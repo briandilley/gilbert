@@ -22,6 +22,7 @@ from gilbert.interfaces.storage import Filter, FilterOp, Query, SortField, Stora
 from gilbert.interfaces.tools import (
     ToolCall,
     ToolDefinition,
+    ToolParameter,
     ToolParameterType,
     ToolProvider,
     ToolResult,
