@@ -24,6 +24,4 @@ async def dashboard(request: Request):  # type: ignore[no-untyped-def]
             "disabled": True,
         },
     ]
-    return templates.TemplateResponse(
-        "dashboard.html", {"request": request, "cards": cards}
-    )
+    return templates.TemplateResponse(request, "dashboard.html", {"cards": cards})

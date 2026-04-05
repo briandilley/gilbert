@@ -5,7 +5,7 @@
 <div class="card-grid">
     {% for card in cards %}
     <a href="{{ card.url }}" class="card{% if card.get('disabled') %} disabled{% endif %}">
-        <span class="card-icon">{{ card.icon }}</span>
+        <span class="card-icon">{{ card.icon | safe }}</span>
         <h2>{{ card.title }}</h2>
         <p>{{ card.description }}</p>
     </a>

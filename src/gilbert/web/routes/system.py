@@ -83,6 +83,4 @@ def _gather_services(gilbert: Gilbert) -> list[dict[str, Any]]:
 async def system_browser(request: Request):  # type: ignore[no-untyped-def]
     gilbert: Gilbert = request.app.state.gilbert
     services = _gather_services(gilbert)
-    return templates.TemplateResponse(
-        "system.html", {"request": request, "services": services}
-    )
+    return templates.TemplateResponse(request, "system.html", {"services": services})
