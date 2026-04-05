@@ -1,9 +1,12 @@
 """Credential service — provides named credentials to other services."""
 
 import logging
+from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.credentials import AnyCredential, CredentialType
 from gilbert.interfaces.service import Service, ServiceInfo
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -42,3 +45,21 @@ class CredentialService(Service):
     def list_names(self) -> list[str]:
         """List all credential names."""
         return sorted(self._credentials.keys())
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "credentials"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="*", type=ToolParameterType.OBJECT,
+                description="Named credentials (all changes require restart for security).",
+                restart_required=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        pass  # Credential changes are restart_required

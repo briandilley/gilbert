@@ -1,7 +1,7 @@
 # Storage Backend
 
 ## Summary
-Generic document/entity store abstracted behind `StorageBackend` ABC. SQLite implementation uses JSON columns — no SQL-shaped API, no migrations needed for new entity types.
+Generic entity store abstracted behind `StorageBackend` ABC. SQLite implementation uses JSON columns — no SQL-shaped API, no migrations needed for new entity types. Service capability is `entity_storage`.
 
 ## Details
 The storage interface (`src/gilbert/interfaces/storage.py`) exposes:
@@ -21,5 +21,5 @@ Design decision: storage returns `dict[str, Any]` — it's intentionally untyped
 
 ## Related
 - `src/gilbert/interfaces/storage.py` — ABC and query types (Filter, FilterOp, Query, SortField, IndexDefinition)
-- `src/gilbert/storage/sqlite.py` — SQLite JSON document store implementation
+- `src/gilbert/storage/sqlite.py` — SQLite JSON entity store implementation
 - `tests/integration/test_sqlite_storage.py` — 29 integration tests against real SQLite

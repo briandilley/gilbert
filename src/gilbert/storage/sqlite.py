@@ -1,4 +1,4 @@
-"""SQLite implementation of StorageBackend using JSON document storage."""
+"""SQLite implementation of StorageBackend using JSON entity storage."""
 
 import json
 from typing import Any
@@ -15,7 +15,7 @@ from gilbert.interfaces.storage import (
 
 
 class SQLiteStorage(StorageBackend):
-    """SQLite-backed document store using JSON columns.
+    """SQLite-backed entity store using JSON columns.
 
     Each collection is stored in a single table with (id, data) columns
     where data is a JSON blob. Indexes use SQLite's json_extract to

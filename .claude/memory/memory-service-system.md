@@ -12,7 +12,15 @@ Discoverable service layer where services declare capabilities and dependencies.
 - **ServiceManager** (`src/gilbert/core/service_manager.py`) — implements ServiceResolver, handles lifecycle
 
 ### Capabilities
-Capabilities are **strings**, not types. Examples: `"document_storage"`, `"event_bus"`, `"device_management"`. A service can provide multiple capabilities. Multiple services can provide the same capability. This enables flexible discovery ("find anything that provides weather").
+Capabilities are **strings**, not types. Examples: `"entity_storage"`, `"event_bus"`, `"ai_tools"`. A service can provide multiple capabilities. Multiple services can provide the same capability. This enables flexible discovery ("find anything that provides weather").
+
+### Tool Exposure Rule
+**Services should always expose AI tools for their capabilities.** Any service with meaningful operations should implement the `ToolProvider` protocol and declare `ai_tools` as a capability. The AIService auto-discovers all `ai_tools` providers. Exception: CredentialService — no tools for security reasons.
+
+Current tool-providing services:
+- **StorageService** — `store_entity`, `get_entity`, `query_entities`, `list_collections`
+- **EventBusService** — `publish_event`
+- **TTSService** — `speak`, `list_voices`
 
 ### Lifecycle
 1. Services are **registered** (constructed but not started)
@@ -24,32 +32,32 @@ Capabilities are **strings**, not types. Examples: `"document_storage"`, `"event
 
 ### Core Service Wrappers (`src/gilbert/core/services/`)
 Existing components are wrapped as services without modifying their ABCs:
-- **StorageService** — wraps `StorageBackend`, provides `{"document_storage", "query_storage"}`
-- **EventBusService** — wraps `EventBus`, provides `{"event_bus", "pub_sub"}`
-- **DeviceManagerService** — provides `{"device_management", "device_registry"}`, requires `{"document_storage", "event_bus"}`
+- **StorageService** — wraps `StorageBackend`, provides `{"entity_storage", "query_storage", "ai_tools"}`
+- **EventBusService** — wraps `EventBus`, provides `{"event_bus", "pub_sub", "ai_tools"}`
+- **CredentialService** — provides `{"credentials"}` (no ai_tools — security)
+- **TTSService** — wraps `TTSBackend`, provides `{"text_to_speech", "ai_tools"}`
+- **AIService** — wraps `AIBackend`, provides `{"ai_chat"}`
 
 Each wrapper exposes the underlying component via a property (e.g., `storage_svc.backend`, `bus_svc.bus`).
 
-### Relationship to ServiceRegistry
-`ServiceManager` and `ServiceRegistry` coexist:
-- **ServiceRegistry** — static DI container (type → instance), used for backward compat and non-service things
-- **ServiceManager** — lifecycle-aware, capability-based discovery
-- Both are available; plugins receive both in `setup(registry, *, services=None)`
+### Output File Management
+Services that produce files (e.g., TTS audio) write to `.gilbert/output/{service_name}/`. A shared utility (`core/output.py`) provides `get_output_dir()` and `cleanup_old_files()` with TTL-based expiry. Global `output_ttl_seconds` config (default 3600).
 
 ### Boot Sequence (app.py)
 1. Logging
 2. Create ServiceManager
-3. Register core services (StorageService, EventBusService, DeviceManagerService)
-4. Register ServiceManager in old registry for backward compat
-5. Load plugins → `plugin.setup(registry, services=service_manager)`
-6. `service_manager.start_all()` — dependency resolution + ordered startup
-7. Start integrations
+3. Register core services (StorageService, EventBusService, CredentialService)
+4. Register optional services (TTSService, AIService) if enabled
+5. Register in old ServiceRegistry for backward compat
+6. Load plugins → `plugin.setup(service_manager)`
+7. `service_manager.start_all()` — dependency resolution + ordered startup
 
 ## Related
 - `src/gilbert/interfaces/service.py` — Service ABC, ServiceInfo, ServiceResolver
 - `src/gilbert/core/service_manager.py` — ServiceManager implementation
-- `src/gilbert/core/services/` — StorageService, EventBusService, DeviceManagerService
+- `src/gilbert/core/services/` — all service wrappers
+- `src/gilbert/core/output.py` — output file management utility
 - `src/gilbert/core/app.py` — boot sequence using service system
-- `tests/unit/test_service_manager.py` — 18 unit tests
+- [AI Service](memory-ai-service.md) — the AI orchestrator that discovers tools
 - [Service Registry](memory-service-registry.md) — the legacy DI container that coexists
 - [Plugin System](memory-plugin-system.md) — plugins register services via `setup()`

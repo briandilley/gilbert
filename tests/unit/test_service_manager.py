@@ -85,22 +85,22 @@ async def test_start_respects_dependency_order(manager: ServiceManager) -> None:
             await super().start(resolver)
             start_order.append(self._info.name)
 
-    storage = OrderTracker("storage", capabilities=frozenset({"document_storage"}))
+    storage = OrderTracker("storage", capabilities=frozenset({"entity_storage"}))
     bus = OrderTracker("event_bus", capabilities=frozenset({"event_bus"}))
-    dm = OrderTracker(
-        "device_manager",
-        capabilities=frozenset({"device_management"}),
-        requires=frozenset({"document_storage", "event_bus"}),
+    consumer = OrderTracker(
+        "consumer",
+        capabilities=frozenset({"consumer_cap"}),
+        requires=frozenset({"entity_storage", "event_bus"}),
     )
 
     # Register in reverse order to prove topo-sort works
-    manager.register(dm)
+    manager.register(consumer)
     manager.register(storage)
     manager.register(bus)
     await manager.start_all()
 
-    assert start_order.index("storage") < start_order.index("device_manager")
-    assert start_order.index("event_bus") < start_order.index("device_manager")
+    assert start_order.index("storage") < start_order.index("consumer")
+    assert start_order.index("event_bus") < start_order.index("consumer")
 
 
 async def test_missing_required_capability_skips_service(manager: ServiceManager) -> None:
@@ -161,17 +161,17 @@ async def test_optional_dependency_missing_still_starts(manager: ServiceManager)
 
 
 async def test_resolver_passed_to_start(manager: ServiceManager) -> None:
-    storage = StubService("storage", capabilities=frozenset({"document_storage"}))
+    storage = StubService("storage", capabilities=frozenset({"entity_storage"}))
     consumer = StubService(
         "consumer",
-        requires=frozenset({"document_storage"}),
+        requires=frozenset({"entity_storage"}),
     )
     manager.register(storage)
     manager.register(consumer)
     await manager.start_all()
 
     assert consumer.resolver_at_start is not None
-    resolved = consumer.resolver_at_start.require_capability("document_storage")
+    resolved = consumer.resolver_at_start.require_capability("entity_storage")
     assert resolved is storage
 
 
@@ -235,17 +235,17 @@ async def test_stop_all_in_reverse_order(manager: ServiceManager) -> None:
         async def stop(self) -> None:
             stop_order.append(self._info.name)
 
-    storage = StopTracker("storage", capabilities=frozenset({"document_storage"}))
-    dm = StopTracker(
-        "device_manager",
-        requires=frozenset({"document_storage"}),
+    storage = StopTracker("storage", capabilities=frozenset({"entity_storage"}))
+    consumer = StopTracker(
+        "consumer",
+        requires=frozenset({"entity_storage"}),
     )
     manager.register(storage)
-    manager.register(dm)
+    manager.register(consumer)
     await manager.start_all()
     await manager.stop_all()
 
-    assert stop_order == ["device_manager", "storage"]
+    assert stop_order == ["consumer", "storage"]
 
 
 async def test_stop_handles_errors(manager: ServiceManager) -> None:
@@ -287,3 +287,53 @@ async def test_failed_lifecycle_event(manager: ServiceManager) -> None:
     bus.publish.assert_called_once()
     event = bus.publish.call_args[0][0]
     assert event.event_type == "service.failed"
+
+
+# --- Hot-swap ---
+
+
+async def test_restart_service_in_place(manager: ServiceManager) -> None:
+    """Restart a service without replacing it."""
+    svc = StubService("test", capabilities=frozenset({"cap_a"}))
+    manager.register(svc)
+    await manager.start_all()
+    assert svc.started
+
+    # Reset to verify it restarts
+    svc.started = False
+    await manager.restart_service("test")
+    assert svc.started
+    assert "test" in manager.started_services
+
+
+async def test_restart_service_with_replacement(manager: ServiceManager) -> None:
+    """Restart a service by swapping in a new instance."""
+    old = StubService("test", capabilities=frozenset({"cap_a"}))
+    manager.register(old)
+    await manager.start_all()
+
+    new = StubService("test", capabilities=frozenset({"cap_a", "cap_b"}))
+    await manager.restart_service("test", new)
+
+    assert new.started
+    # New capabilities should be indexed
+    assert manager.get_by_capability("cap_b") is new
+    # Old capabilities should be removed if not in new
+    assert manager.get_by_capability("cap_a") is new
+
+
+async def test_restart_nonexistent_raises(manager: ServiceManager) -> None:
+    with pytest.raises(LookupError, match="not found"):
+        await manager.restart_service("nonexistent")
+
+
+async def test_register_and_start(manager: ServiceManager) -> None:
+    """Register and start a service after initial startup."""
+    await manager.start_all()  # Empty start
+
+    svc = StubService("late", capabilities=frozenset({"late_cap"}))
+    await manager.register_and_start(svc)
+
+    assert svc.started
+    assert "late" in manager.started_services
+    assert manager.get_by_capability("late_cap") is svc

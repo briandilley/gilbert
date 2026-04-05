@@ -1,16 +1,17 @@
 """Gilbert interfaces — ABCs and protocol definitions."""
 
-from gilbert.interfaces.devices import (
-    Device,
-    DeviceProvider,
-    DeviceState,
-    DeviceType,
-    Display,
-    Light,
-    Lock,
-    Speaker,
-    Switch,
-    Thermostat,
+from gilbert.interfaces.configuration import (
+    ConfigParam,
+    Configurable,
+)
+from gilbert.interfaces.ai import (
+    AIBackend,
+    AIRequest,
+    AIResponse,
+    Message,
+    MessageRole,
+    StopReason,
+    TokenUsage,
 )
 from gilbert.interfaces.credentials import (
     AnyCredential,
@@ -30,6 +31,14 @@ from gilbert.interfaces.storage import (
     SortField,
     StorageBackend,
 )
+from gilbert.interfaces.tools import (
+    ToolCall,
+    ToolDefinition,
+    ToolParameter,
+    ToolParameterType,
+    ToolProvider,
+    ToolResult,
+)
 from gilbert.interfaces.tts import (
     AudioFormat,
     SynthesisRequest,
@@ -39,15 +48,15 @@ from gilbert.interfaces.tts import (
 )
 
 __all__ = [
+    "ConfigParam",
+    "Configurable",
+    "AIBackend",
+    "AIRequest",
+    "AIResponse",
     "AnyCredential",
     "ApiKeyCredential",
     "AudioFormat",
     "CredentialType",
-    "Device",
-    "DeviceProvider",
-    "DeviceState",
-    "DeviceType",
-    "Display",
     "Event",
     "EventBus",
     "EventHandler",
@@ -55,8 +64,8 @@ __all__ = [
     "FilterOp",
     "GoogleServiceAccountCredential",
     "IndexDefinition",
-    "Light",
-    "Lock",
+    "Message",
+    "MessageRole",
     "Plugin",
     "PluginMeta",
     "Query",
@@ -64,13 +73,18 @@ __all__ = [
     "ServiceInfo",
     "ServiceResolver",
     "SortField",
-    "Speaker",
+    "StopReason",
     "StorageBackend",
-    "Switch",
     "SynthesisRequest",
     "SynthesisResult",
     "TTSBackend",
-    "Thermostat",
+    "TokenUsage",
+    "ToolCall",
+    "ToolDefinition",
+    "ToolParameter",
+    "ToolParameterType",
+    "ToolProvider",
+    "ToolResult",
     "UsernamePasswordCredential",
     "Voice",
 ]

@@ -27,13 +27,19 @@ class ColorFormatter(logging.Formatter):
         return super().format(record)
 
 
-def setup_logging(level: str = "INFO", log_file: str | None = None, ai_log_file: str | None = None) -> None:
+def setup_logging(
+    level: str = "INFO",
+    log_file: str | None = None,
+    ai_log_file: str | None = None,
+    loggers: dict[str, str] | None = None,
+) -> None:
     """Configure the logging system.
 
     Args:
         level: Root log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
         log_file: Path to the general log file. None disables file logging.
         ai_log_file: Path to the AI API call log file. None disables.
+        loggers: Per-logger level overrides (e.g., {"httpx": "WARNING"}).
     """
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -72,3 +78,10 @@ def setup_logging(level: str = "INFO", log_file: str | None = None, ai_log_file:
         ai_logger = logging.getLogger("gilbert.ai")
         ai_logger.addHandler(ai_handler)
         ai_logger.setLevel(logging.DEBUG)  # always capture AI calls in detail
+
+    # Per-logger level overrides
+    if loggers:
+        for logger_name, log_level in loggers.items():
+            resolved = getattr(logging, log_level.upper(), None)
+            if resolved is not None:
+                logging.getLogger(logger_name).setLevel(resolved)

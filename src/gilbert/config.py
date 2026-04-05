@@ -54,6 +54,14 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = ".gilbert/gilbert.log"
     ai_log_file: str = ".gilbert/ai_calls.log"
+    loggers: dict[str, str] = {}
+
+
+class WebConfig(BaseModel):
+    """Web server configuration."""
+
+    host: str = "0.0.0.0"
+    port: int = 8765
 
 
 class TTSVoiceConfig(BaseModel):
@@ -73,14 +81,29 @@ class TTSConfig(BaseModel):
     settings: dict[str, Any] = {}
 
 
+class AIConfig(BaseModel):
+    """AI service configuration."""
+
+    enabled: bool = False
+    backend: str = "anthropic"
+    credential: str = ""
+    system_prompt: str = "You are Gilbert, an AI assistant for home and business automation."
+    max_history_messages: int = 50
+    max_tool_rounds: int = 10
+    settings: dict[str, Any] = {}
+
+
 class GilbertConfig(BaseModel):
     """Top-level Gilbert configuration."""
 
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
+    web: WebConfig = WebConfig()
     credentials: dict[str, AnyCredential] = {}
     plugins: list[PluginSource] = []
+    output_ttl_seconds: int = 3600
     tts: TTSConfig = TTSConfig()
+    ai: AIConfig = AIConfig()
 
 
 def load_config(path: str | Path | None = None) -> GilbertConfig:

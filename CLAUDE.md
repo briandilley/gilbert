@@ -1,12 +1,12 @@
 # Gilbert
 
-AI assistant for home and business automation. Extensible, plugin-driven architecture with discoverable services, device integrations, and AI capabilities.
+AI assistant for home and business automation. Extensible, plugin-driven architecture with discoverable services, integrations, and AI capabilities.
 
 ## Tech Stack
 
-- **Language:** Python (3.12+), managed via uv
+- **Language:** Python (3.12+), managed via uv (always use `uv run` to execute commands, `uv add` for dependencies — never use pip directly)
 - **Database:** SQLite (local store), interface-abstracted for swappable backends
-- **Storage API:** Generic document/entity store with query interface (not SQL-shaped). New entity types require no migrations.
+- **Storage API:** Generic entity store with query interface (not SQL-shaped). New entity types require no migrations.
 - **Infrastructure:** Docker for dependent services
 - **Testing:** pytest with mocks; database tests use a real test SQLite database
 - **Logging:** Python logging framework throughout. Colored console output (stderr), file logging, and separate AI API call log.
@@ -18,8 +18,7 @@ AI assistant for home and business automation. Extensible, plugin-driven archite
 Everything is designed as an abstract interface (Python ABCs) with concrete implementations. This applies to:
 
 - **Data layer** — e.g., `StorageBackend` ABC with `SQLiteStorage` implementation (swappable to PostgreSQL, etc.)
-- **Device integrations** — e.g., `LightController` ABC with `LutronRadioRA2Controller`, `CasetaController`, etc.
-- **Service abstractions** — e.g., `SpeakerService` ABC with `SonosService`, `UniFiService`, etc.
+- **Service abstractions** — e.g., `TTSBackend` ABC with `ElevenLabsTTS`, `AIBackend` ABC with `AnthropicAI`, etc.
 
 New integrations are added by implementing the relevant interface, not by modifying core logic.
 
@@ -29,7 +28,7 @@ Plugins are loaded from:
 - **GitHub URLs** — fetched and installed at runtime
 - **Local file paths** — for development or private plugins
 
-Plugins implement published interfaces to extend Gilbert with new device types, integrations, or capabilities.
+Plugins implement published interfaces to extend Gilbert with new integrations or capabilities.
 
 ### Installation Data Directory (`.gilbert/`)
 
@@ -50,8 +49,8 @@ Users customize Gilbert by creating `.gilbert/config.yaml`. The deep merge means
 
 ### Key Directories
 
-- `src/gilbert/interfaces/` — ABCs and protocol definitions (devices, storage, events, TTS, plugins)
-- `src/gilbert/core/` — Application bootstrap, service manager, device manager, event bus, logging
+- `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, plugins)
+- `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging
 - `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services
 - `src/gilbert/integrations/` — Concrete backend implementations (e.g., ElevenLabs TTS)
 - `src/gilbert/storage/` — Storage backend implementations (SQLite)
@@ -142,6 +141,6 @@ uv run ruff check src/ tests/
 # Formatting
 uv run ruff format src/ tests/
 
-# Install dependencies
-uv pip install -e ".[dev]"
+# Install/sync dependencies
+uv sync
 ```

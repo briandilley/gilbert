@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Gilbert — System Browser{% endblock %}
+{% block content %}
+<h1>System Browser</h1>
+<p class="subtitle">{{ services | length }} services registered</p>
+
+{% for svc in services %}
+<details class="service-card" {% if loop.first %}open{% endif %}>
+    <summary>
+        <span class="status-dot {{ 'started' if svc.started else ('failed' if svc.failed else 'pending') }}"></span>
+        <strong>{{ svc.name }}</strong>
+        <span class="caps">
+            {% for cap in svc.capabilities %}
+            <span class="badge">{{ cap }}</span>
+            {% endfor %}
+        </span>
+    </summary>
+
+    <div class="service-details">
+        {% if svc.requires %}
+        <div class="detail-section">
+            <h4>Requires</h4>
+            <span class="caps">
+                {% for req in svc.requires %}
+                <span class="badge badge-muted">{{ req }}</span>
+                {% endfor %}
+            </span>
+        </div>
+        {% endif %}
+
+        {% if svc.config_params %}
+        <div class="detail-section">
+            <h4>Configuration{% if svc.config_namespace %} <code>{{ svc.config_namespace }}.*</code>{% endif %}</h4>
+            <table class="config-table">
+                <thead>
+                    <tr>
+                        <th>Key</th>
+                        <th>Type</th>
+                        <th>Current</th>
+                        <th>Default</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for param in svc.config_params %}
+                    <tr{% if param.restart_required %} class="restart-required"{% endif %}>
+                        <td><code>{{ param.key }}</code>{% if param.restart_required %} <span class="badge badge-warn" title="Changing this requires a service restart">restart</span>{% endif %}</td>
+                        <td><code>{{ param.type }}</code></td>
+                        <td>
+                            {% set keys = param.key.split('.') %}
+                            {% set val = svc.config_values %}
+                            {% for k in keys %}
+                                {% if val is mapping and k in val %}
+                                    {% set val = val[k] %}
+                                {% else %}
+                                    {% set val = none %}
+                                {% endif %}
+                            {% endfor %}
+                            {% if val is not none %}<code>{{ val }}</code>{% else %}<span class="muted">—</span>{% endif %}
+                        </td>
+                        <td>{% if param.default is not none %}<code>{{ param.default }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+                        <td>{{ param.description }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        {% if svc.tools %}
+        <div class="detail-section">
+            <h4>AI Tools</h4>
+            {% for tool in svc.tools %}
+            <div class="tool">
+                <strong>{{ tool.name }}</strong> — {{ tool.description }}
+                {% if tool.parameters %}
+                <ul class="tool-params">
+                    {% for p in tool.parameters %}
+                    <li><code>{{ p.name }}</code> <span class="muted">({{ p.type }}{% if not p.required %}, optional{% endif %})</span> — {{ p.description }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</details>
+{% endfor %}
+{% endblock %}

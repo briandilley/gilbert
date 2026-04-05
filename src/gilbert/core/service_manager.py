@@ -148,6 +148,75 @@ class ServiceManager(ServiceResolver):
     def get_all(self, capability: str) -> list[Service]:
         return self.get_all_by_capability(capability)
 
+    # --- Hot-swap ---
+
+    async def restart_service(
+        self, name: str, new_instance: Service | None = None
+    ) -> None:
+        """Restart a service, optionally replacing it with a new instance.
+
+        Stops the old service, swaps in the new instance (if given),
+        and starts it. Used for hot-swapping structural config changes.
+        """
+        old = self._registered.get(name)
+        if old is None:
+            raise LookupError(f"Service not found: {name}")
+
+        # Stop old
+        if name in self._started:
+            try:
+                await old.stop()
+                logger.info("Service stopped for restart: %s", name)
+            except Exception:
+                logger.exception("Error stopping service %s during restart", name)
+
+        if new_instance is not None:
+            # Unindex old capabilities
+            old_info = old.service_info()
+            for cap in old_info.capabilities:
+                names = self._capabilities.get(cap, [])
+                if name in names:
+                    names.remove(name)
+
+            # Register new instance
+            self._registered[name] = new_instance
+            new_info = new_instance.service_info()
+            for cap in new_info.capabilities:
+                self._capabilities.setdefault(cap, []).append(name)
+
+        # Start the (new or existing) service
+        svc = self._registered[name]
+        try:
+            await svc.start(self)
+            if name not in self._started:
+                self._started.append(name)
+            self._failed.discard(name)
+            logger.info("Service restarted: %s", name)
+            await self._publish_event("service.started", name, svc.service_info())
+        except Exception:
+            logger.exception("Service %s failed to restart", name)
+            if name in self._started:
+                self._started.remove(name)
+            self._failed.add(name)
+            await self._publish_event("service.failed", name, svc.service_info())
+
+    async def register_and_start(self, service: Service) -> None:
+        """Register a new service and immediately start it.
+
+        Used for enabling previously-disabled services at runtime.
+        """
+        self.register(service)
+        svc_info = service.service_info()
+        try:
+            await service.start(self)
+            self._started.append(svc_info.name)
+            logger.info("Service registered and started: %s", svc_info.name)
+            await self._publish_event("service.started", svc_info.name, svc_info)
+        except Exception:
+            logger.exception("Service %s failed to start after registration", svc_info.name)
+            self._failed.add(svc_info.name)
+            await self._publish_event("service.failed", svc_info.name, svc_info)
+
     # --- Internal ---
 
     async def _publish_event(self, event_type: str, name: str, info: ServiceInfo) -> None:

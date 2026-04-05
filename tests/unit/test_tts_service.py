@@ -1,5 +1,7 @@
 """Tests for TTSService and TTS config parsing."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -79,18 +81,17 @@ def cred_service() -> CredentialService:
 def resolver(cred_service: CredentialService) -> ServiceResolver:
     mock = AsyncMock(spec=ServiceResolver)
     mock.require_capability.return_value = cred_service
-    mock.get_capability.return_value = cred_service
+    mock.get_capability.return_value = None  # No ConfigurationService in tests
     return mock
 
 
 @pytest.fixture
 def service(stub_backend: StubTTSBackend) -> TTSService:
-    return TTSService(
-        stub_backend,
-        credential_name="elevenlabs",
-        voices=VOICES,
-        default_voice="default",
-    )
+    svc = TTSService(stub_backend, credential_name="elevenlabs")
+    # Set tunable config directly for testing (normally loaded from ConfigurationService)
+    svc._voices = VOICES
+    svc._default_voice = "default"
+    return svc
 
 
 # --- Service info ---
@@ -100,6 +101,7 @@ def test_service_info(service: TTSService) -> None:
     info = service.service_info()
     assert info.name == "tts"
     assert "text_to_speech" in info.capabilities
+    assert "ai_tools" in info.capabilities
     assert "credentials" in info.requires
 
 
@@ -109,7 +111,8 @@ def test_service_info(service: TTSService) -> None:
 async def test_start_initializes_backend(
     stub_backend: StubTTSBackend, resolver: ServiceResolver
 ) -> None:
-    svc = TTSService(stub_backend, credential_name="elevenlabs", config={"model_id": "v2"})
+    svc = TTSService(stub_backend, credential_name="elevenlabs")
+    svc._config = {"model_id": "v2"}
     await svc.start(resolver)
 
     assert stub_backend.initialized
@@ -139,6 +142,7 @@ async def test_start_raises_on_missing_credential(
     cred_svc = CredentialService({})
     resolver = AsyncMock(spec=ServiceResolver)
     resolver.require_capability.return_value = cred_svc
+    resolver.get_capability.return_value = None
 
     svc = TTSService(stub_backend, credential_name="missing")
     with pytest.raises(LookupError, match="missing"):
@@ -305,3 +309,68 @@ def test_config_tts_defaults() -> None:
     assert config.tts.default_voice == ""
     assert config.tts.voices == {}
     assert config.tts.settings == {}
+
+
+# --- Tool provider ---
+
+
+def test_tool_provider_name(service: TTSService) -> None:
+    assert service.tool_provider_name == "tts"
+
+
+def test_get_tools(service: TTSService) -> None:
+    tools = service.get_tools()
+    names = [t.name for t in tools]
+    assert "speak" in names
+    assert "list_voices" in names
+
+
+async def test_tool_speak(
+    service: TTSService, resolver: ServiceResolver, tmp_path: Path, monkeypatch: object
+) -> None:
+    import gilbert.core.output as output_mod
+
+    monkeypatch.setattr(output_mod, "OUTPUT_DIR", tmp_path / "output")  # type: ignore[attr-defined]
+    await service.start(resolver)
+
+    result = await service.execute_tool("speak", {"text": "Hello world"})
+    parsed = json.loads(result)
+
+    assert parsed["format"] == "mp3"
+    assert parsed["characters_used"] == 11
+    assert parsed["file_path"].endswith(".mp3")
+    assert Path(parsed["file_path"]).exists()
+
+
+async def test_tool_speak_with_voice(
+    service: TTSService,
+    stub_backend: StubTTSBackend,
+    resolver: ServiceResolver,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    import gilbert.core.output as output_mod
+
+    monkeypatch.setattr(output_mod, "OUTPUT_DIR", tmp_path / "output")  # type: ignore[attr-defined]
+    await service.start(resolver)
+
+    await service.execute_tool("speak", {"text": "Boo!", "voice_name": "scary"})
+    assert stub_backend.last_request is not None
+    assert stub_backend.last_request.voice_id == "v2"
+
+
+async def test_tool_list_voices(service: TTSService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+
+    result = await service.execute_tool("list_voices", {})
+    parsed = json.loads(result)
+
+    assert len(parsed) == 2
+    assert parsed[0]["voice_id"] == "v1"
+    assert parsed[0]["name"] == "Alice"
+    assert parsed[1]["name"] == "Bob"
+
+
+async def test_tool_unknown_raises(service: TTSService) -> None:
+    with pytest.raises(KeyError, match="Unknown tool"):
+        await service.execute_tool("nonexistent", {})

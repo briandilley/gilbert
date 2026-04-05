@@ -1,4 +1,4 @@
-"""Storage interface — generic document/entity store with queryability."""
+"""Storage interface — generic entity store with queryability."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -59,7 +59,7 @@ class IndexDefinition:
 
 
 class StorageBackend(ABC):
-    """Abstract document/entity store. Implementation-agnostic."""
+    """Abstract entity store. Implementation-agnostic."""
 
     @abstractmethod
     async def initialize(self) -> None:

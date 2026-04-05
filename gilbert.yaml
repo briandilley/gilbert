@@ -11,6 +11,13 @@ logging:
   level: INFO
   file: .gilbert/gilbert.log
   ai_log_file: .gilbert/ai_calls.log
+  loggers: {}
+    # httpx: WARNING
+    # uvicorn.access: WARNING
+
+web:
+  host: "0.0.0.0"
+  port: 8765
 
 credentials: {}
   # my-openai:
@@ -29,10 +36,24 @@ credentials: {}
   #     - https://www.googleapis.com/auth/calendar.readonly
 
 plugins: []
+
+output_ttl_seconds: 3600  # seconds before service-generated files are cleaned up
   # - source: ./plugins/example-plugin
   #   enabled: true
   # - source: https://github.com/user/gilbert-plugin-sonos
   #   enabled: true
+
+ai:
+  enabled: false
+  backend: anthropic
+  credential: ""
+  system_prompt: "You are Gilbert, an AI assistant for home and business automation."
+  max_history_messages: 50
+  max_tool_rounds: 10
+  settings:
+    model: claude-sonnet-4-20250514
+    max_tokens: 4096
+    temperature: 0.7
 
 tts:
   enabled: false
