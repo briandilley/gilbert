@@ -181,6 +181,14 @@ class PresenceConfig(BaseModel):
     settings: dict[str, Any] = {}
 
 
+class DoorbellConfig(BaseModel):
+    """Doorbell monitoring configuration."""
+
+    enabled: bool = False
+    poll_interval_seconds: float = 5.0
+    doorbell_names: dict[str, str] = {}  # camera name → friendly door name
+
+
 class SpeakerConfig(BaseModel):
     """Speaker system configuration."""
 
@@ -205,6 +213,7 @@ class GilbertConfig(BaseModel):
     google: GoogleConfig = GoogleConfig()
     tunnel: TunnelConfig = TunnelConfig()
     presence: PresenceConfig = PresenceConfig()
+    doorbell: DoorbellConfig = DoorbellConfig()
     speaker: SpeakerConfig = SpeakerConfig()
     music: MusicConfig = MusicConfig()
 

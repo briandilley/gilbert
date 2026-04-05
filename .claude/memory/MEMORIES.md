@@ -15,3 +15,5 @@
 - [Music Service](memory-music-service.md) — music search/metadata/playback with Spotify, seek support, speaker integration
 - [Persona Service](memory-persona-service.md) — AI personality/behavior stored in entity system, editable via chat
 - [Presence Service](memory-presence-service.md) — user presence via UniFi (WiFi, cameras, badges), polling + events
+- [Scheduler Service](memory-scheduler-service.md) — system and user timers/alarms with asyncio task loops
+- [Doorbell Service](memory-doorbell-service.md) — UniFi Protect ring detection, publishes doorbell.ring events

@@ -83,6 +83,11 @@ class Gilbert:
         # 6. Persona service (always — AI persona is core)
         self.service_manager.register(PersonaService())
 
+        # 6b. Scheduler service (always — timers, alarms, periodic jobs)
+        from gilbert.core.services.scheduler import SchedulerService
+
+        self.service_manager.register(SchedulerService())
+
         # 6. Tunnel service (if enabled — before auth, as Google OAuth uses it)
         if self.config.tunnel.enabled:
             from gilbert.core.services.tunnel import TunnelService
@@ -157,6 +162,11 @@ class Gilbert:
 
             presence_backend = self._create_presence_backend(self.config.presence.backend)
             self.service_manager.register(PresenceService(presence_backend))
+
+        if self.config.doorbell.enabled:
+            from gilbert.core.services.doorbell import DoorbellService
+
+            self.service_manager.register(DoorbellService())
 
         if self.config.ai.enabled:
             ai_backend = self._create_ai_backend(self.config.ai.backend)
