@@ -232,7 +232,7 @@ class AIService(Service):
 
             request = AIRequest(
                 messages=truncated,
-                system_prompt=self._build_system_prompt(),
+                system_prompt=await self._build_system_prompt(user_ctx=user_ctx),
                 tools=tool_defs if tool_defs else [],
                 max_tokens=int(self._config.get("max_tokens", 4096)),
                 temperature=float(self._config.get("temperature", 0.7)),
@@ -269,8 +269,8 @@ class AIService(Service):
 
     # --- System Prompt ---
 
-    def _build_system_prompt(self) -> str:
-        """Build the full system prompt: base identity first, then persona elaboration."""
+    async def _build_system_prompt(self, user_ctx: UserContext | None = None) -> str:
+        """Build the full system prompt: base identity, persona, and user memories."""
         parts: list[str] = []
         if self._system_prompt:
             parts.append(self._system_prompt)
@@ -287,6 +287,21 @@ class AIService(Service):
                         "update the persona. Only mention this once — never bring it up again "
                         "in subsequent messages or conversations."
                     )
+
+        # Inject user memory summaries if available
+        if user_ctx and user_ctx.user_id not in ("system", "guest") and self._resolver:
+            memory_svc = self._resolver.get_capability("user_memory")
+            if memory_svc is not None:
+                try:
+                    from gilbert.core.services.memory import MemoryService
+
+                    if isinstance(memory_svc, MemoryService):
+                        summaries = await memory_svc.get_user_summaries(user_ctx.user_id)
+                        if summaries:
+                            parts.append(summaries)
+                except Exception:
+                    pass  # Memory unavailable — not critical
+
         return "\n\n".join(parts) if parts else ""
 
     # --- Tool Discovery ---

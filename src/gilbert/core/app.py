@@ -195,6 +195,16 @@ class Gilbert:
 
             self.service_manager.register(ScreenService())
 
+        if self.config.greeting.enabled:
+            from gilbert.core.services.greeting import GreetingService
+
+            self.service_manager.register(GreetingService())
+
+        # Memory service (always — uses entity storage)
+        from gilbert.core.services.memory import MemoryService
+
+        self.service_manager.register(MemoryService())
+
         if self.config.ai.enabled:
             ai_backend = self._create_ai_backend(self.config.ai.backend)
             self.service_manager.register(

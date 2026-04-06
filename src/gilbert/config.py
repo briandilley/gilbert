@@ -216,6 +216,17 @@ class DoorbellConfig(BaseModel):
     doorbell_names: dict[str, str] = {}  # camera name → friendly door name
 
 
+class GreetingConfig(BaseModel):
+    """Morning greeting configuration."""
+
+    enabled: bool = False
+    start_hour: int = 6
+    cutoff_hour: int = 14
+    style: str = ""  # custom style instructions for AI greeting generation
+    speakers: list[str] = []  # speaker names to announce on (empty = all)
+    voice_name: str = ""  # TTS voice name (empty = default)
+
+
 class ScreenConfig(BaseModel):
     """Remote display screen configuration."""
 
@@ -250,6 +261,7 @@ class GilbertConfig(BaseModel):
     knowledge: KnowledgeConfig = KnowledgeConfig()
     presence: PresenceConfig = PresenceConfig()
     doorbell: DoorbellConfig = DoorbellConfig()
+    greeting: GreetingConfig = GreetingConfig()
     screens: ScreenConfig = ScreenConfig()
     speaker: SpeakerConfig = SpeakerConfig()
     music: MusicConfig = MusicConfig()
