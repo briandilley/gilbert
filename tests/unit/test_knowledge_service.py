@@ -42,20 +42,22 @@ class TestExtractors:
         meta = DocumentMeta(source_id="test", path="f.txt", name="f.txt",
                            document_type=DocumentType.TEXT)
         content = DocumentContent(meta=meta, data=b"Hello world")
-        assert extract_text(content) == "Hello world"
+        text, stats = extract_text(content)
+        assert text == "Hello world"
 
     def test_markdown_extraction(self) -> None:
         meta = DocumentMeta(source_id="test", path="f.md", name="f.md",
                            document_type=DocumentType.MARKDOWN)
         content = DocumentContent(meta=meta, data=b"# Title\n\nBody text")
-        assert "Title" in extract_text(content)
-        assert "Body text" in extract_text(content)
+        text, stats = extract_text(content)
+        assert "Title" in text
+        assert "Body text" in text
 
     def test_json_extraction(self) -> None:
         meta = DocumentMeta(source_id="test", path="f.json", name="f.json",
                            document_type=DocumentType.JSON)
         content = DocumentContent(meta=meta, data=b'{"key": "value"}')
-        text = extract_text(content)
+        text, stats = extract_text(content)
         assert "key" in text
         assert "value" in text
 
@@ -63,14 +65,15 @@ class TestExtractors:
         meta = DocumentMeta(source_id="test", path="f.csv", name="f.csv",
                            document_type=DocumentType.CSV)
         content = DocumentContent(meta=meta, data=b"name,age\nAlice,30\nBob,25")
-        text = extract_text(content)
+        text, stats = extract_text(content)
         assert "Alice" in text
 
     def test_unknown_falls_back_to_text(self) -> None:
         meta = DocumentMeta(source_id="test", path="f.xyz", name="f.xyz",
                            document_type=DocumentType.UNKNOWN)
         content = DocumentContent(meta=meta, data=b"some text")
-        assert extract_text(content) == "some text"
+        text, stats = extract_text(content)
+        assert text == "some text"
 
 
 # --- Chunking ---
@@ -102,7 +105,7 @@ class TestChunking:
         assert chunks[0].chunk_index == 0
 
     def test_page_number_detection(self) -> None:
-        text = "--- Page 1 ---\nContent on page 1.\n\n--- Page 2 ---\nContent on page 2."
+        text = "[Page 1]\nContent on page 1.\n\n[Page 2]\nContent on page 2."
         chunks = chunk_text(text, "doc1", chunk_size=5000)
         assert chunks[0].page_number == 1
 
@@ -120,7 +123,7 @@ class TestConfig:
     def test_knowledge_defaults(self) -> None:
         config = GilbertConfig.model_validate({})
         assert config.knowledge.enabled is False
-        assert config.knowledge.chunk_size == 1000
+        assert config.knowledge.chunk_size == 800
         assert config.knowledge.sources == []
 
     def test_knowledge_full(self) -> None:

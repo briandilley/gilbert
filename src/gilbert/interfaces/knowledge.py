@@ -53,6 +53,20 @@ class DocumentContent:
     encoding: str = "utf-8"
 
 
+@dataclass
+class ExtractionStats:
+    """Statistics from document text extraction."""
+
+    pages: int = 0
+    images_found: int = 0
+    ocr_pages: int = 0
+    ocr_chars: int = 0
+    vision_pages: int = 0
+    vision_chars: int = 0
+    total_chars: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class DocumentChunk:
     """A chunk of extracted text from a document, ready for embedding."""

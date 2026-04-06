@@ -36,18 +36,20 @@ class KnowledgeService(Service):
         self._backends: dict[str, DocumentBackend] = {}
         self._chroma_client: Any = None
         self._collection: Any = None
-        self._chunk_size: int = 1000
+        self._chunk_size: int = 800
         self._chunk_overlap: int = 200
         self._max_results: int = 20
         self._sync_interval: int = 300
         self._event_bus: EventBus | None = None
         self._storage: Any = None
+        self._vision: Any = None  # VisionService
+        self._ocr: Any = None  # OCRService
         self._has_gdrive = has_gdrive
 
     def service_info(self) -> ServiceInfo:
         # If gdrive sources are configured, require google_api so we start after it
         required: frozenset[str] = frozenset({"google_api"}) if self._has_gdrive else frozenset()
-        optional = frozenset({"scheduler", "google_api", "configuration", "credentials", "event_bus", "entity_storage"}) - required
+        optional = frozenset({"scheduler", "google_api", "configuration", "credentials", "event_bus", "entity_storage", "vision", "ocr"}) - required
         return ServiceInfo(
             name="knowledge",
             capabilities=frozenset({"knowledge", "ai_tools"}),
@@ -95,7 +97,10 @@ class KnowledgeService(Service):
         except Exception:
             logger.exception("Failed to initialize ChromaDB")
 
-        # Initialize backends from config
+        # Resolve vision and OCR services
+        self._vision = resolver.get_capability("vision")
+        self._ocr = resolver.get_capability("ocr")
+
         # Event bus
         # Entity storage for document tracking metadata
         storage_svc = resolver.get_capability("entity_storage")
@@ -208,13 +213,26 @@ class KnowledgeService(Service):
             logger.warning("Failed to download document: %s (get_document returned None)", meta.document_id)
             return 0
 
-        text = extract_text(content)
+        text, stats = extract_text(
+            content,
+            vision=self._vision,
+            ocr=self._ocr,
+        )
         if not text.strip():
             logger.warning(
                 "No text extracted from %s (%s, %d bytes) — may be scanned/image-only",
                 meta.document_id, meta.document_type.value, meta.size_bytes,
             )
             return 0
+
+        # Log extraction stats
+        if stats.ocr_pages or stats.vision_pages:
+            logger.info(
+                "Extraction stats for %s: %d pages, %d OCR pages (%d chars), "
+                "%d Vision pages (%d chars), %d total chars",
+                meta.name, stats.pages, stats.ocr_pages, stats.ocr_chars,
+                stats.vision_pages, stats.vision_chars, stats.total_chars,
+            )
 
         chunks = chunk_text(
             text, meta.document_id,
@@ -254,6 +272,9 @@ class KnowledgeService(Service):
 
         logger.info("Indexed %s: %d chunks", doc_id, len(chunks))
 
+        # Cache extracted text for fast keyword search at query time
+        await self._cache_text(doc_id, text)
+
         await self._track_document(meta, indexed_chunks=len(chunks))
         await self._emit("knowledge.document.indexed", {
             "document_id": doc_id,
@@ -265,6 +286,30 @@ class KnowledgeService(Service):
         })
 
         return len(chunks)
+
+    async def _cache_text(self, document_id: str, text: str) -> None:
+        """Cache extracted text in entity store for fast keyword search."""
+        if self._storage is None:
+            return
+        try:
+            await self._storage.put("knowledge_text", document_id, {
+                "document_id": document_id,
+                "text": text,
+            })
+        except Exception:
+            logger.warning("Failed to cache extracted text for %s", document_id)
+
+    async def get_cached_text(self, document_id: str) -> str | None:
+        """Retrieve cached extracted text for a document."""
+        if self._storage is None:
+            return None
+        try:
+            record = await self._storage.get("knowledge_text", document_id)
+            if record:
+                return record.get("text")
+        except Exception:
+            pass
+        return None
 
     async def _sync_backend(self, backend: DocumentBackend) -> int:
         """Sync a single backend. Returns number of documents indexed."""

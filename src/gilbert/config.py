@@ -199,10 +199,13 @@ class KnowledgeConfig(BaseModel):
     enabled: bool = False
     sources: list[DocumentSourceConfig] = []
     sync_interval_seconds: int = 300
-    chunk_size: int = 1000
+    chunk_size: int = 800
     chunk_overlap: int = 200
     max_search_results: int = 20
     chromadb_path: str = ".gilbert/chromadb"
+    vision_enabled: bool = True
+    vision_credential: str = ""  # credential name for Vision API (defaults to AI credential)
+    vision_model: str = "claude-sonnet-4-5-20250514"
 
 
 class DoorbellConfig(BaseModel):

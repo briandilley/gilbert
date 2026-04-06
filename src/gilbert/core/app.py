@@ -93,6 +93,17 @@ class Gilbert:
 
         self.service_manager.register(SchedulerService())
 
+        # 6c. OCR service (always — gracefully degrades if tesseract not installed)
+        from gilbert.core.services.ocr import OCRService
+
+        self.service_manager.register(OCRService())
+
+        # 6d. Vision service (if knowledge + vision enabled)
+        if self.config.knowledge.enabled and self.config.knowledge.vision_enabled:
+            from gilbert.core.services.vision import VisionService
+
+            self.service_manager.register(VisionService())
+
         # 6. Tunnel service (if enabled — before auth, as Google OAuth uses it)
         if self.config.tunnel.enabled:
             from gilbert.core.services.tunnel import TunnelService

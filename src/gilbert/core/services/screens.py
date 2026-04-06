@@ -557,6 +557,82 @@ class ScreenService(Service):
 
         return page_list
 
+    @staticmethod
+    def _find_pages_by_keyword_from_text(text: str, query: str) -> list[int] | None:
+        """Find relevant pages from cached extracted text with [Page N] markers.
+
+        Same TF-IDF scoring as _find_pages_by_keyword but works on pre-extracted
+        text (which includes OCR and Vision enrichment).
+        """
+        import re
+
+        terms = [t.lower() for t in query.split() if len(t) >= 3]
+        if not terms:
+            return None
+
+        # Split text into pages using [Page N] markers
+        page_pattern = re.compile(r"\[Page (\d+)\]")
+        page_sections: list[tuple[int, str]] = []
+
+        parts = page_pattern.split(text)
+        # parts alternates: [text_before_first_marker, page_num, page_text, page_num, page_text, ...]
+        i = 1
+        while i < len(parts) - 1:
+            try:
+                page_num = int(parts[i])
+                page_text = parts[i + 1].lower()
+                page_sections.append((page_num, page_text))
+            except (ValueError, IndexError):
+                pass
+            i += 2
+
+        if not page_sections:
+            return None
+
+        total_pages = len(page_sections)
+
+        # Count how many pages each term appears on (document frequency)
+        term_doc_freq: dict[str, int] = {}
+        for t in terms:
+            term_doc_freq[t] = sum(1 for _, pt in page_sections if t in pt)
+
+        # TF-IDF-style scoring per page
+        page_scores: list[tuple[int, float]] = []
+        for page_num, page_text in page_sections:
+            score = 0.0
+            for t in terms:
+                if t in page_text:
+                    df = term_doc_freq[t]
+                    if df > 0:
+                        score += total_pages / df
+            if score > 0:
+                page_scores.append((page_num, score))
+
+        if not page_scores:
+            return None
+
+        page_scores.sort(key=lambda x: x[1], reverse=True)
+        best_score = page_scores[0][1]
+        threshold = best_score * 0.6
+
+        core_pages: set[int] = set()
+        for page_num, score in page_scores:
+            if score >= threshold:
+                core_pages.add(page_num)
+
+        max_page = max(pn for pn, _ in page_sections)
+        expanded: set[int] = set()
+        for p in core_pages:
+            expanded.add(max(1, p - 1))
+            expanded.add(p)
+            expanded.add(min(max_page, p + 1))
+
+        page_list = sorted(expanded)
+        if len(page_list) > 12:
+            page_list = page_list[:12]
+
+        return page_list
+
     # ── ToolProvider Protocol ───────────────────────────────────
 
     @property
@@ -743,18 +819,24 @@ class ScreenService(Service):
             doc_name = top.name or Path(doc_path).name
 
             # Find relevant pages by keyword-searching the document's text.
-            # This is much more accurate than using vector chunk page numbers
-            # because it finds pages with actual content, not TOC mentions.
+            # Try cached text first (fast, includes OCR/Vision enrichment),
+            # then fall back to downloading the PDF.
             if pages is None:
                 file_ext = Path(doc_path).suffix.lower()
                 if file_ext == ".pdf":
-                    backend = self._knowledge.get_backend(doc_source)
-                    if backend is not None:
-                        try:
-                            doc_content = await backend.get_document(doc_path)
-                            pages = self._find_pages_by_keyword(doc_content.data, query)
-                        except Exception:
-                            logger.warning("Failed to keyword-search document for pages", exc_info=True)
+                    # Try cached text (includes Vision/OCR content)
+                    cached_text = await self._knowledge.get_cached_text(top.document_id)
+                    if cached_text:
+                        pages = self._find_pages_by_keyword_from_text(cached_text, query)
+                    else:
+                        # Fallback: download and extract with pypdf
+                        backend = self._knowledge.get_backend(doc_source)
+                        if backend is not None:
+                            try:
+                                doc_content = await backend.get_document(doc_path)
+                                pages = self._find_pages_by_keyword(doc_content.data, query)
+                            except Exception:
+                                logger.warning("Failed to keyword-search document for pages", exc_info=True)
         elif document_path:
             # Direct path: source_id/path
             parts = document_path.split("/", 1)

@@ -8,7 +8,7 @@ from gilbert.interfaces.knowledge import DocumentChunk
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 # Page marker pattern from PDF extraction
-_PAGE_RE = re.compile(r"--- Page (\d+) ---")
+_PAGE_RE = re.compile(r"\[Page (\d+)\]")
 
 
 def chunk_text(
