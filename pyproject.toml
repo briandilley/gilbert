@@ -29,6 +29,7 @@ dependencies = [
     "pymupdf>=1.27.2.2",
     "pytesseract>=0.3.13",
     "pillow>=12.2.0",
+    "anthropic>=0.89.0",
 ]
 
 [project.optional-dependencies]
