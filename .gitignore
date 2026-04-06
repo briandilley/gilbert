@@ -1,6 +1,9 @@
 # Gilbert installation data (per-instance config, database, logs, plugin cache)
 .gilbert/
 
+# Plugins directory (local plugin development)
+plugins/
+
 # Python
 __pycache__/
 *.py[cod]

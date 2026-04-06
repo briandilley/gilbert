@@ -46,8 +46,10 @@ credentials: {}
   #   client_secret: your-google-oauth-client-secret
 
 plugins:
-  directories: []    # list of directories to scan for plugins
-  sources: []        # explicit plugin sources (local paths or GitHub URLs)
+  directories:
+    - plugins         # default: ./plugins/ directory in project root
+  sources: []         # explicit plugin sources (local paths or GitHub URLs)
+  cache_dir: .gilbert/plugin-cache  # where GitHub-sourced plugins are cloned
   # directories:
   #   - /path/to/my/plugins
   # sources:

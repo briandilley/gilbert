@@ -53,6 +53,7 @@ class PluginsConfig(BaseModel):
 
     directories: list[str] = []
     sources: list[PluginSource] = []
+    cache_dir: str = ".gilbert/plugin-cache"
     config: dict[str, dict[str, Any]] = {}
 
 

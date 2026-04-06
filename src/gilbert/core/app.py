@@ -93,7 +93,8 @@ class Gilbert:
             directories = []
 
         # Scan plugin directories for manifests
-        loader = PluginLoader()
+        cache_dir = plugins_raw.get("cache_dir", ".gilbert/plugin-cache") if isinstance(plugins_raw, dict) else ".gilbert/plugin-cache"
+        loader = PluginLoader(cache_dir=cache_dir)
         manifests = loader.scan_directories(directories)
         plugin_defaults = loader.collect_default_configs(manifests)
 
@@ -299,7 +300,7 @@ class Gilbert:
 
     async def _load_plugins(self) -> None:
         """Load plugins from discovered manifests and explicit sources."""
-        loader = PluginLoader()
+        loader = PluginLoader(cache_dir=self.config.plugins.cache_dir)
         plugin_config = self.config.plugins.config
 
         # Phase 1: Load plugins from scanned directories (already discovered)
