@@ -46,11 +46,13 @@ class FakeEmailBackend(EmailBackend):
         cc: list[EmailAddress] | None = None,
         in_reply_to: str = "",
         thread_id: str = "",
+        attachments: Any = None,
     ) -> str:
         self.sent.append({
             "to": to, "subject": subject, "body_html": body_html,
             "body_text": body_text, "cc": cc,
             "in_reply_to": in_reply_to, "thread_id": thread_id,
+            "attachments": attachments,
         })
         return self._next_send_id
 

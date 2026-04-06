@@ -98,6 +98,11 @@ inbox:
   poll_interval: 60
   max_body_length: 50000
 
+inbox_ai_chat:
+  enabled: false
+  allowed_emails: []
+  allowed_domains: []
+
 knowledge:
   enabled: false
   sync_interval_seconds: 300

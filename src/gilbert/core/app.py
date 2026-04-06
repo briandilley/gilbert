@@ -278,6 +278,11 @@ class Gilbert:
                 google_account=google_account,
             ))
 
+        if self.config.inbox_ai_chat.enabled:
+            from gilbert.core.services.inbox_ai_chat import InboxAIChatService
+
+            self.service_manager.register(InboxAIChatService(self.config.inbox_ai_chat))
+
         # Memory service (always — uses entity storage)
         from gilbert.core.services.memory import MemoryService
 

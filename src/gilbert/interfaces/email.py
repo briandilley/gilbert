@@ -41,6 +41,15 @@ class EmailMessage:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class EmailAttachment:
+    """A file attachment for an outbound email."""
+
+    filename: str
+    data: bytes
+    mime_type: str = "application/octet-stream"
+
+
 class EmailBackend(ABC):
     """Abstract email transport — sync source and outbound sender.
 
@@ -88,6 +97,7 @@ class EmailBackend(ABC):
         cc: list[EmailAddress] | None = None,
         in_reply_to: str = "",
         thread_id: str = "",
+        attachments: list[EmailAttachment] | None = None,
     ) -> str:
         """Send an email. Returns the sent message's ID."""
         ...

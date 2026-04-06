@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from gilbert.interfaces.email import EmailAddress, EmailBackend, EmailMessage
+from gilbert.interfaces.email import EmailAddress, EmailAttachment, EmailBackend, EmailMessage
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -49,6 +49,7 @@ class InboxService(Service):
 
         self._storage: Any = None  # StorageBackend
         self._event_bus: Any = None  # EventBus
+        self._knowledge: Any = None  # KnowledgeService
         self._unsubscribes: list[Callable[[], None]] = []
 
     def service_info(self) -> ServiceInfo:
@@ -56,7 +57,7 @@ class InboxService(Service):
             name="inbox",
             capabilities=frozenset({"email", "ai_tools"}),
             requires=frozenset({"entity_storage", "scheduler"}),
-            optional=frozenset({"event_bus", "google_api"}),
+            optional=frozenset({"event_bus", "google_api", "knowledge"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -75,6 +76,9 @@ class InboxService(Service):
         await self._storage.ensure_index(IndexDefinition(
             collection=_COLLECTION, fields=["date"],
         ))
+
+        # Knowledge service (optional — for document attachments)
+        self._knowledge = resolver.get_capability("knowledge")
 
         # Event bus (optional)
         event_bus_svc = resolver.get_capability("event_bus")
@@ -287,7 +291,11 @@ class InboxService(Service):
         return {"total": total, "inbound": inbound}
 
     async def reply_to_message(
-        self, message_id: str, body_html: str, body_text: str = "",
+        self,
+        message_id: str,
+        body_html: str,
+        body_text: str = "",
+        attachments: list[EmailAttachment] | None = None,
     ) -> str:
         """Reply to an existing message. Returns the sent message's ID."""
         record = await self._storage.get(_COLLECTION, message_id)
@@ -306,6 +314,7 @@ class InboxService(Service):
             body_text=body_text,
             in_reply_to=in_reply_to,
             thread_id=thread_id,
+            attachments=attachments,
         )
 
         # Persist outbound
@@ -347,6 +356,7 @@ class InboxService(Service):
         body_html: str,
         body_text: str = "",
         cc: list[EmailAddress] | None = None,
+        attachments: list[EmailAttachment] | None = None,
     ) -> str:
         """Compose and send a new email. Returns the sent message's ID."""
         sent_id = await self._backend.send(
@@ -355,6 +365,7 @@ class InboxService(Service):
             body_html=body_html,
             body_text=body_text,
             cc=cc,
+            attachments=attachments,
         )
 
         now = datetime.now(timezone.utc)
@@ -441,7 +452,8 @@ class InboxService(Service):
                 name="inbox_reply",
                 description=(
                     "Reply to an email message. The reply is threaded in the "
-                    "same conversation. Provide the body as HTML."
+                    "same conversation. Provide the body as HTML. "
+                    "Optionally attach documents from the knowledge store by document ID."
                 ),
                 parameters=[
                     ToolParameter(
@@ -460,12 +472,24 @@ class InboxService(Service):
                         description="Plain text version of the reply (optional).",
                         required=False,
                     ),
+                    ToolParameter(
+                        name="attach_documents",
+                        type=ToolParameterType.ARRAY,
+                        description=(
+                            "List of knowledge store document IDs to attach "
+                            "(e.g., ['local:docs/report.pdf']). Optional."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
             ),
             ToolDefinition(
                 name="inbox_send",
-                description="Compose and send a new email.",
+                description=(
+                    "Compose and send a new email. "
+                    "Optionally attach documents from the knowledge store by document ID."
+                ),
                 parameters=[
                     ToolParameter(
                         name="to",
@@ -492,6 +516,15 @@ class InboxService(Service):
                         name="cc",
                         type=ToolParameterType.ARRAY,
                         description="List of CC email addresses (optional).",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="attach_documents",
+                        type=ToolParameterType.ARRAY,
+                        description=(
+                            "List of knowledge store document IDs to attach "
+                            "(e.g., ['local:docs/report.pdf']). Optional."
+                        ),
                         required=False,
                     ),
                 ],
@@ -561,13 +594,17 @@ class InboxService(Service):
         if not body_html:
             return "body_html is required."
 
+        attachments = await self._resolve_attachments(args.get("attach_documents"))
+
         try:
             sent_id = await self.reply_to_message(
                 message_id=message_id,
                 body_html=body_html,
                 body_text=args.get("body_text", ""),
+                attachments=attachments or None,
             )
-            return f"Reply sent (message ID: {sent_id})."
+            att_msg = f" with {len(attachments)} attachment(s)" if attachments else ""
+            return f"Reply sent{att_msg} (message ID: {sent_id})."
         except ValueError as e:
             return str(e)
 
@@ -586,6 +623,7 @@ class InboxService(Service):
         to = [EmailAddress(email=addr) for addr in to_raw]
         cc_raw = args.get("cc") or []
         cc = [EmailAddress(email=addr) for addr in cc_raw] if cc_raw else None
+        attachments = await self._resolve_attachments(args.get("attach_documents"))
 
         sent_id = await self.send_message(
             to=to,
@@ -593,5 +631,59 @@ class InboxService(Service):
             body_html=body_html,
             body_text=args.get("body_text", ""),
             cc=cc,
+            attachments=attachments or None,
         )
-        return f"Email sent (message ID: {sent_id})."
+        att_msg = f" with {len(attachments)} attachment(s)" if attachments else ""
+        return f"Email sent{att_msg} (message ID: {sent_id})."
+
+    async def _resolve_attachments(
+        self, document_ids: list[str] | None,
+    ) -> list[EmailAttachment]:
+        """Resolve knowledge store document IDs to email attachments."""
+        if not document_ids or not self._knowledge:
+            return []
+
+        attachments: list[EmailAttachment] = []
+        for doc_id in document_ids:
+            try:
+                # doc_id format: "source_id:path" — split to find backend + path
+                parts = doc_id.split(":", 1)
+                if len(parts) != 2:
+                    logger.warning("Invalid document ID format: %s", doc_id)
+                    continue
+
+                source_id_prefix, path = parts[0], parts[1]
+
+                # Find the matching backend
+                backend = None
+                for sid, b in self._knowledge.backends.items():
+                    if sid == doc_id[:len(sid)]:
+                        backend = b
+                        path = doc_id[len(sid) + 1:]  # skip "source_id:"
+                        break
+
+                if backend is None:
+                    # Try simple prefix match
+                    for sid, b in self._knowledge.backends.items():
+                        if sid.endswith(source_id_prefix):
+                            backend = b
+                            break
+
+                if backend is None:
+                    logger.warning("No backend found for document: %s", doc_id)
+                    continue
+
+                content = await backend.get_document(path)
+                if content is None:
+                    logger.warning("Document not found: %s", doc_id)
+                    continue
+
+                attachments.append(EmailAttachment(
+                    filename=content.meta.name,
+                    data=content.data,
+                    mime_type=content.meta.mime_type,
+                ))
+            except Exception:
+                logger.warning("Failed to resolve attachment: %s", doc_id, exc_info=True)
+
+        return attachments

@@ -244,6 +244,14 @@ class ScreenConfig(BaseModel):
     cleanup_interval_seconds: int = 300
 
 
+class InboxAIChatConfig(BaseModel):
+    """Email-to-AI chat configuration."""
+
+    enabled: bool = False
+    allowed_emails: list[str] = []
+    allowed_domains: list[str] = []
+
+
 class InboxConfig(BaseModel):
     """Email inbox configuration."""
 
@@ -284,6 +292,7 @@ class GilbertConfig(BaseModel):
     greeting: GreetingConfig = GreetingConfig()
     screens: ScreenConfig = ScreenConfig()
     inbox: InboxConfig = InboxConfig()
+    inbox_ai_chat: InboxAIChatConfig = InboxAIChatConfig()
     speaker: SpeakerConfig = SpeakerConfig()
     music: MusicConfig = MusicConfig()
 

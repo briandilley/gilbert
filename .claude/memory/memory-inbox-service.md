@@ -27,8 +27,8 @@ Email inbox service that syncs messages from an email backend into entity storag
 ### AI Tools
 - `inbox_search` — search by sender, subject, limit
 - `inbox_read` — full message content by ID
-- `inbox_reply` — threaded reply (auto-sets In-Reply-To, References, threadId)
-- `inbox_send` — compose and send a new email
+- `inbox_reply` — threaded reply (auto-sets In-Reply-To, References, threadId); supports `attach_documents` param with knowledge store document IDs
+- `inbox_send` — compose and send a new email; supports `attach_documents` param with knowledge store document IDs
 
 ### Events Published
 - `inbox.message.received` — new message persisted (includes `is_inbound` flag)
@@ -76,6 +76,27 @@ inbox:
 - `get_stats()` — returns `{total, inbound}` counts
 - `reply_to_message(message_id, body_html, body_text)` — reply via backend, persist outbound
 - `send_message(to, subject, body_html, body_text, cc)` — send via backend, persist outbound
+
+### InboxAIChatService (`core/services/inbox_ai_chat.py`)
+- Subscribes to `inbox.message.received`, checks sender allowlist, runs AI chat, replies via email
+- Capabilities: `email_ai_chat`, `ai_tools`. Requires: `email`, `ai_chat`, `entity_storage`. Optional: `event_bus`, `users`, `knowledge`.
+- Thread → conversation mapping persisted in `inbox_ai_chat_threads` collection
+- Resolves sender to UserContext via UserService for RBAC
+- Strips quoted reply text (Gmail/Outlook/Apple Mail patterns)
+- Converts markdown responses to styled HTML via `markdown` library
+- Implements ToolProvider with `email_attach` tool so the AI can queue document attachments for the reply
+- Injects `[EMAIL CONTEXT]` prefix telling the AI not to use `inbox_send`/`inbox_reply` tools (those create separate emails); the service handles the reply automatically
+- Queued attachments are collected after `chat()` and passed to `reply_to_message()`
+- Uses `asyncio.Lock` to prevent concurrent message processing from mixing pending attachments
+- Config: `inbox_ai_chat.enabled`, `allowed_emails`, `allowed_domains`
+
+### Email Attachments
+- `EmailAttachment` dataclass (`interfaces/email.py`): filename, data (bytes), mime_type
+- `EmailBackend.send()` accepts `attachments: list[EmailAttachment]`
+- Gmail backend encodes as MIME multipart/mixed with multipart/alternative body
+- InboxService `reply_to_message()` and `send_message()` pass through attachments
+- AI tools accept `attach_documents` array of knowledge store document IDs (e.g., `local:docs/report.pdf`)
+- Documents resolved via KnowledgeService backends at send time
 
 ## Related
 - [Event System](memory-event-system.md) — events published by inbox

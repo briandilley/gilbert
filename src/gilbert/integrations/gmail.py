@@ -15,7 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
-from gilbert.interfaces.email import EmailAddress, EmailBackend, EmailMessage
+from gilbert.interfaces.email import EmailAddress, EmailAttachment, EmailBackend, EmailMessage
 
 logger = logging.getLogger(__name__)
 
@@ -129,10 +129,33 @@ class GmailBackend(EmailBackend):
         cc: list[EmailAddress] | None = None,
         in_reply_to: str = "",
         thread_id: str = "",
+        attachments: list[EmailAttachment] | None = None,
     ) -> str:
         svc = self._ensure_service()
 
-        msg = MIMEMultipart("alternative")
+        # If we have attachments, use mixed multipart with alternative body inside
+        if attachments:
+            msg = MIMEMultipart("mixed")
+            body_part = MIMEMultipart("alternative")
+            if body_text:
+                body_part.attach(MIMEText(body_text, "plain"))
+            body_part.attach(MIMEText(body_html, "html"))
+            msg.attach(body_part)
+
+            for att in attachments:
+                from email.mime.application import MIMEApplication
+
+                part = MIMEApplication(att.data, Name=att.filename)
+                part["Content-Disposition"] = f'attachment; filename="{att.filename}"'
+                if att.mime_type:
+                    part.set_type(att.mime_type)
+                msg.attach(part)
+        else:
+            msg = MIMEMultipart("alternative")
+            if body_text:
+                msg.attach(MIMEText(body_text, "plain"))
+            msg.attach(MIMEText(body_html, "html"))
+
         msg["To"] = ", ".join(str(a) for a in to)
         msg["Subject"] = subject
         msg["From"] = self._email_address
@@ -142,11 +165,7 @@ class GmailBackend(EmailBackend):
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
             if not subject.startswith("Re:"):
-                msg.replace_header("Subject", f"Re: {subject}")
-
-        if body_text:
-            msg.attach(MIMEText(body_text, "plain"))
-        msg.attach(MIMEText(body_html, "html"))
+                msg["Subject"] = f"Re: {subject}"
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
         send_body: dict[str, str] = {"raw": raw}

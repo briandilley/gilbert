@@ -20,6 +20,7 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.email import (
     EmailAddress,
+    EmailAttachment,
     EmailBackend,
     EmailMessage,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "ApiKeyCredential",
     "AudioFormat",
     "EmailAddress",
+    "EmailAttachment",
     "EmailBackend",
     "EmailMessage",
     "CredentialType",
