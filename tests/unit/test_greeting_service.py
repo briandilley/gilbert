@@ -148,3 +148,78 @@ class TestGreetingService:
         greeting = await greeting_service._generate_greeting("Brian")
         assert "Brian" in greeting
         assert "Good morning" in greeting
+
+    @pytest.mark.asyncio
+    async def test_generate_greeting_uses_ai_chat_capability(
+        self, greeting_service: GreetingService, resolver: FakeResolver,
+    ) -> None:
+        """AI greeting looks up 'ai_chat' capability, not 'ai'."""
+        await greeting_service.start(resolver)
+
+        mock_ai = AsyncMock()
+        mock_ai.chat = AsyncMock(return_value=("Hey Brian, welcome!", "conv1"))
+        resolver.caps["ai_chat"] = mock_ai
+
+        greeting = await greeting_service._generate_greeting("Brian")
+        assert greeting == "Hey Brian, welcome!"
+        mock_ai.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_greeting_wrong_capability_falls_back(
+        self, greeting_service: GreetingService, resolver: FakeResolver,
+    ) -> None:
+        """If AI is registered under 'ai' instead of 'ai_chat', falls back."""
+        await greeting_service.start(resolver)
+
+        # Register under wrong name — should not be found
+        mock_ai = AsyncMock()
+        resolver.caps["ai"] = mock_ai
+
+        greeting = await greeting_service._generate_greeting("Brian")
+        assert "Good morning" in greeting  # Fallback, not AI-generated
+        mock_ai.chat.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_startup_greets_already_present(
+        self, greeting_service: GreetingService, resolver: FakeResolver,
+    ) -> None:
+        """Startup check greets people already present."""
+        await greeting_service.start(resolver)
+        greeting_service._start_hour = 0
+        greeting_service._cutoff_hour = 23
+
+        # Mock presence service with people present
+        from gilbert.interfaces.presence import UserPresence, PresenceState
+
+        mock_presence = AsyncMock()
+        mock_presence.who_is_here = AsyncMock(return_value=[
+            UserPresence(user_id="usr_1", state=PresenceState.PRESENT),
+            UserPresence(user_id="usr_2", state=PresenceState.NEARBY),
+        ])
+        resolver.caps["presence"] = mock_presence
+
+        # Mock speaker to capture announcements
+        mock_speaker = AsyncMock()
+        resolver.caps["speaker_control"] = mock_speaker
+
+        await greeting_service._greet_already_present()
+
+        # Both users should have been greeted
+        assert await greeting_service._has_been_greeted_today("usr_1")
+        assert await greeting_service._has_been_greeted_today("usr_2")
+
+    @pytest.mark.asyncio
+    async def test_startup_skips_outside_window(
+        self, greeting_service: GreetingService, resolver: FakeResolver,
+    ) -> None:
+        """Startup check does nothing outside greeting window."""
+        await greeting_service.start(resolver)
+        greeting_service._start_hour = 0
+        greeting_service._cutoff_hour = 0  # Always outside window
+
+        mock_presence = AsyncMock()
+        resolver.caps["presence"] = mock_presence
+
+        await greeting_service._greet_already_present()
+
+        mock_presence.who_is_here.assert_not_called()
