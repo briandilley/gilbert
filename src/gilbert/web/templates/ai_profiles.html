@@ -9,7 +9,7 @@
 
 {# --- Profiles table --- #}
 <h2>Profiles</h2>
-<table class="config-table">
+<table class="config-table" id="profiles-table">
     <thead>
         <tr>
             <th>Name</th>
@@ -21,11 +21,11 @@
     </thead>
     <tbody>
         {% for p in profiles %}
-        <tr>
+        <tr data-profile="{{ p.name }}">
             <td><code>{{ p.name }}</code></td>
-            <td><span class="muted">{{ p.description }}</span></td>
-            <td><span class="badge badge-muted">{{ p.tool_mode }}</span></td>
-            <td>
+            <td class="profile-desc"><span class="muted">{{ p.description }}</span></td>
+            <td class="profile-mode"><span class="badge badge-muted">{{ p.tool_mode }}</span></td>
+            <td class="profile-tools">
                 {% if p.tools %}
                     {% for t in p.tools %}
                     <span class="badge badge-muted">{{ t }}</span>
@@ -41,9 +41,7 @@
                     data-mode="{{ p.tool_mode }}"
                     data-tools="{{ p.tools | join(',') }}">Edit</button>
                 {% if p.name != 'default' %}
-                <form method="POST" action="/roles/profiles/{{ p.name }}/delete" style="display:inline">
-                    <button type="submit" class="btn-sm btn-muted">Delete</button>
-                </form>
+                <button type="button" class="btn-sm btn-muted delete-profile-btn" data-name="{{ p.name }}">Delete</button>
                 {% endif %}
             </td>
         </tr>
@@ -56,7 +54,7 @@
 <div id="profile-modal" class="modal-overlay modal-hidden">
     <div class="modal-content">
         <h3 id="modal-title">New Profile</h3>
-        <form method="POST" action="/roles/profiles/save" id="profile-form">
+        <form id="profile-form">
             <div class="form-row">
                 <label for="modal-name">Name</label>
                 <input type="text" name="name" id="modal-name" required placeholder="my_profile">
@@ -87,11 +85,42 @@
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn-sm btn-muted" id="modal-cancel">Cancel</button>
-                <button type="submit" class="btn-primary">Save</button>
+                <button type="submit" class="btn-primary" id="modal-save">Save</button>
             </div>
         </form>
     </div>
 </div>
+
+{# --- Call assignments table --- #}
+<h2 style="margin-top:2rem">Call Assignments</h2>
+<p class="muted">Map each AI call to a profile. Unassigned calls use the <code>default</code> profile.</p>
+<table class="config-table">
+    <thead>
+        <tr>
+            <th>Call Name</th>
+            <th>Service</th>
+            <th>Profile</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in declared_calls %}
+        <tr data-call="{{ c.call_name }}">
+            <td><code>{{ c.call_name }}</code></td>
+            <td><span class="muted">{{ c.service }}</span></td>
+            <td class="call-profile-badge"><span class="badge {% if c.profile != 'default' %}badge-warn{% else %}badge-muted{% endif %}">{{ c.profile }}</span></td>
+            <td>
+                <select class="inline-input assign-select" data-call="{{ c.call_name }}">
+                    {% for pn in profile_names %}
+                    <option value="{{ pn }}" {% if pn == c.profile %}selected{% endif %}>{{ pn }}</option>
+                    {% endfor %}
+                </select>
+                <button type="button" class="btn-sm assign-btn" data-call="{{ c.call_name }}">Set</button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
 
 <script>
 (function() {
@@ -104,6 +133,25 @@
     var toolFilter = document.getElementById('modal-tool-filter');
     var checkboxLabels = document.querySelectorAll('#modal-checkbox-grid .checkbox-label');
     var checkboxes = document.querySelectorAll('#modal-checkbox-grid input[type="checkbox"]');
+    var profileForm = document.getElementById('profile-form');
+
+    // --- Helpers ---
+
+    function postForm(url, formData) {
+        return fetch(url, {
+            method: 'POST',
+            headers: {'x-requested-with': 'fetch'},
+            body: formData,
+        }).then(function(r) { return r.json(); });
+    }
+
+    function flash(el, color) {
+        el.style.transition = 'background 0.3s';
+        el.style.background = color;
+        setTimeout(function() { el.style.background = ''; }, 600);
+    }
+
+    // --- Tool mode toggle ---
 
     function toggleToolsSection() {
         toolsSection.style.display = modeSelect.value === 'all' ? 'none' : '';
@@ -119,7 +167,6 @@
         checkboxLabels.forEach(function(lbl) { lbl.style.display = ''; });
     }
 
-    // Filter checkboxes by text
     toolFilter.addEventListener('input', function() {
         var q = toolFilter.value.toLowerCase();
         checkboxLabels.forEach(function(lbl) {
@@ -128,15 +175,11 @@
         });
     });
 
-    function showModal() {
-        modal.classList.remove('modal-hidden');
-    }
+    function showModal() { modal.classList.remove('modal-hidden'); }
+    function hideModal() { modal.classList.add('modal-hidden'); }
 
-    function hideModal() {
-        modal.classList.add('modal-hidden');
-    }
+    // --- New profile ---
 
-    // New profile
     document.getElementById('new-profile-btn').addEventListener('click', function() {
         modalTitle.textContent = 'New Profile';
         nameInput.value = '';
@@ -150,7 +193,8 @@
         showModal();
     });
 
-    // Edit profile
+    // --- Edit profile ---
+
     document.querySelectorAll('.edit-profile-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
             var name = btn.getAttribute('data-name');
@@ -176,45 +220,66 @@
         });
     });
 
-    // Cancel / backdrop close
+    // --- Save profile (modal form submit) ---
+
+    profileForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var fd = new FormData(profileForm);
+        postForm('/roles/profiles/save', fd).then(function(data) {
+            if (data.status === 'ok') {
+                hideModal();
+                // Update the profile row in-place or reload to reflect changes
+                location.reload();
+            }
+        });
+    });
+
+    // --- Delete profile ---
+
+    document.querySelectorAll('.delete-profile-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var name = btn.getAttribute('data-name');
+            var fd = new FormData();
+            postForm('/roles/profiles/' + encodeURIComponent(name) + '/delete', fd).then(function(data) {
+                if (data.status === 'ok') {
+                    var row = document.querySelector('tr[data-profile="' + name + '"]');
+                    if (row) row.remove();
+                }
+            });
+        });
+    });
+
+    // --- Assign profile (Set button) ---
+
+    document.querySelectorAll('.assign-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var callName = btn.getAttribute('data-call');
+            var select = document.querySelector('.assign-select[data-call="' + callName + '"]');
+            var profileName = select.value;
+
+            var fd = new FormData();
+            fd.append('call_name', callName);
+            fd.append('profile', profileName);
+
+            postForm('/roles/profiles/assign', fd).then(function(data) {
+                if (data.status === 'ok') {
+                    // Update the badge in-place
+                    var row = document.querySelector('tr[data-call="' + callName + '"]');
+                    var badge = row.querySelector('.call-profile-badge');
+                    var cls = profileName !== 'default' ? 'badge badge-warn' : 'badge badge-muted';
+                    badge.innerHTML = '<span class="' + cls + '">' + profileName + '</span>';
+                    flash(row, 'rgba(108, 140, 255, 0.15)');
+                }
+            });
+        });
+    });
+
+    // --- Cancel / backdrop ---
+
     document.getElementById('modal-cancel').addEventListener('click', hideModal);
     modal.addEventListener('click', function(e) {
         if (e.target === modal) hideModal();
     });
 })();
 </script>
-
-{# --- Call assignments table --- #}
-<h2 style="margin-top:2rem">Call Assignments</h2>
-<p class="muted">Map each AI call to a profile. Unassigned calls use the <code>default</code> profile.</p>
-<table class="config-table">
-    <thead>
-        <tr>
-            <th>Call Name</th>
-            <th>Service</th>
-            <th>Profile</th>
-            <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for c in declared_calls %}
-        <tr>
-            <td><code>{{ c.call_name }}</code></td>
-            <td><span class="muted">{{ c.service }}</span></td>
-            <td><span class="badge {% if c.profile != 'default' %}badge-warn{% else %}badge-muted{% endif %}">{{ c.profile }}</span></td>
-            <td>
-                <form method="POST" action="/roles/profiles/assign" style="display:inline">
-                    <input type="hidden" name="call_name" value="{{ c.call_name }}">
-                    <select name="profile" class="inline-input">
-                        {% for pn in profile_names %}
-                        <option value="{{ pn }}" {% if pn == c.profile %}selected{% endif %}>{{ pn }}</option>
-                        {% endfor %}
-                    </select>
-                    <button type="submit" class="btn-sm">Set</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
 {% endblock %}

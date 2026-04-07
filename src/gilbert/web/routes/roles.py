@@ -249,6 +249,10 @@ async def ai_profiles_page(
     })
 
 
+def _is_ajax(request: Request) -> bool:
+    return request.headers.get("x-requested-with") == "fetch"
+
+
 @router.post("/profiles/save")
 async def save_ai_profile(
     request: Request,
@@ -272,6 +276,8 @@ async def save_ai_profile(
         tools=tools_list,
     )
     await ai_svc.set_profile(profile)
+    if _is_ajax(request):
+        return {"status": "ok", "profile": name}
     return RedirectResponse(url="/roles/profiles", status_code=303)
 
 
@@ -288,6 +294,8 @@ async def delete_ai_profile(
         await ai_svc.delete_profile(profile_name)
     except (KeyError, ValueError):
         pass
+    if _is_ajax(request):
+        return {"status": "ok"}
     return RedirectResponse(url="/roles/profiles", status_code=303)
 
 
@@ -305,6 +313,8 @@ async def assign_ai_profile(
         await ai_svc.set_assignment(call_name, profile)
     except ValueError:
         pass
+    if _is_ajax(request):
+        return {"status": "ok", "call_name": call_name, "profile": profile}
     return RedirectResponse(url="/roles/profiles", status_code=303)
 
 
