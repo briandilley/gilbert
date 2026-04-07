@@ -25,6 +25,15 @@ _POSSESSIVE_RE = re.compile(r"^(.+?)(?:'s?\s)", re.IGNORECASE)
 _CAMEL_SPLIT_RE = re.compile(r"([A-Z][a-z]+)")
 
 
+# UniFi dev_family values that correspond to phones/mobile devices.
+# These are used to filter network presence to only phones.
+_PHONE_DEV_FAMILIES: frozenset[int] = frozenset({
+    9,   # iPhone
+    14,  # Samsung phone
+    77,  # Android phone
+})
+
+
 @dataclass(frozen=True)
 class WifiClient:
     """A connected WiFi client with optional person attribution."""
@@ -37,6 +46,7 @@ class WifiClient:
     ap_name: str
     last_seen: str  # ISO 8601 timestamp or epoch string
     is_wired: bool
+    is_phone: bool = False
 
 
 class UniFiNetwork:
@@ -69,6 +79,7 @@ class UniFiNetwork:
             rssi = c.get("rssi", 0)
             ap_name = c.get("ap_name", "")
             last_seen = str(c.get("last_seen", ""))
+            dev_family = c.get("dev_family", 0)
 
             person = self._resolve_person(mac, device_name, hostname)
 
@@ -81,6 +92,7 @@ class UniFiNetwork:
                 ap_name=ap_name,
                 last_seen=last_seen,
                 is_wired=is_wired,
+                is_phone=dev_family in _PHONE_DEV_FAMILIES,
             ))
 
         matched = [r for r in results if r.person and not r.is_wired]
@@ -93,11 +105,16 @@ class UniFiNetwork:
         return results
 
     async def get_people_on_network(self) -> dict[str, list[WifiClient]]:
-        """Get wireless clients grouped by person name."""
+        """Get wireless phone clients grouped by person name.
+
+        Only phones (not laptops, desktops, IoT, etc.) count toward
+        human presence — a laptop on the network doesn't mean the
+        person is physically present.
+        """
         clients = await self.get_connected_clients()
         people: dict[str, list[WifiClient]] = {}
         for c in clients:
-            if c.person and not c.is_wired:
+            if c.person and not c.is_wired and c.is_phone:
                 people.setdefault(c.person, []).append(c)
         return people
 
