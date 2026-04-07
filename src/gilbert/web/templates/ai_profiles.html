@@ -35,6 +35,7 @@
                 {% endif %}
             </td>
             <td>
+                <button type="button" class="btn-sm" onclick="openEditModal('{{ p.name }}', '{{ p.description | e }}', '{{ p.tool_mode }}', {{ p.tools | tojson }})">Edit</button>
                 {% if p.name != 'default' %}
                 <form method="POST" action="/roles/profiles/{{ p.name }}/delete" style="display:inline">
                     <button type="submit" class="btn-sm btn-muted">Delete</button>
@@ -45,50 +46,96 @@
         {% endfor %}
     </tbody>
 </table>
+<button type="button" class="btn-primary" onclick="openNewModal()" style="margin-top:0.5rem">New Profile</button>
 
-{# --- Create/edit profile form --- #}
-<h3>Create / Update Profile</h3>
-<form method="POST" action="/roles/profiles/save" style="max-width:600px">
-    <div class="form-row">
-        <label>Name</label>
-        <input type="text" name="name" required placeholder="my_profile">
+{# --- Modal --- #}
+<div id="profile-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal()">
+    <div class="modal-content">
+        <h3 id="modal-title">New Profile</h3>
+        <form method="POST" action="/roles/profiles/save" id="profile-form">
+            <div class="form-row">
+                <label for="modal-name">Name</label>
+                <input type="text" name="name" id="modal-name" required placeholder="my_profile">
+            </div>
+            <div class="form-row">
+                <label for="modal-desc">Description</label>
+                <input type="text" name="description" id="modal-desc" placeholder="What this profile is for">
+            </div>
+            <div class="form-row">
+                <label for="modal-mode">Tool Mode</label>
+                <select name="tool_mode" id="modal-mode" class="inline-input" style="width:100%; max-width:300px">
+                    <option value="all">all — every tool</option>
+                    <option value="include">include — only checked tools</option>
+                    <option value="exclude">exclude — all except checked tools</option>
+                </select>
+            </div>
+            <div class="form-row" id="modal-tools-section">
+                <label>Tools</label>
+                <div class="checkbox-grid">
+                    {% for t in all_tool_names %}
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="tools" value="{{ t }}" data-tool="{{ t }}">
+                        <code>{{ t }}</code>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn-sm btn-muted" onclick="closeModal()">Cancel</button>
+                <button type="submit" class="btn-primary">Save</button>
+            </div>
+        </form>
     </div>
-    <div class="form-row">
-        <label>Description</label>
-        <input type="text" name="description" placeholder="What this profile is for">
-    </div>
-    <div class="form-row">
-        <label>Tool Mode</label>
-        <select name="tool_mode" class="inline-input" id="tool-mode-select" style="width:100%; max-width:300px">
-            <option value="all">all — every tool</option>
-            <option value="include">include — only checked tools</option>
-            <option value="exclude">exclude — all except checked tools</option>
-        </select>
-    </div>
-    <div class="form-row" id="tool-checkboxes">
-        <label>Tools</label>
-        <div class="checkbox-grid">
-            {% for t in all_tool_names %}
-            <label class="checkbox-label">
-                <input type="checkbox" name="tools" value="{{ t }}">
-                <code>{{ t }}</code>
-            </label>
-            {% endfor %}
-        </div>
-    </div>
-    <button type="submit" class="btn-primary">Save Profile</button>
-</form>
+</div>
 
 <script>
-(function() {
-    var modeSelect = document.getElementById('tool-mode-select');
-    var checkboxDiv = document.getElementById('tool-checkboxes');
-    function toggle() {
-        checkboxDiv.style.display = modeSelect.value === 'all' ? 'none' : '';
-    }
-    modeSelect.addEventListener('change', toggle);
-    toggle();
-})();
+var modal = document.getElementById('profile-modal');
+var nameInput = document.getElementById('modal-name');
+var descInput = document.getElementById('modal-desc');
+var modeSelect = document.getElementById('modal-mode');
+var toolsSection = document.getElementById('modal-tools-section');
+var modalTitle = document.getElementById('modal-title');
+
+function toggleToolsSection() {
+    toolsSection.style.display = modeSelect.value === 'all' ? 'none' : '';
+}
+modeSelect.addEventListener('change', toggleToolsSection);
+
+function uncheckAll() {
+    toolsSection.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
+}
+
+function openNewModal() {
+    modalTitle.textContent = 'New Profile';
+    nameInput.value = '';
+    nameInput.readOnly = false;
+    nameInput.style.opacity = '';
+    descInput.value = '';
+    modeSelect.value = 'all';
+    uncheckAll();
+    toggleToolsSection();
+    modal.style.display = '';
+}
+
+function openEditModal(name, desc, mode, tools) {
+    modalTitle.textContent = 'Edit Profile: ' + name;
+    nameInput.value = name;
+    nameInput.readOnly = true;
+    nameInput.style.opacity = '0.6';
+    descInput.value = desc;
+    modeSelect.value = mode;
+    uncheckAll();
+    (tools || []).forEach(function(t) {
+        var cb = toolsSection.querySelector('input[data-tool="' + t + '"]');
+        if (cb) cb.checked = true;
+    });
+    toggleToolsSection();
+    modal.style.display = '';
+}
+
+function closeModal() {
+    modal.style.display = 'none';
+}
 </script>
 
 {# --- Call assignments table --- #}
