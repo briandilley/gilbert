@@ -250,7 +250,8 @@ class Gilbert:
         if self.config.doorbell.enabled:
             from gilbert.core.services.doorbell import DoorbellService
 
-            self.service_manager.register(DoorbellService())
+            doorbell_backend = self._create_doorbell_backend(self.config.doorbell.backend)
+            self.service_manager.register(DoorbellService(doorbell_backend))
 
         if self.config.screens.enabled:
             from gilbert.core.services.screens import ScreenService
@@ -454,6 +455,15 @@ class Gilbert:
 
             return SpotifyMusic()
         raise ValueError(f"Unknown music backend: {backend_name}")
+
+    @staticmethod
+    def _create_doorbell_backend(backend_name: str) -> "DoorbellBackend":
+        """Create a doorbell backend by name."""
+        if backend_name == "unifi":
+            from gilbert.integrations.unifi.doorbell import UniFiProtectDoorbellBackend
+
+            return UniFiProtectDoorbellBackend()
+        raise ValueError(f"Unknown doorbell backend: {backend_name}")
 
     @staticmethod
     def _create_presence_backend(backend_name: str) -> PresenceBackend:

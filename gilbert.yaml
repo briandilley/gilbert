@@ -139,11 +139,17 @@ presence:
 
 doorbell:
   enabled: false
+  backend: unifi
   poll_interval_seconds: 5
   doorbell_names: {}
   # doorbell_names:
   #   "G4 Doorbell": "Front Door"
   #   "G4 Doorbell Pro": "Rear Door"
+  speakers: []   # speaker names for announcements (empty = all)
+  voice_name: "" # TTS voice name
+  unifi_protect:
+    host: ""
+    credential: ""
 
 ai:
   enabled: false

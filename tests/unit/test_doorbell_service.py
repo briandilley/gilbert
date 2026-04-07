@@ -1,23 +1,19 @@
-"""Tests for DoorbellService — ring detection and event publishing."""
+"""Tests for DoorbellService — ring detection, event publishing, and announcements."""
 
-import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gilbert.core.services.doorbell import DoorbellService
-from gilbert.core.services.scheduler import SchedulerService
+from gilbert.interfaces.doorbell import DoorbellBackend, RingEvent
 from gilbert.interfaces.events import Event, EventBus
-from gilbert.interfaces.service import ServiceResolver
-from gilbert.integrations.unifi.protect import DetectionEvent, UniFiProtect
 
 
 @pytest.fixture
-def mock_protect() -> UniFiProtect:
-    p = AsyncMock(spec=UniFiProtect)
-    p.get_detection_events = AsyncMock(return_value=[])
-    return p
+def mock_backend() -> DoorbellBackend:
+    b = AsyncMock(spec=DoorbellBackend)
+    b.get_ring_events = AsyncMock(return_value=[])
+    return b
 
 
 @pytest.fixture
@@ -28,34 +24,30 @@ def mock_event_bus() -> EventBus:
 
 
 @pytest.fixture
-def scheduler() -> SchedulerService:
-    return SchedulerService()
+def mock_speaker() -> MagicMock:
+    speaker = MagicMock()
+    speaker.announce = AsyncMock()
+    return speaker
 
 
 @pytest.fixture
-def service() -> DoorbellService:
-    return DoorbellService()
+def service(mock_backend: DoorbellBackend) -> DoorbellService:
+    return DoorbellService(mock_backend)
 
 
-def _ring_event(camera: str, ts: int = 1700000001000) -> DetectionEvent:
-    return DetectionEvent(
-        event_id="evt1",
-        camera_name=camera,
-        event_type="ring",
-        start=ts,
-    )
+def _ring(camera: str, ts: int = 1700000001000) -> RingEvent:
+    return RingEvent(camera_name=camera, timestamp=ts)
 
 
 class TestRingDetection:
     async def test_detects_new_ring(
-        self, service: DoorbellService, mock_protect: UniFiProtect, mock_event_bus: EventBus
+        self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
-        service._protect = mock_protect
         service._event_bus = mock_event_bus
-        service._last_ring_ts = 1700000000000  # before the ring event
+        service._last_ring_ts = 1700000000000
 
-        mock_protect.get_detection_events = AsyncMock(return_value=[
-            _ring_event("G4 Doorbell", ts=1700000001000),
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell", ts=1700000001000),
         ])
 
         await service._check_for_rings()
@@ -66,14 +58,13 @@ class TestRingDetection:
         assert event.data["camera"] == "G4 Doorbell"
 
     async def test_ignores_old_ring(
-        self, service: DoorbellService, mock_protect: UniFiProtect, mock_event_bus: EventBus
+        self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
-        service._protect = mock_protect
         service._event_bus = mock_event_bus
-        service._last_ring_ts = 1700000002000  # after the ring event
+        service._last_ring_ts = 1700000002000
 
-        mock_protect.get_detection_events = AsyncMock(return_value=[
-            _ring_event("G4 Doorbell", ts=1700000001000),
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell", ts=1700000001000),
         ])
 
         await service._check_for_rings()
@@ -81,14 +72,13 @@ class TestRingDetection:
         mock_event_bus.publish.assert_not_awaited()
 
     async def test_updates_last_ring_ts(
-        self, service: DoorbellService, mock_protect: UniFiProtect, mock_event_bus: EventBus
+        self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
-        service._protect = mock_protect
         service._event_bus = mock_event_bus
         service._last_ring_ts = 1700000000000
 
-        mock_protect.get_detection_events = AsyncMock(return_value=[
-            _ring_event("G4 Doorbell", ts=1700000005000),
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell", ts=1700000005000),
         ])
 
         await service._check_for_rings()
@@ -96,15 +86,14 @@ class TestRingDetection:
         assert service._last_ring_ts == 1700000005000
 
     async def test_uses_friendly_door_name(
-        self, service: DoorbellService, mock_protect: UniFiProtect, mock_event_bus: EventBus
+        self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
-        service._protect = mock_protect
         service._event_bus = mock_event_bus
         service._last_ring_ts = 0
         service._doorbell_names = {"G4 Doorbell": "Front Door"}
 
-        mock_protect.get_detection_events = AsyncMock(return_value=[
-            _ring_event("G4 Doorbell"),
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell"),
         ])
 
         await service._check_for_rings()
@@ -113,33 +102,101 @@ class TestRingDetection:
         assert event.data["door"] == "Front Door"
         assert event.data["camera"] == "G4 Doorbell"
 
-    async def test_no_protect_skips(self, service: DoorbellService) -> None:
-        """No crash when protect is not configured."""
-        service._protect = None
-        await service._check_for_rings()  # Should not raise
-
-    async def test_protect_error_handled(
-        self, service: DoorbellService, mock_protect: UniFiProtect
+    async def test_backend_error_handled(
+        self, service: DoorbellService, mock_backend: DoorbellBackend
     ) -> None:
-        service._protect = mock_protect
-        mock_protect.get_detection_events = AsyncMock(side_effect=Exception("network error"))
+        mock_backend.get_ring_events = AsyncMock(side_effect=Exception("network error"))
 
         await service._check_for_rings()  # Should not raise
 
     async def test_multiple_rings_processes_all(
-        self, service: DoorbellService, mock_protect: UniFiProtect, mock_event_bus: EventBus
+        self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
-        service._protect = mock_protect
         service._event_bus = mock_event_bus
         service._last_ring_ts = 0
 
-        mock_protect.get_detection_events = AsyncMock(return_value=[
-            _ring_event("Front Doorbell", ts=1700000001000),
-            _ring_event("Rear Doorbell", ts=1700000002000),
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("Front Doorbell", ts=1700000001000),
+            _ring("Rear Doorbell", ts=1700000002000),
         ])
 
         await service._check_for_rings()
 
         assert mock_event_bus.publish.await_count == 2
-        # Last ring ts should be the most recent
         assert service._last_ring_ts == 1700000002000
+
+
+class TestAnnouncement:
+    async def test_announces_on_ring(
+        self,
+        service: DoorbellService,
+        mock_backend: DoorbellBackend,
+        mock_event_bus: EventBus,
+        mock_speaker: MagicMock,
+    ) -> None:
+        service._event_bus = mock_event_bus
+        service._last_ring_ts = 0
+        service._doorbell_names = {"G4 Doorbell Pro": "Front Door"}
+
+        resolver = MagicMock()
+        resolver.get_capability = MagicMock(return_value=mock_speaker)
+        service._resolver = resolver
+
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell Pro"),
+        ])
+
+        await service._check_for_rings()
+
+        mock_speaker.announce.assert_awaited_once_with(
+            "Someone is at the Front Door.",
+            speaker_names=None,
+            voice_name=None,
+        )
+
+    async def test_announce_uses_configured_speakers(
+        self,
+        service: DoorbellService,
+        mock_backend: DoorbellBackend,
+        mock_event_bus: EventBus,
+        mock_speaker: MagicMock,
+    ) -> None:
+        service._event_bus = mock_event_bus
+        service._last_ring_ts = 0
+        service._speakers = ["Living Room", "Kitchen"]
+        service._voice_name = "gilbert"
+
+        resolver = MagicMock()
+        resolver.get_capability = MagicMock(return_value=mock_speaker)
+        service._resolver = resolver
+
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell"),
+        ])
+
+        await service._check_for_rings()
+
+        mock_speaker.announce.assert_awaited_once_with(
+            "Someone is at the G4 Doorbell.",
+            speaker_names=["Living Room", "Kitchen"],
+            voice_name="gilbert",
+        )
+
+    async def test_no_speaker_service_no_crash(
+        self,
+        service: DoorbellService,
+        mock_backend: DoorbellBackend,
+        mock_event_bus: EventBus,
+    ) -> None:
+        service._event_bus = mock_event_bus
+        service._last_ring_ts = 0
+
+        resolver = MagicMock()
+        resolver.get_capability = MagicMock(return_value=None)
+        service._resolver = resolver
+
+        mock_backend.get_ring_events = AsyncMock(return_value=[
+            _ring("G4 Doorbell"),
+        ])
+
+        await service._check_for_rings()  # Should not raise

@@ -231,8 +231,12 @@ class DoorbellConfig(BaseModel):
     """Doorbell monitoring configuration."""
 
     enabled: bool = False
+    backend: str = "unifi"
     poll_interval_seconds: float = 5.0
     doorbell_names: dict[str, str] = {}  # camera name → friendly door name
+    speakers: list[str] = []  # speaker names for announcements (empty = all)
+    voice_name: str = ""  # TTS voice name
+    unifi_protect: UniFiControllerConfig = UniFiControllerConfig()
 
 
 class GreetingConfig(BaseModel):
