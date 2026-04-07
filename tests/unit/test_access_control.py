@@ -345,3 +345,81 @@ class TestCollectionACL:
         })
         parsed = json.loads(result)
         assert parsed["status"] == "set"
+
+
+# =============================================================================
+# Chat visibility override tests
+# =============================================================================
+
+
+class TestChatVisibility:
+    async def test_default_chat_enabled(self, service: AccessControlService) -> None:
+        """Tools with chat_enabled=True are enabled by default."""
+        tool = ToolDefinition(name="test_tool", description="test")
+        assert service.is_tool_chat_enabled(tool) is True
+
+    async def test_default_chat_disabled(self, service: AccessControlService) -> None:
+        """Tools with chat_enabled=False are disabled by default."""
+        tool = ToolDefinition(name="test_tool", description="test", chat_enabled=False)
+        assert service.is_tool_chat_enabled(tool) is False
+
+    async def test_override_enables_disabled_tool(self, service: AccessControlService) -> None:
+        """Admin can override chat_enabled=False to True."""
+        tool = ToolDefinition(name="internal_tool", description="test", chat_enabled=False)
+        await service.set_chat_override("internal_tool", True)
+        assert service.is_tool_chat_enabled(tool) is True
+
+    async def test_override_disables_enabled_tool(self, service: AccessControlService) -> None:
+        """Admin can override chat_enabled=True to False."""
+        tool = ToolDefinition(name="public_tool", description="test", chat_enabled=True)
+        await service.set_chat_override("public_tool", False)
+        assert service.is_tool_chat_enabled(tool) is False
+
+    async def test_clear_override_reverts_to_default(self, service: AccessControlService) -> None:
+        """Clearing an override reverts to the tool's declared default."""
+        tool = ToolDefinition(name="my_tool", description="test", chat_enabled=False)
+        await service.set_chat_override("my_tool", True)
+        assert service.is_tool_chat_enabled(tool) is True
+        await service.clear_chat_override("my_tool")
+        assert service.is_tool_chat_enabled(tool) is False
+
+    async def test_override_persists_to_storage(
+        self, service: AccessControlService, stub_storage: StubStorage
+    ) -> None:
+        """Chat overrides are persisted in storage."""
+        await service.set_chat_override("some_tool", False)
+        # StorageService wraps with "gilbert." namespace
+        doc = await stub_storage.get("gilbert.acl_chat_overrides", "some_tool")
+        assert doc is not None
+        assert doc["chat_enabled"] is False
+
+    async def test_clear_removes_from_storage(
+        self, service: AccessControlService, stub_storage: StubStorage
+    ) -> None:
+        """Clearing an override removes it from storage."""
+        await service.set_chat_override("some_tool", False)
+        await service.clear_chat_override("some_tool")
+        # StorageService wraps with "gilbert." namespace
+        doc = await stub_storage.get("gilbert.acl_chat_overrides", "some_tool")
+        assert doc is None
+
+    async def test_tool_set_chat_enabled(self, service: AccessControlService) -> None:
+        """The AI tool for setting chat visibility works."""
+        result = await service.execute_tool("set_tool_chat_enabled", {
+            "tool_name": "my_tool", "chat_enabled": False,
+        })
+        parsed = json.loads(result)
+        assert parsed["status"] == "set"
+        tool = ToolDefinition(name="my_tool", description="test")
+        assert service.is_tool_chat_enabled(tool) is False
+
+    async def test_tool_clear_chat_enabled(self, service: AccessControlService) -> None:
+        """The AI tool for clearing chat visibility works."""
+        await service.set_chat_override("my_tool", False)
+        result = await service.execute_tool("clear_tool_chat_enabled", {
+            "tool_name": "my_tool",
+        })
+        parsed = json.loads(result)
+        assert parsed["status"] == "cleared"
+        tool = ToolDefinition(name="my_tool", description="test")
+        assert service.is_tool_chat_enabled(tool) is True

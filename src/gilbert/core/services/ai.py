@@ -353,24 +353,33 @@ class AIService(Service):
                     continue
                 tools_by_name[tool_def.name] = (svc, tool_def)
 
-        # Filter by RBAC permissions
-        if user_ctx is not None and self._acl_svc is not None:
+        # Filter by chat visibility and RBAC permissions
+        if self._acl_svc is not None:
             from gilbert.core.services.access_control import AccessControlService
 
             if isinstance(self._acl_svc, AccessControlService):
-                filtered = {
+                # Filter out tools disabled for chat
+                tools_by_name = {
                     name: (prov, tdef)
                     for name, (prov, tdef) in tools_by_name.items()
-                    if self._acl_svc.check_tool_access(user_ctx, tdef)
+                    if self._acl_svc.is_tool_chat_enabled(tdef)
                 }
-                removed = len(tools_by_name) - len(filtered)
-                if removed:
-                    logger.debug(
-                        "Filtered %d tools for user %s (effective level %d)",
-                        removed, user_ctx.user_id,
-                        self._acl_svc.get_effective_level(user_ctx),
-                    )
-                tools_by_name = filtered
+
+                # Filter by RBAC permissions
+                if user_ctx is not None:
+                    before = len(tools_by_name)
+                    tools_by_name = {
+                        name: (prov, tdef)
+                        for name, (prov, tdef) in tools_by_name.items()
+                        if self._acl_svc.check_tool_access(user_ctx, tdef)
+                    }
+                    removed = before - len(tools_by_name)
+                    if removed:
+                        logger.debug(
+                            "Filtered %d tools for user %s (effective level %d)",
+                            removed, user_ctx.user_id,
+                            self._acl_svc.get_effective_level(user_ctx),
+                        )
 
         return tools_by_name
 

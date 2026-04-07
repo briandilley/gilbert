@@ -122,12 +122,16 @@ async def tool_permissions(
         if svc is not None and isinstance(svc, ToolProvider):
             for tool_def in svc.get_tools():
                 override = acl._tool_overrides.get(tool_def.name)
+                chat_override = acl._chat_overrides.get(tool_def.name)
                 tools.append({
                     "name": tool_def.name,
                     "provider": svc.tool_provider_name,
                     "default_role": tool_def.required_role,
                     "effective_role": override or tool_def.required_role,
                     "has_override": override is not None,
+                    "default_chat_enabled": tool_def.chat_enabled,
+                    "effective_chat_enabled": chat_override if chat_override is not None else tool_def.chat_enabled,
+                    "has_chat_override": chat_override is not None,
                 })
     tools.sort(key=lambda t: (t["provider"], t["name"]))
 
@@ -174,6 +178,39 @@ async def clear_tool_permission(
     acl = _get_acl(gilbert)
 
     await acl.clear_tool_override(tool_name)
+    return RedirectResponse(url="/roles/tools", status_code=303)
+
+
+# --- Set tool chat visibility override ---
+
+
+@router.post("/tools/{tool_name}/chat")
+async def set_tool_chat(
+    request: Request,
+    tool_name: str,
+    chat_enabled: bool = Form(...),
+    user: UserContext = Depends(require_role("admin")),
+) -> Any:
+    gilbert: Gilbert = request.app.state.gilbert
+    acl = _get_acl(gilbert)
+
+    await acl.set_chat_override(tool_name, chat_enabled)
+    return RedirectResponse(url="/roles/tools", status_code=303)
+
+
+# --- Clear tool chat visibility override ---
+
+
+@router.post("/tools/{tool_name}/chat/clear")
+async def clear_tool_chat(
+    request: Request,
+    tool_name: str,
+    user: UserContext = Depends(require_role("admin")),
+) -> Any:
+    gilbert: Gilbert = request.app.state.gilbert
+    acl = _get_acl(gilbert)
+
+    await acl.clear_chat_override(tool_name)
     return RedirectResponse(url="/roles/tools", status_code=303)
 
 

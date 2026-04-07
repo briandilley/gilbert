@@ -267,6 +267,11 @@ class Gilbert:
 
             self.service_manager.register(BackupService())
 
+        if self.config.radio_dj.enabled:
+            from gilbert.core.services.radio_dj import RadioDJService
+
+            self.service_manager.register(RadioDJService())
+
         if self.config.roast.enabled:
             from gilbert.core.services.roast import RoastService
 

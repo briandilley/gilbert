@@ -1,4 +1,4 @@
-"""Tests for AuthService — login flow, sessions, provider registration."""
+"""Tests for AuthService — login flow, sessions, provider discovery."""
 
 from typing import Any
 
@@ -7,28 +7,36 @@ import pytest
 from gilbert.config import AuthConfig
 from gilbert.core.services.auth import AuthService
 from gilbert.core.services.users import UserService
-from gilbert.interfaces.auth import AuthInfo, AuthProvider
+from gilbert.interfaces.auth import AuthenticationService, AuthInfo, LoginMethod
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
 
 # --- Stubs ---
 
 
-class StubAuthProvider(AuthProvider):
+class StubAuthProvider(Service, AuthenticationService):
     """Auth provider that always succeeds for a known email."""
 
     def __init__(self, email: str = "test@example.com") -> None:
         self._email = email
 
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(
+            name="auth_stub",
+            capabilities=frozenset({"authentication_provider"}),
+        )
+
     @property
     def provider_type(self) -> str:
         return "stub"
 
-    async def initialize(self, config: dict[str, Any]) -> None:
-        pass
-
-    async def close(self) -> None:
-        pass
+    def get_login_method(self) -> LoginMethod:
+        return LoginMethod(
+            provider_type="stub",
+            display_name="Stub Auth",
+            method="form",
+            form_action="/auth/login/stub",
+        )
 
     async def authenticate(self, credentials: dict[str, Any]) -> AuthInfo | None:
         if credentials.get("email") == self._email:
@@ -54,21 +62,26 @@ class StubStorageService(Service):
 
 
 class StubResolver(ServiceResolver):
-    def __init__(self, services: dict[str, Service]) -> None:
+    def __init__(self, services: dict[str, Service | list[Service]]) -> None:
         self._by_cap = services
 
     def get_capability(self, capability: str) -> Service | None:
-        return self._by_cap.get(capability)
+        val = self._by_cap.get(capability)
+        if isinstance(val, list):
+            return val[0] if val else None
+        return val
 
     def require_capability(self, capability: str) -> Service:
-        svc = self._by_cap.get(capability)
+        svc = self.get_capability(capability)
         if svc is None:
             raise LookupError(f"Missing: {capability}")
         return svc
 
     def get_all(self, capability: str) -> list[Service]:
-        svc = self._by_cap.get(capability)
-        return [svc] if svc else []
+        val = self._by_cap.get(capability)
+        if isinstance(val, list):
+            return val
+        return [val] if val else []
 
 
 # --- Fixtures ---
@@ -82,20 +95,53 @@ async def user_service(sqlite_storage: StorageBackend) -> UserService:
     return svc
 
 
+def _make_auth_service_resolver(
+    sqlite_storage: StorageBackend,
+    user_service: UserService,
+    providers: list[Service] | None = None,
+) -> StubResolver:
+    """Build a resolver that wires up auth dependencies and optional providers."""
+    caps: dict[str, Service | list[Service]] = {
+        "users": user_service,
+        "entity_storage": StubStorageService(sqlite_storage),
+    }
+    if providers:
+        caps["authentication_provider"] = providers
+    return caps
+
+
 @pytest.fixture
 async def auth_service(
     sqlite_storage: StorageBackend, user_service: UserService
 ) -> AuthService:
+    """AuthService with NO providers (bare)."""
     config = AuthConfig(
         enabled=True,
-        providers=[],  # We'll register providers manually
+        providers=[],
         session_ttl_seconds=3600,
     )
     svc = AuthService(config)
-    resolver = StubResolver({
-        "users": user_service,
-        "entity_storage": StubStorageService(sqlite_storage),
-    })
+    caps = _make_auth_service_resolver(sqlite_storage, user_service)
+    resolver = StubResolver(caps)
+    await svc.start(resolver)
+    return svc
+
+
+@pytest.fixture
+async def auth_service_with_provider(
+    sqlite_storage: StorageBackend, user_service: UserService
+) -> AuthService:
+    """AuthService with a StubAuthProvider already wired in."""
+    config = AuthConfig(
+        enabled=True,
+        providers=[],
+        session_ttl_seconds=3600,
+    )
+    svc = AuthService(config)
+    caps = _make_auth_service_resolver(
+        sqlite_storage, user_service, providers=[StubAuthProvider()]
+    )
+    resolver = StubResolver(caps)
     await svc.start(resolver)
     return svc
 
@@ -103,10 +149,16 @@ async def auth_service(
 # --- Tests ---
 
 
-async def test_register_and_list_providers(auth_service: AuthService) -> None:
-    assert auth_service.list_providers() == []
-    auth_service.register_provider(StubAuthProvider())
-    assert "stub" in auth_service.list_providers()
+async def test_no_providers_by_default(auth_service: AuthService) -> None:
+    assert auth_service.get_login_methods() == []
+
+
+async def test_provider_discovered_via_resolver(
+    auth_service_with_provider: AuthService,
+) -> None:
+    methods = auth_service_with_provider.get_login_methods()
+    assert len(methods) == 1
+    assert methods[0].provider_type == "stub"
 
 
 async def test_authenticate_unknown_provider(auth_service: AuthService) -> None:
@@ -115,11 +167,11 @@ async def test_authenticate_unknown_provider(auth_service: AuthService) -> None:
 
 
 async def test_authenticate_success_creates_user_and_session(
-    auth_service: AuthService, user_service: UserService
+    auth_service_with_provider: AuthService, user_service: UserService
 ) -> None:
-    auth_service.register_provider(StubAuthProvider())
-
-    ctx = await auth_service.authenticate("stub", {"email": "test@example.com"})
+    ctx = await auth_service_with_provider.authenticate(
+        "stub", {"email": "test@example.com"}
+    )
     assert ctx is not None
     assert ctx.email == "test@example.com"
     assert ctx.session_id is not None
@@ -131,23 +183,26 @@ async def test_authenticate_success_creates_user_and_session(
     assert user["display_name"] == "Test User"
 
 
-async def test_authenticate_failure(auth_service: AuthService) -> None:
-    auth_service.register_provider(StubAuthProvider())
-    result = await auth_service.authenticate("stub", {"email": "wrong@example.com"})
+async def test_authenticate_failure(
+    auth_service_with_provider: AuthService,
+) -> None:
+    result = await auth_service_with_provider.authenticate(
+        "stub", {"email": "wrong@example.com"}
+    )
     assert result is None
 
 
-async def test_validate_session(auth_service: AuthService) -> None:
-    auth_service.register_provider(StubAuthProvider())
-
-    # Login to get a session.
-    ctx = await auth_service.authenticate("stub", {"email": "test@example.com"})
+async def test_validate_session(
+    auth_service_with_provider: AuthService,
+) -> None:
+    ctx = await auth_service_with_provider.authenticate(
+        "stub", {"email": "test@example.com"}
+    )
     assert ctx is not None
     session_id = ctx.session_id
     assert session_id is not None
 
-    # Validate the session.
-    validated = await auth_service.validate_session(session_id)
+    validated = await auth_service_with_provider.validate_session(session_id)
     assert validated is not None
     assert validated.user_id == ctx.user_id
     assert validated.email == "test@example.com"
@@ -158,19 +213,21 @@ async def test_validate_invalid_session(auth_service: AuthService) -> None:
     assert result is None
 
 
-async def test_invalidate_session(auth_service: AuthService) -> None:
-    auth_service.register_provider(StubAuthProvider())
-
-    ctx = await auth_service.authenticate("stub", {"email": "test@example.com"})
+async def test_invalidate_session(
+    auth_service_with_provider: AuthService,
+) -> None:
+    ctx = await auth_service_with_provider.authenticate(
+        "stub", {"email": "test@example.com"}
+    )
     assert ctx is not None and ctx.session_id is not None
 
-    await auth_service.invalidate_session(ctx.session_id)
-    result = await auth_service.validate_session(ctx.session_id)
+    await auth_service_with_provider.invalidate_session(ctx.session_id)
+    result = await auth_service_with_provider.validate_session(ctx.session_id)
     assert result is None
 
 
 async def test_authenticate_links_existing_user(
-    auth_service: AuthService, user_service: UserService
+    auth_service_with_provider: AuthService, user_service: UserService
 ) -> None:
     """If a user with the same email already exists, link rather than create."""
     await user_service.create_user("existing", {
@@ -178,18 +235,17 @@ async def test_authenticate_links_existing_user(
         "display_name": "Existing",
     })
 
-    auth_service.register_provider(StubAuthProvider())
-    ctx = await auth_service.authenticate("stub", {"email": "test@example.com"})
+    ctx = await auth_service_with_provider.authenticate(
+        "stub", {"email": "test@example.com"}
+    )
     assert ctx is not None
     assert ctx.user_id == "existing"
 
 
 async def test_authenticate_does_not_link_root(
-    auth_service: AuthService, user_service: UserService
+    auth_service_with_provider: AuthService, user_service: UserService
 ) -> None:
     """Auth should not add provider links to the root user."""
-    # Root user has root@localhost email, so this test uses a different provider
-    # that matches a different email. Just verify root stays unlinked.
     root = await user_service.get_user("root")
     assert root is not None
     assert root["provider_links"] == []

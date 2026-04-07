@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _ROLES_COLLECTION = "acl_roles"
 _OVERRIDES_COLLECTION = "acl_tool_overrides"
+_CHAT_OVERRIDES_COLLECTION = "acl_chat_overrides"
 _COLLECTION_ACL = "acl_collections"
 
 # Built-in roles — cannot be removed or have their level changed
@@ -50,6 +51,8 @@ class AccessControlService(Service):
         self._role_levels: dict[str, int] = {r["name"]: r["level"] for r in _BUILTIN_ROLES}
         # Override cache: tool name → required role name
         self._tool_overrides: dict[str, str] = {}
+        # Chat visibility override cache: tool name → enabled
+        self._chat_overrides: dict[str, bool] = {}
         # Collection ACL cache: collection → {"read_role": str, "write_role": str}
         self._collection_acl: dict[str, dict[str, str]] = {}
 
@@ -108,6 +111,14 @@ class AccessControlService(Service):
             o["tool_name"]: o["required_role"]
             for o in overrides
             if "tool_name" in o and "required_role" in o
+        }
+
+        # Chat visibility overrides
+        chat_overrides = await self._storage.query(Query(collection=_CHAT_OVERRIDES_COLLECTION))
+        self._chat_overrides = {
+            o["tool_name"]: bool(o["chat_enabled"])
+            for o in chat_overrides
+            if "tool_name" in o and "chat_enabled" in o
         }
 
         # Collection ACLs
@@ -246,6 +257,45 @@ class AccessControlService(Service):
         self._tool_overrides.pop(tool_name, None)
         logger.info("Tool override removed for '%s'", tool_name)
 
+    # --- Chat visibility overrides ---
+
+    def is_tool_chat_enabled(self, tool_def: ToolDefinition) -> bool:
+        """Check if a tool should appear in AI chat.
+
+        Checks the admin override first, then falls back to the tool's
+        declared default.
+        """
+        if tool_def.name in self._chat_overrides:
+            return self._chat_overrides[tool_def.name]
+        return tool_def.chat_enabled
+
+    async def set_chat_override(self, tool_name: str, chat_enabled: bool) -> None:
+        """Set or update a chat visibility override for a tool."""
+        if self._storage is None:
+            raise RuntimeError("Storage not available")
+        await self._storage.put(_CHAT_OVERRIDES_COLLECTION, tool_name, {
+            "tool_name": tool_name,
+            "chat_enabled": chat_enabled,
+        })
+        self._chat_overrides[tool_name] = chat_enabled
+        logger.info("Tool '%s' chat_enabled set to %s", tool_name, chat_enabled)
+
+    async def clear_chat_override(self, tool_name: str) -> None:
+        """Remove a chat visibility override (revert to tool default)."""
+        if self._storage is None:
+            raise RuntimeError("Storage not available")
+        await self._storage.delete(_CHAT_OVERRIDES_COLLECTION, tool_name)
+        self._chat_overrides.pop(tool_name, None)
+        logger.info("Chat override removed for '%s'", tool_name)
+
+    async def list_chat_overrides(self) -> list[dict[str, Any]]:
+        """List all chat visibility overrides."""
+        if self._storage is None:
+            return []
+        from gilbert.interfaces.storage import Query
+
+        return await self._storage.query(Query(collection=_CHAT_OVERRIDES_COLLECTION))
+
     # --- Collection-level ACL ---
 
     def check_collection_read(self, user_ctx: UserContext, collection: str) -> bool:
@@ -360,6 +410,23 @@ class AccessControlService(Service):
                 required_role="admin",
             ),
             ToolDefinition(
+                name="set_tool_chat_enabled",
+                description="Enable or disable a tool in AI chat. When disabled, the tool won't appear in chat even if the user has role access.",
+                parameters=[
+                    ToolParameter(name="tool_name", type=ToolParameterType.STRING, description="Tool name."),
+                    ToolParameter(name="chat_enabled", type=ToolParameterType.BOOLEAN, description="Whether to show this tool in AI chat."),
+                ],
+                required_role="admin",
+            ),
+            ToolDefinition(
+                name="clear_tool_chat_enabled",
+                description="Remove a chat visibility override for a tool, reverting to the tool's default.",
+                parameters=[
+                    ToolParameter(name="tool_name", type=ToolParameterType.STRING, description="Tool name."),
+                ],
+                required_role="admin",
+            ),
+            ToolDefinition(
                 name="list_collection_acls",
                 description="List access control rules for entity collections.",
                 required_role="everyone",
@@ -392,6 +459,10 @@ class AccessControlService(Service):
                 return await self._tool_set_permission(arguments)
             case "clear_tool_permission":
                 return await self._tool_clear_permission(arguments)
+            case "set_tool_chat_enabled":
+                return await self._tool_set_chat_enabled(arguments)
+            case "clear_tool_chat_enabled":
+                return await self._tool_clear_chat_enabled(arguments)
             case "list_collection_acls":
                 return await self._tool_list_collection_acls()
             case "set_collection_acl":
@@ -453,6 +524,14 @@ class AccessControlService(Service):
 
     async def _tool_clear_permission(self, arguments: dict[str, Any]) -> str:
         await self.clear_tool_override(arguments["tool_name"])
+        return json.dumps({"status": "cleared"})
+
+    async def _tool_set_chat_enabled(self, arguments: dict[str, Any]) -> str:
+        await self.set_chat_override(arguments["tool_name"], bool(arguments["chat_enabled"]))
+        return json.dumps({"status": "set", "tool_name": arguments["tool_name"], "chat_enabled": arguments["chat_enabled"]})
+
+    async def _tool_clear_chat_enabled(self, arguments: dict[str, Any]) -> str:
+        await self.clear_chat_override(arguments["tool_name"])
         return json.dumps({"status": "cleared"})
 
     async def _tool_list_collection_acls(self) -> str:

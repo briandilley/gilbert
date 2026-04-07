@@ -246,6 +246,25 @@ class BackupConfig(BaseModel):
     backup_minute: int = 0
 
 
+class RadioDJConfig(BaseModel):
+    """Radio DJ service configuration."""
+
+    enabled: bool = False
+    default_genres: list[str] = [
+        "classic rock",
+        "90s hits",
+        "blues rock",
+        "indie rock",
+        "funk",
+        "80s hits",
+    ]
+    min_switch_interval: int = 15  # minutes between auto genre switches
+    default_volume: int = 35
+    speakers: list[str] = []  # speaker names (empty = all)
+    stop_when_empty: bool = True
+    poll_interval: int = 60  # seconds
+
+
 class RoastConfig(BaseModel):
     """Random roast service configuration."""
 
@@ -324,6 +343,7 @@ class GilbertConfig(BaseModel):
     speaker: SpeakerConfig = SpeakerConfig()
     music: MusicConfig = MusicConfig()
     backup: BackupConfig = BackupConfig()
+    radio_dj: RadioDJConfig = RadioDJConfig()
     roast: RoastConfig = RoastConfig()
 
 

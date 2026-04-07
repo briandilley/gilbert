@@ -1,10 +1,11 @@
-"""Tests for LocalAuthProvider — password hashing and verification."""
+"""Tests for LocalAuthenticationService — password hashing and verification."""
 
 from typing import Any
 
 import pytest
 
-from gilbert.integrations.local_auth import LocalAuthProvider
+from gilbert.integrations.local_auth import LocalAuthenticationService
+from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.users import UserBackend
 
 # --- Stub user backend ---
@@ -79,17 +80,51 @@ class StubUserBackend(UserBackend):
         return []
 
 
+# --- Stub user service ---
+
+
+class StubUserService(Service):
+    def __init__(self, user_backend: StubUserBackend) -> None:
+        self._backend = user_backend
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="users", capabilities=frozenset({"users"}))
+
+    @property
+    def backend(self) -> StubUserBackend:
+        return self._backend
+
+
+class StubResolver(ServiceResolver):
+    def __init__(self, services: dict[str, Service]) -> None:
+        self._by_cap = services
+
+    def get_capability(self, capability: str) -> Service | None:
+        return self._by_cap.get(capability)
+
+    def require_capability(self, capability: str) -> Service:
+        svc = self._by_cap.get(capability)
+        if svc is None:
+            raise LookupError(f"Missing: {capability}")
+        return svc
+
+    def get_all(self, capability: str) -> list[Service]:
+        svc = self._by_cap.get(capability)
+        return [svc] if svc else []
+
+
 # --- Fixtures ---
 
 
 @pytest.fixture
-async def local_auth() -> LocalAuthProvider:
+async def local_auth() -> LocalAuthenticationService:
     backend = StubUserBackend()
-    provider = LocalAuthProvider(backend)
-    await provider.initialize({})
+    svc = LocalAuthenticationService()
+    resolver = StubResolver({"users": StubUserService(backend)})
+    await svc.start(resolver)
 
     # Create a test user with a hashed password.
-    pw_hash = provider.hash_password("secret123")
+    pw_hash = svc.hash_password("secret123")
     await backend.create_user("u1", {
         "email": "test@example.com",
         "display_name": "Test",
@@ -97,18 +132,18 @@ async def local_auth() -> LocalAuthProvider:
         "roles": ["user"],
     })
 
-    return provider
+    return svc
 
 
 # --- Tests ---
 
 
 def test_provider_type() -> None:
-    provider = LocalAuthProvider(StubUserBackend())
-    assert provider.provider_type == "local"
+    svc = LocalAuthenticationService()
+    assert svc.provider_type == "local"
 
 
-async def test_authenticate_success(local_auth: LocalAuthProvider) -> None:
+async def test_authenticate_success(local_auth: LocalAuthenticationService) -> None:
     info = await local_auth.authenticate({"email": "test@example.com", "password": "secret123"})
     assert info is not None
     assert info.email == "test@example.com"
@@ -116,21 +151,21 @@ async def test_authenticate_success(local_auth: LocalAuthProvider) -> None:
     assert info.provider_user_id == "u1"
 
 
-async def test_authenticate_wrong_password(local_auth: LocalAuthProvider) -> None:
+async def test_authenticate_wrong_password(local_auth: LocalAuthenticationService) -> None:
     info = await local_auth.authenticate({"email": "test@example.com", "password": "wrong"})
     assert info is None
 
 
-async def test_authenticate_unknown_email(local_auth: LocalAuthProvider) -> None:
+async def test_authenticate_unknown_email(local_auth: LocalAuthenticationService) -> None:
     info = await local_auth.authenticate({"email": "nobody@example.com", "password": "secret123"})
     assert info is None
 
 
-async def test_authenticate_empty_credentials(local_auth: LocalAuthProvider) -> None:
+async def test_authenticate_empty_credentials(local_auth: LocalAuthenticationService) -> None:
     assert await local_auth.authenticate({}) is None
     assert await local_auth.authenticate({"email": "", "password": ""}) is None
 
 
-async def test_hash_password_produces_valid_hash(local_auth: LocalAuthProvider) -> None:
+async def test_hash_password_produces_valid_hash(local_auth: LocalAuthenticationService) -> None:
     h = local_auth.hash_password("mypassword")
     assert h.startswith("$argon2")

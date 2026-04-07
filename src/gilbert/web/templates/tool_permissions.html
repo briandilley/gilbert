@@ -12,6 +12,7 @@
         <tr>
             <th>Tool</th>
             <th>Service</th>
+            <th>Chat</th>
             <th>Default Role</th>
             <th>Effective Role</th>
             <th>Actions</th>
@@ -23,12 +24,28 @@
         {% if tool.provider != current_provider.name %}
         {% set current_provider.name = tool.provider %}
         <tr class="provider-header">
-            <td colspan="5"><strong>{{ tool.provider }}</strong></td>
+            <td colspan="6"><strong>{{ tool.provider }}</strong></td>
         </tr>
         {% endif %}
         <tr>
             <td><code>{{ tool.name }}</code></td>
             <td><span class="muted">{{ tool.provider }}</span></td>
+            <td>
+                <form method="POST" action="/roles/tools/{{ tool.name }}/chat" style="display:inline">
+                    {% if tool.effective_chat_enabled %}
+                    <input type="hidden" name="chat_enabled" value="false">
+                    <button type="submit" class="btn-sm{% if tool.has_chat_override %} btn-warn{% endif %}" title="Click to disable in chat">On</button>
+                    {% else %}
+                    <input type="hidden" name="chat_enabled" value="true">
+                    <button type="submit" class="btn-sm btn-muted" title="Click to enable in chat">Off</button>
+                    {% endif %}
+                </form>
+                {% if tool.has_chat_override %}
+                <form method="POST" action="/roles/tools/{{ tool.name }}/chat/clear" style="display:inline">
+                    <button type="submit" class="btn-sm btn-muted" title="Revert to default ({{ 'On' if tool.default_chat_enabled else 'Off' }})">Reset</button>
+                </form>
+                {% endif %}
+            </td>
             <td><span class="badge badge-muted">{{ tool.default_role }}</span></td>
             <td>
                 {% if tool.has_override %}

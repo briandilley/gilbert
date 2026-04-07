@@ -21,3 +21,4 @@
 - [Knowledge Service](memory-knowledge-service.md) — document store with ChromaDB vector search, local + Google Drive backends
 - [Screen Service](memory-screen-service.md) — remote display screens controlled by AI via SSE push
 - [Inbox Service](memory-inbox-service.md) — email polling, persistence, events, and AI tools with Gmail backend
+- [Radio DJ Service](memory-radio-dj-service.md) — context-aware music DJ with presence-based genre selection and user preferences

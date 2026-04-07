@@ -38,6 +38,7 @@ class ToolDefinition:
     description: str
     parameters: list[ToolParameter] = field(default_factory=list)
     required_role: str = "user"
+    chat_enabled: bool = True
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert parameters to JSON Schema format (used by most AI providers)."""

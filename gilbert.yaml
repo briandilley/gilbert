@@ -186,3 +186,18 @@ tts:
   #     voice_id: your-voice-id-here
   #   scary:
   #     voice_id: another-voice-id
+
+radio_dj:
+  enabled: false
+  default_genres:
+    - "classic rock"
+    - "90s hits"
+    - "blues rock"
+    - "indie rock"
+    - "funk"
+    - "80s hits"
+  min_switch_interval: 15  # minutes between auto genre switches
+  default_volume: 35       # playback volume (0-100)
+  speakers: []             # speaker names (empty = all)
+  stop_when_empty: true    # stop when nobody is present
+  poll_interval: 60        # seconds between presence polls

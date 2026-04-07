@@ -22,18 +22,20 @@ Hierarchical role-based access control with numeric levels, per-tool permissions
 ### Service
 - `src/gilbert/core/services/access_control.py` — `AccessControlService`
 - Capabilities: `access_control`, `ai_tools`
-- Stores roles in `acl_roles`, tool overrides in `acl_tool_overrides`, collection ACLs in `acl_collections`
+- Stores roles in `acl_roles`, tool overrides in `acl_tool_overrides`, chat visibility overrides in `acl_chat_overrides`, collection ACLs in `acl_collections`
 - In-memory cache refreshed on mutations
 - Seeds built-in roles on startup (idempotent)
 
 ### Permission Flow
 1. `ToolDefinition.required_role` (default: "user") declares minimum role
-2. `AIService._discover_tools(user_ctx)` filters tools by effective level — AI never sees tools the user can't use
-3. `AIService._execute_tool_calls()` does defense-in-depth re-check
-4. Web routes use `require_role("admin")` dependency (hierarchy-aware)
-5. Tool overrides in entity store can change any tool's required role
-6. Collection ACLs control read/write per entity collection (default: read=user, write=admin)
-7. Timer ownership: non-admin users can only cancel their own timers
+2. `ToolDefinition.chat_enabled` (default: True) controls whether tool appears in AI chat
+3. `AIService._discover_tools(user_ctx)` filters tools by chat_enabled then by effective level
+4. `AIService._execute_tool_calls()` does defense-in-depth re-check
+5. Web routes use `require_role("admin")` dependency (hierarchy-aware)
+6. Tool overrides in entity store can change any tool's required role
+7. Chat visibility overrides can enable/disable tools in AI chat (admin-controlled)
+8. Collection ACLs control read/write per entity collection (default: read=user, write=admin)
+9. Timer ownership: non-admin users can only cancel their own timers
 
 ### Tool Annotations (baseline)
 - **admin**: create_user, sync_users, update/reset_persona, set_configuration, store_entity, set/remove_speaker_alias, all ACL write tools
@@ -65,4 +67,4 @@ Hierarchical role-based access control with numeric levels, per-tool permissions
 - `src/gilbert/interfaces/auth.py` — UserContext with SYSTEM and GUEST sentinels
 - `src/gilbert/core/services/ai.py` — permission enforcement in tool discovery/execution
 - `src/gilbert/web/auth.py` — hierarchy-aware `require_role()`, local vs tunnel auth
-- `tests/unit/test_access_control.py` — 42 tests
+- `tests/unit/test_access_control.py` — 51 tests
