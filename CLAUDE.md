@@ -47,6 +47,25 @@ Contents:
 
 Users customize Gilbert by creating `.gilbert/config.yaml`. The deep merge means you only need to specify the values you want to change.
 
+### AI Context Profiles
+
+AI interactions use **named profiles** that control which tools are available. This decouples tool access from code — profiles are stored in entity storage and manageable at runtime via AI tools or the web UI at `/roles/profiles`.
+
+**How it works:**
+
+1. Services declare named AI interactions in `ServiceInfo.ai_calls` (e.g., `frozenset({"sales_initial_email", "sales_reply"})`).
+2. Callers pass `ai_call="name"` to `ai.chat()`.
+3. The AI service resolves the call name to a profile via the assignments table.
+4. The profile's `tool_mode` (all/include/exclude) and `tools` list filter which tools the AI can see.
+5. RBAC then filters by the user's role level, using the profile's optional `tool_roles` overrides.
+
+**Key rules:**
+- `ai_call=None` means no profile filtering (all tools available, RBAC still applies).
+- Unassigned call names fall back to the `default` profile (all tools).
+- Profiles control *which* tools are available; RBAC controls *who* can use them. Both always apply.
+- Default profiles (`default`, `human_chat`, `text_only`, `sales_agent`) are seeded from `gilbert.yaml` on first run.
+- New services that call `ai.chat()` should declare their `ai_calls` and pass the call name. The profile assignment can be configured without code changes.
+
 ### Key Directories
 
 - `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, plugins)
