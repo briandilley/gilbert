@@ -8,10 +8,22 @@ from fastapi.responses import JSONResponse
 from gilbert.core.app import Gilbert
 from gilbert.core.services.inbox import InboxService
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.storage import Query, SortField, StorageBackend
 from gilbert.web import templates
 from gilbert.web.auth import require_role
 
 router = APIRouter(prefix="/inbox")
+
+
+def _get_raw_storage(gilbert: Gilbert) -> StorageBackend | None:
+    svc = gilbert.service_manager.get_by_capability("entity_storage")
+    return getattr(svc, "raw_backend", None) if svc else None
+
+
+# Known plugin pending-reply collections (namespace.collection)
+_PENDING_COLLECTIONS = [
+    "gilbert.plugin.current-sales-assistant.pending_replies",
+]
 
 
 def _get_inbox(gilbert: Gilbert) -> InboxService:
@@ -94,6 +106,68 @@ async def inbox_api_thread(
         "thread_id": thread_id,
         "messages": [_detail(m) for m in messages],
     })
+
+
+@router.get("/api/pending")
+async def inbox_api_pending(
+    request: Request,
+    user: UserContext = Depends(require_role("admin")),
+) -> JSONResponse:
+    """List all pending outgoing emails across plugins."""
+    gilbert: Gilbert = request.app.state.gilbert
+    storage = _get_raw_storage(gilbert)
+    if storage is None:
+        return JSONResponse(content={"pending": []})
+
+    pending: list[dict[str, Any]] = []
+    for collection in _PENDING_COLLECTIONS:
+        try:
+            results = await storage.query(Query(
+                collection=collection,
+                sort=[SortField(field="send_at", descending=False)],
+            ))
+            for r in results:
+                pending.append({
+                    "id": r.get("_id", ""),
+                    "collection": collection,
+                    "lead_id": r.get("lead_id", ""),
+                    "customer_email": r.get("customer_email", ""),
+                    "subject": r.get("subject", ""),
+                    "status": r.get("status", ""),
+                    "is_initial": r.get("is_initial", False),
+                    "send_at": r.get("send_at", ""),
+                    "created_at": r.get("created_at", ""),
+                    "response_text": r.get("response_text", ""),
+                })
+        except Exception:
+            pass  # collection may not exist yet
+
+    return JSONResponse(content={"pending": pending})
+
+
+@router.post("/api/pending/{reply_id}/cancel")
+async def inbox_api_cancel_pending(
+    request: Request,
+    reply_id: str,
+    user: UserContext = Depends(require_role("admin")),
+) -> JSONResponse:
+    """Cancel a pending outgoing email by deleting it from storage."""
+    gilbert: Gilbert = request.app.state.gilbert
+    storage = _get_raw_storage(gilbert)
+    if storage is None:
+        return JSONResponse(content={"error": "Storage not available"}, status_code=503)
+
+    for collection in _PENDING_COLLECTIONS:
+        try:
+            existing = await storage.get(collection, reply_id)
+            if existing and existing.get("status") == "pending":
+                existing["status"] = "cancelled"
+                await storage.put(collection, reply_id, existing)
+                return JSONResponse(content={"status": "cancelled", "id": reply_id})
+        except Exception:
+            pass
+
+    return JSONResponse(content={"error": "Pending reply not found"}, status_code=404)
 
 
 # --- Serialization helpers ---

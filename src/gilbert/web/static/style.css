@@ -145,6 +145,7 @@ h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
 
 .badge-muted { background: rgba(122, 128, 150, 0.15); color: var(--text-muted); }
 .badge-warn { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+.badge-danger { background: rgba(248, 113, 113, 0.15); color: var(--red); }
 
 .caps { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; margin-left: 0.5rem; }
 

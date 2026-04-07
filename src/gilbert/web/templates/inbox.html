@@ -17,6 +17,28 @@
     <button type="button" class="btn-sm" id="filter-btn">Search</button>
 </div>
 
+<!-- Pending outgoing emails -->
+<details id="pending-section" style="margin-bottom:1.5rem">
+    <summary style="cursor:pointer;font-weight:600;font-size:0.95rem">
+        Pending Outgoing <span class="badge badge-muted" id="pending-count">0</span>
+    </summary>
+    <table class="config-table inbox-table" style="margin-top:0.5rem">
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Scheduled</th>
+                <th>To</th>
+                <th>Subject</th>
+                <th>Preview</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="pending-body">
+            <tr><td colspan="6" class="muted" style="text-align:center;padding:1rem">Loading...</td></tr>
+        </tbody>
+    </table>
+</details>
+
 <table class="config-table inbox-table">
     <thead>
         <tr>
@@ -261,6 +283,70 @@ function esc(str) {
     return el.innerHTML;
 }
 
+// --- Pending outgoing ---
+
+async function loadPending() {
+    try {
+        const resp = await fetch('/inbox/api/pending');
+        const data = await resp.json();
+        renderPending(data.pending || []);
+    } catch (e) {
+        console.error('Failed to load pending:', e);
+    }
+}
+
+function renderPending(items) {
+    const tbody = document.getElementById('pending-body');
+    const countBadge = document.getElementById('pending-count');
+    const pendingOnly = items.filter(p => p.status === 'pending');
+    countBadge.textContent = pendingOnly.length;
+
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:1rem">No pending emails</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = items.map(function(p) {
+        const sendAt = formatDateFull(p.send_at);
+        const preview = (p.response_text || '').substring(0, 80);
+        const statusCls = p.status === 'pending' ? 'badge-warn' : (p.status === 'sent' ? 'badge-muted' : 'badge-danger');
+        let actions = '';
+        if (p.status === 'pending') {
+            actions = '<button type="button" class="btn-sm btn-muted cancel-pending-btn" data-id="' + esc(p.id) + '">Cancel</button>';
+        }
+        return '<tr data-pending-id="' + esc(p.id) + '">' +
+            '<td><span class="badge ' + statusCls + '">' + esc(p.status) + '</span></td>' +
+            '<td>' + esc(sendAt) + '</td>' +
+            '<td>' + esc(p.customer_email) + '</td>' +
+            '<td>' + esc(p.subject) + '</td>' +
+            '<td class="col-snippet">' + esc(preview) + (preview.length >= 80 ? '...' : '') + '</td>' +
+            '<td>' + actions + '</td>' +
+            '</tr>';
+    }).join('');
+
+    // Cancel button handlers
+    tbody.querySelectorAll('.cancel-pending-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var id = btn.getAttribute('data-id');
+            fetch('/inbox/api/pending/' + encodeURIComponent(id) + '/cancel', {
+                method: 'POST',
+                headers: {'x-requested-with': 'fetch'},
+            }).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.status === 'cancelled') {
+                    var row = tbody.querySelector('tr[data-pending-id="' + id + '"]');
+                    if (row) {
+                        var badge = row.querySelector('.badge');
+                        if (badge) { badge.className = 'badge badge-muted'; badge.textContent = 'cancelled'; }
+                        btn.remove();
+                    }
+                    var c = parseInt(countBadge.textContent) - 1;
+                    countBadge.textContent = Math.max(0, c);
+                }
+            });
+        });
+    });
+}
+
 async function loadStats() {
     try {
         const resp = await fetch('/inbox/api/stats');
@@ -293,7 +379,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadStats();
     loadInbox();
+    loadPending();
     setInterval(loadInbox, 30000);
+    setInterval(loadPending, 30000);
 });
 </script>
 {% endblock %}
