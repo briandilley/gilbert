@@ -165,12 +165,13 @@ class TestAggregation:
         assert result[0].state == PresenceState.PRESENT
         assert result[0].source == "unifi:protect"
 
-    async def test_wifi_yields_nearby(self, backend: UniFiPresenceBackend) -> None:
+    async def test_wifi_phone_yields_present(self, backend: UniFiPresenceBackend) -> None:
+        """A phone on WiFi means the person is physically present."""
         backend._network.get_people_on_network = AsyncMock(return_value=_wifi("Matt"))
         result = await backend.get_all_presence()
         assert len(result) == 1
         assert result[0].user_id == "matt"
-        assert result[0].state == PresenceState.NEARBY
+        assert result[0].state == PresenceState.PRESENT
         assert result[0].source == "unifi:network"
 
     async def test_no_signals_returns_empty(self, backend: UniFiPresenceBackend) -> None:

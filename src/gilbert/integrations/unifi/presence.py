@@ -49,7 +49,7 @@ class UniFiPresenceBackend(PresenceBackend):
     1. Badge IN  → PRESENT  (authoritative physical access)
     2. Badge OUT → AWAY     (explicit departure)
     3. Face seen → PRESENT  (high-confidence visual ID)
-    4. WiFi connected → NEARBY (device is here, person may not be)
+    4. WiFi phone connected → PRESENT (only phones count, not laptops/IoT)
     5. No signals → AWAY
     """
 
@@ -208,7 +208,7 @@ class UniFiPresenceBackend(PresenceBackend):
                 source = "unifi:protect"
                 since = face.since
             elif wifi:
-                state = PresenceState.NEARBY
+                state = PresenceState.PRESENT
                 source = "unifi:network"
                 since = wifi.since
             else:
