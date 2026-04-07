@@ -39,7 +39,7 @@
                     data-name="{{ p.name }}"
                     data-description="{{ p.description }}"
                     data-mode="{{ p.tool_mode }}"
-                    data-tools="{{ p.tools | tojson }}">Edit</button>
+                    data-tools="{{ p.tools | join(',') }}">Edit</button>
                 {% if p.name != 'default' %}
                 <form method="POST" action="/roles/profiles/{{ p.name }}/delete" style="display:inline">
                     <button type="submit" class="btn-sm btn-muted">Delete</button>
@@ -75,9 +75,10 @@
             </div>
             <div class="form-row" id="modal-tools-section">
                 <label>Tools</label>
-                <div class="checkbox-grid">
+                <input type="text" id="modal-tool-filter" placeholder="Filter tools..." style="margin-bottom:0.4rem; width:100%; max-width:300px">
+                <div class="checkbox-grid" id="modal-checkbox-grid">
                     {% for t in all_tool_names %}
-                    <label class="checkbox-label">
+                    <label class="checkbox-label" data-tool-label="{{ t }}">
                         <input type="checkbox" name="tools" value="{{ t }}" data-tool="{{ t }}">
                         <code>{{ t }}</code>
                     </label>
@@ -100,7 +101,9 @@
     var modeSelect = document.getElementById('modal-mode');
     var toolsSection = document.getElementById('modal-tools-section');
     var modalTitle = document.getElementById('modal-title');
-    var checkboxes = toolsSection.querySelectorAll('input[type="checkbox"]');
+    var toolFilter = document.getElementById('modal-tool-filter');
+    var checkboxLabels = document.querySelectorAll('#modal-checkbox-grid .checkbox-label');
+    var checkboxes = document.querySelectorAll('#modal-checkbox-grid input[type="checkbox"]');
 
     function toggleToolsSection() {
         toolsSection.style.display = modeSelect.value === 'all' ? 'none' : '';
@@ -110,6 +113,20 @@
     function uncheckAll() {
         checkboxes.forEach(function(cb) { cb.checked = false; });
     }
+
+    function clearFilter() {
+        toolFilter.value = '';
+        checkboxLabels.forEach(function(lbl) { lbl.style.display = ''; });
+    }
+
+    // Filter checkboxes by text
+    toolFilter.addEventListener('input', function() {
+        var q = toolFilter.value.toLowerCase();
+        checkboxLabels.forEach(function(lbl) {
+            var name = lbl.getAttribute('data-tool-label') || '';
+            lbl.style.display = name.toLowerCase().indexOf(q) >= 0 ? '' : 'none';
+        });
+    });
 
     function showModal() {
         modal.classList.remove('modal-hidden');
@@ -128,6 +145,7 @@
         descInput.value = '';
         modeSelect.value = 'all';
         uncheckAll();
+        clearFilter();
         toggleToolsSection();
         showModal();
     });
@@ -138,8 +156,8 @@
             var name = btn.getAttribute('data-name');
             var desc = btn.getAttribute('data-description');
             var mode = btn.getAttribute('data-mode');
-            var tools = [];
-            try { tools = JSON.parse(btn.getAttribute('data-tools')); } catch(e) {}
+            var toolsStr = btn.getAttribute('data-tools') || '';
+            var tools = toolsStr ? toolsStr.split(',') : [];
 
             modalTitle.textContent = 'Edit Profile: ' + name;
             nameInput.value = name;
@@ -148,8 +166,9 @@
             descInput.value = desc;
             modeSelect.value = mode;
             uncheckAll();
+            clearFilter();
             tools.forEach(function(t) {
-                var cb = toolsSection.querySelector('input[data-tool="' + t + '"]');
+                var cb = document.querySelector('#modal-checkbox-grid input[data-tool="' + t.trim() + '"]');
                 if (cb) cb.checked = true;
             });
             toggleToolsSection();
