@@ -645,6 +645,11 @@ class TestDateTimeContext:
         result = AIService._current_datetime_context()
         assert any(tz in result for tz in ["PDT", "PST", "UTC"])
 
+    def test_date_context_includes_yesterday(self) -> None:
+        """Should explicitly state what yesterday was to avoid AI day-of-week errors."""
+        result = AIService._current_datetime_context()
+        assert "Yesterday was" in result
+
 
 class TestServiceInfoAiCalls:
     def test_default_ai_calls_is_empty(self) -> None:

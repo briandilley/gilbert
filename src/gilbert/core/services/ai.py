@@ -4,7 +4,7 @@ import json as _json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from gilbert.core.context import get_current_user
@@ -493,7 +493,13 @@ class AIService(Service):
             now = datetime.now(ZoneInfo("America/Los_Angeles"))
         except Exception:
             now = datetime.now(timezone.utc)
-        return f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p %Z')}"
+        today = now.strftime("%A, %B %d, %Y")
+        time_str = now.strftime("%I:%M %p %Z")
+        yesterday = (now - timedelta(days=1)).strftime("%A, %B %d, %Y")
+        return (
+            f"Current date and time: {today} at {time_str}. "
+            f"Yesterday was {yesterday}."
+        )
 
     async def _build_system_prompt(self, user_ctx: UserContext | None = None) -> str:
         """Build the full system prompt: base identity, persona, and user memories."""
