@@ -6,29 +6,85 @@
 </div>
 
 <h1>{{ collection }}</h1>
-<p class="subtitle">{{ total }} entit{{ "y" if total == 1 else "ies" }}</p>
+<p class="subtitle">{{ total }} entit{{ "y" if total == 1 else "ies" }}{% if filter_field %} (filtered){% endif %}</p>
+
+{# --- Filter bar --- #}
+{% if sortable_fields | length > 1 %}
+<div class="filter-bar">
+    <form method="GET" action="/entities/{{ collection }}" class="filter-form">
+        {% if sort %}
+        <input type="hidden" name="sort" value="{{ sort }}">
+        {% endif %}
+        <select name="filter_field" class="inline-input">
+            <option value="">Field...</option>
+            {% for f in sortable_fields %}
+            <option value="{{ f }}" {% if f == filter_field %}selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+        </select>
+        <select name="filter_op" class="inline-input">
+            {% for op_val, op_label in filter_ops %}
+            <option value="{{ op_val }}" {% if op_val == filter_op %}selected{% endif %}>{{ op_label }}</option>
+            {% endfor %}
+        </select>
+        <input type="text" name="filter_value" value="{{ filter_value }}" placeholder="Value" class="inline-input" style="width: 160px">
+        <button type="submit" class="btn-sm">Filter</button>
+        {% if filter_field %}
+        <a href="/entities/{{ collection }}{% if sort %}?sort={{ sort }}{% endif %}" class="btn-sm btn-muted" style="text-decoration:none">Clear</a>
+        {% endif %}
+    </form>
+</div>
+{% endif %}
 
 {% if entities %}
 <table class="config-table entity-table">
     <thead>
         <tr>
-            <th>ID</th>
-            <th>Fields</th>
+            {# --- Sortable column headers --- #}
+            {% for f in sortable_fields %}
+            <th>
+                {% set is_sorted = sort == f or sort == '-' + f %}
+                {% set is_desc = sort == '-' + f %}
+                {% if is_sorted and is_desc %}
+                    {% set next_sort = f %}
+                {% elif is_sorted %}
+                    {% set next_sort = '-' + f %}
+                {% else %}
+                    {% set next_sort = f %}
+                {% endif %}
+                <a href="/entities/{{ collection }}?sort={{ next_sort }}{% if filter_field %}&amp;filter_field={{ filter_field }}&amp;filter_op={{ filter_op }}&amp;filter_value={{ filter_value }}{% endif %}" class="sort-header{% if is_sorted %} sort-active{% endif %}">
+                    {{ f }}
+                    {% if is_sorted %}
+                        {% if is_desc %}&#9660;{% else %}&#9650;{% endif %}
+                    {% endif %}
+                </a>
+            </th>
+            {% endfor %}
             <th>Preview</th>
         </tr>
     </thead>
     <tbody>
         {% for e in entities %}
         <tr>
-            <td><a href="/entities/{{ collection }}/{{ e._id }}" class="entity-link"><code>{{ e._id }}</code></a></td>
-            <td><span class="muted">{{ e.keys() | list | reject("eq", "_id") | list | length }}</span></td>
+            {% for f in sortable_fields %}
+            <td>
+                {% if f == '_id' %}
+                    <a href="/entities/{{ collection }}/{{ e._id }}" class="entity-link"><code>{{ e._id }}</code></a>
+                {% elif f in fk_map and e[f] is defined and e[f] is not none %}
+                    <a href="/entities/{{ fk_map[f].ref_collection }}/{{ e[f] }}" class="entity-link fk-link" title="FK &rarr; {{ fk_map[f].ref_collection }}">{{ e[f] | string | truncate(40) }}</a>
+                {% elif e[f] is defined %}
+                    <span>{{ e[f] | string | truncate(40) }}</span>
+                {% else %}
+                    <span class="muted">-</span>
+                {% endif %}
+            </td>
+            {% endfor %}
             <td class="preview-cell">
-                {% set preview_keys = e.keys() | list | reject("eq", "_id") | list %}
-                {% for key in preview_keys[:4] %}
-                <span class="badge badge-muted">{{ key }}: {{ e[key] | string | truncate(30) }}</span>
+                {% set preview_keys = e.keys() | list | reject("eq", "_id") | reject("in", sortable_fields) | list %}
+                {% for key in preview_keys[:3] %}
+                <span class="badge badge-muted">{{ key }}: {{ e[key] | string | truncate(25) }}</span>
                 {% endfor %}
-                {% if preview_keys | length > 4 %}
-                <span class="muted">+{{ preview_keys | length - 4 }} more</span>
+                {% if preview_keys | length > 3 %}
+                <span class="muted">+{{ preview_keys | length - 3 }} more</span>
                 {% endif %}
             </td>
         </tr>
@@ -36,19 +92,24 @@
     </tbody>
 </table>
 
+{# --- Pagination with preserved sort/filter --- #}
 {% if total_pages > 1 %}
 <div class="pagination">
+    {% set qs = "" %}
+    {% for k, v in base_params.items() %}
+        {% set qs = qs + "&" + k + "=" + v %}
+    {% endfor %}
     {% if page > 1 %}
-    <a href="/entities/{{ collection }}?page={{ page - 1 }}" class="page-link">&laquo; Prev</a>
+    <a href="/entities/{{ collection }}?page={{ page - 1 }}{{ qs }}" class="page-link">&laquo; Prev</a>
     {% endif %}
     <span class="muted">Page {{ page }} of {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="/entities/{{ collection }}?page={{ page + 1 }}" class="page-link">Next &raquo;</a>
+    <a href="/entities/{{ collection }}?page={{ page + 1 }}{{ qs }}" class="page-link">Next &raquo;</a>
     {% endif %}
 </div>
 {% endif %}
 
 {% else %}
-<p class="muted">This collection is empty.</p>
+<p class="muted">{% if filter_field %}No entities match this filter.{% else %}This collection is empty.{% endif %}</p>
 {% endif %}
 {% endblock %}

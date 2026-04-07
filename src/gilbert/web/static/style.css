@@ -711,3 +711,83 @@ select.inline-input {
     padding-top: 1rem !important;
     border-bottom: 1px solid var(--border);
 }
+
+/* --- Entity browser: filter bar --- */
+.filter-bar {
+    margin-bottom: 1rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+.filter-form {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+/* --- Entity browser: sort headers --- */
+.sort-header {
+    color: var(--text-muted);
+    text-decoration: none;
+    white-space: nowrap;
+}
+.sort-header:hover {
+    color: var(--accent);
+}
+.sort-header.sort-active {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* --- Entity browser: FK links --- */
+.fk-link {
+    border-bottom: 1px dashed var(--accent);
+}
+.badge-fk {
+    font-size: 0.65rem;
+    padding: 0 4px;
+    background: rgba(108, 140, 255, 0.2);
+    color: var(--accent);
+    border-radius: 3px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
+/* --- Entity detail: structured table --- */
+.entity-detail-table td:first-child {
+    white-space: nowrap;
+    vertical-align: top;
+    color: var(--text-muted);
+}
+.entity-detail-table td:last-child {
+    word-break: break-all;
+}
+.inline-json {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    margin: 0;
+    font-size: 0.8rem;
+    overflow-x: auto;
+    max-height: 200px;
+}
+.inline-json code {
+    background: none;
+    padding: 0;
+}
+
+/* --- Raw JSON toggle --- */
+.raw-json-toggle {
+    margin-top: 1.5rem;
+}
+.raw-json-toggle summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0.3rem 0;
+}
+.raw-json-toggle summary:hover {
+    color: var(--accent);
+}

@@ -11,9 +11,44 @@
 <p class="subtitle">Collection: {{ collection }}</p>
 
 {% if entity %}
-<div class="entity-data">
-    <pre><code>{{ formatted }}</code></pre>
-</div>
+<table class="config-table entity-detail-table">
+    <thead>
+        <tr>
+            <th style="width: 220px">Field</th>
+            <th>Value</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for key, value in entity.items() %}
+        <tr>
+            <td>
+                <code>{{ key }}</code>
+                {% if key in fk_map %}
+                <span class="badge badge-fk" title="FK &rarr; {{ fk_map[key].ref_collection }}">FK</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if key in fk_map and value is not none %}
+                    <a href="/entities/{{ fk_map[key].ref_collection }}/{{ value }}" class="entity-link fk-link">{{ value }}</a>
+                {% elif value is mapping %}
+                    <pre class="inline-json"><code>{{ value | tojson(indent=2) }}</code></pre>
+                {% elif value is iterable and value is not string %}
+                    <pre class="inline-json"><code>{{ value | tojson(indent=2) }}</code></pre>
+                {% else %}
+                    <span>{{ value }}</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<details class="raw-json-toggle">
+    <summary class="muted">Raw JSON</summary>
+    <div class="entity-data">
+        <pre><code>{{ formatted }}</code></pre>
+    </div>
+</details>
 {% else %}
 <p class="muted">Entity not found.</p>
 {% endif %}
