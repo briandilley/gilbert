@@ -119,11 +119,14 @@ async def inbox_api_pending(
     if storage is None:
         return JSONResponse(content={"pending": []})
 
+    from gilbert.interfaces.storage import Filter, FilterOp
+
     pending: list[dict[str, Any]] = []
     for collection in _PENDING_COLLECTIONS:
         try:
             results = await storage.query(Query(
                 collection=collection,
+                filters=[Filter(field="status", op=FilterOp.IN, value=["pending", "failed"])],
                 sort=[SortField(field="send_at", descending=False)],
             ))
             for r in results:

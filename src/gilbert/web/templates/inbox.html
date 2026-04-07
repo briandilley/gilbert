@@ -306,7 +306,8 @@ function renderPending(items) {
         return;
     }
 
-    tbody.innerHTML = items.map(function(p) {
+    var pendingItems = items;
+    tbody.innerHTML = items.map(function(p, idx) {
         const sendAt = formatDateFull(p.send_at);
         const preview = (p.response_text || '').substring(0, 80);
         const statusCls = p.status === 'pending' ? 'badge-warn' : (p.status === 'sent' ? 'badge-muted' : 'badge-danger');
@@ -314,7 +315,7 @@ function renderPending(items) {
         if (p.status === 'pending') {
             actions = '<button type="button" class="btn-sm btn-muted cancel-pending-btn" data-id="' + esc(p.id) + '">Cancel</button>';
         }
-        return '<tr data-pending-id="' + esc(p.id) + '">' +
+        return '<tr data-pending-id="' + esc(p.id) + '" data-pending-idx="' + idx + '" style="cursor:pointer">' +
             '<td><span class="badge ' + statusCls + '">' + esc(p.status) + '</span></td>' +
             '<td>' + esc(sendAt) + '</td>' +
             '<td>' + esc(p.customer_email) + '</td>' +
@@ -323,6 +324,15 @@ function renderPending(items) {
             '<td>' + actions + '</td>' +
             '</tr>';
     }).join('');
+
+    // Row click to view detail
+    tbody.querySelectorAll('tr[data-pending-idx]').forEach(function(row) {
+        row.addEventListener('click', function(e) {
+            if (e.target.closest('.cancel-pending-btn')) return;
+            var idx = parseInt(row.getAttribute('data-pending-idx'));
+            showPendingDetail(pendingItems[idx]);
+        });
+    });
 
     // Cancel button handlers
     tbody.querySelectorAll('.cancel-pending-btn').forEach(function(btn) {
@@ -345,6 +355,30 @@ function renderPending(items) {
             });
         });
     });
+}
+
+function showPendingDetail(p) {
+    var overlay = document.getElementById('modal-overlay');
+    var title = document.getElementById('modal-title');
+    var body = document.getElementById('modal-body');
+
+    title.textContent = p.subject || 'Pending Email';
+    var statusCls = p.status === 'pending' ? 'badge-warn' : (p.status === 'sent' ? 'badge-muted' : 'badge-danger');
+
+    var html = '<div class="msg-headers">';
+    html += '<div class="msg-header-row"><span class="msg-label">To</span><span>' + esc(p.customer_email) + '</span></div>';
+    html += '<div class="msg-header-row"><span class="msg-label">Subject</span><span>' + esc(p.subject) + '</span></div>';
+    html += '<div class="msg-header-row"><span class="msg-label">Status</span><span class="badge ' + statusCls + '">' + esc(p.status) + '</span></div>';
+    html += '<div class="msg-header-row"><span class="msg-label">Send at</span><span>' + esc(formatDateFull(p.send_at)) + '</span></div>';
+    html += '<div class="msg-header-row"><span class="msg-label">Created</span><span>' + esc(formatDateFull(p.created_at)) + '</span></div>';
+    if (p.lead_id) {
+        html += '<div class="msg-header-row"><span class="msg-label">Lead</span><span><code>' + esc(p.lead_id) + '</code></span></div>';
+    }
+    html += '</div>';
+    html += '<div class="msg-body-text">' + esc(p.response_text || '(empty)') + '</div>';
+
+    body.innerHTML = html;
+    overlay.classList.remove('hidden');
 }
 
 async function loadStats() {
