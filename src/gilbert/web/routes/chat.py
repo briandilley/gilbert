@@ -72,6 +72,7 @@ async def chat_send(
         user_message=message,
         conversation_id=conversation_id,
         user_ctx=user,
+        apply_chat_visibility=True,
     )
 
     return {

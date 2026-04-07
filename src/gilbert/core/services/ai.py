@@ -198,6 +198,7 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         system_prompt: str | None = None,
         tool_filter: list[str] | None = None,
+        apply_chat_visibility: bool = False,
     ) -> tuple[str, str]:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -228,11 +229,11 @@ class AIService(Service):
         messages.append(Message(role=MessageRole.USER, content=user_message))
 
         # Discover tools from all ai_tools providers.
-        # When an explicit tool_filter is given, skip the chat_enabled filter —
-        # the caller (e.g., sales assistant) knows exactly which tools it needs.
+        # chat_enabled filtering only applies to human-facing channels (web, Slack)
+        # that explicitly opt in via apply_chat_visibility=True.
         tools_by_name = self._discover_tools(
             user_ctx=user_ctx,
-            skip_chat_filter=tool_filter is not None,
+            apply_chat_visibility=apply_chat_visibility,
         )
 
         # Apply tool filter if specified
@@ -335,16 +336,17 @@ class AIService(Service):
     def _discover_tools(
         self,
         user_ctx: UserContext | None = None,
-        skip_chat_filter: bool = False,
+        apply_chat_visibility: bool = False,
     ) -> dict[str, tuple[ToolProvider, ToolDefinition]]:
         """Find all started services that implement ToolProvider and collect their tools.
 
         If user_ctx is provided and AccessControlService is available, filters
         tools to only those the user has permission to use.
 
-        When *skip_chat_filter* is True, the ``chat_enabled`` visibility filter
-        is bypassed. This is used when the caller provides an explicit
-        tool_filter list — they know exactly which tools they need.
+        The ``chat_enabled`` visibility filter is only applied when
+        *apply_chat_visibility* is True. Human-facing channels (web chat,
+        Slack) set this; service-to-service calls leave it off so they
+        get the full tool set.
         """
         tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]] = {}
         if self._resolver is None:
@@ -369,8 +371,8 @@ class AIService(Service):
             from gilbert.core.services.access_control import AccessControlService
 
             if isinstance(self._acl_svc, AccessControlService):
-                # Filter out tools disabled for chat (unless bypassed)
-                if not skip_chat_filter:
+                # Filter out tools disabled for chat (human-facing channels only)
+                if apply_chat_visibility:
                     tools_by_name = {
                         name: (prov, tdef)
                         for name, (prov, tdef) in tools_by_name.items()
