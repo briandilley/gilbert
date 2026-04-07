@@ -196,6 +196,8 @@ class AIService(Service):
         user_message: str,
         conversation_id: str | None = None,
         user_ctx: UserContext | None = None,
+        system_prompt: str | None = None,
+        tool_filter: list[str] | None = None,
     ) -> tuple[str, str]:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -203,6 +205,10 @@ class AIService(Service):
             user_message: The user's input text.
             conversation_id: Existing conversation ID, or None to start new.
             user_ctx: Optional user context. Falls back to contextvar if None.
+            system_prompt: Override the system prompt entirely. When ``None``,
+                uses the default persona + user memories.
+            tool_filter: Restrict available tools to these names only.
+                When ``None``, all discovered tools are available.
 
         Returns:
             (response_text, conversation_id) tuple.
@@ -223,7 +229,22 @@ class AIService(Service):
 
         # Discover tools from all ai_tools providers
         tools_by_name = self._discover_tools(user_ctx=user_ctx)
+
+        # Apply tool filter if specified
+        if tool_filter is not None:
+            filter_set = set(tool_filter)
+            tools_by_name = {
+                k: v for k, v in tools_by_name.items() if k in filter_set
+            }
+
         tool_defs = [defn for _, defn in tools_by_name.values()]
+
+        # Resolve system prompt
+        effective_prompt = (
+            system_prompt
+            if system_prompt is not None
+            else await self._build_system_prompt(user_ctx=user_ctx)
+        )
 
         # Agentic loop
         response: AIResponse | None = None
@@ -232,7 +253,7 @@ class AIService(Service):
 
             request = AIRequest(
                 messages=truncated,
-                system_prompt=await self._build_system_prompt(user_ctx=user_ctx),
+                system_prompt=effective_prompt,
                 tools=tool_defs if tool_defs else [],
                 max_tokens=int(self._config.get("max_tokens", 4096)),
                 temperature=float(self._config.get("temperature", 0.7)),
