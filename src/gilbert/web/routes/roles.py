@@ -273,11 +273,16 @@ async def save_ai_profile(
     tool_mode = str(form.get("tool_mode", "all"))
     tools_list = form.getlist("tools")
 
+    # Preserve existing tool_roles when editing (not exposed in form UI)
+    existing = ai_svc._profiles.get(name)
+    existing_tool_roles = existing.tool_roles if existing else {}
+
     profile = AIContextProfile(
         name=name,
         description=description,
         tool_mode=tool_mode,
         tools=tools_list,
+        tool_roles=existing_tool_roles,
     )
     await ai_svc.set_profile(profile)
     if _is_ajax(request):

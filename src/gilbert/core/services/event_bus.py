@@ -52,6 +52,7 @@ class EventBusService(Service):
             ToolDefinition(
                 name="publish_event",
                 description="Publish an event to the event bus. Subscribed handlers will be notified.",
+                required_role="admin",
                 parameters=[
                     ToolParameter(
                         name="event_type",

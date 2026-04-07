@@ -464,7 +464,8 @@ class AIService(Service):
 
             # Execute tool calls and append results
             tool_results = await self._execute_tool_calls(
-                response.message.tool_calls, tools_by_name, user_ctx=user_ctx
+                response.message.tool_calls, tools_by_name,
+                user_ctx=user_ctx, profile=profile,
             )
             messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
         else:
@@ -602,9 +603,12 @@ class AIService(Service):
         tool_calls: list[ToolCall],
         tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
         user_ctx: UserContext | None = None,
+        profile: AIContextProfile | None = None,
     ) -> list[ToolResult]:
         """Execute a batch of tool calls and return results."""
         results: list[ToolResult] = []
+        tool_roles = profile.tool_roles if profile else {}
+
         for tc in tool_calls:
             provider_and_def = tools_by_name.get(tc.tool_name)
             if provider_and_def is None:
@@ -616,21 +620,22 @@ class AIService(Service):
                 continue
             provider, tool_def = provider_and_def
 
-            # Defense in depth: re-check permission before execution
-            if user_ctx is not None and self._acl_svc is not None:
+            # Defense in depth: re-check permission before execution.
+            # Uses profile tool_roles overrides for consistency with _discover_tools.
+            if user_ctx is not None and user_ctx.user_id != "system" and self._acl_svc is not None:
                 from gilbert.core.services.access_control import AccessControlService
 
-                if (
-                    isinstance(self._acl_svc, AccessControlService)
-                    and user_ctx.user_id != "system"
-                    and not self._acl_svc.check_tool_access(user_ctx, tool_def)
-                ):
-                    results.append(ToolResult(
-                        tool_call_id=tc.tool_call_id,
-                        content=f"Permission denied: tool '{tc.tool_name}' requires higher privileges",
-                        is_error=True,
-                    ))
-                    continue
+                if isinstance(self._acl_svc, AccessControlService):
+                    effective_role = tool_roles.get(tc.tool_name, tool_def.required_role)
+                    role_level = self._acl_svc.get_role_level(effective_role)
+                    user_level = self._acl_svc.get_effective_level(user_ctx)
+                    if user_level > role_level:
+                        results.append(ToolResult(
+                            tool_call_id=tc.tool_call_id,
+                            content=f"Permission denied: tool '{tc.tool_name}' requires higher privileges",
+                            is_error=True,
+                        ))
+                        continue
 
             try:
                 result_text = await provider.execute_tool(tc.tool_name, tc.arguments)
