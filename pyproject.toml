@@ -33,6 +33,7 @@ dependencies = [
     "markdown>=3.5",
     "slack-bolt>=1.18",
     "pyjwt[crypto]>=2.12.1",
+    "aiohttp>=3.13.5",
 ]
 
 [project.optional-dependencies]
