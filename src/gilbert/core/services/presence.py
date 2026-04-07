@@ -44,6 +44,7 @@ class PresenceService(Service):
         self._poll_interval: float = _DEFAULT_POLL_INTERVAL
         self._event_bus: EventBus | None = None
         self._storage: Any = None
+        self._resolver: ServiceResolver | None = None
         # Last-known state per user for change detection
         self._last_state: dict[str, PresenceState] = {}
 
@@ -60,6 +61,7 @@ class PresenceService(Service):
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
+        self._resolver = resolver
         # Event bus for publishing presence changes
         event_bus_svc = resolver.get_capability("event_bus")
         if event_bus_svc is not None:
@@ -343,21 +345,32 @@ class PresenceService(Service):
     async def _tool_check_presence(self, arguments: dict[str, Any]) -> str:
         user_id = arguments["user_id"]
         p = await self.get_presence(user_id)
-        return json.dumps(_presence_to_dict(p))
+        return json.dumps(await self._presence_to_dict(p))
 
     async def _tool_who_is_here(self) -> str:
         present = await self.who_is_here()
-        return json.dumps([_presence_to_dict(p) for p in present])
+        return json.dumps([await self._presence_to_dict(p) for p in present])
 
     async def _tool_list_all(self) -> str:
         all_p = await self.get_all_presence()
-        return json.dumps([_presence_to_dict(p) for p in all_p])
+        return json.dumps([await self._presence_to_dict(p) for p in all_p])
 
-
-def _presence_to_dict(p: UserPresence) -> dict[str, Any]:
-    return {
-        "user_id": p.user_id,
-        "state": p.state.value,
-        "since": p.since,
-        "source": p.source,
-    }
+    async def _presence_to_dict(self, p: UserPresence) -> dict[str, Any]:
+        """Convert a UserPresence to a dict with resolved display name."""
+        display_name = p.user_id
+        if self._resolver is not None:
+            user_svc = self._resolver.get_capability("users")
+            if user_svc is not None:
+                try:
+                    user = await user_svc.backend.get_user(p.user_id)
+                    if user:
+                        display_name = user.get("display_name", p.user_id)
+                except Exception:
+                    pass
+        return {
+            "user_id": p.user_id,
+            "name": display_name,
+            "state": p.state.value,
+            "since": p.since,
+            "source": p.source,
+        }
