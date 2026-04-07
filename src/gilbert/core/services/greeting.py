@@ -83,6 +83,24 @@ class GreetingService(Service):
                 app_section = config_svc.get_section("presence")
                 self._timezone = app_section.get("timezone", "UTC")
 
+        # Schedule a one-shot check for people already present at startup.
+        # This handles the case where Gilbert restarts while people are
+        # already at the shop — they won't get a presence.arrived event
+        # because the presence service suppresses events for users seen
+        # on the first poll.
+        scheduler = resolver.get_capability("scheduler")
+        if scheduler is not None:
+            from gilbert.core.services.scheduler import SchedulerService
+            from gilbert.interfaces.scheduler import Schedule
+
+            if isinstance(scheduler, SchedulerService):
+                scheduler.add_job(
+                    name="greeting-startup-check",
+                    schedule=Schedule.once_after(45),
+                    callback=self._greet_already_present,
+                    system=True,
+                )
+
         logger.info(
             "Greeting service started (window=%d:00-%d:00)",
             self._start_hour, self._cutoff_hour,
@@ -92,33 +110,49 @@ class GreetingService(Service):
         if self._unsubscribe:
             self._unsubscribe()
 
+    async def _greet_already_present(self) -> None:
+        """Greet anyone already present at startup who hasn't been greeted today."""
+        if not self._in_greeting_window():
+            return
+
+        presence_svc = self._resolver.get_capability("presence") if self._resolver else None
+        if presence_svc is None:
+            return
+
+        try:
+            here = await presence_svc.who_is_here()
+        except Exception:
+            logger.debug("Could not check who is here at startup")
+            return
+
+        for p in here:
+            try:
+                await self._greet_user(p.user_id)
+            except Exception:
+                logger.debug("Startup greeting failed for %s", p.user_id)
+
     async def _on_arrival(self, event: Event) -> None:
         """Handle a presence.arrived event."""
         user_id = event.data.get("user_id", "")
         if not user_id:
             return
-
-        # Check time window
         if not self._in_greeting_window():
             return
+        await self._greet_user(user_id)
 
-        # Check if already greeted today
+    async def _greet_user(self, user_id: str) -> None:
+        """Greet a user if they haven't been greeted today."""
         if await self._has_been_greeted_today(user_id):
             return
 
-        # Generate and announce greeting
-        display_name = self._get_display_name(user_id)
+        display_name = await self._get_display_name(user_id)
         greeting = await self._generate_greeting(display_name)
 
         logger.info("Greeting %s: %s", user_id, greeting)
 
-        # Mark as greeted before announcing (avoid races)
         await self._mark_greeted(user_id)
-
-        # Announce via speakers
         await self._announce(greeting)
 
-        # Publish event
         if self._event_bus:
             await self._event_bus.publish(Event(
                 event_type="greeting.announced",
@@ -137,11 +171,21 @@ class GreetingService(Service):
 
         return self._start_hour <= now.hour < self._cutoff_hour
 
-    def _get_display_name(self, user_id: str) -> str:
-        """Extract a display-friendly name from user_id."""
-        # user_id might be an email or a name
+    async def _get_display_name(self, user_id: str) -> str:
+        """Resolve a user_id to a display-friendly first name."""
+        if self._resolver is not None:
+            user_svc = self._resolver.get_capability("users")
+            if user_svc is not None:
+                try:
+                    user = await user_svc.backend.get_user(user_id)
+                    if user:
+                        name = user.get("display_name", "")
+                        if name:
+                            return name.split()[0]  # First name only
+                except Exception:
+                    pass
+        # Fallback: parse from user_id
         if "@" in user_id:
-            # Take the local part and capitalize
             local = user_id.split("@")[0]
             return local.replace(".", " ").replace("_", " ").title()
         return user_id.split()[0] if " " in user_id else user_id

@@ -114,11 +114,11 @@ class TestGreetingService:
         await greeting_service.stop()
         assert len(bus.handlers["presence.arrived"]) == 0
 
-    def test_get_display_name_from_email(self, greeting_service: GreetingService) -> None:
-        assert greeting_service._get_display_name("brian.dilley@example.com") == "Brian Dilley"
+    async def test_get_display_name_from_email(self, greeting_service: GreetingService) -> None:
+        assert await greeting_service._get_display_name("brian.dilley@example.com") == "Brian Dilley"
 
-    def test_get_display_name_from_plain(self, greeting_service: GreetingService) -> None:
-        assert greeting_service._get_display_name("Brian") == "Brian"
+    async def test_get_display_name_from_plain(self, greeting_service: GreetingService) -> None:
+        assert await greeting_service._get_display_name("Brian") == "Brian"
 
     def test_in_greeting_window(self, greeting_service: GreetingService) -> None:
         greeting_service._start_hour = 6
