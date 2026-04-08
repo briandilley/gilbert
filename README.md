@@ -90,6 +90,28 @@ Tools can push structured forms directly into the chat UI — text inputs, dropd
 
 This enables richer workflows without leaving the chat: configuring settings, confirming actions, picking from options, or filling out multi-field forms — all driven by tools, not by the AI generating markup.
 
+### WebSocket Protocol
+
+Gilbert exposes a bidirectional WebSocket at `/ws/events` that serves as the primary real-time channel for the web UI, inter-Gilbert communication, and external integrations.
+
+All messages are JSON frames with a `type` field using `namespace.resource.verb` naming:
+
+```
+gilbert.event        — server pushes bus events to clients
+gilbert.welcome      — sent after auth with user identity and roles
+gilbert.sub.add      — subscribe to event patterns (glob matching)
+gilbert.sub.remove   — unsubscribe from patterns
+gilbert.ping/pong    — heartbeat (30s interval)
+gilbert.peer.publish — peer instances publish events to the local bus
+chat.message.send    — send a chat message (RPC with .result response)
+chat.form.submit     — submit a UI form
+chat.history.load    — load conversation messages
+```
+
+Events are filtered server-side through three layers: pattern matching (client subscribes to what it cares about), role-based visibility (admin/user/everyone tiers), and content filtering (chat membership and message visibility).
+
+Authentication supports both session cookies (web UI) and bearer tokens via query parameter (peers and integrations). Peer Gilbert instances can authenticate, subscribe to filtered events, and publish events that propagate to the local bus.
+
 ### Storage
 
 Gilbert uses a generic entity store — not raw SQL tables. Entities are stored as typed documents with indexes and foreign keys, all through an abstract `StorageBackend` interface. The default implementation is SQLite, but the interface is designed to be swappable. New entity types require no migrations.
