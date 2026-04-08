@@ -54,6 +54,7 @@ class UniFiProtect:
     ) -> None:
         self._client = client
         self._zone_aliases: dict[str, list[str]] = zone_aliases or {}
+        self._camera_names: dict[str, str] = {}  # id → name, populated lazily
 
     async def list_cameras(self) -> list[Camera]:
         """List all cameras and their status."""
@@ -71,6 +72,24 @@ class UniFiProtect:
                 last_motion=c.get("lastMotion", 0),
             ))
         return cameras
+
+    async def _ensure_camera_names(self) -> None:
+        """Populate camera ID → name map if empty."""
+        if self._camera_names:
+            return
+        cameras = await self.list_cameras()
+        self._camera_names = {c.camera_id: c.name for c in cameras if c.camera_id}
+
+    def _resolve_camera_name(self, camera_field: Any) -> str:
+        """Resolve a camera name from an event's camera field.
+
+        The field may be a dict with 'name', a camera ID string, or missing.
+        """
+        if isinstance(camera_field, dict):
+            return camera_field.get("name", "")
+        if isinstance(camera_field, str) and camera_field:
+            return self._camera_names.get(camera_field, camera_field)
+        return ""
 
     async def get_detection_events(
         self,
@@ -92,12 +111,14 @@ class UniFiProtect:
         if data is None:
             return []
 
+        # Ensure camera ID→name map is populated for resolving IDs
+        await self._ensure_camera_names()
+
         events: list[DetectionEvent] = []
         for e in data if isinstance(data, list) else []:
-            camera = e.get("camera", {})
             events.append(DetectionEvent(
                 event_id=e.get("id", ""),
-                camera_name=camera.get("name", "") if isinstance(camera, dict) else str(camera),
+                camera_name=self._resolve_camera_name(e.get("camera")),
                 event_type=e.get("type", ""),
                 smart_types=e.get("smartDetectTypes", []),
                 start=e.get("start", 0),
@@ -142,12 +163,9 @@ class UniFiProtect:
             if not matched_name:
                 continue
 
-            camera = e.get("camera", {})
-            camera_name = camera.get("name", "") if isinstance(camera, dict) else ""
-
             faces.append(FaceDetection(
                 person_name=matched_name,
-                camera_name=camera_name,
+                camera_name=self._resolve_camera_name(e.get("camera")),
                 timestamp=e.get("start", 0),
                 confidence=e.get("score", 0),
             ))
