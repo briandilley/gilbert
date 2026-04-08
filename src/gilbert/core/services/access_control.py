@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _ROLES_COLLECTION = "acl_roles"
 _OVERRIDES_COLLECTION = "acl_tool_overrides"
 _COLLECTION_ACL = "acl_collections"
+_EVENT_ACL_COLLECTION = "acl_event_visibility"
 
 # Built-in roles — cannot be removed or have their level changed
 _BUILTIN_ROLES: list[dict[str, Any]] = [
@@ -52,6 +53,8 @@ class AccessControlService(Service):
         self._tool_overrides: dict[str, str] = {}
         # Collection ACL cache: collection → {"read_role": str, "write_role": str}
         self._collection_acl: dict[str, dict[str, str]] = {}
+        # Event visibility override cache: event prefix → role name
+        self._event_acl: dict[str, str] = {}
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -116,6 +119,14 @@ class AccessControlService(Service):
             c["collection"]: {"read_role": c.get("read_role", "user"), "write_role": c.get("write_role", "admin")}
             for c in col_acls
             if "collection" in c
+        }
+
+        # Event visibility overrides
+        event_acls = await self._storage.query(Query(collection=_EVENT_ACL_COLLECTION))
+        self._event_acl = {
+            e["event_prefix"]: e["min_role"]
+            for e in event_acls
+            if "event_prefix" in e and "min_role" in e
         }
 
     # --- Role queries ---
@@ -296,6 +307,75 @@ class AccessControlService(Service):
 
         return await self._storage.query(Query(collection=_COLLECTION_ACL))
 
+    # --- Event visibility ---
+
+    def get_event_visibility_role(self, event_type: str) -> str:
+        """Resolve the minimum role required to see an event type.
+
+        Checks overrides first, then falls back to the built-in defaults
+        in ``ws_protocol``. Longest prefix match wins.
+        """
+        from gilbert.web.ws_protocol import _EVENT_VISIBILITY, _DEFAULT_VISIBILITY_LEVEL
+
+        # Check overrides (longest prefix match)
+        best = ""
+        for prefix in self._event_acl:
+            if event_type.startswith(prefix) and len(prefix) > len(best):
+                best = prefix
+        if best:
+            return self._event_acl[best]
+
+        # Check built-in defaults
+        best = ""
+        best_level = _DEFAULT_VISIBILITY_LEVEL
+        for prefix, level in _EVENT_VISIBILITY.items():
+            if event_type.startswith(prefix) and len(prefix) > len(best):
+                best = prefix
+                best_level = level
+
+        # Reverse-lookup level → role name
+        for name, lv in sorted(self._role_levels.items(), key=lambda x: x[1]):
+            if lv == best_level:
+                return name
+        return "user"
+
+    async def set_event_visibility(self, event_prefix: str, min_role: str) -> None:
+        """Set or update an event visibility override."""
+        if self._storage is None:
+            return
+        await self._storage.put(_EVENT_ACL_COLLECTION, event_prefix, {
+            "event_prefix": event_prefix,
+            "min_role": min_role,
+        })
+        await self._refresh_caches()
+
+    async def clear_event_visibility(self, event_prefix: str) -> None:
+        """Remove an event visibility override (reverts to default)."""
+        if self._storage is None:
+            return
+        await self._storage.delete(_EVENT_ACL_COLLECTION, event_prefix)
+        await self._refresh_caches()
+
+    async def list_event_visibility(self) -> list[dict[str, Any]]:
+        """List all event visibility rules (defaults + overrides)."""
+        from gilbert.web.ws_protocol import _EVENT_VISIBILITY
+
+        # Start with defaults
+        rules: dict[str, dict[str, Any]] = {}
+        for prefix, level in _EVENT_VISIBILITY.items():
+            role = "user"
+            for name, lv in sorted(self._role_levels.items(), key=lambda x: x[1]):
+                if lv == level:
+                    role = name
+                    break
+            rules[prefix] = {"event_prefix": prefix, "min_role": role, "source": "default"}
+
+        # Layer overrides on top
+        for prefix, role in self._event_acl.items():
+            rules[prefix] = {"event_prefix": prefix, "min_role": role, "source": "override"}
+
+        return sorted(rules.values(), key=lambda r: r["event_prefix"])
+
     # --- ToolProvider protocol ---
 
     @property
@@ -374,6 +454,28 @@ class AccessControlService(Service):
                 ],
                 required_role="admin",
             ),
+            ToolDefinition(
+                name="list_event_visibility",
+                description="List all event visibility rules (which roles can see which events via WebSocket).",
+                required_role="everyone",
+            ),
+            ToolDefinition(
+                name="set_event_visibility",
+                description="Set the minimum role required to see events matching a prefix via WebSocket.",
+                parameters=[
+                    ToolParameter(name="event_prefix", type=ToolParameterType.STRING, description="Event type prefix (e.g., 'inbox.' or 'chat.message.')."),
+                    ToolParameter(name="min_role", type=ToolParameterType.STRING, description="Minimum role required (e.g., 'admin', 'user', 'everyone')."),
+                ],
+                required_role="admin",
+            ),
+            ToolDefinition(
+                name="clear_event_visibility",
+                description="Remove an event visibility override, reverting to the built-in default.",
+                parameters=[
+                    ToolParameter(name="event_prefix", type=ToolParameterType.STRING, description="Event type prefix to clear."),
+                ],
+                required_role="admin",
+            ),
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -396,6 +498,15 @@ class AccessControlService(Service):
                 return await self._tool_list_collection_acls()
             case "set_collection_acl":
                 return await self._tool_set_collection_acl(arguments)
+            case "list_event_visibility":
+                rules = await self.list_event_visibility()
+                return json.dumps(rules)
+            case "set_event_visibility":
+                await self.set_event_visibility(arguments["event_prefix"], arguments["min_role"])
+                return json.dumps({"status": "ok", "event_prefix": arguments["event_prefix"], "min_role": arguments["min_role"]})
+            case "clear_event_visibility":
+                await self.clear_event_visibility(arguments["event_prefix"])
+                return json.dumps({"status": "ok", "event_prefix": arguments["event_prefix"]})
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 

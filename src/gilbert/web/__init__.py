@@ -20,6 +20,20 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     # Store gilbert instance for route access
     app.state.gilbert = gilbert
 
+    # WebSocket connection manager — single bus subscription, dispatches to all clients
+    from gilbert.web.ws_protocol import WsConnectionManager
+
+    ws_manager = WsConnectionManager()
+    app.state.ws_manager = ws_manager
+
+    @app.on_event("startup")
+    async def _start_ws_manager() -> None:
+        ws_manager.subscribe_to_bus(gilbert)
+
+    @app.on_event("shutdown")
+    async def _stop_ws_manager() -> None:
+        ws_manager.shutdown()
+
     # Auth middleware (works even when auth is disabled — falls through to SYSTEM)
     from gilbert.web.auth import AuthMiddleware
 
