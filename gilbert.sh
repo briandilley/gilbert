@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 build_frontend() {
     echo "Building frontend..."
+    if [ ! -d "$SCRIPT_DIR/frontend/node_modules" ]; then
+        echo "Installing frontend dependencies..."
+        cd "$SCRIPT_DIR/frontend" && npm install
+    fi
     cd "$SCRIPT_DIR/frontend" && npm run build
     rm -rf "$SCRIPT_DIR/src/gilbert/web/spa"
     cp -r "$SCRIPT_DIR/frontend/dist" "$SCRIPT_DIR/src/gilbert/web/spa"
