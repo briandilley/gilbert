@@ -192,7 +192,9 @@ class PresenceService(Service):
             logger.warning("Failed to poll presence", exc_info=True)
             return
 
+        current_ids = set()
         for p in all_presence:
+            current_ids.add(p.user_id)
             old_state = self._last_state.get(p.user_id)
             if old_state == p.state:
                 continue
@@ -206,8 +208,28 @@ class PresenceService(Service):
                 # First time seeing this user — don't emit arrived/departed
                 logger.debug("New tracked user: %s (%s)", p.user_id, p.state.value)
 
-        # Persist current state to entity store
-        await self._persist_presence(all_presence)
+        # Detect users who disappeared from the poll (phone disconnected,
+        # no face/badge signals). They should transition to AWAY.
+        for user_id, old_state in list(self._last_state.items()):
+            if user_id in current_ids:
+                continue
+            if old_state == PresenceState.AWAY:
+                continue
+            self._last_state[user_id] = PresenceState.AWAY
+            away = UserPresence(
+                user_id=user_id,
+                state=PresenceState.AWAY,
+                source="unifi",
+            )
+            await self._emit_change(away, old_state)
+
+        # Persist current state to entity store (include AWAY users)
+        full_presence = list(all_presence) + [
+            UserPresence(user_id=uid, state=PresenceState.AWAY, source="unifi")
+            for uid in self._last_state
+            if uid not in current_ids and self._last_state[uid] == PresenceState.AWAY
+        ]
+        await self._persist_presence(full_presence)
 
     async def _emit_change(self, presence: UserPresence, old_state: PresenceState) -> None:
         """Publish presence change events."""
