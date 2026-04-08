@@ -430,6 +430,955 @@ async def _handle_chat_history(conn: WsConnection, frame: dict[str, Any]) -> dic
     return result
 
 
+# ── Helper: admin check ───────────────────────────────────────────────
+
+
+def _require_admin(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    """Return an error frame if the connection is not admin-level, else None."""
+    if conn.user_level > 0:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Admin access required", "code": 403}
+    return None
+
+
+def _get_gilbert(conn: WsConnection) -> Any:
+    """Get the Gilbert instance from the connection manager."""
+    return conn.manager._gilbert
+
+
+def _get_service(conn: WsConnection, capability: str) -> Any:
+    """Get a service by capability, or None."""
+    gilbert = _get_gilbert(conn)
+    if gilbert is None:
+        return None
+    return gilbert.service_manager.get_by_capability(capability)
+
+
+# ── Chat conversation management ─────────────────────────────────────
+
+
+@rpc_handler("chat.conversation.list")
+async def _handle_conversation_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    ai_svc = _get_service(conn, "ai_chat")
+    if ai_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not running", "code": 503}
+
+    from gilbert.web.chat_helpers import conv_summary
+
+    personal = await ai_svc.list_conversations(user_id=conn.user_id, limit=30)
+    shared = await ai_svc.list_shared_conversations(user_id=conn.user_id, limit=30)
+
+    conversations = [conv_summary(c, shared=True) for c in shared]
+    conversations += [conv_summary(c, shared=False) for c in personal]
+
+    return {"type": "chat.conversation.list.result", "ref": frame.get("id"), "conversations": conversations}
+
+
+@rpc_handler("chat.conversation.rename")
+async def _handle_conversation_rename(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    title = (frame.get("title") or "").strip()
+    if not conversation_id or not title:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id and title required", "code": 400}
+
+    gilbert = _get_gilbert(conn)
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+    storage = getattr(storage_svc, "backend", None)
+    if storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Conversation not found", "code": 404}
+
+    from gilbert.web.chat_helpers import check_conversation_access, publish_event
+    err = check_conversation_access(data, conn.user_ctx)
+    if err:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": err, "code": 403}
+
+    data["title"] = title
+    await storage.put("ai_conversations", conversation_id, data)
+    await publish_event(gilbert, "chat.conversation.renamed", {"conversation_id": conversation_id, "title": title})
+
+    return {"type": "chat.conversation.rename.result", "ref": frame.get("id"), "status": "ok", "title": title}
+
+
+@rpc_handler("chat.conversation.delete")
+async def _handle_conversation_delete(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    if not conversation_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+    storage = getattr(storage_svc, "backend", None)
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Conversation not found", "code": 404}
+    if data.get("shared"):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Use room destroy for shared conversations", "code": 400}
+    conv_owner = data.get("user_id", "")
+    if conv_owner and conn.user_id != "system" and conv_owner != conn.user_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Access denied", "code": 403}
+
+    await storage.delete("ai_conversations", conversation_id)
+    return {"type": "chat.conversation.delete.result", "ref": frame.get("id"), "status": "ok"}
+
+
+# ── Chat room management ─────────────────────────────────────────────
+
+
+@rpc_handler("chat.room.create")
+async def _handle_room_create(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    title = (frame.get("title") or "").strip()
+    if not title:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "title required", "code": 400}
+    visibility = frame.get("visibility", "public")
+
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+    storage = getattr(storage_svc, "backend", None)
+
+    import uuid as _uuid
+    conv_id = str(_uuid.uuid4())
+    from datetime import datetime, timezone as tz
+    now = datetime.now(tz.utc).isoformat()
+
+    members = [{"user_id": conn.user_id, "display_name": conn.user_ctx.display_name, "role": "owner", "joined_at": now}]
+    data = {
+        "shared": True,
+        "visibility": visibility,
+        "title": title,
+        "user_id": conn.user_id,
+        "members": members,
+        "messages": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await storage.put("ai_conversations", conv_id, data)
+
+    gilbert = _get_gilbert(conn)
+    from gilbert.web.chat_helpers import publish_event
+    await publish_event(gilbert, "chat.conversation.created", {
+        "conversation_id": conv_id, "title": title, "shared": True,
+        "members": members, "visibility": visibility,
+    })
+
+    return {
+        "type": "chat.room.create.result", "ref": frame.get("id"),
+        "conversation_id": conv_id, "title": title,
+        "members": [{"user_id": m["user_id"], "display_name": m["display_name"]} for m in members],
+    }
+
+
+@rpc_handler("chat.room.join")
+async def _handle_room_join(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    if not conversation_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    storage = getattr(storage_svc, "backend", None) if storage_svc else None
+    if storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None or not data.get("shared"):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Room not found", "code": 404}
+
+    members = data.get("members", [])
+    if any(m.get("user_id") == conn.user_id for m in members):
+        return {"type": "chat.room.join.result", "ref": frame.get("id"), "status": "already_member"}
+
+    from datetime import datetime, timezone as tz
+    members.append({"user_id": conn.user_id, "display_name": conn.user_ctx.display_name, "role": "member", "joined_at": datetime.now(tz.utc).isoformat()})
+    data["members"] = members
+    await storage.put("ai_conversations", conversation_id, data)
+
+    gilbert = _get_gilbert(conn)
+    from gilbert.web.chat_helpers import publish_event
+    await publish_event(gilbert, "chat.member.joined", {
+        "conversation_id": conversation_id, "user_id": conn.user_id,
+        "display_name": conn.user_ctx.display_name,
+    })
+
+    return {"type": "chat.room.join.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("chat.room.leave")
+async def _handle_room_leave(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    if not conversation_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    storage = getattr(storage_svc, "backend", None) if storage_svc else None
+    if storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None or not data.get("shared"):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Room not found", "code": 404}
+
+    gilbert = _get_gilbert(conn)
+    from gilbert.web.chat_helpers import publish_event
+
+    # Owner leaving destroys the room
+    if data.get("user_id") == conn.user_id:
+        await storage.delete("ai_conversations", conversation_id)
+        await publish_event(gilbert, "chat.conversation.destroyed", {"conversation_id": conversation_id})
+        return {"type": "chat.room.leave.result", "ref": frame.get("id"), "status": "destroyed"}
+
+    members = [m for m in data.get("members", []) if m.get("user_id") != conn.user_id]
+    data["members"] = members
+    await storage.put("ai_conversations", conversation_id, data)
+    await publish_event(gilbert, "chat.member.left", {"conversation_id": conversation_id, "user_id": conn.user_id})
+
+    return {"type": "chat.room.leave.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("chat.room.kick")
+async def _handle_room_kick(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    target_user = frame.get("user_id")
+    if not conversation_id or not target_user:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id and user_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    storage = getattr(storage_svc, "backend", None) if storage_svc else None
+    if storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None or not data.get("shared"):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Room not found", "code": 404}
+    if data.get("user_id") != conn.user_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Only the room owner can kick members", "code": 403}
+
+    members = [m for m in data.get("members", []) if m.get("user_id") != target_user]
+    data["members"] = members
+    await storage.put("ai_conversations", conversation_id, data)
+
+    gilbert = _get_gilbert(conn)
+    from gilbert.web.chat_helpers import publish_event
+    await publish_event(gilbert, "chat.member.kicked", {"conversation_id": conversation_id, "user_id": target_user})
+
+    return {"type": "chat.room.kick.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("chat.room.invite")
+async def _handle_room_invite(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = frame.get("conversation_id")
+    target_user = frame.get("user_id")
+    display_name = frame.get("display_name", "")
+    if not conversation_id or not target_user:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "conversation_id and user_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    storage = getattr(storage_svc, "backend", None) if storage_svc else None
+    if storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None or not data.get("shared"):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Room not found", "code": 404}
+
+    members = data.get("members", [])
+    if any(m.get("user_id") == target_user for m in members):
+        return {"type": "chat.room.invite.result", "ref": frame.get("id"), "status": "already_member"}
+
+    from datetime import datetime, timezone as tz
+    members.append({"user_id": target_user, "display_name": display_name, "role": "member", "joined_at": datetime.now(tz.utc).isoformat()})
+    data["members"] = members
+    await storage.put("ai_conversations", conversation_id, data)
+
+    gilbert = _get_gilbert(conn)
+    from gilbert.web.chat_helpers import publish_event
+    await publish_event(gilbert, "chat.member.joined", {
+        "conversation_id": conversation_id, "user_id": target_user, "display_name": display_name,
+    })
+
+    return {"type": "chat.room.invite.result", "ref": frame.get("id"), "status": "ok"}
+
+
+# ── Roles & Admin ─────────────────────────────────────────────────────
+
+
+@rpc_handler("roles.role.list")
+async def _handle_role_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    roles = await acl.list_roles()
+    for r in roles:
+        r.pop("_id", None)
+    return {"type": "roles.role.list.result", "ref": frame.get("id"), "roles": roles}
+
+
+@rpc_handler("roles.role.create")
+async def _handle_role_create(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.create_role(frame.get("name", ""), frame.get("level", 100), frame.get("description", ""))
+    return {"type": "roles.role.create.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.role.update")
+async def _handle_role_update(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.update_role(frame.get("name", ""), level=frame.get("level"), description=frame.get("description"))
+    return {"type": "roles.role.update.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.role.delete")
+async def _handle_role_delete(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.delete_role(frame.get("name", ""))
+    return {"type": "roles.role.delete.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.tool.list")
+async def _handle_tool_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    gilbert = _get_gilbert(conn)
+    acl = _get_service(conn, "access_control")
+    if acl is None or gilbert is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Service not available", "code": 503}
+
+    from gilbert.interfaces.tools import ToolProvider
+    tools = []
+    for svc in gilbert.service_manager.get_all_by_capability("ai_tools"):
+        if isinstance(svc, ToolProvider):
+            for t in svc.get_tools():
+                effective = acl._tool_overrides.get(t.name, t.required_role)
+                tools.append({
+                    "provider": svc.tool_provider_name,
+                    "tool_name": t.name,
+                    "default_role": t.required_role,
+                    "effective_role": effective,
+                    "has_override": t.name in acl._tool_overrides,
+                })
+    role_names = sorted(acl._role_levels.keys())
+    return {"type": "roles.tool.list.result", "ref": frame.get("id"), "tools": tools, "role_names": role_names}
+
+
+@rpc_handler("roles.tool.set")
+async def _handle_tool_set(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.set_tool_override(frame.get("tool_name", ""), frame.get("role", ""))
+    return {"type": "roles.tool.set.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.tool.clear")
+async def _handle_tool_clear(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.clear_tool_override(frame.get("tool_name", ""))
+    return {"type": "roles.tool.clear.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.profile.list")
+async def _handle_profile_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    ai_svc = _get_service(conn, "ai_chat")
+    if ai_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
+
+    gilbert = _get_gilbert(conn)
+    profiles_raw = await ai_svc.list_profiles()
+    assignments = ai_svc._assignments
+
+    profiles = []
+    for p in profiles_raw:
+        assigned = [call for call, prof in assignments.items() if prof == p.name]
+        profiles.append({
+            "name": p.name, "description": p.description, "tool_mode": p.tool_mode,
+            "tools": list(p.tools), "tool_roles": dict(p.tool_roles),
+            "assigned_calls": assigned,
+        })
+
+    declared_calls: set[str] = set()
+    for svc in gilbert.service_manager.get_all_by_capability("ai_tools"):
+        info = svc.service_info()
+        declared_calls.update(info.ai_calls)
+
+    from gilbert.interfaces.tools import ToolProvider
+    all_tools: set[str] = set()
+    for svc in gilbert.service_manager.get_all_by_capability("ai_tools"):
+        if isinstance(svc, ToolProvider):
+            for t in svc.get_tools():
+                all_tools.add(t.name)
+
+    return {
+        "type": "roles.profile.list.result", "ref": frame.get("id"),
+        "profiles": profiles, "declared_calls": sorted(declared_calls),
+        "profile_names": [p["name"] for p in profiles],
+        "all_tool_names": sorted(all_tools),
+    }
+
+
+@rpc_handler("roles.profile.save")
+async def _handle_profile_save(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    ai_svc = _get_service(conn, "ai_chat")
+    if ai_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
+
+    from gilbert.core.services.ai import AIContextProfile
+    profile = AIContextProfile(
+        name=frame.get("name", ""),
+        description=frame.get("description", ""),
+        tool_mode=frame.get("tool_mode", "all"),
+        tools=frame.get("tools", []),
+        tool_roles=frame.get("tool_roles", {}),
+    )
+    await ai_svc.set_profile(profile)
+    return {"type": "roles.profile.save.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.profile.delete")
+async def _handle_profile_delete(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    ai_svc = _get_service(conn, "ai_chat")
+    if ai_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
+    await ai_svc.delete_profile(frame.get("name", ""))
+    return {"type": "roles.profile.delete.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.profile.assign")
+async def _handle_profile_assign(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    ai_svc = _get_service(conn, "ai_chat")
+    if ai_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
+    await ai_svc.set_assignment(frame.get("ai_call", ""), frame.get("profile_name", ""))
+    return {"type": "roles.profile.assign.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.user.list")
+async def _handle_user_role_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    gilbert = _get_gilbert(conn)
+    user_svc = _get_service(conn, "users")
+    acl = _get_service(conn, "access_control")
+    if user_svc is None or acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Service not available", "code": 503}
+
+    users = await user_svc.list_users()
+    result = []
+    for u in users:
+        result.append({
+            "user_id": u.get("user_id", u.get("_id", "")),
+            "email": u.get("email", ""),
+            "display_name": u.get("display_name", ""),
+            "roles": u.get("roles", []),
+        })
+    role_names = sorted(acl._role_levels.keys())
+    return {"type": "roles.user.list.result", "ref": frame.get("id"), "users": result, "role_names": role_names}
+
+
+@rpc_handler("roles.user.set")
+async def _handle_user_role_set(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    user_svc = _get_service(conn, "users")
+    if user_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "User service not available", "code": 503}
+    user_id = frame.get("user_id", "")
+    roles = frame.get("roles", [])
+    await user_svc.backend.update_user(user_id, {"roles": roles})
+    return {"type": "roles.user.set.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.collection.list")
+async def _handle_collection_acl_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    storage_svc = _get_service(conn, "entity_storage")
+    if acl is None or storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Service not available", "code": 503}
+
+    collections = await storage_svc.backend.list_collections()
+    acl_entries = []
+    for col in sorted(collections):
+        entry = acl._collection_acl.get(col)
+        acl_entries.append({
+            "collection": col,
+            "read_role": entry["read_role"] if entry else "user",
+            "write_role": entry["write_role"] if entry else "admin",
+            "has_custom": entry is not None,
+        })
+    roles = await acl.list_roles()
+    return {
+        "type": "roles.collection.list.result", "ref": frame.get("id"),
+        "collections": acl_entries, "role_names": [r["name"] for r in roles],
+    }
+
+
+@rpc_handler("roles.collection.set")
+async def _handle_collection_acl_set(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.set_collection_acl(frame.get("collection", ""), read_role=frame.get("read_role", "user"), write_role=frame.get("write_role", "admin"))
+    return {"type": "roles.collection.set.result", "ref": frame.get("id"), "status": "ok"}
+
+
+@rpc_handler("roles.collection.clear")
+async def _handle_collection_acl_clear(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    acl = _get_service(conn, "access_control")
+    if acl is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "ACL service not available", "code": 503}
+    await acl.clear_collection_acl(frame.get("collection", ""))
+    return {"type": "roles.collection.clear.result", "ref": frame.get("id"), "status": "ok"}
+
+
+# ── Inbox ─────────────────────────────────────────────────────────────
+
+
+@rpc_handler("inbox.stats.get")
+async def _handle_inbox_stats(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    from gilbert.core.services.inbox import InboxService
+    svc = _get_service(conn, "email")
+    if svc is None or not isinstance(svc, InboxService):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Inbox not available", "code": 503}
+    stats = await svc.get_stats()
+    return {"type": "inbox.stats.get.result", "ref": frame.get("id"), **stats}
+
+
+@rpc_handler("inbox.message.list")
+async def _handle_inbox_messages(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    from gilbert.core.services.inbox import InboxService
+    svc = _get_service(conn, "email")
+    if svc is None or not isinstance(svc, InboxService):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Inbox not available", "code": 503}
+    messages = await svc.search_messages(
+        sender=frame.get("sender", ""), subject=frame.get("subject", ""),
+        limit=frame.get("limit", 50), include_body=False,
+    )
+    summaries = []
+    for m in messages:
+        snippet = m.get("snippet", "")
+        if not snippet:
+            body = m.get("body_text", "")
+            snippet = body[:120] + ("..." if len(body) > 120 else "")
+        summaries.append({
+            "message_id": m.get("_id", ""), "thread_id": m.get("thread_id", ""),
+            "subject": m.get("subject", ""), "sender_email": m.get("sender_email", ""),
+            "sender_name": m.get("sender_name", ""), "date": m.get("date", ""),
+            "is_inbound": m.get("is_inbound", True), "snippet": snippet,
+        })
+    return {"type": "inbox.message.list.result", "ref": frame.get("id"), "messages": summaries, "total": len(summaries)}
+
+
+@rpc_handler("inbox.message.get")
+async def _handle_inbox_message_detail(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    from gilbert.core.services.inbox import InboxService
+    svc = _get_service(conn, "email")
+    if svc is None or not isinstance(svc, InboxService):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Inbox not available", "code": 503}
+    record = await svc.get_message(frame.get("message_id", ""))
+    if not record:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Message not found", "code": 404}
+    return {
+        "type": "inbox.message.get.result", "ref": frame.get("id"),
+        "message_id": record.get("_id", ""), "thread_id": record.get("thread_id", ""),
+        "subject": record.get("subject", ""), "sender_email": record.get("sender_email", ""),
+        "sender_name": record.get("sender_name", ""), "date": record.get("date", ""),
+        "to": record.get("to", []), "cc": record.get("cc", []),
+        "body_text": record.get("body_text", ""), "body_html": record.get("body_html", ""),
+        "is_inbound": record.get("is_inbound", True),
+    }
+
+
+@rpc_handler("inbox.thread.get")
+async def _handle_inbox_thread(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    from gilbert.core.services.inbox import InboxService
+    svc = _get_service(conn, "email")
+    if svc is None or not isinstance(svc, InboxService):
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Inbox not available", "code": 503}
+    messages = await svc.get_thread(frame.get("thread_id", ""))
+    result = []
+    for m in messages:
+        result.append({
+            "message_id": m.get("_id", ""), "thread_id": m.get("thread_id", ""),
+            "subject": m.get("subject", ""), "sender_email": m.get("sender_email", ""),
+            "sender_name": m.get("sender_name", ""), "date": m.get("date", ""),
+            "to": m.get("to", []), "cc": m.get("cc", []),
+            "body_text": m.get("body_text", ""), "body_html": m.get("body_html", ""),
+            "is_inbound": m.get("is_inbound", True),
+        })
+    return {"type": "inbox.thread.get.result", "ref": frame.get("id"), "messages": result}
+
+
+@rpc_handler("inbox.pending.list")
+async def _handle_inbox_pending(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    gilbert = _get_gilbert(conn)
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": []}
+    raw_storage = getattr(storage_svc, "raw_backend", None)
+    if raw_storage is None:
+        return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": []}
+
+    from gilbert.interfaces.storage import Filter, FilterOp, Query, SortField
+    from datetime import datetime, timedelta, timezone as tz
+    cutoff = (datetime.now(tz.utc) - timedelta(days=1)).isoformat()
+    _PENDING_COLLECTIONS = ["gilbert.plugin.current-sales-assistant.pending_replies"]
+
+    pending: list[dict[str, Any]] = []
+    for collection in _PENDING_COLLECTIONS:
+        try:
+            pending_results = await raw_storage.query(Query(
+                collection=collection,
+                filters=[Filter(field="status", op=FilterOp.EQ, value="pending")],
+                sort=[SortField(field="send_at", descending=False)],
+            ))
+            failed_results = await raw_storage.query(Query(
+                collection=collection,
+                filters=[Filter(field="status", op=FilterOp.EQ, value="failed"), Filter(field="send_at", op=FilterOp.GTE, value=cutoff)],
+                sort=[SortField(field="send_at", descending=False)],
+            ))
+            for r in pending_results + failed_results:
+                pending.append({
+                    "id": r.get("_id", ""), "collection": collection,
+                    "customer_email": r.get("customer_email", ""), "subject": r.get("subject", ""),
+                    "status": r.get("status", ""), "send_at": r.get("send_at", ""),
+                })
+        except Exception:
+            pass
+    return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": pending}
+
+
+@rpc_handler("inbox.pending.cancel")
+async def _handle_inbox_cancel(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    reply_id = frame.get("reply_id", "")
+    if not reply_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "reply_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    raw_storage = getattr(storage_svc, "raw_backend", None) if storage_svc else None
+    if raw_storage is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    _PENDING_COLLECTIONS = ["gilbert.plugin.current-sales-assistant.pending_replies"]
+    for collection in _PENDING_COLLECTIONS:
+        try:
+            existing = await raw_storage.get(collection, reply_id)
+            if existing and existing.get("status") in ("pending", "failed"):
+                existing["status"] = "cancelled"
+                await raw_storage.put(collection, reply_id, existing)
+                return {"type": "inbox.pending.cancel.result", "ref": frame.get("id"), "status": "cancelled"}
+        except Exception:
+            pass
+    return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Pending reply not found", "code": 404}
+
+
+# ── Documents ─────────────────────────────────────────────────────────
+
+
+@rpc_handler("documents.list")
+async def _handle_documents_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    from gilbert.core.services.knowledge import KnowledgeService
+    svc = _get_service(conn, "knowledge")
+    if svc is None or not isinstance(svc, KnowledgeService):
+        return {"type": "documents.list.result", "ref": frame.get("id"), "sources": []}
+    sources = await svc.list_sources_with_trees()
+    return {"type": "documents.list.result", "ref": frame.get("id"), "sources": sources}
+
+
+@rpc_handler("documents.search")
+async def _handle_documents_search(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    query = frame.get("query", "").strip()
+    if not query:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "query required", "code": 400}
+
+    from gilbert.core.services.knowledge import KnowledgeService
+    svc = _get_service(conn, "knowledge")
+    if svc is None or not isinstance(svc, KnowledgeService):
+        return {"type": "documents.search.result", "ref": frame.get("id"), "results": [], "query": query}
+
+    results = await svc.search(query, source_id=frame.get("source_id"), max_results=frame.get("max_results", 20))
+    return {"type": "documents.search.result", "ref": frame.get("id"), "results": results, "query": query}
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────
+
+
+@rpc_handler("dashboard.get")
+async def _handle_dashboard(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    gilbert = _get_gilbert(conn)
+    if gilbert is None:
+        return {"type": "dashboard.get.result", "ref": frame.get("id"), "cards": []}
+
+    sm = gilbert.service_manager
+    cards = []
+    _DASHBOARD_CARDS = [
+        {"title": "Chat", "description": "Talk with Gilbert", "url": "/chat", "icon": "message-square", "required_role": "everyone"},
+        {"title": "Documents", "description": "Knowledge base", "url": "/documents", "icon": "file-text", "required_role": "user"},
+        {"title": "Inbox", "description": "Email management", "url": "/inbox", "icon": "inbox", "required_role": "admin"},
+        {"title": "Roles", "description": "Roles & access control", "url": "/roles", "icon": "shield", "required_role": "admin"},
+        {"title": "Entities", "description": "Entity browser", "url": "/entities", "icon": "database", "required_role": "admin"},
+        {"title": "System", "description": "Service inspector", "url": "/system", "icon": "settings", "required_role": "admin"},
+    ]
+
+    acl = _get_service(conn, "access_control")
+    for card in _DASHBOARD_CARDS:
+        if acl is not None:
+            required_level = acl.get_role_level(card["required_role"])
+            if conn.user_level > required_level:
+                continue
+        cards.append(card)
+
+    return {"type": "dashboard.get.result", "ref": frame.get("id"), "cards": cards}
+
+
+# ── System ────────────────────────────────────────────────────────────
+
+
+@rpc_handler("system.services.list")
+async def _handle_system_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+
+    gilbert = _get_gilbert(conn)
+    if gilbert is None:
+        return {"type": "system.services.list.result", "ref": frame.get("id"), "services": []}
+
+    from gilbert.interfaces.configuration import Configurable
+    from gilbert.interfaces.tools import ToolProvider
+    from gilbert.core.services.configuration import ConfigurationService
+
+    sm = gilbert.service_manager
+    config_svc = sm.get_by_capability("configuration")
+    services = []
+
+    for name in list(sm._registered.keys()):
+        svc = sm._registered[name]
+        info = svc.service_info()
+        started = name in sm.started_services
+        failed = name in sm.failed_services
+
+        entry: dict[str, Any] = {
+            "name": info.name,
+            "capabilities": sorted(info.capabilities),
+            "requires": sorted(info.requires),
+            "optional": sorted(info.optional),
+            "ai_calls": sorted(info.ai_calls),
+            "events": sorted(info.events),
+            "started": started,
+            "failed": failed,
+            "config_params": [],
+            "config_values": {},
+            "tools": [],
+        }
+
+        if isinstance(svc, Configurable):
+            entry["config_namespace"] = svc.config_namespace
+            entry["config_params"] = [
+                {"key": p.key, "type": p.type.value, "description": p.description, "default": p.default, "restart_required": p.restart_required}
+                for p in svc.config_params()
+            ]
+            if isinstance(config_svc, ConfigurationService):
+                entry["config_values"] = config_svc.get_section(svc.config_namespace)
+
+        if isinstance(svc, ToolProvider):
+            entry["tools"] = [
+                {"name": t.name, "description": t.description, "required_role": t.required_role,
+                 "parameters": [{"name": p.name, "type": p.type.value, "description": p.description, "required": p.required} for p in t.parameters]}
+                for t in svc.get_tools()
+            ]
+
+        services.append(entry)
+
+    return {"type": "system.services.list.result", "ref": frame.get("id"), "services": services}
+
+
+# ── Entities ──────────────────────────────────────────────────────────
+
+
+@rpc_handler("entities.collection.list")
+async def _handle_entities_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "entities.collection.list.result", "ref": frame.get("id"), "groups": []}
+
+    collections = await storage_svc.backend.list_collections()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for col in sorted(collections):
+        parts = col.rsplit(".", 1)
+        ns = parts[0] if len(parts) > 1 else "(default)"
+        short = parts[-1]
+        count = await storage_svc.backend.count(col) if hasattr(storage_svc.backend, "count") else 0
+        groups.setdefault(ns, []).append({"name": col, "short_name": short, "count": count})
+
+    result = [{"namespace": ns, "collections": cols} for ns, cols in groups.items()]
+    return {"type": "entities.collection.list.result", "ref": frame.get("id"), "groups": result}
+
+
+@rpc_handler("entities.collection.query")
+async def _handle_entities_query(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+
+    collection = frame.get("collection", "")
+    if not collection:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "collection required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    from gilbert.interfaces.storage import Query, SortField
+    page = int(frame.get("page", 1))
+    sort_field = frame.get("sort", "_id")
+    order = frame.get("order", "asc")
+    page_size = 50
+    offset = (page - 1) * page_size
+
+    sort = [SortField(field=sort_field, descending=(order == "desc"))]
+    entities = await storage_svc.backend.query(Query(
+        collection=collection, sort=sort, limit=page_size, offset=offset,
+    ))
+    total = await storage_svc.backend.count(collection) if hasattr(storage_svc.backend, "count") else len(entities)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    # Derive sortable fields from first entity
+    sortable_fields = []
+    if entities:
+        sortable_fields = sorted(entities[0].keys())
+
+    # FK map
+    fk_map = {}
+    if hasattr(storage_svc.backend, "get_foreign_keys"):
+        fk_map = await storage_svc.backend.get_foreign_keys(collection) or {}
+
+    return {
+        "type": "entities.collection.query.result", "ref": frame.get("id"),
+        "collection": collection, "entities": entities, "total": total,
+        "page": page, "total_pages": total_pages,
+        "sortable_fields": sortable_fields, "fk_map": fk_map,
+    }
+
+
+@rpc_handler("entities.entity.get")
+async def _handle_entity_get(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    err = _require_admin(conn, frame)
+    if err:
+        return err
+
+    collection = frame.get("collection", "")
+    entity_id = frame.get("entity_id", "")
+    if not collection or not entity_id:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "collection and entity_id required", "code": 400}
+
+    storage_svc = _get_service(conn, "entity_storage")
+    if storage_svc is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+    entity = await storage_svc.backend.get(collection, entity_id)
+    if entity is None:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Entity not found", "code": 404}
+
+    fk_map = {}
+    if hasattr(storage_svc.backend, "get_foreign_keys"):
+        fk_map = await storage_svc.backend.get_foreign_keys(collection) or {}
+
+    return {
+        "type": "entities.entity.get.result", "ref": frame.get("id"),
+        "collection": collection, "entity_id": entity_id,
+        "entity": entity, "fk_map": fk_map,
+    }
+
+
+# ── Screens ───────────────────────────────────────────────────────────
+
+
+@rpc_handler("screens.list")
+async def _handle_screens_list(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
+    from gilbert.core.services.screens import ScreenService
+    svc = _get_service(conn, "screen_display")
+    if svc is None or not isinstance(svc, ScreenService):
+        return {"type": "screens.list.result", "ref": frame.get("id"), "screens": []}
+    screens = svc.list_screens()
+    return {"type": "screens.list.result", "ref": frame.get("id"), "screens": screens}
+
+
+# ── Frame dispatch ────────────────────────────────────────────────────
+
+
 async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
     """Route an incoming frame to the appropriate handler."""
     frame_type = frame.get("type", "")
