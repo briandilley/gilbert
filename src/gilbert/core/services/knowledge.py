@@ -923,41 +923,91 @@ class KnowledgeService(Service):
 
     # --- WebSocket RPC handlers ---
 
-    async def list_sources_with_trees(self) -> list[dict[str, Any]]:
-        """List all sources with their document trees for the UI."""
-        sources: list[dict[str, Any]] = []
-        for backend in self._backends.values():
-            source_info: dict[str, Any] = {
-                "source_id": backend.source_id,
-                "source_name": backend.display_name,
-                "tree": [],
-            }
-            try:
-                docs = await backend.list_documents()
-                source_info["tree"] = [
-                    {
-                        "name": d.name,
-                        "path": d.document_id,
-                        "is_folder": False,
-                        "size": d.size_bytes,
-                        "modified": d.last_modified.isoformat() if hasattr(d.last_modified, "isoformat") else (d.last_modified or ""),
-                    }
-                    for d in docs
-                ]
-            except Exception:
-                logger.warning("Failed to list documents from %s", backend.source_id, exc_info=True)
-            sources.append(source_info)
-        return sources
+    async def list_sources(self) -> list[dict[str, Any]]:
+        """List source IDs and names (no document listing)."""
+        return [
+            {"source_id": b.source_id, "source_name": b.display_name}
+            for b in self._backends.values()
+        ]
+
+    async def browse(self, source_id: str, path: str = "") -> list[dict[str, Any]]:
+        """Browse a source at a directory path. Returns immediate children (folders + files).
+
+        Builds a virtual directory structure from flat document paths.
+        """
+        backend = self._backends.get(source_id)
+        if backend is None:
+            return []
+
+        try:
+            docs = await backend.list_documents(prefix=path)
+        except Exception:
+            logger.warning("Failed to list documents from %s", source_id, exc_info=True)
+            return []
+
+        # Normalize the prefix for stripping
+        prefix = path.rstrip("/") + "/" if path else ""
+        prefix_len = len(prefix)
+
+        seen_folders: set[str] = set()
+        children: list[dict[str, Any]] = []
+
+        for d in docs:
+            # Get the relative path after the prefix
+            rel = d.path
+            if prefix and rel.startswith(prefix):
+                rel = rel[prefix_len:]
+            elif prefix:
+                continue  # not under this path
+
+            # If there's a "/" in the relative path, the first segment is a folder
+            if "/" in rel:
+                folder_name = rel.split("/", 1)[0]
+                folder_path = f"{prefix}{folder_name}" if prefix else folder_name
+                if folder_path not in seen_folders:
+                    seen_folders.add(folder_path)
+                    children.append({
+                        "name": folder_name,
+                        "path": folder_path,
+                        "is_folder": True,
+                    })
+            else:
+                # Direct child file
+                modified = d.last_modified
+                if hasattr(modified, "isoformat"):
+                    modified = modified.isoformat()
+                children.append({
+                    "name": d.name,
+                    "path": d.path,
+                    "is_folder": False,
+                    "size": d.size_bytes,
+                    "modified": modified or "",
+                    "type": d.document_type.value,
+                    "external_url": d.external_url or "",
+                })
+
+        # Sort: folders first, then files, alphabetically
+        children.sort(key=lambda c: (not c["is_folder"], c["name"].lower()))
+        return children
 
     def get_ws_handlers(self) -> dict[str, Any]:
         return {
-            "documents.list": self._ws_documents_list,
+            "documents.sources.list": self._ws_sources_list,
+            "documents.browse": self._ws_documents_browse,
             "documents.search": self._ws_documents_search,
         }
 
-    async def _ws_documents_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        sources = await self.list_sources_with_trees()
-        return {"type": "documents.list.result", "ref": frame.get("id"), "sources": sources}
+    async def _ws_sources_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        sources = await self.list_sources()
+        return {"type": "documents.sources.list.result", "ref": frame.get("id"), "sources": sources}
+
+    async def _ws_documents_browse(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        source_id = frame.get("source_id", "")
+        path = frame.get("path", "")
+        if not source_id:
+            return {"type": "gilbert.error", "ref": frame.get("id"), "error": "source_id required", "code": 400}
+        children = await self.browse(source_id, path)
+        return {"type": "documents.browse.result", "ref": frame.get("id"), "source_id": source_id, "path": path, "children": children}
 
     async def _ws_documents_search(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         query = frame.get("query", "").strip()

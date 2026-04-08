@@ -2,11 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import type { DocumentNode } from "@/types/documents";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { FolderIcon, FolderOpenIcon, FileTextIcon, ChevronRightIcon } from "lucide-react";
 
 export function DocumentsPage() {
   const api = useWsApi();
@@ -14,9 +15,9 @@ export function DocumentsPage() {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["documents"],
-    queryFn: api.listDocuments,
+  const { data: sources, isLoading } = useQuery({
+    queryKey: ["document-sources"],
+    queryFn: api.listDocumentSources,
     enabled: connected,
   });
 
@@ -39,7 +40,11 @@ export function DocumentsPage() {
   }
 
   if (isLoading) {
-    return <div className="p-6 text-muted-foreground">Loading documents...</div>;
+    return (
+      <div className="flex items-center justify-center p-12">
+        <LoadingSpinner text="Loading sources..." />
+      </div>
+    );
   }
 
   return (
@@ -96,13 +101,16 @@ export function DocumentsPage() {
           </CardContent>
         </Card>
       ) : (
-        data?.map((source) => (
+        sources?.map((source) => (
           <Card key={source.source_id}>
-            <CardHeader>
-              <CardTitle className="text-sm">{source.source_name}</CardTitle>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <FolderIcon className="size-4" />
+                {source.source_name}
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <DocumentTree nodes={source.tree} sourceId={source.source_id} />
+              <FolderBrowser sourceId={source.source_id} />
             </CardContent>
           </Card>
         ))
@@ -111,64 +119,132 @@ export function DocumentsPage() {
   );
 }
 
-function DocumentTree({
-  nodes,
-  sourceId,
-}: {
-  nodes: DocumentNode[];
-  sourceId: string;
-}) {
+/** Lazy-loading folder browser for a single document source. */
+function FolderBrowser({ sourceId }: { sourceId: string }) {
+  const api = useWsApi();
+  const { connected } = useWebSocket();
+
+  const { data: children, isLoading } = useQuery({
+    queryKey: ["doc-browse", sourceId, ""],
+    queryFn: () => api.browseDocuments(sourceId),
+    enabled: connected,
+  });
+
+  if (isLoading) return <LoadingSpinner text="Loading..." className="py-2" />;
+
+  if (!children || children.length === 0) {
+    return <p className="text-sm text-muted-foreground">No documents.</p>;
+  }
+
   return (
     <div className="space-y-0.5">
-      {nodes.map((node) => (
-        <DocumentTreeNode key={node.path} node={node} sourceId={sourceId} />
-      ))}
+      {children.map((child) =>
+        child.is_folder ? (
+          <LazyFolder key={child.path} sourceId={sourceId} path={child.path} name={child.name} />
+        ) : (
+          <FileRow key={child.path} sourceId={sourceId} item={child} />
+        ),
+      )}
     </div>
   );
 }
 
-function DocumentTreeNode({
-  node,
+/** A folder row that loads its children on click. */
+function LazyFolder({
   sourceId,
+  path,
+  name,
 }: {
-  node: DocumentNode;
   sourceId: string;
+  path: string;
+  name: string;
 }) {
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const [open, setOpen] = useState(false);
 
-  if (node.is_folder) {
-    return (
-      <div>
-        <button
-          onClick={() => setOpen(!open)}
-          className="flex items-center gap-1 text-sm hover:text-foreground text-muted-foreground py-0.5 w-full text-left"
-        >
-          <span className="text-xs">{open ? "▾" : "▸"}</span>
-          <span>{node.name}</span>
-        </button>
-        {open && node.children && (
-          <div className="ml-4">
-            <DocumentTree nodes={node.children} sourceId={sourceId} />
-          </div>
+  const { data: children, isLoading } = useQuery({
+    queryKey: ["doc-browse", sourceId, path],
+    queryFn: () => api.browseDocuments(sourceId, path),
+    enabled: open && connected,
+  });
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-sm hover:text-foreground text-muted-foreground py-1 w-full text-left"
+      >
+        {open ? (
+          <FolderOpenIcon className="size-4 shrink-0 text-amber-500" />
+        ) : (
+          <FolderIcon className="size-4 shrink-0 text-amber-500" />
         )}
-      </div>
-    );
-  }
+        <span className="flex-1">{name}</span>
+        <ChevronRightIcon
+          className={`size-3.5 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="ml-5 border-l pl-3">
+          {isLoading ? (
+            <LoadingSpinner className="py-1" />
+          ) : !children || children.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-1">Empty folder</p>
+          ) : (
+            <div className="space-y-0.5">
+              {children.map((child) =>
+                child.is_folder ? (
+                  <LazyFolder
+                    key={child.path}
+                    sourceId={sourceId}
+                    path={child.path}
+                    name={child.name}
+                  />
+                ) : (
+                  <FileRow key={child.path} sourceId={sourceId} item={child} />
+                ),
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface FileItem {
+  name: string;
+  path: string;
+  is_folder: boolean;
+  size?: number;
+  modified?: string;
+  type?: string;
+  external_url?: string;
+}
+
+function FileRow({ sourceId, item }: { sourceId: string; item: FileItem }) {
+  const href =
+    item.external_url ||
+    `/documents/serve/${sourceId}/${encodeURIComponent(item.path)}`;
 
   return (
     <a
-      href={
-        node.external_url ||
-        `/documents/serve/${sourceId}/${encodeURIComponent(node.path)}`
-      }
+      href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="flex items-center gap-2 text-sm py-0.5 ml-3 hover:text-foreground text-muted-foreground"
+      className="flex items-center gap-1.5 text-sm py-1 hover:text-foreground text-muted-foreground group"
     >
-      <span>{node.name}</span>
-      {node.size !== undefined && (
-        <span className="text-xs text-muted-foreground">
-          ({formatSize(node.size)})
+      <FileTextIcon className="size-4 shrink-0" />
+      <span className="flex-1 truncate group-hover:underline">{item.name}</span>
+      {item.size != null && item.size > 0 && (
+        <span className="text-xs text-muted-foreground shrink-0">
+          {formatSize(item.size)}
+        </span>
+      )}
+      {item.modified && (
+        <span className="text-xs text-muted-foreground shrink-0">
+          {formatDate(item.modified)}
         </span>
       )}
     </a>
@@ -179,4 +255,14 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
 }

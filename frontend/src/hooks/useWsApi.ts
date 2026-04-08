@@ -10,7 +10,7 @@ import { useCallback, useMemo } from "react";
 import { useWebSocket } from "./useWebSocket";
 import type { ConversationSummary, ConversationDetail, ChatResponse, ConversationMember } from "@/types/chat";
 import type { Role, ToolPermission, AIProfile, UserRoleAssignment, CollectionACL } from "@/types/roles";
-import type { DocumentSource, SearchResult } from "@/types/documents";
+import type { DocumentNode, SearchResult } from "@/types/documents";
 import type { DashboardCard } from "@/types/dashboard";
 import type { ServiceInfo } from "@/types/system";
 import type { CollectionGroup, CollectionData, EntityData } from "@/types/entities";
@@ -141,9 +141,14 @@ export function useWsApi() {
 
     // ── Documents ─────────────────────────────────────────────────
 
-    listDocuments: () =>
-      rpc<{ sources: DocumentSource[] }>({ type: "documents.list" })
+    listDocumentSources: () =>
+      rpc<{ sources: { source_id: string; source_name: string }[] }>({ type: "documents.sources.list" })
         .then((r) => r.sources),
+
+    browseDocuments: (sourceId: string, path?: string) =>
+      rpc<{ source_id: string; path: string; children: DocumentNode[] }>({
+        type: "documents.browse", source_id: sourceId, path: path || "",
+      }).then((r) => r.children),
 
     searchDocuments: (query: string, sourceId?: string) =>
       rpc<{ results: SearchResult[]; query: string }>({ type: "documents.search", query, source_id: sourceId })
