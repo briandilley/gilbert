@@ -27,6 +27,13 @@ export function MessageBubble({
     authorLabel = "You";
   }
 
+  // Strip [Name]: prefix from shared room messages — stored for AI context
+  // but shouldn't display since we show author_name separately
+  let displayContent = message.content;
+  if (isShared && message.role === "user") {
+    displayContent = displayContent.replace(/^\[.*?\]:\s*/, "");
+  }
+
   const initials = isAssistant
     ? "G"
     : (message.author_name || "You").charAt(0).toUpperCase();
@@ -69,7 +76,7 @@ export function MessageBubble({
           {isAssistant ? (
             <MarkdownContent content={message.content} />
           ) : (
-            <p className="whitespace-pre-wrap break-words">{message.content}</p>
+            <p className="whitespace-pre-wrap break-words">{displayContent}</p>
           )}
         </div>
       </div>
