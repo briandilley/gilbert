@@ -59,19 +59,19 @@ export function DocumentsPage() {
         </form>
       </div>
 
-      {searching && searchResults?.results ? (
+      {searching && searchResults ? (
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">
-              Search Results ({searchResults.results.length})
+              Search Results ({searchResults.length})
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {searchResults.results.length === 0 ? (
+            {searchResults.length === 0 ? (
               <p className="text-sm text-muted-foreground">No results found.</p>
             ) : (
               <div className="space-y-3">
-                {searchResults.results.map((r, i) => (
+                {searchResults.map((r, i) => (
                   <div key={i} className="border-b pb-2 last:border-0">
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-sm">
@@ -96,7 +96,7 @@ export function DocumentsPage() {
           </CardContent>
         </Card>
       ) : (
-        data?.sources.map((source) => (
+        data?.map((source) => (
           <Card key={source.source_id}>
             <CardHeader>
               <CardTitle className="text-sm">{source.source_name}</CardTitle>

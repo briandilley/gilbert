@@ -1,8 +1,9 @@
-/** Base frame — all WebSocket messages have a type field. */
+/** Base frame — all WebSocket messages have a type field plus arbitrary payload. */
 export interface WsFrame {
   type: string;
   id?: string;
   ref?: string;
+  [key: string]: unknown;
 }
 
 /** Server → Client: wrapped event from the event bus. */
