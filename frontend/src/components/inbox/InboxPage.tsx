@@ -149,26 +149,28 @@ export function InboxPage() {
       </Card>
 
       <Dialog open={!!selectedMsg} onOpenChange={() => setSelectedMsg(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl w-[90vw] h-[85vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>{selectedMsg?.subject}</DialogTitle>
           </DialogHeader>
           {selectedMsg && (
-            <div className="space-y-3 text-sm">
-              <div className="text-muted-foreground">
+            <div className="flex flex-col flex-1 min-h-0 text-sm">
+              <div className="text-muted-foreground shrink-0 pb-3">
                 <div>From: {selectedMsg.sender_name || selectedMsg.sender_email}</div>
                 {selectedMsg.to?.length > 0 && <div>To: {selectedMsg.to.join(", ")}</div>}
                 {selectedMsg.cc?.length > 0 && <div>CC: {selectedMsg.cc.join(", ")}</div>}
                 <div>Date: {new Date(selectedMsg.date).toLocaleString()}</div>
               </div>
-              <div className="border-t pt-3">
+              <div className="border-t pt-3 flex-1 min-h-0">
                 {selectedMsg.body_html ? (
-                  <div
-                    dangerouslySetInnerHTML={{ __html: selectedMsg.body_html }}
-                    className="prose prose-invert prose-sm max-w-none"
+                  <iframe
+                    sandbox=""
+                    srcDoc={selectedMsg.body_html}
+                    className="w-full h-full border-0 rounded bg-white"
+                    title="Email content"
                   />
                 ) : (
-                  <pre className="whitespace-pre-wrap">{selectedMsg.body_text}</pre>
+                  <pre className="whitespace-pre-wrap overflow-y-auto h-full">{selectedMsg.body_text}</pre>
                 )}
               </div>
             </div>
