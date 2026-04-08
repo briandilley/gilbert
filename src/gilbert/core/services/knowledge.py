@@ -929,19 +929,18 @@ class KnowledgeService(Service):
         for backend in self._backends.values():
             source_info: dict[str, Any] = {
                 "source_id": backend.source_id,
-                "display_name": backend.display_name,
-                "read_only": backend.read_only,
-                "documents": [],
+                "source_name": backend.display_name,
+                "tree": [],
             }
             try:
                 docs = await backend.list_documents()
-                source_info["documents"] = [
+                source_info["tree"] = [
                     {
-                        "document_id": d.document_id,
                         "name": d.name,
-                        "type": d.document_type.value,
+                        "path": d.document_id,
+                        "is_folder": False,
                         "size": d.size_bytes,
-                        "modified": d.last_modified.isoformat() if d.last_modified else "",
+                        "modified": d.last_modified.isoformat() if hasattr(d.last_modified, "isoformat") else (d.last_modified or ""),
                     }
                     for d in docs
                 ]
