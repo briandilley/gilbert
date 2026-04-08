@@ -11,6 +11,7 @@ interface ChatSidebarProps {
   onJoinRoom: (id: string) => void;
   onLeaveRoom: (id: string) => void;
   onRename: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
 /**
@@ -25,6 +26,7 @@ export function ChatSidebarContent({
   onJoinRoom,
   onLeaveRoom,
   onRename,
+  onDelete,
 }: ChatSidebarProps) {
   const shared = conversations.filter((c) => c.shared);
   const personal = conversations.filter((c) => !c.shared);
@@ -94,15 +96,26 @@ export function ChatSidebarContent({
               onClick={() => onSelect(conv.conversation_id)}
             >
               <span className="flex-1 truncate">{conv.title}</span>
-              <button
-                className="hidden text-muted-foreground hover:text-foreground group-hover:inline text-xs"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRename(conv.conversation_id);
-                }}
-              >
-                Rename
-              </button>
+              <span className="hidden group-hover:inline-flex gap-1">
+                <button
+                  className="text-muted-foreground hover:text-foreground text-xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRename(conv.conversation_id);
+                  }}
+                >
+                  Rename
+                </button>
+                <button
+                  className="text-muted-foreground hover:text-destructive text-xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(conv.conversation_id);
+                  }}
+                >
+                  Delete
+                </button>
+              </span>
             </div>
           ))}
         </div>

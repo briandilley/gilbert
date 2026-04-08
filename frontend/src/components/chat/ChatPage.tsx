@@ -12,6 +12,7 @@ import {
   leaveRoom,
   kickMember,
   renameConversation,
+  deleteConversation,
 } from "@/api/chat";
 import type { ChatMessage } from "@/types/chat";
 import type { UIBlock } from "@/types/ui";
@@ -219,6 +220,15 @@ export function ChatPage() {
     [activeConvId, conversations, refetchConversations],
   );
 
+  const handleDelete = useCallback(
+    async (id: string) => {
+      await deleteConversation(id);
+      if (activeConvId === id) handleNewChat();
+      refetchConversations();
+    },
+    [activeConvId, handleNewChat, refetchConversations],
+  );
+
   // WebSocket event handlers
   const handleChatEvent = useCallback(
     (event: { event_type: string; data: Record<string, unknown> }) => {
@@ -312,6 +322,7 @@ export function ChatPage() {
     onJoinRoom: handleJoinRoom,
     onLeaveRoom: handleLeaveRoom,
     onRename: handleRename,
+    onDelete: handleDelete,
   };
 
   return (

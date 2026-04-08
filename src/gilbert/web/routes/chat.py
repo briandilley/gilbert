@@ -289,6 +289,31 @@ async def rename_conversation(
     return {"status": "ok", "title": title}
 
 
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    request: Request,
+    conversation_id: str,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> dict[str, Any]:
+    """Delete a personal conversation."""
+    storage = _get_storage(request)
+
+    data = await storage.get("ai_conversations", conversation_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Only the owner can delete; shared rooms use a different mechanism
+    if data.get("shared"):
+        raise HTTPException(status_code=400, detail="Use room destroy for shared conversations")
+    conv_owner = data.get("user_id", "")
+    if conv_owner and user.user_id not in ("system",) and conv_owner != user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    await storage.delete("ai_conversations", conversation_id)
+
+    return {"status": "ok"}
+
+
 @router.post("/form-submit")
 async def form_submit(
     request: Request,

@@ -36,6 +36,10 @@ export async function renameConversation(
   });
 }
 
+export async function deleteConversation(id: string): Promise<void> {
+  await apiFetch(`/chat/conversations/${id}`, { method: "DELETE" });
+}
+
 export async function submitForm(
   conversationId: string,
   blockId: string,
