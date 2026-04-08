@@ -18,7 +18,10 @@ export async function fetchMessages(params?: {
   if (params?.sender) qs.set("sender", params.sender);
   if (params?.subject) qs.set("subject", params.subject);
   const q = qs.toString();
-  return apiFetch(`/inbox/api/messages${q ? `?${q}` : ""}`);
+  const resp = await apiFetch<{ messages: InboxMessage[]; total: number }>(
+    `/inbox/api/messages${q ? `?${q}` : ""}`,
+  );
+  return resp.messages;
 }
 
 export async function fetchMessageDetail(id: string): Promise<MessageDetail> {
@@ -30,7 +33,8 @@ export async function fetchThread(threadId: string): Promise<InboxMessage[]> {
 }
 
 export async function fetchPending(): Promise<PendingReply[]> {
-  return apiFetch("/inbox/api/pending");
+  const resp = await apiFetch<{ pending: PendingReply[] }>("/inbox/api/pending");
+  return resp.pending;
 }
 
 export async function cancelPending(replyId: string): Promise<void> {
