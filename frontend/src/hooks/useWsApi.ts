@@ -116,6 +116,28 @@ export function useWsApi() {
     clearCollectionACL: (collection: string) =>
       rpc<{ status: string }>({ type: "roles.collection.clear", collection }),
 
+    listEventVisibility: () =>
+      rpc<{ rules: { event_prefix: string; min_role: string; source: string }[]; role_names: string[] }>(
+        { type: "roles.event_visibility.list" },
+      ),
+
+    setEventVisibility: (eventPrefix: string, minRole: string) =>
+      rpc<{ status: string }>({ type: "roles.event_visibility.set", event_prefix: eventPrefix, min_role: minRole }),
+
+    clearEventVisibility: (eventPrefix: string) =>
+      rpc<{ status: string }>({ type: "roles.event_visibility.clear", event_prefix: eventPrefix }),
+
+    listRpcPermissions: () =>
+      rpc<{ rules: { frame_prefix: string; min_role: string; source: string }[]; role_names: string[] }>(
+        { type: "roles.rpc_permissions.list" },
+      ),
+
+    setRpcPermission: (framePrefix: string, minRole: string) =>
+      rpc<{ status: string }>({ type: "roles.rpc_permissions.set", frame_prefix: framePrefix, min_role: minRole }),
+
+    clearRpcPermission: (framePrefix: string) =>
+      rpc<{ status: string }>({ type: "roles.rpc_permissions.clear", frame_prefix: framePrefix }),
+
     // ── Inbox ─────────────────────────────────────────────────────
 
     inboxStats: () =>

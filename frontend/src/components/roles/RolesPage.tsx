@@ -5,6 +5,8 @@ import { ToolPermissions } from "./ToolPermissions";
 import { AIProfiles } from "./AIProfiles";
 import { UserRoles } from "./UserRoles";
 import { CollectionACLs } from "./CollectionACLs";
+import { EventVisibility } from "./EventVisibility";
+import { RpcPermissions } from "./RpcPermissions";
 
 const TABS = [
   { value: "roles", label: "Roles", path: "/roles" },
@@ -12,6 +14,8 @@ const TABS = [
   { value: "profiles", label: "AI Profiles", path: "/roles/profiles" },
   { value: "users", label: "Users", path: "/roles/users" },
   { value: "collections", label: "Collections", path: "/roles/collections" },
+  { value: "events", label: "Events", path: "/roles/events" },
+  { value: "rpc", label: "RPC", path: "/roles/rpc" },
 ];
 
 export function RolesPage() {
@@ -39,6 +43,8 @@ export function RolesPage() {
         <Route path="profiles" element={<AIProfiles />} />
         <Route path="users" element={<UserRoles />} />
         <Route path="collections" element={<CollectionACLs />} />
+        <Route path="events" element={<EventVisibility />} />
+        <Route path="rpc" element={<RpcPermissions />} />
       </Routes>
     </div>
   );

@@ -682,6 +682,12 @@ class AccessControlService(Service):
             "roles.collection.list": self._ws_collection_list,
             "roles.collection.set": self._ws_collection_set,
             "roles.collection.clear": self._ws_collection_clear,
+            "roles.event_visibility.list": self._ws_event_vis_list,
+            "roles.event_visibility.set": self._ws_event_vis_set,
+            "roles.event_visibility.clear": self._ws_event_vis_clear,
+            "roles.rpc_permissions.list": self._ws_rpc_perm_list,
+            "roles.rpc_permissions.set": self._ws_rpc_perm_set,
+            "roles.rpc_permissions.clear": self._ws_rpc_perm_clear,
         }
 
     async def _ws_role_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -890,3 +896,33 @@ class AccessControlService(Service):
     async def _ws_collection_clear(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         await self.clear_collection_acl(frame.get("collection", ""))
         return {"type": "roles.collection.clear.result", "ref": frame.get("id"), "status": "ok"}
+
+    # --- Event visibility WS handlers ---
+
+    async def _ws_event_vis_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        rules = await self.list_event_visibility()
+        role_names = sorted(self._role_levels.keys())
+        return {"type": "roles.event_visibility.list.result", "ref": frame.get("id"), "rules": rules, "role_names": role_names}
+
+    async def _ws_event_vis_set(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        await self.set_event_visibility(frame.get("event_prefix", ""), frame.get("min_role", ""))
+        return {"type": "roles.event_visibility.set.result", "ref": frame.get("id"), "status": "ok"}
+
+    async def _ws_event_vis_clear(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        await self.clear_event_visibility(frame.get("event_prefix", ""))
+        return {"type": "roles.event_visibility.clear.result", "ref": frame.get("id"), "status": "ok"}
+
+    # --- RPC permissions WS handlers ---
+
+    async def _ws_rpc_perm_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        rules = await self.list_rpc_permissions()
+        role_names = sorted(self._role_levels.keys())
+        return {"type": "roles.rpc_permissions.list.result", "ref": frame.get("id"), "rules": rules, "role_names": role_names}
+
+    async def _ws_rpc_perm_set(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        await self.set_rpc_permission(frame.get("frame_prefix", ""), frame.get("min_role", ""))
+        return {"type": "roles.rpc_permissions.set.result", "ref": frame.get("id"), "status": "ok"}
+
+    async def _ws_rpc_perm_clear(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        await self.clear_rpc_permission(frame.get("frame_prefix", ""))
+        return {"type": "roles.rpc_permissions.clear.result", "ref": frame.get("id"), "status": "ok"}
