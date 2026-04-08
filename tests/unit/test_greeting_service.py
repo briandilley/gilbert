@@ -157,7 +157,7 @@ class TestGreetingService:
         await greeting_service.start(resolver)
 
         mock_ai = AsyncMock()
-        mock_ai.chat = AsyncMock(return_value=("Hey Brian, welcome!", "conv1"))
+        mock_ai.chat = AsyncMock(return_value=("Hey Brian, welcome!", "conv1", []))
         resolver.caps["ai_chat"] = mock_ai
 
         greeting = await greeting_service._generate_greeting("Brian")

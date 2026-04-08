@@ -593,6 +593,117 @@ code {
 .chat-input-area button:hover { opacity: 0.9; }
 .chat-input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* --- Chat forms (tool-pushed UI blocks) --- */
+.chat-form-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    margin-top: 0.75rem;
+    max-width: 500px;
+}
+.chat-form-block h3 {
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem 0;
+    color: var(--text);
+}
+.chat-form-block.submitted {
+    opacity: 0.65;
+}
+.chat-form-field {
+    margin-bottom: 0.75rem;
+}
+.chat-form-field > label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+.chat-form-field input[type="text"],
+.chat-form-field textarea,
+.chat-form-field select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.45rem 0.5rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 0.85rem;
+}
+.chat-form-field input[type="text"]:focus,
+.chat-form-field textarea:focus,
+.chat-form-field select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.chat-form-field input[type="range"] { width: 100%; }
+.chat-form-range-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.chat-form-range-val {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    min-width: 2.5rem;
+    text-align: right;
+}
+.chat-form-radio-group,
+.chat-form-checkbox-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.chat-form-radio-option,
+.chat-form-checkbox-option {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.chat-form-submit {
+    margin-top: 0.75rem;
+    padding: 0.5rem 1.2rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+.chat-form-submit:hover { opacity: 0.9; }
+.chat-form-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-form-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.chat-form-btn {
+    padding: 0.4rem 0.8rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+.chat-form-btn:hover { border-color: var(--accent); }
+.chat-form-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-form-btn.selected { border-color: var(--accent); background: rgba(99, 102, 241, 0.1); }
+.chat-form-label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin: 0.25rem 0;
+}
+.chat-form-separator {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0.5rem 0;
+}
+
 /* --- Role management forms --- */
 .inline-input {
     background: var(--surface);

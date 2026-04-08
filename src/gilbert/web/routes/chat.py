@@ -68,7 +68,7 @@ async def chat_send(
 
     conversation_id = body.get("conversation_id") or None
 
-    response_text, conv_id = await ai_svc.chat(
+    response_text, conv_id, ui_blocks = await ai_svc.chat(
         user_message=message,
         conversation_id=conversation_id,
         user_ctx=user,
@@ -78,6 +78,7 @@ async def chat_send(
     return {
         "response": response_text,
         "conversation_id": conv_id,
+        "ui_blocks": ui_blocks,
     }
 
 
@@ -151,6 +152,7 @@ async def get_conversation(
         "conversation_id": conversation_id,
         "title": data.get("title", ""),
         "messages": display_messages,
+        "ui_blocks": data.get("ui_blocks", []),
         "updated_at": data.get("updated_at", ""),
     }
 
@@ -201,3 +203,58 @@ async def rename_conversation(
             ))
 
     return {"status": "ok", "title": title}
+
+
+@router.post("/form-submit")
+async def form_submit(
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> dict[str, Any]:
+    """Submit a form that was rendered in chat.
+
+    Expects JSON: ``{"conversation_id": "...", "block_id": "...", "values": {...}}``.
+    """
+    ai_svc = _get_ai_service(request)
+    body = await request.json()
+
+    conversation_id = body.get("conversation_id")
+    block_id = body.get("block_id")
+    values = body.get("values", {})
+
+    if not conversation_id or not block_id:
+        raise HTTPException(status_code=400, detail="conversation_id and block_id required")
+
+    # Mark the form as submitted in storage
+    gilbert: Gilbert = request.app.state.gilbert
+    storage_svc = gilbert.service_manager.get_by_capability("entity_storage")
+    storage = getattr(storage_svc, "backend", None) if storage_svc else None
+
+    block_title = "Form"
+    if storage:
+        conv_data = await storage.get("ai_conversations", conversation_id)
+        if conv_data:
+            for block in conv_data.get("ui_blocks", []):
+                if block.get("block_id") == block_id:
+                    block["submitted"] = True
+                    block["submission"] = values
+                    block_title = block.get("title") or "Form"
+                    break
+            await storage.put("ai_conversations", conversation_id, conv_data)
+
+    # Build a human-readable summary for the AI
+    form_message = f"[Form submitted: {block_title}]\n"
+    for k, v in values.items():
+        form_message += f"- {k}: {v}\n"
+
+    response_text, conv_id, ui_blocks = await ai_svc.chat(
+        user_message=form_message,
+        conversation_id=conversation_id,
+        user_ctx=user,
+        ai_call="human_chat",
+    )
+
+    return {
+        "response": response_text,
+        "conversation_id": conv_id,
+        "ui_blocks": ui_blocks,
+    }

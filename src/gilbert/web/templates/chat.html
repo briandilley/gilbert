@@ -57,7 +57,7 @@
         return el.innerHTML;
     }
 
-    function appendMessage(role, content) {
+    function appendMessage(role, content, uiBlocks) {
         // Remove welcome message on first message.
         const welcome = messagesEl.querySelector('.chat-welcome');
         if (welcome) welcome.remove();
@@ -79,8 +79,328 @@
 
         div.appendChild(label);
         div.appendChild(body);
+
+        // Render UI blocks (forms) after the message body
+        if (uiBlocks && uiBlocks.length > 0) {
+            uiBlocks.forEach(block => {
+                div.appendChild(renderUIBlock(block));
+            });
+        }
+
         messagesEl.appendChild(div);
         scrollToBottom();
+    }
+
+    // --- UI Block (Form) Rendering ---
+
+    function renderUIBlock(block) {
+        const container = document.createElement('div');
+        container.className = 'chat-form-block';
+        container.dataset.blockId = block.block_id;
+
+        if (block.submitted) container.classList.add('submitted');
+
+        if (block.title) {
+            const h = document.createElement('h3');
+            h.textContent = block.title;
+            container.appendChild(h);
+        }
+
+        const formEl = document.createElement('div');
+        formEl.className = 'chat-form-fields';
+
+        (block.elements || []).forEach(el => {
+            formEl.appendChild(renderUIElement(el, block));
+        });
+
+        container.appendChild(formEl);
+
+        // Submit button (unless block only has buttons-type elements)
+        const hasButtons = (block.elements || []).some(e => e.type === 'buttons');
+        if (!hasButtons) {
+            const btn = document.createElement('button');
+            btn.className = 'chat-form-submit';
+            btn.textContent = block.submit_label || 'Submit';
+            if (block.submitted) btn.disabled = true;
+            btn.addEventListener('click', () => submitForm(container, block));
+            container.appendChild(btn);
+        }
+
+        return container;
+    }
+
+    function renderUIElement(el, block) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'chat-form-field';
+
+        const submitted = block.submitted;
+        const submittedVal = (block.submission || {})[el.name];
+
+        switch (el.type) {
+        case 'label':
+            wrapper.className = 'chat-form-label';
+            wrapper.textContent = el.label;
+            return wrapper;
+
+        case 'separator':
+            const hr = document.createElement('hr');
+            hr.className = 'chat-form-separator';
+            return hr;
+
+        case 'text': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.name = el.name;
+            inp.placeholder = el.placeholder || '';
+            inp.required = el.required || false;
+            if (submitted && submittedVal !== undefined) inp.value = submittedVal;
+            else if (el.default != null) inp.value = el.default;
+            if (submitted) inp.disabled = true;
+            wrapper.appendChild(inp);
+            return wrapper;
+        }
+
+        case 'textarea': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const ta = document.createElement('textarea');
+            ta.name = el.name;
+            ta.rows = el.rows || 4;
+            ta.placeholder = el.placeholder || '';
+            ta.required = el.required || false;
+            if (submitted && submittedVal !== undefined) ta.value = submittedVal;
+            else if (el.default != null) ta.value = el.default;
+            if (submitted) ta.disabled = true;
+            wrapper.appendChild(ta);
+            return wrapper;
+        }
+
+        case 'select': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const sel = document.createElement('select');
+            sel.name = el.name;
+            (el.options || []).forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.value;
+                o.textContent = opt.label;
+                if (submitted && submittedVal === opt.value) o.selected = true;
+                else if (opt.selected || opt.value === el.default) o.selected = true;
+                sel.appendChild(o);
+            });
+            if (submitted) sel.disabled = true;
+            wrapper.appendChild(sel);
+            return wrapper;
+        }
+
+        case 'radio': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const group = document.createElement('div');
+            group.className = 'chat-form-radio-group';
+            (el.options || []).forEach(opt => {
+                const row = document.createElement('label');
+                row.className = 'chat-form-radio-option';
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = el.name;
+                r.value = opt.value;
+                if (submitted && submittedVal === opt.value) r.checked = true;
+                else if (opt.selected || opt.value === el.default) r.checked = true;
+                if (submitted) r.disabled = true;
+                row.appendChild(r);
+                row.appendChild(document.createTextNode(' ' + opt.label));
+                group.appendChild(row);
+            });
+            wrapper.appendChild(group);
+            return wrapper;
+        }
+
+        case 'checkbox': {
+            if (el.options && el.options.length > 0) {
+                // Multi-checkbox group
+                if (el.label) {
+                    const lbl = document.createElement('label');
+                    lbl.textContent = el.label;
+                    wrapper.appendChild(lbl);
+                }
+                const group = document.createElement('div');
+                group.className = 'chat-form-checkbox-group';
+                const checkedVals = submitted ? (submittedVal || []) : (el.default || []);
+                (el.options || []).forEach(opt => {
+                    const row = document.createElement('label');
+                    row.className = 'chat-form-checkbox-option';
+                    const c = document.createElement('input');
+                    c.type = 'checkbox';
+                    c.name = el.name;
+                    c.value = opt.value;
+                    if (Array.isArray(checkedVals) && checkedVals.includes(opt.value)) c.checked = true;
+                    else if (opt.selected) c.checked = true;
+                    if (submitted) c.disabled = true;
+                    row.appendChild(c);
+                    row.appendChild(document.createTextNode(' ' + opt.label));
+                    group.appendChild(row);
+                });
+                wrapper.appendChild(group);
+            } else {
+                // Single checkbox toggle
+                const row = document.createElement('label');
+                row.className = 'chat-form-checkbox-option';
+                const c = document.createElement('input');
+                c.type = 'checkbox';
+                c.name = el.name;
+                if (submitted) { c.checked = !!submittedVal; c.disabled = true; }
+                else if (el.default) c.checked = true;
+                row.appendChild(c);
+                row.appendChild(document.createTextNode(' ' + (el.label || el.name)));
+                wrapper.appendChild(row);
+            }
+            return wrapper;
+        }
+
+        case 'range': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const rangeRow = document.createElement('div');
+            rangeRow.className = 'chat-form-range-row';
+            const r = document.createElement('input');
+            r.type = 'range';
+            r.name = el.name;
+            if (el.min != null) r.min = el.min;
+            if (el.max != null) r.max = el.max;
+            if (el.step != null) r.step = el.step;
+            const val = (submitted && submittedVal != null) ? submittedVal : (el.default != null ? el.default : r.min || 0);
+            r.value = val;
+            if (submitted) r.disabled = true;
+            const valDisplay = document.createElement('span');
+            valDisplay.className = 'chat-form-range-val';
+            valDisplay.textContent = val;
+            r.addEventListener('input', () => { valDisplay.textContent = r.value; });
+            rangeRow.appendChild(r);
+            rangeRow.appendChild(valDisplay);
+            wrapper.appendChild(rangeRow);
+            return wrapper;
+        }
+
+        case 'buttons': {
+            if (el.label) {
+                const lbl = document.createElement('label');
+                lbl.textContent = el.label;
+                wrapper.appendChild(lbl);
+            }
+            const btnRow = document.createElement('div');
+            btnRow.className = 'chat-form-buttons';
+            (el.options || []).forEach(opt => {
+                const b = document.createElement('button');
+                b.className = 'chat-form-btn';
+                b.textContent = opt.label;
+                if (submitted) {
+                    b.disabled = true;
+                    if (submittedVal === opt.value) b.classList.add('selected');
+                } else {
+                    b.addEventListener('click', () => {
+                        // Submit immediately with this button's value
+                        const container = wrapper.closest('.chat-form-block');
+                        const values = gatherFormValues(container);
+                        values[el.name] = opt.value;
+                        doFormSubmit(container, block, values);
+                    });
+                }
+                btnRow.appendChild(b);
+            });
+            wrapper.appendChild(btnRow);
+            return wrapper;
+        }
+
+        default:
+            return wrapper;
+        }
+    }
+
+    function gatherFormValues(container) {
+        const values = {};
+        // Text, textarea, select
+        container.querySelectorAll('input[type="text"], textarea, select').forEach(el => {
+            if (el.name) values[el.name] = el.value;
+        });
+        // Range
+        container.querySelectorAll('input[type="range"]').forEach(el => {
+            if (el.name) values[el.name] = parseFloat(el.value);
+        });
+        // Radio
+        container.querySelectorAll('input[type="radio"]:checked').forEach(el => {
+            if (el.name) values[el.name] = el.value;
+        });
+        // Checkbox
+        const checkboxNames = new Set();
+        container.querySelectorAll('input[type="checkbox"]').forEach(el => {
+            if (el.name) checkboxNames.add(el.name);
+        });
+        checkboxNames.forEach(name => {
+            const boxes = container.querySelectorAll('input[type="checkbox"][name="' + name + '"]');
+            if (boxes.length === 1) {
+                values[name] = boxes[0].checked;
+            } else {
+                values[name] = Array.from(boxes).filter(b => b.checked).map(b => b.value);
+            }
+        });
+        return values;
+    }
+
+    function submitForm(container, block) {
+        const values = gatherFormValues(container);
+        doFormSubmit(container, block, values);
+    }
+
+    async function doFormSubmit(container, block, values) {
+        // Disable form
+        container.classList.add('submitted');
+        container.querySelectorAll('input, textarea, select, button').forEach(el => el.disabled = true);
+
+        setLoading(true);
+        try {
+            const resp = await fetch('/chat/form-submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: conversationId,
+                    block_id: block.block_id,
+                    values: values,
+                }),
+            });
+            setLoading(false);
+            if (resp.ok) {
+                const data = await resp.json();
+                conversationId = data.conversation_id;
+                appendMessage('assistant', data.response, data.ui_blocks);
+                loadConversationList();
+            } else if (resp.status === 401) {
+                window.location.href = '/auth/login';
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                appendMessage('assistant', 'Error: ' + (err.detail || 'Something went wrong'));
+            }
+        } catch (e) {
+            setLoading(false);
+            appendMessage('assistant', 'Error: Connection failed');
+        }
     }
 
     function setLoading(on) {
@@ -119,7 +439,7 @@
             if (resp.ok) {
                 const data = await resp.json();
                 conversationId = data.conversation_id;
-                appendMessage('assistant', data.response);
+                appendMessage('assistant', data.response, data.ui_blocks);
                 loadConversationList();
             } else if (resp.status === 401) {
                 window.location.href = '/auth/login';
@@ -211,7 +531,18 @@
             const data = await resp.json();
             conversationId = data.conversation_id;
             messagesEl.innerHTML = '';
-            data.messages.forEach(m => appendMessage(m.role, m.content));
+
+            const uiBlocks = data.ui_blocks || [];
+            let assistantIdx = 0;
+            data.messages.forEach(m => {
+                // Find UI blocks that follow this assistant message
+                let blocksForMsg = [];
+                if (m.role === 'assistant') {
+                    blocksForMsg = uiBlocks.filter(b => b.response_index === assistantIdx);
+                    assistantIdx++;
+                }
+                appendMessage(m.role, m.content, blocksForMsg.length ? blocksForMsg : undefined);
+            });
         } catch (e) { /* ignore */ }
     }
 

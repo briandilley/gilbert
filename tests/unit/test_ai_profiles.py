@@ -473,7 +473,7 @@ class TestDefenseInDepth:
         }
         tool_calls = [ToolCall(tool_call_id="tc1", tool_name="admin_tool", arguments={})]
 
-        results = await ai_svc._execute_tool_calls(
+        results, _ui = await ai_svc._execute_tool_calls(
             tool_calls, tools_by_name, user_ctx=_user(), profile=None,
         )
         assert len(results) == 1
@@ -493,7 +493,7 @@ class TestDefenseInDepth:
         )
         tool_calls = [ToolCall(tool_call_id="tc1", tool_name="admin_tool", arguments={})]
 
-        results = await ai_svc._execute_tool_calls(
+        results, _ui = await ai_svc._execute_tool_calls(
             tool_calls, tools_by_name, user_ctx=_everyone(), profile=profile,
         )
         assert len(results) == 1
@@ -507,7 +507,7 @@ class TestDefenseInDepth:
         }
         tool_calls = [ToolCall(tool_call_id="tc1", tool_name="admin_tool", arguments={})]
 
-        results = await ai_svc._execute_tool_calls(
+        results, _ui = await ai_svc._execute_tool_calls(
             tool_calls, tools_by_name, user_ctx=UserContext.SYSTEM, profile=None,
         )
         assert len(results) == 1
@@ -515,7 +515,7 @@ class TestDefenseInDepth:
 
     async def test_unknown_tool_returns_error(self, ai_svc: AIService) -> None:
         tool_calls = [ToolCall(tool_call_id="tc1", tool_name="nonexistent", arguments={})]
-        results = await ai_svc._execute_tool_calls(tool_calls, {}, user_ctx=_admin())
+        results, _ui = await ai_svc._execute_tool_calls(tool_calls, {}, user_ctx=_admin())
         assert len(results) == 1
         assert results[0].is_error
         assert "unknown tool" in results[0].content

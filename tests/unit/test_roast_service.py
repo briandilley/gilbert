@@ -147,7 +147,7 @@ class TestGenerateRoast:
     async def test_ai_roast(self, roast_service: RoastService, resolver: FakeResolver) -> None:
         """With AI available, uses AI-generated roast."""
         fake_ai = MagicMock()
-        fake_ai.chat = AsyncMock(return_value=("Hey Alice, nice work today!", []))
+        fake_ai.chat = AsyncMock(return_value=("Hey Alice, nice work today!", "conv1", []))
         resolver.caps["ai_chat"] = fake_ai
 
         await roast_service.start(resolver)

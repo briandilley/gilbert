@@ -66,7 +66,7 @@ class FakeAIService:
         conversation_id: str | None = None,
         user_ctx: UserContext | None = None,
         **kwargs: Any,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[Any]]:
         conv_id = conversation_id or f"conv_{self._conv_counter}"
         self._conv_counter += 1
         self.chats.append({
@@ -74,7 +74,7 @@ class FakeAIService:
             "conversation_id": conv_id,
             "user_ctx": user_ctx,
         })
-        return self.response_text, conv_id
+        return self.response_text, conv_id, []
 
 
 class FakeStorageBackend:
@@ -633,7 +633,7 @@ class TestAttachmentInReply:
             conversation_id: str | None = None,
             user_ctx: UserContext | None = None,
             **kwargs: Any,
-        ) -> tuple[str, str]:
+        ) -> tuple[str, str, list[Any]]:
             # Simulate AI calling email_attach tool during chat
             await service.execute_tool("email_attach", {
                 "document_id": "local:docs/report.pdf",
@@ -664,7 +664,7 @@ class TestAttachmentInReply:
             conversation_id: str | None = None,
             user_ctx: UserContext | None = None,
             **kwargs: Any,
-        ) -> tuple[str, str]:
+        ) -> tuple[str, str, list[Any]]:
             nonlocal call_count
             call_count += 1
             if call_count == 1:

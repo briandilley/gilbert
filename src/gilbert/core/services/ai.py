@@ -395,7 +395,7 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         system_prompt: str | None = None,
         ai_call: str | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[dict[str, Any]]]:
         """Send a user message and get an AI response (with full agentic loop).
 
         Args:
@@ -409,7 +409,8 @@ class AIService(Service):
                 requirements. When ``None``, all tools are available.
 
         Returns:
-            (response_text, conversation_id) tuple.
+            (response_text, conversation_id, ui_blocks) tuple.  ``ui_blocks``
+            is a list of serialized UI block dicts (possibly empty).
         """
         if user_ctx is None:
             user_ctx = get_current_user()
@@ -441,7 +442,11 @@ class AIService(Service):
             effective_prompt = await self._build_system_prompt(user_ctx=user_ctx)
 
         # Agentic loop
+        from gilbert.interfaces.ui import UIBlock
+
         response: AIResponse | None = None
+        all_ui_blocks: list[UIBlock] = []
+
         for round_num in range(self._max_tool_rounds):
             truncated = self._truncate_history(messages)
 
@@ -464,10 +469,11 @@ class AIService(Service):
                 break
 
             # Execute tool calls and append results
-            tool_results = await self._execute_tool_calls(
+            tool_results, round_ui_blocks = await self._execute_tool_calls(
                 response.message.tool_calls, tools_by_name,
                 user_ctx=user_ctx, profile=profile,
             )
+            all_ui_blocks.extend(round_ui_blocks)
             messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
         else:
             logger.warning(
@@ -476,12 +482,27 @@ class AIService(Service):
                 conversation_id,
             )
 
-        # Persist conversation with user ownership
-        await self._save_conversation(conversation_id, messages, user_ctx)
+        # Count assistant messages to determine response_index for UI blocks
+        assistant_count = sum(1 for m in messages if m.role == MessageRole.ASSISTANT)
+        response_index = max(0, assistant_count - 1)
+
+        # Serialize UI blocks with position and submission state
+        ui_block_dicts: list[dict[str, Any]] = []
+        for block in all_ui_blocks:
+            d = block.to_dict()
+            d["response_index"] = response_index
+            d["submitted"] = False
+            d["submission"] = None
+            ui_block_dicts.append(d)
+
+        # Persist conversation with user ownership and UI blocks
+        await self._save_conversation(
+            conversation_id, messages, user_ctx, ui_blocks=ui_block_dicts,
+        )
 
         # Return final text response
         final_text = response.message.content if response else ""
-        return final_text, conversation_id
+        return final_text, conversation_id, ui_block_dicts
 
     # --- System Prompt ---
 
@@ -626,9 +647,12 @@ class AIService(Service):
         tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
-    ) -> list[ToolResult]:
-        """Execute a batch of tool calls and return results."""
+    ) -> tuple[list[ToolResult], list["UIBlock"]]:
+        """Execute a batch of tool calls and return results + any UI blocks."""
+        from gilbert.interfaces.ui import ToolOutput, UIBlock
+
         results: list[ToolResult] = []
+        ui_blocks: list[UIBlock] = []
         tool_roles = profile.tool_roles if profile else {}
 
         for tc in tool_calls:
@@ -660,7 +684,23 @@ class AIService(Service):
                         continue
 
             try:
-                result_text = await provider.execute_tool(tc.tool_name, tc.arguments)
+                raw_result = await provider.execute_tool(tc.tool_name, tc.arguments)
+
+                # Normalize: tools may return str (backward compat) or ToolOutput
+                if isinstance(raw_result, ToolOutput):
+                    result_text = raw_result.text
+                    for block in raw_result.ui_blocks:
+                        import dataclasses as _dc
+                        # Auto-assign block_id if missing
+                        if not block.block_id:
+                            block = _dc.replace(block, block_id=str(uuid.uuid4()))
+                        # Tag with tool name if not set
+                        if not block.tool_name:
+                            block = _dc.replace(block, tool_name=tc.tool_name)
+                        ui_blocks.append(block)
+                else:
+                    result_text = raw_result
+
                 results.append(ToolResult(
                     tool_call_id=tc.tool_call_id,
                     content=result_text,
@@ -672,7 +712,7 @@ class AIService(Service):
                     content=f"Error executing tool: {exc}",
                     is_error=True,
                 ))
-        return results
+        return results, ui_blocks
 
     # --- Conversation Persistence ---
 
@@ -681,6 +721,7 @@ class AIService(Service):
         conv_id: str,
         messages: list[Message],
         user_ctx: UserContext | None = None,
+        ui_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         """Persist a conversation to storage with optional user ownership."""
         if self._storage is None:
@@ -694,6 +735,13 @@ class AIService(Service):
         }
         if user_ctx is not None and user_ctx.user_id != "system":
             data["user_id"] = user_ctx.user_id
+
+        # Merge new UI blocks with any existing ones
+        if ui_blocks:
+            existing_blocks: list[dict[str, Any]] = data.get("ui_blocks", [])
+            existing_blocks.extend(ui_blocks)
+            data["ui_blocks"] = existing_blocks
+
         await self._storage.put(_COLLECTION, conv_id, data)
 
     async def list_conversations(

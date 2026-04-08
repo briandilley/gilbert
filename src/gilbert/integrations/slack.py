@@ -223,7 +223,7 @@ class SlackService(Service):
 
         # Run through AI
         try:
-            response_text, conv_id = await self._ai.chat(
+            response_text, conv_id, _ui = await self._ai.chat(
                 user_message=text,
                 conversation_id=conversation_id,
                 user_ctx=user_ctx,

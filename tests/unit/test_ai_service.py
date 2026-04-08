@@ -244,7 +244,7 @@ async def test_chat_simple_response(
     ))
     await ai_service.start(resolver)
 
-    text, conv_id = await ai_service.chat("Hi")
+    text, conv_id, _ui = await ai_service.chat("Hi")
     assert text == "Hello there!"
     assert conv_id  # non-empty UUID string
     assert len(stub_backend.requests) == 1
@@ -276,7 +276,7 @@ async def test_chat_continues_conversation(
     await ai_service.start(resolver)
 
     # First message
-    _, conv_id = await ai_service.chat("Hello")
+    _, conv_id, _ui = await ai_service.chat("Hello")
 
     # Simulate storage returning the saved conversation
     saved_call = storage_backend.put.call_args  # type: ignore[union-attr]
@@ -284,7 +284,7 @@ async def test_chat_continues_conversation(
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
 
     # Second message in same conversation
-    text, same_id = await ai_service.chat("Follow up", conversation_id=conv_id)
+    text, same_id, _ui = await ai_service.chat("Follow up", conversation_id=conv_id)
     assert same_id == conv_id
     assert text == "Second reply"
 
@@ -367,7 +367,7 @@ async def test_chat_with_tool_calls(
     ))
 
     await ai_service.start(resolver)
-    text, _ = await ai_service.chat("What's the weather in Portland?")
+    text, _, _ui = await ai_service.chat("What's the weather in Portland?")
 
     assert text == "It's 72F and sunny in Portland!"
     assert len(stub_backend.requests) == 2
@@ -407,7 +407,7 @@ async def test_chat_max_tool_rounds(
         ))
 
     await ai_service.start(resolver)
-    text, _ = await ai_service.chat("loop forever")
+    text, _, _ui = await ai_service.chat("loop forever")
 
     # max_tool_rounds=5, so at most 5 backend calls
     assert len(stub_backend.requests) == 5
@@ -439,7 +439,7 @@ async def test_unknown_tool_returns_error_result(
     ))
 
     await ai_service.start(resolver)
-    text, _ = await ai_service.chat("Do something impossible")
+    text, _, _ui = await ai_service.chat("Do something impossible")
 
     # The error result was fed back
     second_req = stub_backend.requests[1]
@@ -495,7 +495,7 @@ async def test_tool_execution_error_returns_error_result(
     ))
 
     await ai_service.start(resolver)
-    text, _ = await ai_service.chat("Run the bad tool")
+    text, _, _ui = await ai_service.chat("Run the bad tool")
 
     second_req = stub_backend.requests[1]
     tool_result_msg = second_req.messages[-1]
@@ -517,7 +517,7 @@ async def test_conversation_saved_to_storage(
         model="stub",
     ))
     await ai_service.start(resolver)
-    _, conv_id = await ai_service.chat("Save this")
+    _, conv_id, _ui = await ai_service.chat("Save this")
 
     # Find the conversation save call among all put calls (profiles are also seeded)
     conv_calls = [
