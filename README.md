@@ -19,6 +19,7 @@ Out of the box, Gilbert ships with integrations and services for:
 - **Personalized greetings** — welcome people by name when they arrive, with a voice and personality you define
 - **Scheduled jobs** — cron-style recurring tasks, one-shot timers, and system maintenance jobs
 - **Role-based access control** — per-tool and per-collection permissions with a role hierarchy
+- **Interactive tool forms** — tools can push structured forms (inputs, selects, sliders, buttons) into the chat for user interaction
 - **Plugin system** — extend Gilbert with new services, tools, and integrations without modifying core code
 
 ## Architecture
@@ -82,6 +83,12 @@ Gilbert's AI service runs an agentic tool-use loop. Services that implement the 
 Tools are filtered through two layers:
 1. **Profile filtering** — which tools are available for this type of interaction
 2. **RBAC filtering** — which tools this user's role is allowed to invoke
+
+### Interactive Tool Forms
+
+Tools can push structured forms directly into the chat UI — text inputs, dropdowns, radio buttons, checkboxes, range sliders, and button groups. A tool returns a `ToolOutput` instead of a plain string, and the form renders inline after the AI's response. When the user submits, the values flow back through the normal conversation as a structured message the AI can process.
+
+This enables richer workflows without leaving the chat: configuring settings, confirming actions, picking from options, or filling out multi-field forms — all driven by tools, not by the AI generating markup.
 
 ### Storage
 
