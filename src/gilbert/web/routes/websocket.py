@@ -68,7 +68,7 @@ async def event_stream(websocket: WebSocket) -> None:
         "subscriptions": sorted(conn.subscriptions),
     })
 
-    logger.debug("WebSocket connected: user=%s, level=%d", user_ctx.user_id, user_level)
+    logger.info("WebSocket connected: user=%s, level=%d, roles=%s", user_ctx.user_id, user_level, sorted(user_ctx.roles))
 
     try:
         send_task = asyncio.create_task(_send_loop(websocket, conn))
@@ -113,7 +113,12 @@ async def _send_loop(websocket: WebSocket, conn: WsConnection) -> None:
         frame = await conn.queue.get()
         try:
             await websocket.send_json(frame)
+        except (TypeError, ValueError) as exc:
+            # JSON serialization error — skip this frame, don't kill the connection
+            logger.warning("Failed to serialize WS frame type=%s: %s", frame.get("type"), exc)
+            continue
         except Exception:
+            # Connection error — stop sending
             return
 
 

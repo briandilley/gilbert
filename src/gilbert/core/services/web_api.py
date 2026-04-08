@@ -113,12 +113,22 @@ class WebApiService(Service):
 
             if isinstance(svc, Configurable):
                 entry["config_namespace"] = svc.config_namespace
-                entry["config_params"] = [
-                    {"key": p.key, "type": p.type.value, "description": p.description, "default": p.default, "restart_required": p.restart_required}
-                    for p in svc.config_params()
-                ]
+                try:
+                    entry["config_params"] = [
+                        {"key": p.key, "type": p.type.value, "description": p.description, "default": p.default, "restart_required": p.restart_required}
+                        for p in svc.config_params()
+                    ]
+                except Exception:
+                    pass
                 if isinstance(config_svc, ConfigurationService):
-                    entry["config_values"] = config_svc.get_section(svc.config_namespace)
+                    try:
+                        section = config_svc.get_section(svc.config_namespace)
+                        # Ensure values are JSON-serializable
+                        import json as _json
+                        _json.dumps(section)
+                        entry["config_values"] = section
+                    except (TypeError, ValueError):
+                        entry["config_values"] = {}
 
             if isinstance(svc, ToolProvider):
                 entry["tools"] = [
