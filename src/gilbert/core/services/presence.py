@@ -130,9 +130,8 @@ class PresenceService(Service):
                 )
 
         logger.info(
-            "Presence service started (poll_interval=%.0fs, tracking=%d users)",
+            "Presence service started (poll_interval=%.0fs)",
             self._poll_interval,
-            len(self._last_state),
         )
 
     def _apply_config(self, section: dict[str, Any]) -> None:
