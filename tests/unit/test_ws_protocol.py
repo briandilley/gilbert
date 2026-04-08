@@ -19,8 +19,8 @@ from gilbert.web.ws_protocol import (
 
 
 class TestEventVisibility:
-    def test_presence_is_everyone(self) -> None:
-        assert get_event_visibility_level("presence.arrived") == 200
+    def test_presence_is_user(self) -> None:
+        assert get_event_visibility_level("presence.arrived") == 100
 
     def test_doorbell_is_everyone(self) -> None:
         assert get_event_visibility_level("doorbell.ring") == 200
@@ -28,17 +28,17 @@ class TestEventVisibility:
     def test_greeting_is_everyone(self) -> None:
         assert get_event_visibility_level("greeting.announced") == 200
 
-    def test_timer_is_everyone(self) -> None:
-        assert get_event_visibility_level("timer.fired") == 200
+    def test_timer_is_user(self) -> None:
+        assert get_event_visibility_level("timer.fired") == 100
 
-    def test_chat_is_user(self) -> None:
-        assert get_event_visibility_level("chat.message.created") == 100
+    def test_chat_is_everyone(self) -> None:
+        assert get_event_visibility_level("chat.message.created") == 200
 
-    def test_inbox_is_user(self) -> None:
-        assert get_event_visibility_level("inbox.message.received") == 100
+    def test_inbox_is_admin(self) -> None:
+        assert get_event_visibility_level("inbox.message.received") == 0
 
-    def test_radio_dj_is_user(self) -> None:
-        assert get_event_visibility_level("radio_dj.started") == 100
+    def test_radio_dj_is_everyone(self) -> None:
+        assert get_event_visibility_level("radio_dj.started") == 200
 
     def test_service_is_admin(self) -> None:
         assert get_event_visibility_level("service.started") == 0
@@ -64,8 +64,8 @@ class TestEventVisibility:
 
     def test_everyone_sees_only_everyone(self) -> None:
         assert not can_see_event(200, "service.started")
-        assert not can_see_event(200, "chat.message.created")
-        assert can_see_event(200, "presence.arrived")
+        assert can_see_event(200, "chat.message.created")  # chat is everyone now
+        assert not can_see_event(200, "presence.arrived")  # presence is user now
 
     def test_system_bypasses_all(self) -> None:
         assert can_see_event(-1, "service.started")
@@ -175,8 +175,8 @@ class TestConnectionManager:
         # Clear admin queue
         admin_conn.queue.get_nowait()
 
-        # Everyone event
-        event2 = Event(event_type="presence.arrived", data={"user_id": "x"}, source="test")
+        # Everyone event (chat is everyone-visible now)
+        event2 = Event(event_type="chat.message.created", data={"conversation_id": ""}, source="test")
         await manager._dispatch_event(event2)
 
         assert not admin_conn.queue.empty()

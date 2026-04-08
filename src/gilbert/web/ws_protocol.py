@@ -24,18 +24,18 @@ logger = logging.getLogger(__name__)
 
 _EVENT_VISIBILITY: dict[str, int] = {
     # everyone (200)
-    "presence.": 200,
     "doorbell.": 200,
     "greeting.": 200,
-    "timer.": 200,
     "alarm.": 200,
     "screen.": 200,
+    "chat.": 200,
+    "radio_dj.": 200,
     # user (100)
-    "chat.": 100,
-    "radio_dj.": 100,
-    "inbox.": 100,
+    "presence.": 100,
+    "timer.": 100,
     "knowledge.": 100,
     # admin (0)
+    "inbox.": 0,
     "service.": 0,
     "config.": 0,
     "acl.": 0,
