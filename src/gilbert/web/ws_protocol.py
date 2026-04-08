@@ -51,6 +51,7 @@ _RPC_PERMISSIONS: dict[str, int] = {
     "gilbert.ping": 200,
     "gilbert.sub.": 200,
     "chat.conversation.list": 200,
+    "chat.conversation.create": 200,
     "chat.history.load": 200,
     "chat.message.send": 200,
     "chat.form.submit": 200,

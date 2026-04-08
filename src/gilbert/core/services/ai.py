@@ -1181,6 +1181,7 @@ class AIService(Service):
             "chat.form.submit": self._ws_form_submit,
             "chat.history.load": self._ws_history_load,
             "chat.conversation.list": self._ws_conversation_list,
+            "chat.conversation.create": self._ws_conversation_create,
             "chat.conversation.rename": self._ws_conversation_rename,
             "chat.conversation.delete": self._ws_conversation_delete,
             "chat.room.create": self._ws_room_create,
@@ -1200,13 +1201,62 @@ class AIService(Service):
 
         conversation_id = frame.get("conversation_id") or None
 
+        # Check if this is a shared room
+        is_shared = False
+        conv_data = None
+        if conversation_id and self._storage:
+            conv_data = await self._storage.get(_COLLECTION, conversation_id)
+            if conv_data:
+                is_shared = conv_data.get("shared", False)
+
         try:
-            response_text, conv_id, ui_blocks = await self.chat(
-                user_message=message,
-                conversation_id=conversation_id,
-                user_ctx=conn.user_ctx,
-                ai_call="human_chat",
-            )
+            if is_shared:
+                from gilbert.web.chat_helpers import mentions_gilbert, build_room_context, publish_event
+
+                addressed = mentions_gilbert(message)
+                tagged_message = f"[{conn.user_ctx.display_name}]: {message}"
+
+                response_text = ""
+                ui_blocks: list[dict[str, Any]] = []
+
+                if addressed:
+                    response_text, conv_id, ui_blocks = await self.chat(
+                        user_message=tagged_message,
+                        conversation_id=conversation_id,
+                        user_ctx=conn.user_ctx,
+                        system_prompt=build_room_context(conv_data, conn.user_ctx),
+                        ai_call="human_chat",
+                    )
+                else:
+                    # Store message without invoking AI
+                    conv_id = conversation_id
+                    messages = await self._load_conversation(conversation_id)
+                    messages.append(Message(
+                        role=MessageRole.USER, content=tagged_message,
+                        author_id=conn.user_ctx.user_id,
+                        author_name=conn.user_ctx.display_name,
+                    ))
+                    await self._save_conversation(conv_id, messages, user_ctx=conn.user_ctx)
+
+                # Broadcast to room members
+                gilbert = conn.manager._gilbert
+                if gilbert:
+                    await publish_event(gilbert, "chat.message.created", {
+                        "conversation_id": conv_id,
+                        "author_id": conn.user_ctx.user_id,
+                        "author_name": conn.user_ctx.display_name,
+                        "content": response_text,
+                        "user_message": message,
+                        "ui_blocks": ui_blocks,
+                    })
+            else:
+                # Personal chat — normal AI flow
+                response_text, conv_id, ui_blocks = await self.chat(
+                    user_message=message,
+                    conversation_id=conversation_id,
+                    user_ctx=conn.user_ctx,
+                    ai_call="human_chat",
+                )
         except Exception as exc:
             logger.warning("chat.message.send failed", exc_info=True)
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": str(exc), "code": 500}
@@ -1217,6 +1267,34 @@ class AIService(Service):
             "response": response_text,
             "conversation_id": conv_id,
             "ui_blocks": ui_blocks,
+        }
+
+    async def _ws_conversation_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Create an empty named personal conversation."""
+        from gilbert.web.ws_protocol import WsConnection
+        conn: WsConnection = conn
+
+        title = (frame.get("title") or "").strip() or "New conversation"
+
+        if self._storage is None:
+            return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+
+        conv_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        await self._storage.put(_COLLECTION, conv_id, {
+            "title": title,
+            "user_id": conn.user_ctx.user_id,
+            "messages": [],
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        return {
+            "type": "chat.conversation.create.result",
+            "ref": frame.get("id"),
+            "conversation_id": conv_id,
+            "title": title,
         }
 
     async def _ws_form_submit(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:

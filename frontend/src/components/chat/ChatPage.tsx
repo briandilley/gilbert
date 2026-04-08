@@ -167,48 +167,25 @@ export function ChatPage() {
   const handleNewChat = useCallback(() => {
     setPromptDialog({
       title: "New Chat",
-      placeholder: "Chat name (optional)",
+      placeholder: "Chat name",
       submitLabel: "Create",
       onSubmit: async (name) => {
         setPromptDialog(null);
-        // Start a new chat — the name will be set as the title after first message
-        clearChat();
-        if (name.trim()) {
-          // Send an initial message to create the conversation with a title
+        try {
+          const result = await api.createConversation(name.trim() || "New conversation");
+          refetchConversations();
+          setActiveConvId(result.conversation_id);
           setMessages([]);
-          setSending(true);
-          try {
-            const resp = await api.sendMessage(
-              name.trim(),
-              null,
-            );
-            setActiveConvId(resp.conversation_id);
-            if (resp.response) {
-              setMessages([
-                { role: "user", content: name.trim() },
-                { role: "assistant", content: resp.response },
-              ]);
-            }
-            if (resp.ui_blocks?.length) {
-              setUiBlocks(resp.ui_blocks);
-            }
-            // Rename it to the given name
-            await api.renameConversation(resp.conversation_id, name.trim());
-            refetchConversations();
-          } catch {
-            setMessages([
-              {
-                role: "assistant",
-                content: "Sorry, something went wrong.",
-              },
-            ]);
-          } finally {
-            setSending(false);
-          }
+          setUiBlocks([]);
+          setIsShared(false);
+          setMembers([]);
+          setRoomTitle(result.title);
+        } catch {
+          // ignore
         }
       },
     });
-  }, [api, clearChat, refetchConversations]);
+  }, [api, refetchConversations]);
 
   const handleCreateRoom = useCallback(() => {
     setPromptDialog({

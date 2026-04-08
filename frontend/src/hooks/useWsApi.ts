@@ -30,6 +30,9 @@ export function useWsApi() {
     loadConversation: (conversationId: string) =>
       rpc<ConversationDetail>({ type: "chat.history.load", conversation_id: conversationId }),
 
+    createConversation: (title: string) =>
+      rpc<{ conversation_id: string; title: string }>({ type: "chat.conversation.create", title }),
+
     sendMessage: (message: string, conversationId: string | null) =>
       rpc<ChatResponse>({ type: "chat.message.send", message, conversation_id: conversationId }),
 
