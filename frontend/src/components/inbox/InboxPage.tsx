@@ -217,43 +217,60 @@ export function InboxPage() {
   );
 }
 
-/** Sandboxed iframe that auto-sizes to its HTML content. */
+/** Sandboxed iframe that auto-sizes to fit its HTML content. */
 function EmailFrame({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
 
   const resize = useCallback(() => {
     const iframe = ref.current;
-    if (!iframe?.contentDocument?.body) return;
-    iframe.style.height = iframe.contentDocument.body.scrollHeight + "px";
+    if (!iframe) return;
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc?.body) return;
+      // Reset height so scrollHeight reflects actual content
+      iframe.style.height = "0";
+      const h = doc.documentElement.scrollHeight || doc.body.scrollHeight;
+      iframe.style.height = h + "px";
+    } catch {
+      // Cross-origin — can't measure
+    }
   }, []);
 
   useEffect(() => {
     const iframe = ref.current;
     if (!iframe) return;
+    let observer: MutationObserver | null = null;
+
     const handleLoad = () => {
       resize();
-      // Observe content changes (e.g. images loading)
-      const observer = new MutationObserver(resize);
-      if (iframe.contentDocument?.body) {
-        observer.observe(iframe.contentDocument.body, { childList: true, subtree: true, attributes: true });
-        // Also resize when images finish loading
-        iframe.contentDocument.querySelectorAll("img").forEach((img) => {
-          if (!img.complete) img.addEventListener("load", resize);
-        });
+      try {
+        const doc = iframe.contentDocument;
+        if (doc?.body) {
+          observer = new MutationObserver(resize);
+          observer.observe(doc.body, { childList: true, subtree: true, attributes: true });
+          doc.querySelectorAll("img").forEach((img) => {
+            if (!img.complete) img.addEventListener("load", resize);
+          });
+        }
+      } catch {
+        // cross-origin
       }
-      return () => observer.disconnect();
     };
+
     iframe.addEventListener("load", handleLoad);
-    return () => iframe.removeEventListener("load", handleLoad);
+    return () => {
+      iframe.removeEventListener("load", handleLoad);
+      observer?.disconnect();
+    };
   }, [html, resize]);
 
   return (
     <iframe
       ref={ref}
-      sandbox=""
+      sandbox="allow-same-origin"
       srcDoc={html}
       className="w-full border-0 rounded bg-white"
-      style={{ minHeight: "100px" }}
+      style={{ minHeight: "60px" }}
       title="Email content"
     />
   );
