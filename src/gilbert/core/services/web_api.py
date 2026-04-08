@@ -145,13 +145,18 @@ class WebApiService(Service):
         if storage_svc is None:
             return {"type": "entities.collection.list.result", "ref": frame.get("id"), "groups": []}
 
+        from gilbert.interfaces.storage import Query as StorageQuery
+
         collections = await storage_svc.backend.list_collections()
         groups: dict[str, list[dict[str, Any]]] = {}
         for col in sorted(collections):
             parts = col.rsplit(".", 1)
             ns = parts[0] if len(parts) > 1 else "(default)"
             short = parts[-1]
-            count = await storage_svc.backend.count(col) if hasattr(storage_svc.backend, "count") else 0
+            try:
+                count = await storage_svc.backend.count(StorageQuery(collection=col))
+            except Exception:
+                count = 0
             groups.setdefault(ns, []).append({"name": col, "short_name": short, "count": count})
 
         result = [{"namespace": ns, "collections": cols} for ns, cols in groups.items()]
@@ -186,7 +191,10 @@ class WebApiService(Service):
         entities = await storage_svc.backend.query(Query(
             collection=collection, sort=sort, limit=page_size, offset=offset,
         ))
-        total = await storage_svc.backend.count(collection) if hasattr(storage_svc.backend, "count") else len(entities)
+        try:
+            total = await storage_svc.backend.count(Query(collection=collection))
+        except Exception:
+            total = len(entities)
         total_pages = max(1, (total + page_size - 1) // page_size)
 
         # Derive sortable fields from first entity
