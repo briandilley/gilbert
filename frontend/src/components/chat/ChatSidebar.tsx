@@ -1,7 +1,9 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "@/types/chat";
+import { MessageSquareIcon, UsersRoundIcon } from "lucide-react";
 
 interface ChatSidebarProps {
   conversations: ConversationSummary[];
@@ -14,10 +16,6 @@ interface ChatSidebarProps {
   onDelete: (id: string) => void;
 }
 
-/**
- * Sidebar conversation list — rendered both inline (desktop)
- * and inside a Sheet (mobile).
- */
 export function ChatSidebarContent({
   conversations,
   activeId,
@@ -32,100 +30,110 @@ export function ChatSidebarContent({
   const personal = conversations.filter((c) => !c.shared);
 
   return (
-    <ScrollArea className="h-full">
-      {shared.length > 0 && (
-        <div className="px-3 pt-3 pb-2">
-          <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5 px-2">
-            Rooms
-          </h3>
-          {shared.map((conv) => {
-            const isMember = conv.is_member !== false;
-            return (
+    <ScrollArea className="h-full w-full">
+      <div className="p-3 space-y-1">
+        {/* Rooms section */}
+        <div className="mb-3">
+          <div className="flex items-center gap-1.5 px-2 mb-2">
+            <UsersRoundIcon className="size-3.5 text-muted-foreground" />
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Rooms
+            </h3>
+          </div>
+          {shared.length === 0 ? (
+            <p className="px-2 text-xs text-muted-foreground/60">No rooms</p>
+          ) : (
+            shared.map((conv) => {
+              const isMember = conv.is_member !== false;
+              return (
+                <div
+                  key={conv.conversation_id}
+                  className={cn(
+                    "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
+                    activeId === conv.conversation_id && "bg-accent",
+                  )}
+                  onClick={() =>
+                    isMember
+                      ? onSelect(conv.conversation_id)
+                      : onJoinRoom(conv.conversation_id)
+                  }
+                >
+                  <span className="flex-1 truncate">{conv.title}</span>
+                  {conv.member_count !== undefined && (
+                    <Badge variant="secondary" className="text-[10px] px-1.5">
+                      {conv.member_count}
+                    </Badge>
+                  )}
+                  {!isMember && (
+                    <Badge variant="outline" className="text-[10px]">
+                      Join
+                    </Badge>
+                  )}
+                  {isMember && (
+                    <button
+                      className="hidden text-muted-foreground hover:text-destructive group-hover:inline text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onLeaveRoom(conv.conversation_id);
+                      }}
+                    >
+                      Leave
+                    </button>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <Separator />
+
+        {/* Chats section */}
+        <div className="mt-3">
+          <div className="flex items-center gap-1.5 px-2 mb-2">
+            <MessageSquareIcon className="size-3.5 text-muted-foreground" />
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Chats
+            </h3>
+          </div>
+          {personal.length === 0 ? (
+            <p className="px-2 text-xs text-muted-foreground/60">No chats yet</p>
+          ) : (
+            personal.map((conv) => (
               <div
                 key={conv.conversation_id}
                 className={cn(
-                  "group flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
+                  "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
                   activeId === conv.conversation_id && "bg-accent",
                 )}
-                onClick={() =>
-                  isMember
-                    ? onSelect(conv.conversation_id)
-                    : onJoinRoom(conv.conversation_id)
-                }
+                onClick={() => onSelect(conv.conversation_id)}
               >
                 <span className="flex-1 truncate">{conv.title}</span>
-                {conv.member_count !== undefined && (
-                  <Badge variant="secondary" className="text-[10px] px-1.5">
-                    {conv.member_count}
-                  </Badge>
-                )}
-                {!isMember && (
-                  <Badge variant="outline" className="text-[10px]">
-                    Join
-                  </Badge>
-                )}
-                {isMember && (
+                <span className="hidden group-hover:inline-flex gap-1 shrink-0">
                   <button
-                    className="hidden text-muted-foreground hover:text-destructive group-hover:inline text-xs"
+                    className="text-muted-foreground hover:text-foreground text-xs"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onLeaveRoom(conv.conversation_id);
+                      onRename(conv.conversation_id);
                     }}
                   >
-                    Leave
+                    Rename
                   </button>
-                )}
+                  <button
+                    className="text-muted-foreground hover:text-destructive text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(conv.conversation_id);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </span>
               </div>
-            );
-          })}
+            ))
+          )}
         </div>
-      )}
-
-      {personal.length > 0 && (
-        <div className="px-3 pt-3 pb-2">
-          <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5 px-2">
-            Chats
-          </h3>
-          {personal.map((conv) => (
-            <div
-              key={conv.conversation_id}
-              className={cn(
-                "group flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
-                activeId === conv.conversation_id && "bg-accent",
-              )}
-              onClick={() => onSelect(conv.conversation_id)}
-            >
-              <span className="flex-1 truncate">{conv.title}</span>
-              <span className="hidden group-hover:inline-flex gap-1">
-                <button
-                  className="text-muted-foreground hover:text-foreground text-xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRename(conv.conversation_id);
-                  }}
-                >
-                  Rename
-                </button>
-                <button
-                  className="text-muted-foreground hover:text-destructive text-xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(conv.conversation_id);
-                  }}
-                >
-                  Delete
-                </button>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {shared.length === 0 && personal.length === 0 && (
-        <div className="flex items-center justify-center h-32 text-sm text-muted-foreground">
-          No conversations yet
-        </div>
-      )}
+      </div>
     </ScrollArea>
   );
 }

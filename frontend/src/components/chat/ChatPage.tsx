@@ -18,7 +18,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { MenuIcon, MessageSquareIcon, PlusIcon, UsersRoundIcon } from "lucide-react";
+import {
+  MenuIcon,
+  MessageSquareIcon,
+  PlusIcon,
+  UsersRoundIcon,
+} from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PromptDialog } from "@/components/ui/PromptDialog";
@@ -44,6 +49,7 @@ export function ChatPage() {
     title: string;
     placeholder?: string;
     defaultValue?: string;
+    submitLabel?: string;
     onSubmit: (value: string) => void;
   } | null>(null);
 
@@ -53,29 +59,32 @@ export function ChatPage() {
     enabled: connected,
   });
 
-  const loadConversation = useCallback(async (id: string) => {
-    setLoadingConv(true);
-    try {
-      const conv = await api.loadConversation(id);
-      setActiveConvId(id);
-      setMessages(conv.messages);
-      setUiBlocks(conv.ui_blocks);
-      setIsShared(conv.shared);
-      setMembers(
-        (conv.members || []).map((m) => ({
-          ...m,
-          role: m.role as "owner" | "member" | undefined,
-        })),
-      );
-      setOwnerId(conv.owner_id || "");
-      setRoomTitle(conv.title);
-      setSidebarOpen(false);
-    } catch {
-      setActiveConvId(null);
-    } finally {
-      setLoadingConv(false);
-    }
-  }, []);
+  const loadConversation = useCallback(
+    async (id: string) => {
+      setLoadingConv(true);
+      try {
+        const conv = await api.loadConversation(id);
+        setActiveConvId(id);
+        setMessages(conv.messages);
+        setUiBlocks(conv.ui_blocks || []);
+        setIsShared(conv.shared);
+        setMembers(
+          (conv.members || []).map((m) => ({
+            ...m,
+            role: m.role as "owner" | "member" | undefined,
+          })),
+        );
+        setOwnerId(conv.owner_id || "");
+        setRoomTitle(conv.title);
+        setSidebarOpen(false);
+      } catch {
+        setActiveConvId(null);
+      } finally {
+        setLoadingConv(false);
+      }
+    },
+    [api],
+  );
 
   const handleSend = useCallback(
     async (message: string) => {
@@ -110,7 +119,7 @@ export function ChatPage() {
         setSending(false);
       }
     },
-    [activeConvId, refetchConversations],
+    [api, activeConvId, refetchConversations],
   );
 
   const handleBlockSubmit = useCallback(
@@ -141,10 +150,10 @@ export function ChatPage() {
         setSending(false);
       }
     },
-    [activeConvId],
+    [api, activeConvId],
   );
 
-  const handleNewChat = useCallback(() => {
+  const clearChat = useCallback(() => {
     setActiveConvId(null);
     setMessages([]);
     setUiBlocks([]);
@@ -155,10 +164,57 @@ export function ChatPage() {
     setSidebarOpen(false);
   }, []);
 
+  const handleNewChat = useCallback(() => {
+    setPromptDialog({
+      title: "New Chat",
+      placeholder: "Chat name (optional)",
+      submitLabel: "Create",
+      onSubmit: async (name) => {
+        setPromptDialog(null);
+        // Start a new chat — the name will be set as the title after first message
+        clearChat();
+        if (name.trim()) {
+          // Send an initial message to create the conversation with a title
+          setMessages([]);
+          setSending(true);
+          try {
+            const resp = await api.sendMessage(
+              name.trim(),
+              null,
+            );
+            setActiveConvId(resp.conversation_id);
+            if (resp.response) {
+              setMessages([
+                { role: "user", content: name.trim() },
+                { role: "assistant", content: resp.response },
+              ]);
+            }
+            if (resp.ui_blocks?.length) {
+              setUiBlocks(resp.ui_blocks);
+            }
+            // Rename it to the given name
+            await api.renameConversation(resp.conversation_id, name.trim());
+            refetchConversations();
+          } catch {
+            setMessages([
+              {
+                role: "assistant",
+                content: "Sorry, something went wrong.",
+              },
+            ]);
+          } finally {
+            setSending(false);
+          }
+        }
+      },
+    });
+  }, [api, clearChat, refetchConversations]);
+
   const handleCreateRoom = useCallback(() => {
     setPromptDialog({
-      title: "Create Room",
+      title: "New Room",
       placeholder: "Room name",
+      submitLabel: "Create",
       onSubmit: async (title) => {
         setPromptDialog(null);
         const room = await api.createRoom(title);
@@ -166,7 +222,7 @@ export function ChatPage() {
         loadConversation(room.conversation_id);
       },
     });
-  }, [refetchConversations, loadConversation]);
+  }, [api, refetchConversations, loadConversation]);
 
   const handleJoinRoom = useCallback(
     async (id: string) => {
@@ -180,10 +236,10 @@ export function ChatPage() {
   const handleLeaveRoom = useCallback(
     async (id: string) => {
       await api.leaveRoom(id);
-      if (activeConvId === id) handleNewChat();
+      if (activeConvId === id) clearChat();
       refetchConversations();
     },
-    [api, activeConvId, handleNewChat, refetchConversations],
+    [api, activeConvId, clearChat, refetchConversations],
   );
 
   const handleKick = useCallback(
@@ -197,11 +253,13 @@ export function ChatPage() {
 
   const handleRename = useCallback(
     (id: string) => {
-      const current = conversations.find((c) => c.conversation_id === id)?.title || "";
+      const current =
+        conversations.find((c) => c.conversation_id === id)?.title || "";
       setPromptDialog({
-        title: "Rename Conversation",
+        title: "Rename",
         placeholder: "New name",
         defaultValue: current,
+        submitLabel: "Save",
         onSubmit: async (title) => {
           setPromptDialog(null);
           await api.renameConversation(id, title);
@@ -216,10 +274,10 @@ export function ChatPage() {
   const handleDelete = useCallback(
     async (id: string) => {
       await api.deleteConversation(id);
-      if (activeConvId === id) handleNewChat();
+      if (activeConvId === id) clearChat();
       refetchConversations();
     },
-    [api, activeConvId, handleNewChat, refetchConversations],
+    [api, activeConvId, clearChat, refetchConversations],
   );
 
   // WebSocket event handlers
@@ -231,10 +289,7 @@ export function ChatPage() {
       switch (event.event_type) {
         case "chat.message.created":
           if (convId === activeConvId) {
-            // Skip events from our own messages — we already added them
-            // optimistically in handleSend
             const isOwnMessage = data.author_id === user?.user_id;
-
             if (data.user_message && !isOwnMessage) {
               setMessages((prev) => [
                 ...prev,
@@ -279,12 +334,12 @@ export function ChatPage() {
             setMembers((prev) =>
               prev.filter((m) => m.user_id !== data.user_id),
             );
-            if (data.user_id === user?.user_id) handleNewChat();
+            if (data.user_id === user?.user_id) clearChat();
           }
           refetchConversations();
           break;
         case "chat.conversation.destroyed":
-          if (convId === activeConvId) handleNewChat();
+          if (convId === activeConvId) clearChat();
           refetchConversations();
           break;
         case "chat.conversation.renamed":
@@ -296,7 +351,7 @@ export function ChatPage() {
           break;
       }
     },
-    [activeConvId, user?.user_id, handleNewChat, refetchConversations],
+    [activeConvId, user?.user_id, clearChat, refetchConversations],
   );
 
   useEventBus("chat.message.created", handleChatEvent);
@@ -318,6 +373,12 @@ export function ChatPage() {
     onDelete: handleDelete,
   };
 
+  const chatTitle = isShared && roomTitle
+    ? roomTitle
+    : activeConvId
+      ? conversations.find((c) => c.conversation_id === activeConvId)?.title || "Chat"
+      : "";
+
   return (
     <div className="flex h-[calc(100dvh-3.5rem)]">
       {/* Desktop sidebar */}
@@ -338,7 +399,7 @@ export function ChatPage() {
       {/* Main chat area */}
       <div className="flex flex-1 flex-col min-w-0">
         {/* Top bar */}
-        <div className="flex items-center gap-1 shrink-0 border-b px-1.5 py-1.5 sm:px-2">
+        <div className="flex items-center gap-2 shrink-0 border-b px-3 py-2">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -349,20 +410,14 @@ export function ChatPage() {
           </Button>
 
           {/* Title */}
-          <div className="flex-1 min-w-0 px-1.5">
+          <div className="flex-1 min-w-0 px-1">
             <h2 className="text-sm font-medium truncate">
-              {isShared && roomTitle
-                ? roomTitle
-                : activeConvId
-                  ? conversations.find(
-                      (c) => c.conversation_id === activeConvId,
-                    )?.title || "Chat"
-                  : "New conversation"}
+              {chatTitle || "Chat"}
             </h2>
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-0.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0">
             {isShared && (
               <>
                 <Tooltip>
@@ -388,7 +443,7 @@ export function ChatPage() {
                 >
                   Leave
                 </Button>
-                <Separator orientation="vertical" className="h-5 mx-0.5" />
+                <Separator orientation="vertical" className="h-5 mx-1" />
               </>
             )}
 
@@ -424,15 +479,30 @@ export function ChatPage() {
           </div>
         </div>
 
-        {/* Messages */}
+        {/* Messages or empty state */}
         {loadingConv ? (
           <div className="flex flex-1 flex-col items-center justify-center">
             <LoadingSpinner text="Loading conversation..." />
           </div>
-        ) : messages.length === 0 && !activeConvId ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground p-4">
-            <MessageSquareIcon className="size-10 opacity-30" />
-            <p className="text-sm">Start a new conversation</p>
+        ) : !activeConvId && messages.length === 0 ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground p-8">
+            <MessageSquareIcon className="size-12 opacity-20" />
+            <div className="text-center space-y-1">
+              <p className="text-sm font-medium">No conversation selected</p>
+              <p className="text-xs">
+                Pick a chat or room from the sidebar, or create a new one.
+              </p>
+            </div>
+            <div className="flex gap-2 mt-2">
+              <Button variant="outline" size="sm" onClick={handleNewChat}>
+                <PlusIcon className="size-3.5 mr-1.5" />
+                New Chat
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleCreateRoom}>
+                <UsersRoundIcon className="size-3.5 mr-1.5" />
+                New Room
+              </Button>
+            </div>
           </div>
         ) : (
           <MessageList
@@ -453,16 +523,18 @@ export function ChatPage() {
           </div>
         )}
 
-        {/* Sticky input */}
-        <ChatInput
-          onSend={handleSend}
-          disabled={sending}
-          placeholder={
-            isShared
-              ? "Mention 'Gilbert' for AI help..."
-              : "Type a message..."
-          }
-        />
+        {/* Sticky input — only show when a conversation is active or messages exist */}
+        {(activeConvId || messages.length > 0) && (
+          <ChatInput
+            onSend={handleSend}
+            disabled={sending}
+            placeholder={
+              isShared
+                ? "Mention 'Gilbert' for AI help..."
+                : "Type a message..."
+            }
+          />
+        )}
       </div>
 
       {/* Desktop member panel */}
@@ -497,6 +569,7 @@ export function ChatPage() {
         title={promptDialog?.title || ""}
         placeholder={promptDialog?.placeholder}
         defaultValue={promptDialog?.defaultValue}
+        submitLabel={promptDialog?.submitLabel}
         onSubmit={(v) => promptDialog?.onSubmit(v)}
         onCancel={() => setPromptDialog(null)}
       />
