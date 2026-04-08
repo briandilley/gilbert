@@ -2,18 +2,8 @@ import { useState, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
-import {
-  fetchConversations,
-  fetchConversation,
-  sendMessage,
-  submitForm,
-  createSharedRoom,
-  joinRoom,
-  leaveRoom,
-  kickMember,
-  renameConversation,
-  deleteConversation,
-} from "@/api/chat";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import type { ChatMessage } from "@/types/chat";
 import type { UIBlock } from "@/types/ui";
 import { ChatSidebarContent } from "./ChatSidebar";
@@ -35,6 +25,8 @@ import { PromptDialog } from "@/components/ui/PromptDialog";
 
 export function ChatPage() {
   const { user } = useAuth();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uiBlocks, setUiBlocks] = useState<UIBlock[]>([]);
@@ -57,13 +49,14 @@ export function ChatPage() {
 
   const { data: conversations = [], refetch: refetchConversations } = useQuery({
     queryKey: ["conversations"],
-    queryFn: fetchConversations,
+    queryFn: api.listConversations,
+    enabled: connected,
   });
 
   const loadConversation = useCallback(async (id: string) => {
     setLoadingConv(true);
     try {
-      const conv = await fetchConversation(id);
+      const conv = await api.loadConversation(id);
       setActiveConvId(id);
       setMessages(conv.messages);
       setUiBlocks(conv.ui_blocks);
@@ -90,7 +83,7 @@ export function ChatPage() {
       setSending(true);
 
       try {
-        const resp = await sendMessage(message, activeConvId);
+        const resp = await api.sendMessage(message, activeConvId);
         setActiveConvId(resp.conversation_id);
 
         if (resp.response) {
@@ -134,7 +127,7 @@ export function ChatPage() {
 
       setSending(true);
       try {
-        const resp = await submitForm(activeConvId, blockId, values);
+        const resp = await api.submitForm(activeConvId, blockId, values);
         if (resp.response) {
           setMessages((prev) => [
             ...prev,
@@ -168,7 +161,7 @@ export function ChatPage() {
       placeholder: "Room name",
       onSubmit: async (title) => {
         setPromptDialog(null);
-        const room = await createSharedRoom(title);
+        const room = await api.createRoom(title);
         refetchConversations();
         loadConversation(room.conversation_id);
       },
@@ -177,29 +170,29 @@ export function ChatPage() {
 
   const handleJoinRoom = useCallback(
     async (id: string) => {
-      await joinRoom(id);
+      await api.joinRoom(id);
       refetchConversations();
       loadConversation(id);
     },
-    [refetchConversations, loadConversation],
+    [api, refetchConversations, loadConversation],
   );
 
   const handleLeaveRoom = useCallback(
     async (id: string) => {
-      await leaveRoom(id);
+      await api.leaveRoom(id);
       if (activeConvId === id) handleNewChat();
       refetchConversations();
     },
-    [activeConvId, handleNewChat, refetchConversations],
+    [api, activeConvId, handleNewChat, refetchConversations],
   );
 
   const handleKick = useCallback(
     async (userId: string) => {
       if (!activeConvId) return;
-      await kickMember(activeConvId, userId);
+      await api.kickMember(activeConvId, userId);
       setMembers((prev) => prev.filter((m) => m.user_id !== userId));
     },
-    [activeConvId],
+    [api, activeConvId],
   );
 
   const handleRename = useCallback(
@@ -211,22 +204,22 @@ export function ChatPage() {
         defaultValue: current,
         onSubmit: async (title) => {
           setPromptDialog(null);
-          await renameConversation(id, title);
+          await api.renameConversation(id, title);
           refetchConversations();
           if (id === activeConvId) setRoomTitle(title);
         },
       });
     },
-    [activeConvId, conversations, refetchConversations],
+    [api, activeConvId, conversations, refetchConversations],
   );
 
   const handleDelete = useCallback(
     async (id: string) => {
-      await deleteConversation(id);
+      await api.deleteConversation(id);
       if (activeConvId === id) handleNewChat();
       refetchConversations();
     },
-    [activeConvId, handleNewChat, refetchConversations],
+    [api, activeConvId, handleNewChat, refetchConversations],
   );
 
   // WebSocket event handlers

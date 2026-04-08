@@ -1,18 +1,22 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchUserRoles, setUserRoles } from "@/api/roles";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 
 export function UserRoles() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["user-roles"],
-    queryFn: fetchUserRoles,
+    queryFn: api.listUserRoles,
+    enabled: connected,
   });
 
   const mutation = useMutation({
     mutationFn: (args: { userId: string; roles: string[] }) =>
-      setUserRoles(args.userId, args.roles),
+      api.setUserRoles(args.userId, args.roles),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["user-roles"] }),
   });

@@ -1,10 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
-import {
-  fetchCollectionACLs,
-  setCollectionACL,
-  clearCollectionACL,
-} from "@/api/roles";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,9 +14,12 @@ import {
 
 export function CollectionACLs() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["collection-acls"],
-    queryFn: fetchCollectionACLs,
+    queryFn: api.listCollectionACLs,
+    enabled: connected,
   });
 
   const setMutation = useMutation({
@@ -27,13 +27,13 @@ export function CollectionACLs() {
       collection: string;
       readRole: string;
       writeRole: string;
-    }) => setCollectionACL(args.collection, args.readRole, args.writeRole),
+    }) => api.setCollectionACL(args.collection, args.readRole, args.writeRole),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["collection-acls"] }),
   });
 
   const clearMutation = useMutation({
-    mutationFn: clearCollectionACL,
+    mutationFn: api.clearCollectionACL,
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["collection-acls"] }),
   });

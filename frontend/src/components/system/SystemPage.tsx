@@ -1,11 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchServices } from "@/api/system";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { ServiceCard } from "./ServiceCard";
 
 export function SystemPage() {
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["system-services"],
-    queryFn: fetchServices,
+    queryFn: api.listServices,
+    enabled: connected,
   });
 
   if (isLoading) {

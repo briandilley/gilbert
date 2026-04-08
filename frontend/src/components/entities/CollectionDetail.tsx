@@ -1,6 +1,7 @@
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { fetchCollection } from "@/api/entities";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
@@ -8,10 +9,16 @@ export function CollectionDetail() {
   const { collection } = useParams<{ collection: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["entity-collection", collection, searchParams.toString()],
-    queryFn: () => fetchCollection(collection!, searchParams),
-    enabled: !!collection,
+    queryFn: () => api.queryCollection(collection!, {
+      page: Number(searchParams.get("page") || 1),
+      sort: searchParams.get("sort") || undefined,
+      order: searchParams.get("order") || undefined,
+    }),
+    enabled: !!collection && connected,
   });
 
   if (isLoading) {

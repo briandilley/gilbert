@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { fetchDashboard } from "@/api/dashboard";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   Card,
   CardDescription,
@@ -9,9 +10,12 @@ import {
 } from "@/components/ui/card";
 
 export function DashboardPage() {
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard"],
-    queryFn: fetchDashboard,
+    queryFn: api.getDashboard,
+    enabled: connected,
   });
 
   if (isLoading) {

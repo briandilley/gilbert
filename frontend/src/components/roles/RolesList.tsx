@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchRoles, createRole, deleteRole } from "@/api/roles";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,9 +19,12 @@ import { PlusIcon, Trash2Icon } from "lucide-react";
 
 export function RolesList() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["roles"],
-    queryFn: fetchRoles,
+    queryFn: api.listRoles,
+    enabled: connected,
   });
 
   const [showCreate, setShowCreate] = useState(false);
@@ -29,7 +33,7 @@ export function RolesList() {
   const [newDesc, setNewDesc] = useState("");
 
   const createMutation = useMutation({
-    mutationFn: () => createRole(newName, Number(newLevel), newDesc),
+    mutationFn: () => api.createRole(newName, Number(newLevel), newDesc),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["roles"] });
       setShowCreate(false);
@@ -40,7 +44,7 @@ export function RolesList() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteRole,
+    mutationFn: api.deleteRole,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["roles"] }),
   });
 

@@ -1,13 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  fetchInboxStats,
-  fetchMessages,
-  fetchMessageDetail,
-  fetchThread,
-  fetchPending,
-  cancelPending,
-} from "@/api/inbox";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import type { MessageDetail, InboxMessage } from "@/types/inbox";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -23,6 +17,8 @@ import {
 
 export function InboxPage() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const [sender, setSender] = useState("");
   const [subject, setSubject] = useState("");
   const [selectedMsg, setSelectedMsg] = useState<MessageDetail | null>(null);
@@ -31,21 +27,24 @@ export function InboxPage() {
 
   const { data: stats } = useQuery({
     queryKey: ["inbox-stats"],
-    queryFn: fetchInboxStats,
+    queryFn: api.inboxStats,
+    enabled: connected,
   });
 
   const { data: messages = [], refetch } = useQuery({
     queryKey: ["inbox-messages", sender, subject],
-    queryFn: () => fetchMessages({ sender: sender || undefined, subject: subject || undefined }),
+    queryFn: () => api.listMessages({ sender: sender || undefined, subject: subject || undefined }),
+    enabled: connected,
   });
 
   const { data: pending = [] } = useQuery({
     queryKey: ["inbox-pending"],
-    queryFn: fetchPending,
+    queryFn: api.listPending,
+    enabled: connected,
   });
 
   const cancelMutation = useMutation({
-    mutationFn: cancelPending,
+    mutationFn: api.cancelPending,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inbox-pending"] }),
   });
 
@@ -58,18 +57,18 @@ export function InboxPage() {
       if (msg.thread_id) {
         // Load the full thread
         try {
-          const threadDetails = await fetchThread(msg.thread_id);
+          const threadDetails = await api.getThread(msg.thread_id);
           if (threadDetails.length > 0) {
             setSelectedMsg(threadDetails[0]);
             setThreadMsgs(threadDetails);
           }
         } catch {
           // Fall back to single message
-          const detail = await fetchMessageDetail(msg.message_id);
+          const detail = await api.getMessage(msg.message_id);
           setSelectedMsg(detail);
         }
       } else {
-        const detail = await fetchMessageDetail(msg.message_id);
+        const detail = await api.getMessage(msg.message_id);
         setSelectedMsg(detail);
       }
     } finally {

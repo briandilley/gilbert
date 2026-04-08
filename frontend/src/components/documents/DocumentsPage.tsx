@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchDocuments, searchDocuments } from "@/api/documents";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import type { DocumentNode } from "@/types/documents";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -8,12 +9,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 export function DocumentsPage() {
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["documents"],
-    queryFn: fetchDocuments,
+    queryFn: api.listDocuments,
+    enabled: connected,
   });
 
   const {
@@ -22,7 +26,7 @@ export function DocumentsPage() {
     isFetching: isSearching,
   } = useQuery({
     queryKey: ["document-search", query],
-    queryFn: () => searchDocuments(query),
+    queryFn: () => api.searchDocuments(query),
     enabled: false,
   });
 

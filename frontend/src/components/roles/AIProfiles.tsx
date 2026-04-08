@@ -1,11 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
-import {
-  fetchProfiles,
-  saveProfile,
-  deleteProfile,
-} from "@/api/roles";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,9 +35,12 @@ interface ProfileForm {
 
 export function AIProfiles() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["ai-profiles"],
-    queryFn: fetchProfiles,
+    queryFn: api.listProfiles,
+    enabled: connected,
   });
 
   const [editing, setEditing] = useState<ProfileForm | null>(null);
@@ -48,7 +48,7 @@ export function AIProfiles() {
   const [toolFilter, setToolFilter] = useState("");
 
   const saveMutation = useMutation({
-    mutationFn: saveProfile,
+    mutationFn: api.saveProfile,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ai-profiles"] });
       setEditing(null);
@@ -56,7 +56,7 @@ export function AIProfiles() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteProfile,
+    mutationFn: api.deleteProfile,
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["ai-profiles"] }),
   });

@@ -1,6 +1,7 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { fetchEntity } from "@/api/entities";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export function EntityDetail() {
@@ -9,10 +10,12 @@ export function EntityDetail() {
     entityId: string;
   }>();
 
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["entity", collection, entityId],
-    queryFn: () => fetchEntity(collection!, entityId!),
-    enabled: !!collection && !!entityId,
+    queryFn: () => api.getEntity(collection!, entityId!),
+    enabled: !!collection && !!entityId && connected,
   });
 
   if (isLoading) {

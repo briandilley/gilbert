@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchToolPermissions, setToolRole, clearToolRole } from "@/api/roles";
+import { useWsApi } from "@/hooks/useWsApi";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Button } from "@/components/ui/button";
@@ -14,20 +15,23 @@ import { Badge } from "@/components/ui/badge";
 
 export function ToolPermissions() {
   const queryClient = useQueryClient();
+  const api = useWsApi();
+  const { connected } = useWebSocket();
   const { data, isLoading } = useQuery({
     queryKey: ["tool-permissions"],
-    queryFn: fetchToolPermissions,
+    queryFn: api.listToolPermissions,
+    enabled: connected,
   });
 
   const setMutation = useMutation({
     mutationFn: (args: { toolName: string; role: string }) =>
-      setToolRole(args.toolName, args.role),
+      api.setToolRole(args.toolName, args.role),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["tool-permissions"] }),
   });
 
   const clearMutation = useMutation({
-    mutationFn: clearToolRole,
+    mutationFn: api.clearToolRole,
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["tool-permissions"] }),
   });
