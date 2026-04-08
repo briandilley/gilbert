@@ -68,9 +68,9 @@ AI interactions use **named profiles** that control which tools are available. T
 
 ### Key Directories
 
-- `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, plugins)
+- `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, plugins, WS)
 - `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging
-- `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services
+- `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services (including WS RPC handlers via `WsHandlerProvider`)
 - `src/gilbert/integrations/` — Concrete backend implementations (e.g., ElevenLabs TTS)
 - `src/gilbert/storage/` — Storage backend implementations (SQLite)
 - `src/gilbert/plugins/` — Plugin loader

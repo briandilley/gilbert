@@ -239,17 +239,7 @@ On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLi
 
 ## Web UI
 
-Gilbert includes a web interface with:
-
-- **/chat** — conversational AI interface with persistent history
-- **/documents** — browse and search the knowledge base
-- **/inbox** — email management (threads, compose, search)
-- **/screens** — configure and control remote displays
-- **/system** — service inspector with status, config, and tool details
-- **/entities** — entity browser with query builder
-- **/roles** — role hierarchy and permission management
-
-Real-time updates are delivered via WebSocket at `/ws/events`.
+Gilbert includes a React SPA with pages for chat, documents, inbox, screens, system, entities, and roles. **All data operations use the WebSocket protocol** — the only HTTP endpoints are authentication (OAuth callbacks, login) and static file serving. The SPA connects to `/ws/events` on load and communicates exclusively via typed RPC frames.
 
 ## Development
 
