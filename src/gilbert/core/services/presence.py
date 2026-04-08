@@ -1,10 +1,10 @@
 """Presence service — wraps a PresenceBackend as a discoverable service.
 
-Polls the backend periodically, detects state changes, and publishes
-events on the event bus:
-- ``presence.arrived`` — user became present or nearby
-- ``presence.departed`` — user became away
-- ``presence.changed`` — any state transition
+Polls the backend periodically and diffs against stored records in the
+entity store. Record exists = user is here. No record = user is gone.
+Publishes events on the event bus:
+- ``presence.arrived`` — user appeared in poll (record created)
+- ``presence.departed`` — user disappeared from poll (record deleted)
 """
 
 import json
@@ -53,7 +53,7 @@ class PresenceService(Service):
             capabilities=frozenset({"presence", "ai_tools"}),
             requires=frozenset({"users", "scheduler"}),
             optional=frozenset({"configuration", "event_bus", "credentials", "entity_storage"}),
-            events=frozenset({"presence.changed", "presence.arrived", "presence.departed"}),
+            events=frozenset({"presence.arrived", "presence.departed"}),
         )
 
     @property
@@ -180,137 +180,105 @@ class PresenceService(Service):
     # --- Polling and event detection ---
 
     async def _check_for_changes(self) -> None:
-        """Poll backend, diff against stored state, emit events, persist new state.
+        """Poll backend, diff against stored records, emit events, persist.
 
-        All state is kept in the entity store so it survives restarts.
-        The backend only reports who is *currently* visible — users who
-        disappear from the poll are transitioned to AWAY.
+        Record exists = user is here. No record = user is gone.
         """
-        # 1. Load previous state from entity store
-        previous = await self._load_stored_presence()
+        # 1. Load who was here last poll (record exists = was here)
+        previously_here = await self._load_present_user_ids()
 
-        # 2. Poll the backend for current signals
+        # 2. Poll the backend
         try:
             all_presence = await self._backend.get_all_presence()
         except Exception:
             logger.warning("Failed to poll presence", exc_info=True)
             return
 
-        # 3. Build current state map from poll results
-        current: dict[str, UserPresence] = {p.user_id: p for p in all_presence}
+        # 3. Who is here now
+        currently_here: dict[str, UserPresence] = {p.user_id: p for p in all_presence}
 
-        # 4. Diff: users in current poll
-        for user_id, p in current.items():
-            old_state = previous.get(user_id)
-            if old_state == p.state:
-                continue
-            if old_state is not None:
-                await self._emit_change(p, old_state)
-            elif not self._first_poll:
-                # New user appearing after first poll — treat as arrived
-                await self._emit_change(p, PresenceState.AWAY)
-            else:
-                logger.debug("Initial tracked user: %s (%s)", user_id, p.state.value)
+        # 4. Arrived: in current poll but not in stored records
+        for user_id, p in currently_here.items():
+            if user_id not in previously_here:
+                if not self._first_poll:
+                    await self._emit_arrived(p)
+                else:
+                    logger.debug("Initial tracked user: %s (%s)", user_id, p.state.value)
 
-        # 5. Diff: users in previous state but missing from current poll → AWAY
-        for user_id, old_state in previous.items():
-            if user_id in current:
-                continue
-            if old_state == PresenceState.AWAY:
-                continue
-            away = UserPresence(
-                user_id=user_id, state=PresenceState.AWAY, source="presence",
-            )
-            await self._emit_change(away, old_state)
+        # 5. Departed: in stored records but not in current poll
+        for user_id in previously_here:
+            if user_id not in currently_here:
+                await self._emit_departed(user_id)
 
-        # 6. Persist new state (current poll + AWAY for vanished users)
-        new_state: dict[str, UserPresence] = dict(current)
-        for user_id in previous:
-            if user_id not in current:
-                new_state[user_id] = UserPresence(
-                    user_id=user_id, state=PresenceState.AWAY, source="presence",
-                )
-        await self._persist_presence(list(new_state.values()))
+        # 6. Persist: delete departed, upsert current
+        await self._sync_stored_presence(previously_here, currently_here)
 
         self._first_poll = False
 
-    async def _emit_change(self, presence: UserPresence, old_state: PresenceState) -> None:
-        """Publish presence change events."""
+    async def _emit_arrived(self, presence: UserPresence) -> None:
+        """Publish presence.arrived event."""
+        logger.info("User %s arrived (%s)", presence.user_id, presence.state.value)
         if self._event_bus is None:
             return
-
         data = {
             "user_id": presence.user_id,
             "state": presence.state.value,
-            "previous_state": old_state.value,
             "since": presence.since,
             "source": presence.source,
         }
-
-        # Always emit the generic changed event
         await self._event_bus.publish(Event(
-            event_type="presence.changed",
-            data=data,
-            source="presence",
+            event_type="presence.arrived", data=data, source="presence",
         ))
 
-        # Emit specific arrived/departed events
-        arrived_states = {PresenceState.PRESENT, PresenceState.NEARBY}
-        was_here = old_state in arrived_states
-        is_here = presence.state in arrived_states
-
-        if is_here and not was_here:
-            await self._event_bus.publish(Event(
-                event_type="presence.arrived",
-                data=data,
-                source="presence",
-            ))
-            logger.info("User %s arrived (%s)", presence.user_id, presence.state.value)
-        elif was_here and not is_here:
-            await self._event_bus.publish(Event(
-                event_type="presence.departed",
-                data=data,
-                source="presence",
-            ))
-            logger.info("User %s departed", presence.user_id)
-        else:
-            logger.info(
-                "User %s presence changed: %s → %s",
-                presence.user_id, old_state.value, presence.state.value,
-            )
+    async def _emit_departed(self, user_id: str) -> None:
+        """Publish presence.departed event."""
+        logger.info("User %s departed", user_id)
+        if self._event_bus is None:
+            return
+        data = {"user_id": user_id, "state": "away", "source": "presence"}
+        await self._event_bus.publish(Event(
+            event_type="presence.departed", data=data, source="presence",
+        ))
 
     # --- Entity persistence ---
 
     _COLLECTION = "user_presence"
 
-    async def _load_stored_presence(self) -> dict[str, PresenceState]:
-        """Load the previous presence state from the entity store."""
+    async def _load_present_user_ids(self) -> set[str]:
+        """Load the set of user IDs that have a stored presence record (= were here)."""
         if self._storage is None:
-            return {}
+            return set()
         try:
             from gilbert.interfaces.storage import Query
 
             records = await self._storage.query(Query(
                 collection=self._COLLECTION, limit=500,
             ))
-            return {
-                r["user_id"]: PresenceState(r["state"])
-                for r in records
-                if "user_id" in r and "state" in r
-            }
+            return {r["user_id"] for r in records if "user_id" in r}
         except Exception:
             logger.warning("Failed to load stored presence", exc_info=True)
-            return {}
+            return set()
 
-    async def _persist_presence(self, presence_list: list[UserPresence]) -> None:
-        """Replace stored presence state with the latest poll results."""
+    async def _sync_stored_presence(
+        self,
+        previously_here: set[str],
+        currently_here: dict[str, UserPresence],
+    ) -> None:
+        """Sync entity store: delete departed users, upsert current ones."""
         if self._storage is None:
             return
         try:
             from datetime import datetime, timezone
 
             now = datetime.now(timezone.utc).isoformat()
-            for p in presence_list:
+
+            # Remove records for users who left
+            for user_id in previously_here:
+                if user_id not in currently_here:
+                    await self._storage.delete(self._COLLECTION, user_id)
+
+            # Upsert records for users who are here
+            for p in currently_here.values():
                 await self._storage.put(self._COLLECTION, p.user_id, {
                     "user_id": p.user_id,
                     "state": p.state.value,
