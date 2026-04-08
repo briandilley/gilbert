@@ -99,6 +99,16 @@ class GreetingService(Service):
                     callback=self._greet_already_present,
                     system=True,
                 )
+                # Daily check at the start of the greeting window.
+                # Catches the case where Gilbert runs continuously overnight
+                # and people never transition through AWAY → PRESENT (e.g.
+                # devices left on-site keep them in nearby/present).
+                scheduler.add_job(
+                    name="greeting-daily-check",
+                    schedule=Schedule.daily_at(self._start_hour, 5),
+                    callback=self._greet_already_present,
+                    system=True,
+                )
 
         logger.info(
             "Greeting service started (window=%d:00-%d:00)",
