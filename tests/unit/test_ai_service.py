@@ -604,3 +604,200 @@ def test_tool_result_serialize_deserialize() -> None:
     assert deserialized.tool_results[0].content == "ok"
     assert not deserialized.tool_results[0].is_error
     assert deserialized.tool_results[1].is_error
+
+
+# --- Conversation State ---
+
+
+async def test_set_and_get_conversation_state(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """State can be set and retrieved by key."""
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="ok"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    # Capture the saved conversation and return it on subsequent gets
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    # Set state
+    await ai_service.set_conversation_state("my_key", {"score": 42}, conv_id)
+
+    # The put call should include the state
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    assert put_data["state"]["my_key"] == {"score": 42}
+
+    # Mock get to return updated data
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    result = await ai_service.get_conversation_state("my_key", conv_id)
+    assert result == {"score": 42}
+
+
+async def test_get_missing_state_returns_none(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """Getting a non-existent key returns None."""
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="ok"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    result = await ai_service.get_conversation_state("nonexistent", conv_id)
+    assert result is None
+
+
+async def test_clear_conversation_state(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """Clearing a key removes it from state."""
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="ok"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    # Set two keys
+    await ai_service.set_conversation_state("a", 1, conv_id)
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    await ai_service.set_conversation_state("b", 2, conv_id)
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    # Clear key "a"
+    await ai_service.clear_conversation_state("a", conv_id)
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    assert await ai_service.get_conversation_state("a", conv_id) is None
+    assert await ai_service.get_conversation_state("b", conv_id) == 2
+
+
+async def test_multiple_state_keys_coexist(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """Multiple keys can be stored independently."""
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="ok"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    await ai_service.set_conversation_state("game", {"round": 1}, conv_id)
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    await ai_service.set_conversation_state("workflow", {"step": "review"}, conv_id)
+    put_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=put_data)  # type: ignore[union-attr]
+
+    assert await ai_service.get_conversation_state("game", conv_id) == {"round": 1}
+    assert await ai_service.get_conversation_state("workflow", conv_id) == {"step": "review"}
+
+
+async def test_state_uses_current_conversation_id(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """When no conversation_id is passed, uses the active one."""
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="ok"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    # Should use _current_conversation_id implicitly
+    await ai_service.set_conversation_state("key", "value")
+    put_call = storage_backend.put.call_args[0]  # type: ignore[union-attr]
+    assert put_call[1] == conv_id  # entity_id matches conv_id
+
+
+async def test_state_injected_into_system_prompt(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """Conversation state appears in the system prompt sent to the AI."""
+    # First call to create conversation
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="first"),
+        model="stub",
+    ))
+    await ai_service.start(resolver)
+    _, conv_id, _ = await ai_service.chat("Hi")
+
+    # Save state directly in the conversation data
+    saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
+    saved_data["state"] = {"guess_game": {"round": 3, "scores": {"alice": 10}}}
+    storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
+
+    # Second call should see state in prompt
+    stub_backend.queue_response(AIResponse(
+        message=Message(role=MessageRole.ASSISTANT, content="second"),
+        model="stub",
+    ))
+    await ai_service.chat("What's the score?", conversation_id=conv_id)
+
+    req = stub_backend.requests[-1]
+    assert "Active Conversation State" in req.system_prompt
+    assert "guess_game" in req.system_prompt
+    assert '"round": 3' in req.system_prompt
+
+
+def test_format_state_for_context() -> None:
+    """State formatting produces readable text."""
+    state = {
+        "game": {"round": 2, "players": ["alice"]},
+        "simple": "active",
+    }
+    result = AIService._format_state_for_context(state)
+    assert "## Active Conversation State" in result
+    assert "### game" in result
+    assert "### simple" in result
+    assert "active" in result
+    assert '"round": 2' in result
+
+
+def test_format_state_empty() -> None:
+    """Formatting empty state still produces a header."""
+    result = AIService._format_state_for_context({})
+    assert "## Active Conversation State" in result

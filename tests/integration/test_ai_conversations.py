@@ -118,3 +118,51 @@ async def test_conversation_with_error_tool_result(
 
     assert loaded_messages[0].tool_results[0].is_error is True
     assert loaded_messages[0].tool_results[0].content == "Connection refused"
+
+
+async def test_conversation_state_persists(sqlite_storage: SQLiteStorage) -> None:
+    """State dict survives round-trip through real storage."""
+    conv_id = "test-conv-state"
+    data = {
+        "messages": [],
+        "updated_at": "2026-01-01T00:00:00Z",
+        "state": {
+            "guess_game": {"round": 3, "scores": {"alice": 10, "bob": 7}},
+            "workflow": {"step": "review"},
+        },
+    }
+    await sqlite_storage.put("ai_conversations", conv_id, data)
+
+    loaded = await sqlite_storage.get("ai_conversations", conv_id)
+    assert loaded is not None
+    assert loaded["state"]["guess_game"]["round"] == 3
+    assert loaded["state"]["guess_game"]["scores"]["alice"] == 10
+    assert loaded["state"]["workflow"]["step"] == "review"
+
+
+async def test_conversation_state_update(sqlite_storage: SQLiteStorage) -> None:
+    """State can be updated without losing other conversation data."""
+    conv_id = "test-conv-state-update"
+    messages = [
+        Message(role=MessageRole.USER, content="Hello"),
+        Message(role=MessageRole.ASSISTANT, content="Hi!"),
+    ]
+    data: dict = {
+        "messages": [AIService._serialize_message(m) for m in messages],
+        "updated_at": "2026-01-01T00:00:00Z",
+        "state": {"key1": "value1"},
+    }
+    await sqlite_storage.put("ai_conversations", conv_id, data)
+
+    # Update state, add a new key
+    loaded = await sqlite_storage.get("ai_conversations", conv_id)
+    assert loaded is not None
+    loaded["state"]["key2"] = {"nested": True}
+    await sqlite_storage.put("ai_conversations", conv_id, loaded)
+
+    reloaded = await sqlite_storage.get("ai_conversations", conv_id)
+    assert reloaded is not None
+    assert reloaded["state"]["key1"] == "value1"
+    assert reloaded["state"]["key2"] == {"nested": True}
+    # Messages still intact
+    assert len(reloaded["messages"]) == 2

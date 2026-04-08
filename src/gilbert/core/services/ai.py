@@ -450,9 +450,20 @@ class AIService(Service):
         for round_num in range(self._max_tool_rounds):
             truncated = self._truncate_history(messages)
 
+            # Dynamically append conversation state each round so tool-call
+            # mutations are visible to subsequent AI rounds.
+            conv_state = await self._load_conversation_state(conversation_id)
+            if conv_state:
+                round_prompt = (
+                    f"{effective_prompt}\n\n"
+                    f"{self._format_state_for_context(conv_state)}"
+                )
+            else:
+                round_prompt = effective_prompt
+
             request = AIRequest(
                 messages=truncated,
-                system_prompt=effective_prompt,
+                system_prompt=round_prompt,
                 tools=tool_defs if tool_defs else [],
                 max_tokens=int(self._config.get("max_tokens", 4096)),
                 temperature=float(self._config.get("temperature", 0.7)),
@@ -754,7 +765,7 @@ class AIService(Service):
         if user_id:
             filters.append(Filter(field="user_id", op=FilterOp.EQ, value=user_id))
         # Exclude shared conversations — those are listed separately
-        filters.append(Filter(field="shared", op=FilterOp.NE, value=True))
+        filters.append(Filter(field="shared", op=FilterOp.NEQ, value=True))
         return await self._storage.query(
             Query(
                 collection=_COLLECTION,
@@ -859,6 +870,102 @@ class AIService(Service):
             author_name=data.get("author_name", ""),
             visible_to=data.get("visible_to"),
         )
+
+    # --- Conversation State ---
+
+    def _resolve_conversation_id(self, conversation_id: str | None) -> str:
+        """Resolve to an explicit or the current conversation ID."""
+        cid = conversation_id or self._current_conversation_id
+        if not cid:
+            raise RuntimeError("No active conversation")
+        return cid
+
+    async def get_conversation_state(
+        self, key: str, conversation_id: str | None = None,
+    ) -> Any | None:
+        """Read a state entry from a conversation.
+
+        Args:
+            key: Namespace key (e.g. ``"guess_game"``).
+            conversation_id: Explicit conversation ID, or ``None`` to use the
+                currently active conversation.
+
+        Returns:
+            The stored value, or ``None`` if the key doesn't exist.
+        """
+        if self._storage is None:
+            return None
+        cid = self._resolve_conversation_id(conversation_id)
+        data = await self._storage.get(_COLLECTION, cid)
+        if data is None:
+            return None
+        return data.get("state", {}).get(key)
+
+    async def set_conversation_state(
+        self, key: str, value: Any, conversation_id: str | None = None,
+    ) -> None:
+        """Write a state entry to a conversation.
+
+        The value must be JSON-serialisable.  It is persisted immediately so
+        that subsequent agentic-loop rounds see the update.
+
+        Args:
+            key: Namespace key (e.g. ``"guess_game"``).
+            value: Any JSON-serialisable value.
+            conversation_id: Explicit conversation ID, or ``None`` to use the
+                currently active conversation.
+        """
+        if self._storage is None:
+            return
+        cid = self._resolve_conversation_id(conversation_id)
+        data = await self._storage.get(_COLLECTION, cid) or {}
+        state: dict[str, Any] = data.get("state", {})
+        state[key] = value
+        data["state"] = state
+        await self._storage.put(_COLLECTION, cid, data)
+
+    async def clear_conversation_state(
+        self, key: str, conversation_id: str | None = None,
+    ) -> None:
+        """Remove a state entry from a conversation.
+
+        Args:
+            key: Namespace key to remove.
+            conversation_id: Explicit conversation ID, or ``None`` to use the
+                currently active conversation.
+        """
+        if self._storage is None:
+            return
+        cid = self._resolve_conversation_id(conversation_id)
+        data = await self._storage.get(_COLLECTION, cid)
+        if data is None:
+            return
+        state: dict[str, Any] = data.get("state", {})
+        if key in state:
+            del state[key]
+            data["state"] = state
+            await self._storage.put(_COLLECTION, cid, data)
+
+    async def _load_conversation_state(self, conv_id: str) -> dict[str, Any]:
+        """Load all state entries for a conversation."""
+        if self._storage is None:
+            return {}
+        data = await self._storage.get(_COLLECTION, conv_id)
+        if data is None:
+            return {}
+        return data.get("state", {})
+
+    @staticmethod
+    def _format_state_for_context(state: dict[str, Any]) -> str:
+        """Render conversation state as a text block for the system prompt."""
+        parts: list[str] = ["## Active Conversation State"]
+        for key, value in state.items():
+            parts.append(f"\n### {key}")
+            if isinstance(value, (dict, list)):
+                parts.append(_json.dumps(value, indent=2, default=str))
+            else:
+                parts.append(str(value))
+        return "\n".join(parts)
 
     # --- History Management ---
 

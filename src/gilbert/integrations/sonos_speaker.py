@@ -117,7 +117,9 @@ class SonosSpeaker(SpeakerBackend):
             if coordinator is None:
                 raise RuntimeError(f"Group coordinator not found: {group.coordinator_id}")
         else:
-            coordinator = _find_device(self._devices, target_ids[0])
+            device = _find_device(self._devices, target_ids[0])
+            group = await asyncio.to_thread(lambda: device.group)
+            coordinator = group.coordinator if group else device
 
         # Set volume if requested
         if request.volume is not None:
