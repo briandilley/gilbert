@@ -39,10 +39,12 @@ class UserService(Service):
         root_password_hash: str = "",
         default_roles: list[str] | None = None,
         sync_ttl_seconds: int | None = None,
+        allow_user_creation: bool = True,
     ) -> None:
         self._root_password_hash = root_password_hash
         self._default_roles = default_roles or ["user"]
         self._sync_ttl = sync_ttl_seconds if sync_ttl_seconds is not None else self._DEFAULT_SYNC_TTL_SECONDS
+        self._allow_user_creation = allow_user_creation
         self._backend: UserBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._last_sync: float = 0.0  # monotonic timestamp of last provider sync
@@ -50,7 +52,7 @@ class UserService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="users",
-            capabilities=frozenset({"users", "ai_tools"}),
+            capabilities=frozenset({"users", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"user_provider"}),
         )
@@ -80,6 +82,11 @@ class UserService(Service):
                 ttl = section.get("sync_ttl_seconds")
                 if ttl is not None:
                     self._sync_ttl = int(ttl)
+
+                auth_section = config_svc.get_section("auth")
+                allow = auth_section.get("allow_user_creation")
+                if allow is not None:
+                    self._allow_user_creation = bool(allow)
 
         await self._ensure_root_user()
 
@@ -310,6 +317,82 @@ class UserService(Service):
         ttl = config.get("sync_ttl_seconds")
         if ttl is not None:
             self._sync_ttl = int(ttl)
+
+    # --- WebSocket RPC handlers ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "users.user.create": self._ws_user_create,
+            "users.user.delete": self._ws_user_delete,
+        }
+
+    async def _ws_user_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        if not self._allow_user_creation:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "User creation is disabled", "code": 403,
+            }
+
+        username = (frame.get("username") or "").strip().lower()
+        if not username:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "Username is required", "code": 400,
+            }
+
+        password = frame.get("password") or ""
+        if not password:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "Password is required", "code": 400,
+            }
+
+        # Check uniqueness
+        existing = await self.backend.get_user_by_username(username)
+        if existing is not None:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": f"Username '{username}' already exists", "code": 409,
+            }
+
+        email = (frame.get("email") or "").strip()
+        if email:
+            existing = await self.backend.get_user_by_email(email)
+            if existing is not None:
+                return {
+                    "type": "gilbert.error", "ref": frame.get("id"),
+                    "error": f"Email '{email}' already in use", "code": 409,
+                }
+
+        password_hash = self._hash_password(password)
+        user_id = f"usr_{uuid.uuid4().hex[:12]}"
+        user = await self.create_user(
+            user_id,
+            {
+                "username": username,
+                "email": email,
+                "display_name": (frame.get("display_name") or "").strip(),
+                "password_hash": password_hash,
+            },
+        )
+        user.pop("password_hash", None)
+        return {"type": "users.user.create.result", "ref": frame.get("id"), "status": "ok", "user": user}
+
+    async def _ws_user_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        user_id = frame.get("user_id", "")
+        if not user_id:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "user_id is required", "code": 400,
+            }
+        try:
+            await self.delete_user(user_id)
+        except ValueError as e:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": str(e), "code": 403,
+            }
+        return {"type": "users.user.delete.result", "ref": frame.get("id"), "status": "ok"}
 
     # --- ToolProvider protocol ---
 

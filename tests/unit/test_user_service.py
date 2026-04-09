@@ -127,3 +127,77 @@ async def test_tool_list_users_strips_password(user_service: UserService) -> Non
     users = json.loads(result)
     for u in users:
         assert "password_hash" not in u
+
+
+# --- WS handler tests ---
+
+
+class _FakeConn:
+    """Minimal stand-in for a WsConnection."""
+    pass
+
+
+async def test_ws_create_user(user_service: UserService) -> None:
+    frame = {"id": "1", "username": "alice", "password": "secret123", "display_name": "Alice", "email": "alice@example.com"}
+    result = await user_service._ws_user_create(_FakeConn(), frame)
+    assert result is not None
+    assert result["status"] == "ok"
+    assert result["user"]["username"] == "alice"
+    assert "password_hash" not in result["user"]
+
+    # User should exist in the backend
+    user = await user_service.get_user(result["user"]["_id"])
+    assert user is not None
+    assert user["email"] == "alice@example.com"
+
+
+async def test_ws_create_user_duplicate_username(user_service: UserService) -> None:
+    frame = {"id": "1", "username": "bob", "password": "secret123", "display_name": "Bob"}
+    await user_service._ws_user_create(_FakeConn(), frame)
+
+    frame2 = {"id": "2", "username": "bob", "password": "other", "display_name": "Bob2"}
+    result = await user_service._ws_user_create(_FakeConn(), frame2)
+    assert result is not None
+    assert result["type"] == "gilbert.error"
+    assert result["code"] == 409
+
+
+async def test_ws_create_user_disabled(storage: Any) -> None:
+    svc = UserService(root_password_hash="hashed_pw", default_roles=["user"], allow_user_creation=False)
+    resolver = StubResolver({"entity_storage": StubStorageService(storage)})
+    await svc.start(resolver)
+
+    frame = {"id": "1", "username": "alice", "password": "secret123"}
+    result = await svc._ws_user_create(_FakeConn(), frame)
+    assert result is not None
+    assert result["type"] == "gilbert.error"
+    assert result["code"] == 403
+
+
+async def test_ws_create_user_missing_fields(user_service: UserService) -> None:
+    # Missing username
+    result = await user_service._ws_user_create(_FakeConn(), {"id": "1", "password": "x"})
+    assert result is not None
+    assert result["code"] == 400
+
+    # Missing password
+    result = await user_service._ws_user_create(_FakeConn(), {"id": "2", "username": "test"})
+    assert result is not None
+    assert result["code"] == 400
+
+
+async def test_ws_delete_user(user_service: UserService) -> None:
+    await user_service.create_user("u_del", {"username": "todelete", "email": "", "display_name": "Del"})
+    result = await user_service._ws_user_delete(_FakeConn(), {"id": "1", "user_id": "u_del"})
+    assert result is not None
+    assert result["status"] == "ok"
+
+    user = await user_service.get_user("u_del")
+    assert user is None
+
+
+async def test_ws_delete_root_rejected(user_service: UserService) -> None:
+    result = await user_service._ws_user_delete(_FakeConn(), {"id": "1", "user_id": "root"})
+    assert result is not None
+    assert result["type"] == "gilbert.error"
+    assert result["code"] == 403

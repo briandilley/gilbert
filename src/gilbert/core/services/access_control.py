@@ -846,7 +846,12 @@ class AccessControlService(Service):
                 "roles": u.get("roles", []),
             })
         role_names = sorted(self._role_levels.keys())
-        return {"type": "roles.user.list.result", "ref": frame.get("id"), "users": result, "role_names": role_names}
+        allow_creation = getattr(user_svc, "_allow_user_creation", False)
+        return {
+            "type": "roles.user.list.result", "ref": frame.get("id"),
+            "users": result, "role_names": role_names,
+            "allow_user_creation": allow_creation,
+        }
 
     async def _ws_user_set(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
 

@@ -71,6 +71,7 @@ auth:
   default_roles: ["user"]
   session_ttl_seconds: 86400
   root_password: "password"
+  allow_user_creation: true  # allow admins to create local users via the UI
   # providers:
   #   - type: google
   #     enabled: true

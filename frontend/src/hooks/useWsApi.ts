@@ -105,10 +105,16 @@ export function useWsApi() {
       rpc<{ status: string }>({ type: "roles.profile.assign", ai_call: aiCall, profile_name: profileName }),
 
     listUserRoles: () =>
-      rpc<{ users: UserRoleAssignment[]; role_names: string[] }>({ type: "roles.user.list" }),
+      rpc<{ users: UserRoleAssignment[]; role_names: string[]; allow_user_creation: boolean }>({ type: "roles.user.list" }),
 
     setUserRoles: (userId: string, roles: string[]) =>
       rpc<{ status: string }>({ type: "roles.user.set", user_id: userId, roles }),
+
+    createUser: (params: { username: string; password: string; email?: string; display_name?: string }) =>
+      rpc<{ status: string; user: UserRoleAssignment }>({ type: "users.user.create", ...params }),
+
+    deleteUser: (userId: string) =>
+      rpc<{ status: string }>({ type: "users.user.delete", user_id: userId }),
 
     listCollectionACLs: () =>
       rpc<{ collections: CollectionACL[]; role_names: string[] }>({ type: "roles.collection.list" }),

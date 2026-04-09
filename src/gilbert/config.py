@@ -146,6 +146,7 @@ class AuthConfig(BaseModel):
     default_roles: list[str] = ["user"]
     session_ttl_seconds: int = 86400
     root_password: str = ""
+    allow_user_creation: bool = True
 
 
 class GoogleConfig(BaseModel):

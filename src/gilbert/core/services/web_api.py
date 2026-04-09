@@ -55,8 +55,8 @@ class WebApiService(Service):
 
         _DASHBOARD_CARDS = [
             {"title": "Chat", "description": "Talk with Gilbert", "url": "/chat", "icon": "message-square", "required_role": "everyone"},
-            {"title": "Documents", "description": "Knowledge base", "url": "/documents", "icon": "file-text", "required_role": "user"},
-            {"title": "Inbox", "description": "Email management", "url": "/inbox", "icon": "inbox", "required_role": "admin"},
+            {"title": "Documents", "description": "Knowledge base", "url": "/documents", "icon": "file-text", "required_role": "user", "requires_capability": "knowledge"},
+            {"title": "Inbox", "description": "Email management", "url": "/inbox", "icon": "inbox", "required_role": "admin", "requires_capability": "email"},
             {"title": "Roles", "description": "Roles & access control", "url": "/roles", "icon": "shield", "required_role": "admin"},
             {"title": "Entities", "description": "Entity browser", "url": "/entities", "icon": "database", "required_role": "admin"},
             {"title": "System", "description": "Service inspector", "url": "/system", "icon": "settings", "required_role": "admin"},
@@ -65,11 +65,15 @@ class WebApiService(Service):
         acl = gilbert.service_manager.get_by_capability("access_control")
         cards = []
         for card in _DASHBOARD_CARDS:
+            # Skip cards whose required service is not running
+            cap = card.get("requires_capability")
+            if cap and gilbert.service_manager.get_by_capability(cap) is None:
+                continue
             if acl is not None:
                 required_level = acl.get_role_level(card["required_role"])
                 if conn.user_level > required_level:
                     continue
-            cards.append(card)
+            cards.append({k: v for k, v in card.items() if k != "requires_capability"})
 
         return {"type": "dashboard.get.result", "ref": frame.get("id"), "cards": cards}
 

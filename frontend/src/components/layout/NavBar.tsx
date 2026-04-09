@@ -11,17 +11,38 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  MessageSquareIcon,
+  FileTextIcon,
+  InboxIcon,
+  ShieldIcon,
+  SettingsIcon,
+  DatabaseIcon,
+  MonitorIcon,
+  type LucideIcon,
+} from "lucide-react";
+
+/** Nav item config: label, icon component, and color class. */
+interface NavItemConfig {
+  label: string;
+  icon: LucideIcon;
+  color: string;
+}
+
+const NAV_CONFIG: Record<string, NavItemConfig> = {
+  "/chat": { label: "Chat", icon: MessageSquareIcon, color: "text-blue-500" },
+  "/documents": { label: "Documents", icon: FileTextIcon, color: "text-amber-500" },
+  "/inbox": { label: "Inbox", icon: InboxIcon, color: "text-green-500" },
+  "/roles": { label: "Roles", icon: ShieldIcon, color: "text-purple-500" },
+  "/system": { label: "System", icon: SettingsIcon, color: "text-slate-500" },
+  "/entities": { label: "Entities", icon: DatabaseIcon, color: "text-cyan-500" },
+  "/screens": { label: "Screens", icon: MonitorIcon, color: "text-rose-500" },
+};
 
 /** Map dashboard card URLs to short nav labels. */
-const NAV_LABELS: Record<string, string> = {
-  "/chat": "Chat",
-  "/documents": "Documents",
-  "/inbox": "Inbox",
-  "/roles": "Roles",
-  "/system": "System",
-  "/entities": "Entities",
-  "/screens": "Screens",
-};
+const NAV_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(NAV_CONFIG).map(([url, cfg]) => [url, cfg.label]),
+);
 
 /** URLs that should appear in the top nav (skip dashboard itself). */
 const NAV_URLS = new Set(Object.keys(NAV_LABELS));
@@ -56,18 +77,24 @@ export function NavBar() {
         </Link>
 
         <nav className="flex items-center gap-1">
-          {navItems.map((card) => (
-            <Link key={card.url} to={card.url}>
-              <Button
-                variant={
-                  location.pathname.startsWith(card.url) ? "secondary" : "ghost"
-                }
-                size="sm"
-              >
-                {NAV_LABELS[card.url] ?? card.title}
-              </Button>
-            </Link>
-          ))}
+          {navItems.map((card) => {
+            const cfg = NAV_CONFIG[card.url];
+            const Icon = cfg?.icon;
+            return (
+              <Link key={card.url} to={card.url}>
+                <Button
+                  variant={
+                    location.pathname.startsWith(card.url) ? "secondary" : "ghost"
+                  }
+                  size="sm"
+                  className="gap-1.5"
+                >
+                  {Icon && <Icon className={`h-4 w-4 ${cfg.color}`} />}
+                  {cfg?.label ?? card.title}
+                </Button>
+              </Link>
+            );
+          })}
         </nav>
 
         <div className="ml-auto flex items-center gap-3">

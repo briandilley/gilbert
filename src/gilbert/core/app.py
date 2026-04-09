@@ -144,6 +144,7 @@ class Gilbert:
             UserService(
                 root_password_hash=root_hash,
                 default_roles=self.config.auth.default_roles,
+                allow_user_creation=self.config.auth.allow_user_creation,
             )
         )
 
