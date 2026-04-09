@@ -18,9 +18,9 @@ from gilbert.interfaces.speaker import (
 logger = logging.getLogger(__name__)
 
 # Time to wait for a group to form/settle before verifying
-_GROUP_SETTLE_SECONDS = 2.0
-_GROUP_VERIFY_RETRIES = 3
-_GROUP_RETRY_DELAY = 1.0
+_GROUP_SETTLE_SECONDS = 3.0
+_GROUP_VERIFY_RETRIES = 10
+_GROUP_RETRY_DELAY = 2.0
 
 # Map SoCo transport states to our enum
 _STATE_MAP: dict[str, PlaybackState] = {
@@ -234,10 +234,13 @@ class SonosSpeaker(SpeakerBackend):
 
         # Only unjoin devices that are in the target set — don't disrupt other groups
         await asyncio.to_thread(self._unjoin_target_devices, devices)
+        await asyncio.sleep(1.0)  # let unjoins settle
 
-        # Join the rest to the coordinator
-        for device in devices[1:]:
-            await asyncio.to_thread(device.join, coordinator)
+        # Join the rest to the coordinator in parallel
+        await asyncio.gather(*(
+            asyncio.to_thread(device.join, coordinator)
+            for device in devices[1:]
+        ))
 
         # Wait for the group to settle
         await asyncio.sleep(_GROUP_SETTLE_SECONDS)
@@ -316,10 +319,16 @@ class SonosSpeaker(SpeakerBackend):
                 )
                 await asyncio.sleep(_GROUP_RETRY_DELAY)
 
-        # Return best-effort group info even if verification is incomplete
+        # Final check — log what we have vs what we expected
         group = await asyncio.to_thread(lambda: coord.group)
         if group:
-            logger.warning("Group may not have fully formed — proceeding anyway")
+            actual = {_speaker_id(m) for m in group.members}
+            missing = expected - actual
+            if missing:
+                logger.warning(
+                    "Group formed with %d/%d speakers (missing %d)",
+                    len(actual & expected), len(expected), len(missing),
+                )
             return SpeakerGroup(
                 group_id=group.uid,
                 name=group.label,
