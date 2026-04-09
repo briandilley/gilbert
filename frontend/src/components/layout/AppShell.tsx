@@ -3,9 +3,9 @@ import { NavBar } from "./NavBar";
 
 export function AppShell() {
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex h-[100svh] flex-col overflow-hidden">
       <NavBar />
-      <main className="flex-1">
+      <main className="flex-1 overflow-hidden">
         <Outlet />
       </main>
     </div>
