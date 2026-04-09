@@ -349,7 +349,8 @@ async def test_tool_stop_audio_all(
     result = await service.execute_tool("stop_audio", {})
     parsed = json.loads(result)
     assert parsed["status"] == "stopped"
-    assert stub_backend.stopped_ids is None  # None means all
+    # All speakers resolved and stopped
+    assert set(stub_backend.stopped_ids) == {"uid-1", "uid-2", "uid-3"}
 
 
 # --- Aliases ---

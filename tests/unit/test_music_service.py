@@ -345,8 +345,6 @@ async def test_tool_play_track_with_speakers(
     mock_speaker_backend.play_uri = AsyncMock()
 
     speaker_svc = MagicMock(spec=SpeakerService)
-    speaker_svc.resolve_speaker_names = AsyncMock(return_value=["s1"])
-    speaker_svc._resolve_target_speakers.return_value = ["s1"]
     speaker_svc.play_on_speakers = AsyncMock()
     speaker_svc.backend = mock_speaker_backend
 

@@ -147,23 +147,13 @@ class FakeMusicService:
 
 class FakeSpeakerService:
     def __init__(self) -> None:
-        self.backend = AsyncMock()
-        self.backend.play_uri = AsyncMock()
-        self.backend.stop = AsyncMock()
-        self._last_speaker_ids: list[str] = []
+        self.play_on_speakers = AsyncMock()
+        self.stop_speakers = AsyncMock()
+        self.announce = AsyncMock()
 
     def service_info(self) -> Any:
         from gilbert.interfaces.service import ServiceInfo
         return ServiceInfo(name="speaker", capabilities=frozenset({"speaker_control"}))
-
-    async def resolve_speaker_names(self, names: list[str]) -> list[str]:
-        return [f"id_{n}" for n in names]
-
-    def _resolve_target_speakers(self, speaker_ids: list[str] | None) -> list[str]:
-        if speaker_ids:
-            self._last_speaker_ids = list(speaker_ids)
-            return speaker_ids
-        return self._last_speaker_ids or []
 
 
 class FakeSchedulerService:
@@ -399,7 +389,7 @@ class TestStartStop:
         result = await started_dj.start_radio()
         assert started_dj._active is True
         assert "started" in result.lower() or "playing" in result.lower()
-        speaker_svc.backend.play_uri.assert_called_once()
+        speaker_svc.play_on_speakers.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_start_radio_with_genre(
@@ -418,7 +408,7 @@ class TestStartStop:
         result = await started_dj.stop_radio()
         assert started_dj._active is False
         assert "stopped" in result.lower()
-        speaker_svc.backend.stop.assert_called_once()
+        speaker_svc.stop_speakers.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stop_emits_event(
@@ -492,7 +482,7 @@ class TestPolling:
         self, started_dj: RadioDJService, speaker_svc: FakeSpeakerService
     ) -> None:
         await started_dj._poll()
-        speaker_svc.backend.play_uri.assert_not_called()
+        speaker_svc.play_on_speakers.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_poll_stops_when_empty(
@@ -502,11 +492,11 @@ class TestPolling:
         presence_svc: FakePresenceService,
     ) -> None:
         await started_dj.start_radio()
-        speaker_svc.backend.play_uri.reset_mock()
+        speaker_svc.play_on_speakers.reset_mock()
         # Simulate nobody present
         presence_svc._users = []
         await started_dj._poll()
-        speaker_svc.backend.stop.assert_called()
+        speaker_svc.stop_speakers.assert_called()
 
     @pytest.mark.asyncio
     async def test_poll_resumes_when_people_arrive(
@@ -519,11 +509,11 @@ class TestPolling:
         # Empty
         presence_svc._users = []
         await started_dj._poll()
-        speaker_svc.backend.play_uri.reset_mock()
+        speaker_svc.play_on_speakers.reset_mock()
         # People return
         presence_svc._users = ["alice"]
         await started_dj._poll()
-        speaker_svc.backend.play_uri.assert_called()
+        speaker_svc.play_on_speakers.assert_called()
 
 
 # --- Event handling ---
@@ -545,7 +535,7 @@ class TestEventHandling:
         )
         await started_dj._on_presence_arrived(event)
         assert started_dj._stopped_by_empty is False
-        speaker_svc.backend.play_uri.assert_called()
+        speaker_svc.play_on_speakers.assert_called()
 
     @pytest.mark.asyncio
     async def test_on_departure_stops_if_empty(
@@ -564,7 +554,7 @@ class TestEventHandling:
             source="presence",
         )
         await started_dj._on_presence_departed(event)
-        speaker_svc.backend.stop.assert_called()
+        speaker_svc.stop_speakers.assert_called()
         assert started_dj._stopped_by_empty is True
 
     @pytest.mark.asyncio
@@ -578,7 +568,7 @@ class TestEventHandling:
             source="presence",
         )
         await started_dj._on_presence_arrived(event)
-        speaker_svc.backend.play_uri.assert_not_called()
+        speaker_svc.play_on_speakers.assert_not_called()
 
 
 # --- AI Tools ---
@@ -698,10 +688,10 @@ class TestVeto:
         speaker_svc: FakeSpeakerService,
     ) -> None:
         await started_dj.start_radio(genre="country")
-        speaker_svc.backend.play_uri.reset_mock()
+        speaker_svc.play_on_speakers.reset_mock()
         result = await started_dj.veto_genre("alice", "country")
         # Should have switched to a different genre
-        speaker_svc.backend.play_uri.assert_called()
+        speaker_svc.play_on_speakers.assert_called()
 
 
 # --- Configuration ---

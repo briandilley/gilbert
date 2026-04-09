@@ -16,7 +16,6 @@ from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.music import SearchResults, TrackInfo
 from gilbert.interfaces.presence import PresenceState, UserPresence
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import PlayRequest
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -359,18 +358,12 @@ class RadioDJService(Service):
             playlist = results.playlists[0]
             uri = playlist.external_url or f"spotify:playlist:{playlist.playlist_id}"
 
-            # Resolve speakers
-            speaker_ids: list[str] = []
-            if self._speakers:
-                speaker_ids = await self._speaker_svc.resolve_speaker_names(self._speakers)
-            target_ids = self._speaker_svc._resolve_target_speakers(speaker_ids or None)
-
-            await self._speaker_svc.backend.play_uri(PlayRequest(
+            await self._speaker_svc.play_on_speakers(
                 uri=uri,
-                speaker_ids=target_ids,
+                speaker_names=self._speakers or None,
                 volume=self._default_volume,
                 title=f"Radio DJ: {genre}",
-            ))
+            )
 
             old_genre = self._current_genre
             self._current_genre = genre
@@ -396,10 +389,7 @@ class RadioDJService(Service):
 
     async def _stop_playback(self) -> None:
         try:
-            speaker_ids: list[str] = []
-            if self._speakers:
-                speaker_ids = await self._speaker_svc.resolve_speaker_names(self._speakers)
-            await self._speaker_svc.backend.stop(speaker_ids or None)
+            await self._speaker_svc.stop_speakers(self._speakers or None)
         except Exception:
             logger.warning("Failed to stop playback", exc_info=True)
 

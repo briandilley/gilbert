@@ -250,15 +250,41 @@ class SpeakerService(Service):
         except OSError:
             return "127.0.0.1"
 
-    def _resolve_target_speakers(self, speaker_ids: list[str] | None) -> list[str]:
-        """Resolve target speakers: explicit list > last used > all."""
-        if speaker_ids:
-            self._last_speaker_ids = list(speaker_ids)
-            return speaker_ids
+    async def _resolve_target_ids(
+        self, speaker_names: list[str] | None,
+    ) -> list[str]:
+        """Resolve speaker names to IDs with fallback logic.
+
+        Explicit names → resolve to IDs and cache.
+        None → use last-used speakers.
+        Last-used empty → use all speakers.
+        """
+        if speaker_names:
+            ids = await self.resolve_speaker_names(speaker_names)
+            self._last_speaker_ids = list(ids)
+            return ids
         if self._last_speaker_ids:
-            return self._last_speaker_ids
+            return list(self._last_speaker_ids)
         # Fall back to all speakers
-        return []
+        speakers = await self._backend.list_speakers()
+        return [s.speaker_id for s in speakers]
+
+    async def prepare_speakers(self, speaker_ids: list[str]) -> None:
+        """Ensure speakers are in the correct topology before playback.
+
+        - Single speaker: unjoined from any group for solo playback.
+        - Multiple speakers: grouped together.
+        - Already correct: returns immediately.
+
+        Backends that don't support grouping are skipped.
+        """
+        if not self._backend.supports_grouping or not speaker_ids:
+            return
+
+        if len(speaker_ids) == 1:
+            await self._backend.ungroup_speakers(speaker_ids)
+        else:
+            await self._backend.group_speakers(speaker_ids)
 
     # --- Playback ---
 
@@ -272,13 +298,10 @@ class SpeakerService(Service):
     ) -> None:
         """Play a URI on the specified speakers.
 
-        Handles speaker name resolution and topology (grouping/ungrouping)
-        before starting playback.
+        Resolves names, prepares topology, then plays.
         """
-        speaker_ids: list[str] = []
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-        target_ids = self._resolve_target_speakers(speaker_ids or None)
+        target_ids = await self._resolve_target_ids(speaker_names)
+        await self.prepare_speakers(target_ids)
 
         await self._backend.play_uri(PlayRequest(
             uri=uri,
@@ -292,11 +315,9 @@ class SpeakerService(Service):
         self,
         speaker_names: list[str] | None = None,
     ) -> None:
-        """Stop playback on the specified speakers (or last-used speakers)."""
-        speaker_ids: list[str] | None = None
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._backend.stop(speaker_ids)
+        """Stop playback on the specified speakers."""
+        target_ids = await self._resolve_target_ids(speaker_names)
+        await self._backend.stop(target_ids)
 
     # --- Announce ---
 
@@ -357,14 +378,9 @@ class SpeakerService(Service):
             title=f"Announcement: {text[:50]}",
         )
 
-        # Resolve speaker IDs for playback wait
-        speaker_ids: list[str] = []
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-        target_ids = self._resolve_target_speakers(speaker_ids or None)
-
         # Wait for playback to finish before releasing the lock.
         # Use audio duration if available, fall back to polling.
+        target_ids = await self._resolve_target_ids(speaker_names)
         duration = self._estimate_mp3_duration(result.audio)
         if duration > 0:
             await asyncio.sleep(duration + 0.5)

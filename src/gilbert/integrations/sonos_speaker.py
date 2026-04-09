@@ -124,7 +124,9 @@ class SonosSpeaker(SpeakerBackend):
         if not target_ids:
             raise ValueError("No speakers available")
 
-        coordinator = await self._ensure_speaker_topology(target_ids)
+        # Find the coordinator — after topology is prepared by the speaker
+        # service, the first target is standalone or the group coordinator.
+        coordinator = await self._find_coordinator(target_ids)
 
         # Set volume if requested
         if request.volume is not None:
@@ -133,7 +135,7 @@ class SonosSpeaker(SpeakerBackend):
                 if dev:
                     await asyncio.to_thread(setattr, dev, "volume", request.volume)
 
-        # Play — Spotify URIs need conversion to Sonos format with DIDL metadata
+        # Play — Spotify URIs need conversion to Sonos format
         title = request.title or ""
         uri = request.uri
 
@@ -150,34 +152,15 @@ class SonosSpeaker(SpeakerBackend):
 
         logger.info("Playing %s on %s", request.uri, coordinator.player_name)
 
-    async def _ensure_speaker_topology(self, target_ids: list[str]) -> SoCo:
-        """Ensure the target speakers are in the correct topology.
+    async def _find_coordinator(self, target_ids: list[str]) -> SoCo:
+        """Find the group coordinator for the given speakers.
 
-        - Single speaker: unjoin from any existing group so it plays solo.
-        - Multiple speakers: form a group with exactly those speakers.
-
-        Returns the coordinator device to use for playback.
+        If the speakers are grouped, returns the coordinator. If a single
+        standalone speaker, returns that device.
         """
-        if len(target_ids) == 1:
-            device = _find_device(self._devices, target_ids[0])
-            # Unjoin if part of a multi-member group
-            group = await asyncio.to_thread(lambda: device.group)
-            if group and len(group.members) > 1:
-                await asyncio.to_thread(device.unjoin)
-                await asyncio.sleep(_GROUP_SETTLE_SECONDS)
-                logger.info(
-                    "Unjoined %s from group for solo playback",
-                    device.player_name,
-                )
-            return device
-
-        group = await self.group_speakers(target_ids)
-        coordinator = self._devices.get(group.coordinator_id)
-        if coordinator is None:
-            raise RuntimeError(
-                f"Group coordinator not found: {group.coordinator_id}"
-            )
-        return coordinator
+        device = _find_device(self._devices, target_ids[0])
+        group = await asyncio.to_thread(lambda: device.group)
+        return group.coordinator if group else device
 
     async def stop(self, speaker_ids: list[str] | None = None) -> None:
         targets = speaker_ids or list(self._devices.keys())
@@ -265,11 +248,17 @@ class SonosSpeaker(SpeakerBackend):
         return group
 
     async def ungroup_speakers(self, speaker_ids: list[str]) -> None:
+        changed = False
         for sid in speaker_ids:
             device = self._devices.get(sid)
             if device:
-                await asyncio.to_thread(device.unjoin)
-        logger.info("Ungrouped %d speakers", len(speaker_ids))
+                group = await asyncio.to_thread(lambda d=device: d.group)
+                if group and len(group.members) > 1:
+                    await asyncio.to_thread(device.unjoin)
+                    changed = True
+        if changed:
+            await asyncio.sleep(_GROUP_SETTLE_SECONDS)
+            logger.info("Ungrouped %d speakers", len(speaker_ids))
 
     # --- Private helpers ---
 
