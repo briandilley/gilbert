@@ -10,8 +10,16 @@ import { ChatSidebarContent } from "./ChatSidebar";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { MemberPanelContent } from "./MemberPanel";
+import { InviteModal } from "./InviteModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   Sheet,
   SheetContent,
@@ -22,6 +30,7 @@ import {
   MenuIcon,
   MessageSquareIcon,
   PlusIcon,
+  UserPlusIcon,
   UsersRoundIcon,
 } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
@@ -52,6 +61,14 @@ export function ChatPage() {
     submitLabel?: string;
     onSubmit: (value: string) => void;
   } | null>(null);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [allUsers, setAllUsers] = useState<{ user_id: string; display_name: string }[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [pendingInvites, setPendingInvites] = useState<{ user_id: string; display_name: string }[]>([]);
+  const [inviteResponseDialog, setInviteResponseDialog] = useState<{
+    conversationId: string;
+    title: string;
+  } | null>(null);
 
   const { data: conversations = [], refetch: refetchConversations } = useQuery({
     queryKey: ["conversations"],
@@ -74,6 +91,7 @@ export function ChatPage() {
             role: m.role as "owner" | "member" | undefined,
           })),
         );
+        setPendingInvites(conv.invites || []);
         setOwnerId(conv.owner_id || "");
         setRoomTitle(conv.title);
         setSidebarOpen(false);
@@ -159,6 +177,7 @@ export function ChatPage() {
     setUiBlocks([]);
     setIsShared(false);
     setMembers([]);
+    setPendingInvites([]);
     setOwnerId("");
     setRoomTitle("");
     setSidebarOpen(false);
@@ -226,6 +245,63 @@ export function ChatPage() {
       setMembers((prev) => prev.filter((m) => m.user_id !== userId));
     },
     [api, activeConvId],
+  );
+
+  const handleOpenInvite = useCallback(async () => {
+    setInviteOpen(true);
+    setLoadingUsers(true);
+    try {
+      const users = await api.listChatUsers();
+      setAllUsers(users);
+    } catch {
+      setAllUsers([]);
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, [api]);
+
+  const handleInviteUsers = useCallback(
+    async (invited: { user_id: string; display_name: string }[], revoked: string[]) => {
+      if (!activeConvId) return;
+      setInviteOpen(false);
+      if (invited.length > 0) {
+        await api.inviteMembers(activeConvId, invited);
+      }
+      for (const userId of revoked) {
+        await api.revokeInvite(activeConvId, userId);
+      }
+      if (invited.length > 0 || revoked.length > 0) {
+        // Refresh to get updated invite list
+        const conv = await api.loadConversation(activeConvId);
+        setPendingInvites(conv.invites || []);
+      }
+    },
+    [api, activeConvId],
+  );
+
+  const handleSelectInvite = useCallback(
+    (id: string) => {
+      const conv = conversations.find((c) => c.conversation_id === id);
+      setInviteResponseDialog({
+        conversationId: id,
+        title: conv?.title || "Room",
+      });
+    },
+    [conversations],
+  );
+
+  const handleRespondInvite = useCallback(
+    async (action: "accept" | "decline") => {
+      if (!inviteResponseDialog) return;
+      const { conversationId } = inviteResponseDialog;
+      setInviteResponseDialog(null);
+      await api.respondInvite(conversationId, action);
+      refetchConversations();
+      if (action === "accept") {
+        loadConversation(conversationId);
+      }
+    },
+    [api, inviteResponseDialog, refetchConversations, loadConversation],
   );
 
   const handleRename = useCallback(
@@ -326,6 +402,10 @@ export function ChatPage() {
         case "chat.conversation.created":
           refetchConversations();
           break;
+        case "chat.invite.created":
+        case "chat.invite.declined":
+          refetchConversations();
+          break;
       }
     },
     [activeConvId, user?.user_id, clearChat, refetchConversations],
@@ -338,12 +418,15 @@ export function ChatPage() {
   useEventBus("chat.conversation.destroyed", handleChatEvent);
   useEventBus("chat.conversation.renamed", handleChatEvent);
   useEventBus("chat.conversation.created", handleChatEvent);
+  useEventBus("chat.invite.created", handleChatEvent);
+  useEventBus("chat.invite.declined", handleChatEvent);
 
   const sidebarProps = {
     conversations,
     activeId: activeConvId,
     currentUserId: user?.user_id,
     onSelect: loadConversation,
+    onSelectInvite: handleSelectInvite,
     onJoinRoom: handleJoinRoom,
     onLeaveRoom: handleLeaveRoom,
     onRename: handleRename,
@@ -397,6 +480,20 @@ export function ChatPage() {
           <div className="flex items-center gap-1 shrink-0">
             {isShared && (
               <>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={handleOpenInvite}
+                      />
+                    }
+                  >
+                    <UserPlusIcon className="size-4" />
+                  </TooltipTrigger>
+                  <TooltipContent>Invite users</TooltipContent>
+                </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -550,6 +647,53 @@ export function ChatPage() {
         onSubmit={(v) => promptDialog?.onSubmit(v)}
         onCancel={() => setPromptDialog(null)}
       />
+
+      <InviteModal
+        open={inviteOpen}
+        users={allUsers}
+        existingMemberIds={members.map((m) => m.user_id)}
+        pendingInviteIds={pendingInvites.map((i) => i.user_id)}
+        currentUserId={user?.user_id}
+        loading={loadingUsers}
+        onInvite={handleInviteUsers}
+        onCancel={() => setInviteOpen(false)}
+      />
+
+      <Dialog
+        open={!!inviteResponseDialog}
+        onOpenChange={(o) => !o && setInviteResponseDialog(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Room Invitation</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            You've been invited to join{" "}
+            <span className="font-medium text-foreground">
+              {inviteResponseDialog?.title}
+            </span>
+            . Would you like to join?
+          </p>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setInviteResponseDialog(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="outline"
+              className="text-destructive"
+              onClick={() => handleRespondInvite("decline")}
+            >
+              Decline
+            </Button>
+            <Button onClick={() => handleRespondInvite("accept")}>
+              Join
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

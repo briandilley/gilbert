@@ -55,6 +55,7 @@ _RPC_PERMISSIONS: dict[str, int] = {
     "chat.history.load": 200,
     "chat.message.send": 200,
     "chat.form.submit": 200,
+    "chat.user.list": 200,
     "dashboard.get": 200,
     "documents.": 200,
     "screens.list": 200,
@@ -173,6 +174,10 @@ class WsConnection:
             members = event.data.get("members", [])
             if any(m.get("user_id") == self.user_id for m in members):
                 self.shared_conv_ids.add(conv_id)
+
+        # Invite events are targeted to specific users
+        if event.event_type.startswith("chat.invite."):
+            return event.data.get("user_id") == self.user_id
 
         # Filter by membership
         if event.event_type.startswith(("chat.message.", "chat.member.")):

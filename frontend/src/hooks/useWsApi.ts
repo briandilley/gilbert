@@ -59,13 +59,30 @@ export function useWsApi() {
     kickMember: (conversationId: string, userId: string) =>
       rpc<{ status: string }>({ type: "chat.room.kick", conversation_id: conversationId, user_id: userId }),
 
-    inviteMember: (conversationId: string, userId: string, displayName: string) =>
-      rpc<{ status: string }>({
+    inviteMembers: (conversationId: string, users: { user_id: string; display_name: string }[]) =>
+      rpc<{ status: string; invited: { user_id: string; display_name: string }[] }>({
         type: "chat.room.invite",
         conversation_id: conversationId,
-        user_id: userId,
-        display_name: displayName,
+        user_ids: users,
       }),
+
+    revokeInvite: (conversationId: string, userId: string) =>
+      rpc<{ status: string }>({
+        type: "chat.room.invite_revoke",
+        conversation_id: conversationId,
+        user_id: userId,
+      }),
+
+    respondInvite: (conversationId: string, action: "accept" | "decline") =>
+      rpc<{ status: string; action: string }>({
+        type: "chat.room.invite_respond",
+        conversation_id: conversationId,
+        action,
+      }),
+
+    listChatUsers: () =>
+      rpc<{ users: { user_id: string; display_name: string }[] }>({ type: "chat.user.list" })
+        .then((r) => r.users),
 
     // ── Roles ─────────────────────────────────────────────────────
 

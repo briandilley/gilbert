@@ -107,6 +107,7 @@ class UIBlock:
     submit_label: str = "Submit"
     tool_name: str = ""
     for_user: str = ""  # empty = visible to all members
+    exclude_user: str = ""  # hide from this user
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON transport and persistence."""
@@ -120,6 +121,8 @@ class UIBlock:
         }
         if self.for_user:
             d["for_user"] = self.for_user
+        if self.exclude_user:
+            d["exclude_user"] = self.exclude_user
         return d
 
     @classmethod
@@ -134,6 +137,7 @@ class UIBlock:
             submit_label=data.get("submit_label", "Submit"),
             tool_name=data.get("tool_name", ""),
             for_user=data.get("for_user", ""),
+            exclude_user=data.get("exclude_user", ""),
         )
 
 

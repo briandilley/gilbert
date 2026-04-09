@@ -260,6 +260,44 @@ class SpeakerService(Service):
         # Fall back to all speakers
         return []
 
+    # --- Playback ---
+
+    async def play_on_speakers(
+        self,
+        uri: str,
+        speaker_names: list[str] | None = None,
+        volume: int | None = None,
+        title: str = "",
+        position_seconds: float | None = None,
+    ) -> None:
+        """Play a URI on the specified speakers.
+
+        Handles speaker name resolution and topology (grouping/ungrouping)
+        before starting playback.
+        """
+        speaker_ids: list[str] = []
+        if speaker_names:
+            speaker_ids = await self.resolve_speaker_names(speaker_names)
+        target_ids = self._resolve_target_speakers(speaker_ids or None)
+
+        await self._backend.play_uri(PlayRequest(
+            uri=uri,
+            speaker_ids=target_ids,
+            volume=volume,
+            title=title,
+            position_seconds=position_seconds,
+        ))
+
+    async def stop_speakers(
+        self,
+        speaker_names: list[str] | None = None,
+    ) -> None:
+        """Stop playback on the specified speakers (or last-used speakers)."""
+        speaker_ids: list[str] | None = None
+        if speaker_names:
+            speaker_ids = await self.resolve_speaker_names(speaker_names)
+        await self._backend.stop(speaker_ids)
+
     # --- Announce ---
 
     async def announce(
@@ -297,13 +335,6 @@ class SpeakerService(Service):
         if not isinstance(self._tts_svc, TTSService):
             raise TypeError("Expected TTSService for text_to_speech capability")
 
-        # Resolve speaker names to IDs
-        speaker_ids: list[str] = []
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-
-        target_ids = self._resolve_target_speakers(speaker_ids or None)
-
         # Generate TTS audio
         request = SynthesisRequest(text=text, voice_id="", output_format=AudioFormat.MP3)
         result = await self._tts_svc.synthesize(request, voice_name=voice_name)
@@ -317,21 +348,60 @@ class SpeakerService(Service):
         # Determine volume
         effective_volume = volume or self._default_announce_volume
 
-        # Play on speakers via HTTP URL (speakers can't access local files)
+        # Play on speakers — topology handled by play_on_speakers
         audio_url = self._audio_url(str(file_path.resolve()))
-        play_request = PlayRequest(
+        await self.play_on_speakers(
             uri=audio_url,
-            speaker_ids=target_ids,
+            speaker_names=speaker_names,
             volume=effective_volume,
             title=f"Announcement: {text[:50]}",
         )
-        await self._backend.play_uri(play_request)
 
-        # Wait for playback to finish by polling transport state.
-        # This prevents the next announcement from interrupting this one.
-        await self._wait_for_playback(target_ids)
+        # Resolve speaker IDs for playback wait
+        speaker_ids: list[str] = []
+        if speaker_names:
+            speaker_ids = await self.resolve_speaker_names(speaker_names)
+        target_ids = self._resolve_target_speakers(speaker_ids or None)
+
+        # Wait for playback to finish before releasing the lock.
+        # Use audio duration if available, fall back to polling.
+        duration = self._estimate_mp3_duration(result.audio)
+        if duration > 0:
+            await asyncio.sleep(duration + 0.5)
+        else:
+            await self._wait_for_playback(target_ids)
 
         return str(file_path)
+
+    @staticmethod
+    def _estimate_mp3_duration(audio_data: bytes) -> float:
+        """Estimate MP3 duration from file size and bitrate.
+
+        Parses the first MP3 frame header to get the bitrate, then
+        calculates duration = size / (bitrate / 8). Returns 0 on failure.
+        """
+        try:
+            # Find first MP3 frame sync (0xFF 0xFB/0xFA/0xF3/0xF2)
+            for i in range(min(len(audio_data) - 1, 4096)):
+                if audio_data[i] == 0xFF and (audio_data[i + 1] & 0xE0) == 0xE0:
+                    header = audio_data[i:i + 4]
+                    if len(header) < 4:
+                        return 0
+                    # MPEG version, layer, bitrate index
+                    version = (header[1] >> 3) & 0x03
+                    layer = (header[1] >> 1) & 0x03
+                    br_idx = (header[2] >> 4) & 0x0F
+                    # MPEG1 Layer3 bitrate table
+                    if version == 3 and layer == 1 and 1 <= br_idx <= 14:
+                        bitrates = [
+                            0, 32, 40, 48, 56, 64, 80, 96,
+                            112, 128, 160, 192, 224, 256, 320,
+                        ]
+                        kbps = bitrates[br_idx]
+                        return len(audio_data) / (kbps * 125)
+            return 0
+        except Exception:
+            return 0
 
     async def _wait_for_playback(
         self,
@@ -610,27 +680,17 @@ class SpeakerService(Service):
         volume: int | None = arguments.get("volume")
         position: float | None = arguments.get("position_seconds")
 
-        speaker_ids: list[str] = []
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-
-        target_ids = self._resolve_target_speakers(speaker_ids or None)
-
-        await self._backend.play_uri(PlayRequest(
+        await self.play_on_speakers(
             uri=uri,
-            speaker_ids=target_ids,
+            speaker_names=speaker_names or None,
             volume=volume,
             position_seconds=position,
-        ))
+        )
         return json.dumps({"status": "playing", "uri": uri})
 
     async def _tool_stop_audio(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments.get("speakers", [])
-        speaker_ids: list[str] | None = None
-        if speaker_names:
-            speaker_ids = await self.resolve_speaker_names(speaker_names)
-
-        await self._backend.stop(speaker_ids)
+        await self.stop_speakers(speaker_names or None)
         return json.dumps({"status": "stopped"})
 
     async def _tool_set_volume(self, arguments: dict[str, Any]) -> str:

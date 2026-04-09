@@ -18,6 +18,7 @@ export interface ConversationSummary {
   members?: ConversationMember[];
   visibility?: "public" | "invite";
   is_member?: boolean;
+  is_invited?: boolean;
 }
 
 export interface ConversationMember {
@@ -34,6 +35,7 @@ export interface ConversationDetail {
   updated_at: string;
   shared: boolean;
   members?: ConversationMember[];
+  invites?: { user_id: string; display_name: string }[];
   owner_id?: string;
 }
 

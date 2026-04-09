@@ -38,11 +38,16 @@ export function MessageList({
           />
         ))}
 
-        {uiBlocks.map((block) => (
-          <div key={block.block_id} className="max-w-md mx-auto">
-            <UIBlockRenderer block={block} onSubmit={onBlockSubmit} />
-          </div>
-        ))}
+        {uiBlocks
+          .filter((block) =>
+            (!block.for_user || block.for_user === currentUserId) &&
+            block.exclude_user !== currentUserId
+          )
+          .map((block) => (
+            <div key={block.block_id} className="max-w-md mx-auto">
+              <UIBlockRenderer block={block} onSubmit={onBlockSubmit} />
+            </div>
+          ))}
 
         <div ref={bottomRef} />
       </div>

@@ -23,6 +23,11 @@ def check_conversation_access(
     if members:
         if any(m.get("user_id") == user.user_id for m in members):
             return None
+    # Allow invited users to see room info (but not require_member actions)
+    if not require_member:
+        invites = data.get("invites", [])
+        if any(inv.get("user_id") == user.user_id for inv in invites):
+            return None
     conv_owner = data.get("user_id", "")
     if conv_owner and conv_owner == user.user_id:
         return None
@@ -57,6 +62,7 @@ def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
         ]
         summary["visibility"] = c.get("visibility", "public")
         summary["is_member"] = c.get("_is_member", True)
+        summary["is_invited"] = c.get("_is_invited", False)
     return summary
 
 

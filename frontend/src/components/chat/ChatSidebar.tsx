@@ -3,13 +3,14 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "@/types/chat";
-import { MessageSquareIcon, UsersRoundIcon } from "lucide-react";
+import { MailIcon, MessageSquareIcon, UsersRoundIcon } from "lucide-react";
 
 interface ChatSidebarProps {
   conversations: ConversationSummary[];
   activeId: string | null;
   currentUserId?: string;
   onSelect: (id: string) => void;
+  onSelectInvite: (id: string) => void;
   onJoinRoom: (id: string) => void;
   onLeaveRoom: (id: string) => void;
   onRename: (id: string) => void;
@@ -21,6 +22,7 @@ export function ChatSidebarContent({
   activeId,
   currentUserId,
   onSelect,
+  onSelectInvite,
   onJoinRoom,
   onLeaveRoom,
   onRename,
@@ -45,26 +47,38 @@ export function ChatSidebarContent({
           ) : (
             shared.map((conv) => {
               const isMember = conv.is_member !== false;
+              const isInvited = conv.is_invited === true;
               return (
                 <div
                   key={conv.conversation_id}
                   className={cn(
                     "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
                     activeId === conv.conversation_id && "bg-accent",
+                    isInvited && "bg-primary/5",
                   )}
                   onClick={() =>
-                    isMember
-                      ? onSelect(conv.conversation_id)
-                      : onJoinRoom(conv.conversation_id)
+                    isInvited
+                      ? onSelectInvite(conv.conversation_id)
+                      : isMember
+                        ? onSelect(conv.conversation_id)
+                        : onJoinRoom(conv.conversation_id)
                   }
                 >
+                  {isInvited && (
+                    <MailIcon className="size-3.5 text-primary shrink-0" />
+                  )}
                   <span className="flex-1 truncate">{conv.title}</span>
-                  {conv.member_count !== undefined && (
+                  {conv.member_count !== undefined && !isInvited && (
                     <Badge variant="secondary" className="text-[10px] px-1.5">
                       {conv.member_count}
                     </Badge>
                   )}
-                  {!isMember && (
+                  {isInvited && (
+                    <Badge variant="default" className="text-[10px]">
+                      Invited
+                    </Badge>
+                  )}
+                  {!isMember && !isInvited && (
                     <Badge variant="outline" className="text-[10px]">
                       Join
                     </Badge>

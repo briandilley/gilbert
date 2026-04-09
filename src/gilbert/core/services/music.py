@@ -16,7 +16,6 @@ from gilbert.interfaces.music import (
     TrackInfo,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import PlayRequest
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -209,31 +208,20 @@ class MusicService(Service):
         if self._speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
 
-        from gilbert.core.services.speaker import SpeakerService
-
-        if not isinstance(self._speaker_svc, SpeakerService):
-            raise TypeError("Expected SpeakerService for speaker_control capability")
-
         track = await self._backend.get_track(track_id)
         if track is None:
             raise KeyError(f"Track not found: {track_id}")
 
         uri = await self._backend.get_playable_uri(track_id)
+        title = f"{track.name} — {', '.join(a.name for a in track.artists)}"
 
-        # Resolve speaker names to IDs
-        speaker_ids: list[str] = []
-        if speaker_names:
-            speaker_ids = await self._speaker_svc.resolve_speaker_names(speaker_names)
-
-        target_ids = self._speaker_svc._resolve_target_speakers(speaker_ids or None)
-
-        await self._speaker_svc.backend.play_uri(PlayRequest(
+        await self._speaker_svc.play_on_speakers(
             uri=uri,
-            speaker_ids=target_ids,
+            speaker_names=speaker_names,
             volume=volume,
-            title=f"{track.name} — {', '.join(a.name for a in track.artists)}",
+            title=title,
             position_seconds=position_seconds,
-        ))
+        )
 
         return track
 

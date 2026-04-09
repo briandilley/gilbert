@@ -35,6 +35,7 @@ export interface UIBlock {
   submit_label?: string;
   tool_name?: string;
   for_user?: string;
+  exclude_user?: string;
   submitted?: boolean;
   submission?: Record<string, unknown>;
 }

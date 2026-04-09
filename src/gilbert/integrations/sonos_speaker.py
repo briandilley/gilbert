@@ -64,6 +64,20 @@ def _find_device(devices: dict[str, SoCo], speaker_id: str) -> SoCo:
     return device
 
 
+def _to_sonos_spotify_uri(spotify_uri: str) -> str:
+    """Convert a ``spotify:track:ID`` URI to Sonos ``x-sonos-spotify:`` format.
+
+    Sonos cannot play raw ``spotify:`` URIs via ``play_uri``. Wrapping in
+    ``x-sonos-spotify:`` with the Spotify service ID lets Sonos resolve
+    the track through its own Spotify account.
+    """
+    from soco.music_services import MusicService
+
+    sid = MusicService("Spotify").service_id
+    encoded = spotify_uri.replace(":", "%3a")
+    return f"x-sonos-spotify:{encoded}?sid={sid}&flags=8224&sn=1"
+
+
 class SonosSpeaker(SpeakerBackend):
     """Sonos speaker backend using the SoCo library."""
 
@@ -110,16 +124,7 @@ class SonosSpeaker(SpeakerBackend):
         if not target_ids:
             raise ValueError("No speakers available")
 
-        # If multiple speakers, group them first
-        if len(target_ids) > 1 and self.supports_grouping:
-            group = await self.group_speakers(target_ids)
-            coordinator = self._devices.get(group.coordinator_id)
-            if coordinator is None:
-                raise RuntimeError(f"Group coordinator not found: {group.coordinator_id}")
-        else:
-            device = _find_device(self._devices, target_ids[0])
-            group = await asyncio.to_thread(lambda: device.group)
-            coordinator = group.coordinator if group else device
+        coordinator = await self._ensure_speaker_topology(target_ids)
 
         # Set volume if requested
         if request.volume is not None:
@@ -128,18 +133,51 @@ class SonosSpeaker(SpeakerBackend):
                 if dev:
                     await asyncio.to_thread(setattr, dev, "volume", request.volume)
 
-        # Play
+        # Play — Spotify URIs need conversion to Sonos format with DIDL metadata
         title = request.title or ""
-        await asyncio.to_thread(coordinator.play_uri, request.uri, title=title)
+        uri = request.uri
+
+        if uri.startswith("spotify:"):
+            uri = await asyncio.to_thread(_to_sonos_spotify_uri, uri)
+        await asyncio.to_thread(coordinator.play_uri, uri, title=title)
 
         # Seek to position if requested
         if request.position_seconds is not None and request.position_seconds > 0:
             pos = int(request.position_seconds)
             timestamp = f"{pos // 3600}:{(pos % 3600) // 60:02d}:{pos % 60:02d}"
+            await asyncio.sleep(0.3)  # brief pause for transport to start
             await asyncio.to_thread(coordinator.seek, timestamp)
-            logger.info("Seeked to %s on %s", timestamp, coordinator.player_name)
 
         logger.info("Playing %s on %s", request.uri, coordinator.player_name)
+
+    async def _ensure_speaker_topology(self, target_ids: list[str]) -> SoCo:
+        """Ensure the target speakers are in the correct topology.
+
+        - Single speaker: unjoin from any existing group so it plays solo.
+        - Multiple speakers: form a group with exactly those speakers.
+
+        Returns the coordinator device to use for playback.
+        """
+        if len(target_ids) == 1:
+            device = _find_device(self._devices, target_ids[0])
+            # Unjoin if part of a multi-member group
+            group = await asyncio.to_thread(lambda: device.group)
+            if group and len(group.members) > 1:
+                await asyncio.to_thread(device.unjoin)
+                await asyncio.sleep(_GROUP_SETTLE_SECONDS)
+                logger.info(
+                    "Unjoined %s from group for solo playback",
+                    device.player_name,
+                )
+            return device
+
+        group = await self.group_speakers(target_ids)
+        coordinator = self._devices.get(group.coordinator_id)
+        if coordinator is None:
+            raise RuntimeError(
+                f"Group coordinator not found: {group.coordinator_id}"
+            )
+        return coordinator
 
     async def stop(self, speaker_ids: list[str] | None = None) -> None:
         targets = speaker_ids or list(self._devices.keys())

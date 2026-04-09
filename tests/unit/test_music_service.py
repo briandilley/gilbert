@@ -347,6 +347,7 @@ async def test_tool_play_track_with_speakers(
     speaker_svc = MagicMock(spec=SpeakerService)
     speaker_svc.resolve_speaker_names = AsyncMock(return_value=["s1"])
     speaker_svc._resolve_target_speakers.return_value = ["s1"]
+    speaker_svc.play_on_speakers = AsyncMock()
     speaker_svc.backend = mock_speaker_backend
 
     resolver = AsyncMock(spec=ServiceResolver)
@@ -380,12 +381,12 @@ async def test_tool_play_track_with_speakers(
     assert parsed["name"] == "First Song"
     assert parsed["started_at_seconds"] == 12.5
 
-    # Verify play_uri was called with position
-    mock_speaker_backend.play_uri.assert_awaited_once()
-    call_args = mock_speaker_backend.play_uri.call_args[0][0]
-    assert call_args.uri == "spotify:track:tr-1"
-    assert call_args.position_seconds == 12.5
-    assert call_args.speaker_ids == ["s1"]
+    # Verify play_on_speakers was called with correct args
+    speaker_svc.play_on_speakers.assert_awaited_once()
+    call_kwargs = speaker_svc.play_on_speakers.call_args[1]
+    assert call_kwargs["uri"] == "spotify:track:tr-1"
+    assert call_kwargs["position_seconds"] == 12.5
+    assert call_kwargs["speaker_names"] == ["Kitchen"]
 
 
 # --- Config parsing ---
