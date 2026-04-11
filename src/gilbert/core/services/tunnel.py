@@ -1,77 +1,91 @@
-"""Tunnel service — provides public HTTPS URLs via ngrok.
+"""Tunnel service — provides public HTTPS URLs via a pluggable backend.
 
-Starts an ngrok tunnel to the local web server so external services
-(Google OAuth, webhooks, etc.) can reach Gilbert over HTTPS.
+Wraps a TunnelBackend (ngrok, etc.) as a discoverable service so external
+services (Google OAuth, webhooks) can reach Gilbert over HTTPS.
 """
 
 import logging
 from typing import Any
 
-from gilbert.config import TunnelConfig
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.tunnel import TunnelBackend
 
 logger = logging.getLogger(__name__)
 
 
 class TunnelService(Service):
-    """Manages an ngrok tunnel for public HTTPS access.
+    """Manages a public HTTPS tunnel via a pluggable backend.
 
     Capabilities: ``tunnel``.
-    Requires: ``credentials`` (optional — only if auth token configured).
     """
 
-    def __init__(self, config: TunnelConfig, local_port: int = 8765) -> None:
-        self._config = config
+    def __init__(self, backend: TunnelBackend, local_port: int = 8765) -> None:
+        self._backend = backend
         self._local_port = local_port
-        self._tunnel: Any = None
         self._public_url: str = ""
+        self._settings: dict[str, Any] = {}
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="tunnel",
             capabilities=frozenset({"tunnel"}),
-            optional=frozenset({"credentials"}),
+            optional=frozenset({"configuration"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
-        from pyngrok import conf, ngrok
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
 
-        # Configure auth token if provided.
-        if self._config.credential:
-            cred_svc = resolver.get_capability("credentials")
-            if cred_svc is not None:
-                from gilbert.interfaces.credentials import ApiKeyCredential
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("tunnel")
+                self._settings = section.get("settings", {})
 
-                cred = cred_svc.get(self._config.credential)  # type: ignore[union-attr]
-                if isinstance(cred, ApiKeyCredential):
-                    conf.get_default().auth_token = cred.api_key
-                    logger.info("Ngrok auth token configured")
-
-        # Start the tunnel.
-        options: dict[str, Any] = {"addr": str(self._local_port)}
-        if self._config.domain:
-            options["domain"] = self._config.domain
-
-        self._tunnel = ngrok.connect(**options)
-        self._public_url = self._tunnel.public_url
-
-        # Ensure HTTPS.
-        if self._public_url.startswith("http://"):
-            self._public_url = self._public_url.replace("http://", "https://", 1)
-
+        self._public_url = await self._backend.connect(self._local_port, self._settings)
         logger.info("Tunnel started: %s -> localhost:%d", self._public_url, self._local_port)
 
     async def stop(self) -> None:
-        if self._tunnel is not None:
-            from pyngrok import ngrok
+        await self._backend.disconnect()
+        self._public_url = ""
 
-            try:
-                ngrok.disconnect(self._tunnel.public_url)
-            except Exception:
-                logger.debug("Error disconnecting tunnel")
-            self._tunnel = None
-            self._public_url = ""
-            logger.info("Tunnel stopped")
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "tunnel"
+
+    @property
+    def config_category(self) -> str:
+        return "Infrastructure"
+
+    def config_params(self) -> list[ConfigParam]:
+        params = [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the public tunnel is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="backend", type=ToolParameterType.STRING,
+                description="Tunnel backend provider.",
+                default="ngrok", restart_required=True,
+                choices=tuple(TunnelBackend.registered_backends().keys()) or ("ngrok",),
+            ),
+        ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        pass  # All tunnel params are restart_required
 
     # --- Public API ---
 
@@ -81,7 +95,7 @@ class TunnelService(Service):
         return self._public_url
 
     def public_url_for(self, path: str) -> str:
-        """Build a full public URL for a path (e.g., ``/auth/login/google/callback``)."""
+        """Build a full public URL for a path (e.g., ``/auth/callback``)."""
         base = self._public_url.rstrip("/")
         path = path if path.startswith("/") else f"/{path}"
         return f"{base}{path}"

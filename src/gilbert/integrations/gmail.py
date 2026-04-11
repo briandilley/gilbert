@@ -1,13 +1,14 @@
-"""Gmail email backend — EmailBackend implementation using Gmail API v1.
+"""Gmail email backend — self-contained EmailBackend using Gmail API v1.
 
-Uses Gilbert's GoogleService for authentication (service account with
-domain-wide delegation). The ``email_address`` config field specifies
-which mailbox to impersonate.
+Authenticates directly with a Google service account (JSON key pasted
+into config) and domain-wide delegation. No shared GoogleService needed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -19,33 +20,84 @@ from gilbert.interfaces.email import EmailAddress, EmailAttachment, EmailBackend
 
 logger = logging.getLogger(__name__)
 
-GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-
 
 class GmailBackend(EmailBackend):
     """EmailBackend backed by Gmail API v1 via google-api-python-client."""
 
-    def __init__(self, email_address: str) -> None:
-        self._email_address = email_address
+    backend_name = "gmail"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="email_address", type=ToolParameterType.STRING,
+                description="Email address (mailbox to monitor and send from).",
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="service_account_json", type=ToolParameterType.STRING,
+                description="Google service account key (paste JSON content).",
+                sensitive=True, restart_required=True, multiline=True,
+            ),
+            ConfigParam(
+                key="delegated_user", type=ToolParameterType.STRING,
+                description="Email of the user to impersonate via domain-wide delegation.",
+                restart_required=True,
+            ),
+        ]
+
+    def __init__(self) -> None:
+        self._email_address: str = ""
         self._service: Any = None  # gmail API resource
 
-    async def initialize(self) -> None:
-        # Actual service is built in InboxService.start() after GoogleService resolves
-        pass
+    async def initialize(self, config: dict[str, Any] | None = None) -> None:
+        if config is None:
+            return
 
-    def set_service(self, service: Any) -> None:
-        """Set the authenticated Gmail API service resource.
+        self._email_address = config.get("email_address", "")
+        sa_json = config.get("service_account_json", "")
+        delegated_user = config.get("delegated_user", self._email_address)
 
-        Called by InboxService after GoogleService builds the client.
-        """
-        self._service = service
+        if not sa_json:
+            logger.warning("Gmail backend: no service_account_json configured")
+            return
+
+        try:
+            sa_info = json.loads(sa_json) if isinstance(sa_json, str) else sa_json
+        except json.JSONDecodeError:
+            logger.error("Gmail backend: invalid service_account_json")
+            return
+
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+
+            scopes = [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.send",
+            ]
+            creds = service_account.Credentials.from_service_account_info(
+                sa_info, scopes=scopes,
+            )
+            if delegated_user:
+                creds = creds.with_subject(delegated_user)
+
+            self._service = await asyncio.to_thread(
+                build, "gmail", "v1", credentials=creds,
+            )
+            logger.info("Gmail backend initialized (email=%s)", self._email_address)
+        except Exception:
+            logger.exception("Failed to initialize Gmail backend")
 
     async def close(self) -> None:
         self._service = None
 
     def _ensure_service(self) -> Any:
         if self._service is None:
-            raise RuntimeError("Gmail backend not initialized — call set_service() first")
+            raise RuntimeError("Gmail backend not initialized — check service_account_json config")
         return self._service
 
     # --- Fetch ---
@@ -53,8 +105,6 @@ class GmailBackend(EmailBackend):
     async def list_message_ids(self, query: str = "", max_results: int = 100) -> list[str]:
         svc = self._ensure_service()
         q = query or "in:inbox OR in:sent"
-
-        import asyncio
 
         ids: list[str] = []
         page_token: str | None = None
@@ -82,8 +132,6 @@ class GmailBackend(EmailBackend):
 
     async def get_message(self, message_id: str) -> EmailMessage | None:
         svc = self._ensure_service()
-
-        import asyncio
 
         try:
             data = await asyncio.to_thread(
@@ -133,7 +181,6 @@ class GmailBackend(EmailBackend):
     ) -> str:
         svc = self._ensure_service()
 
-        # If we have attachments, use mixed multipart with alternative body inside
         if attachments:
             msg = MIMEMultipart("mixed")
             body_part = MIMEMultipart("alternative")
@@ -172,8 +219,6 @@ class GmailBackend(EmailBackend):
         if thread_id:
             send_body["threadId"] = thread_id
 
-        import asyncio
-
         result = await asyncio.to_thread(
             svc.users().messages().send(userId="me", body=send_body).execute,
         )
@@ -183,15 +228,12 @@ class GmailBackend(EmailBackend):
 
     async def mark_read(self, message_id: str) -> None:
         svc = self._ensure_service()
-        import asyncio
-
         await asyncio.to_thread(
             svc.users()
             .messages()
             .modify(userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]})
             .execute,
         )
-
 
 
 # --- Helpers ---

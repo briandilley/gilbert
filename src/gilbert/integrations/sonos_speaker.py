@@ -82,6 +82,8 @@ def _to_sonos_spotify_uri(spotify_uri: str) -> str:
 class SonosSpeaker(SpeakerBackend):
     """Sonos speaker backend using the SoCo library."""
 
+    backend_name = "sonos"
+
     def __init__(self) -> None:
         self._devices: dict[str, SoCo] = {}
 
@@ -162,6 +164,17 @@ class SonosSpeaker(SpeakerBackend):
         device = _find_device(self._devices, target_ids[0])
         group = await asyncio.to_thread(lambda: device.group)
         return group.coordinator if group else device
+
+    async def clear_queue(self, speaker_ids: list[str] | None = None) -> None:
+        """Clear the playback queue on the specified speakers."""
+        targets = speaker_ids or list(self._devices.keys())
+        for sid in targets:
+            device = self._devices.get(sid)
+            if device:
+                try:
+                    await asyncio.to_thread(device.clear_queue)
+                except Exception:
+                    logger.debug("Failed to clear queue on %s", sid)
 
     async def stop(self, speaker_ids: list[str] | None = None) -> None:
         targets = speaker_ids or list(self._devices.keys())

@@ -18,38 +18,71 @@ AI assistant for home and business automation. Extensible, plugin-driven archite
 Everything is designed as an abstract interface (Python ABCs) with concrete implementations. This applies to:
 
 - **Data layer** — e.g., `StorageBackend` ABC with `SQLiteStorage` implementation (swappable to PostgreSQL, etc.)
-- **Service abstractions** — e.g., `TTSBackend` ABC with `ElevenLabsTTS`, `AIBackend` ABC with `AnthropicAI`, etc.
+- **Backend abstractions** — e.g., `TTSBackend` ABC with `ElevenLabsTTS`, `AIBackend` ABC with `AnthropicAI`, `AuthBackend` with `LocalAuth`/`GoogleAuth`, `VisionBackend` with `AnthropicVision`, `TunnelBackend` with `NgrokTunnel`, etc.
+- **Service-level protocols** — e.g., `Configurable` for runtime config, `ToolProvider` for AI tool registration
 
-New integrations are added by implementing the relevant interface, not by modifying core logic.
+New integrations are added by implementing the relevant backend ABC. The `__init_subclass__` auto-registration means just defining the class is enough — no wiring code needed.
 
 ### Plugin System
 
 Plugins are loaded from:
 - **GitHub URLs** — fetched and installed at runtime
 - **Local file paths** — for development or private plugins
+- **Plugin directories** — scanned for subdirectories containing `plugin.yaml`
 
-Plugins implement published interfaces to extend Gilbert with new integrations or capabilities.
+Plugins implement published interfaces to extend Gilbert with new integrations or capabilities. Plugins that need configuration implement `Configurable` and read their config from `ConfigurationService`, not from `context.config` (which only contains the initial config snapshot at load time).
 
 ### Installation Data Directory (`.gilbert/`)
 
 The `.gilbert/` folder is the per-installation data directory. It is **gitignored** and auto-created on first run. Users clone the repo and run it — no source files need editing.
 
 Contents:
-- `config.yaml` — per-installation config overrides
-- `gilbert.db` — SQLite database
+- `config.yaml` — bootstrap overrides only (storage, logging, web)
+- `gilbert.db` — SQLite database (includes all runtime configuration)
 - `gilbert.log` / `ai_calls.log` — log files
 - `plugins/` — cached plugins fetched from GitHub
+- `chromadb/` — vector store for knowledge service
 
-### Configuration Layering
+### Configuration System
 
-1. `gilbert.yaml` (committed) — sensible defaults, shipped with the repo
-2. `.gilbert/config.yaml` (gitignored) — per-installation overrides, deep-merged on top
+Configuration is split between YAML (bootstrap) and entity storage (everything else).
 
-Users customize Gilbert by creating `.gilbert/config.yaml`. The deep merge means you only need to specify the values you want to change.
+**Bootstrap config (YAML)** — only `storage`, `logging`, and `web` sections live in YAML because they are needed before entity storage is available:
+
+1. `gilbert.yaml` (committed) — bootstrap defaults
+2. `.gilbert/config.yaml` (gitignored) — per-installation bootstrap overrides, deep-merged on top
+
+**Runtime config (entity storage)** — all other configuration is stored in the `gilbert.config` entity collection and managed via the web UI at `/settings`. On first run, non-bootstrap sections from YAML are seeded into entity storage. After that, entity storage is the source of truth.
+
+The `ConfigurationService` provides read/write access to all config, persists changes, and notifies or restarts affected services. Services implement the `Configurable` protocol to declare their parameters and handle live updates.
+
+### Backend Pattern
+
+All swappable components follow a universal backend pattern:
+
+- **`backend_name`** class attribute for automatic registry
+- **`backend_config_params()`** classmethod declaring backend-specific settings as `ConfigParam` objects
+- **`__init_subclass__`** auto-registration into the backend's `_registry` dict
+- **`initialize(config)` / `close()`** lifecycle methods
+
+The owning service exposes backend params in the Settings UI under a "Backend Settings" section (params with `backend_param=True`). Backend selection and credentials (API keys, etc.) are configured directly on each backend via the Settings UI.
+
+Backend ABCs following this pattern: `AIBackend`, `TTSBackend`, `AuthBackend`, `UserProviderBackend`, `TunnelBackend`, `VisionBackend`, `DocumentBackend`, `EmailBackend`, `MusicBackend`, `SpeakerBackend`, `DoorbellBackend`, `WebSearchBackend`.
+
+### Configurable Protocol
+
+Services that accept runtime configuration implement `Configurable`:
+
+- **`config_namespace`** — config section name (e.g., `"ai"`, `"tts"`)
+- **`config_category`** — UI grouping (e.g., `"Media"`, `"Intelligence"`, `"Security"`)
+- **`config_params()`** — declares all parameters with types, descriptions, defaults
+- **`on_config_changed(config)`** — called when tunable params change at runtime
+
+`ConfigParam` fields: `key`, `type`, `description`, `default`, `restart_required`, `sensitive` (masked in UI), `choices` (dropdown), `multiline` (textarea), `choices_from` (dynamic choices), `backend_param` (declared by backend, not service).
 
 ### AI Context Profiles
 
-AI interactions use **named profiles** that control which tools are available. This decouples tool access from code — profiles are stored in entity storage and manageable at runtime via AI tools or the web UI at `/roles/profiles`.
+AI interactions use **named profiles** that control which tools are available. This decouples tool access from code — profiles are stored in entity storage (`ai_profiles` collection) and manageable at runtime via AI tools or the web UI at `/roles/profiles`.
 
 **How it works:**
 
@@ -63,20 +96,21 @@ AI interactions use **named profiles** that control which tools are available. T
 - `ai_call=None` means no profile filtering (all tools available, RBAC still applies).
 - Unassigned call names fall back to the `default` profile (all tools).
 - Profiles control *which* tools are available; RBAC controls *who* can use them. Both always apply.
-- Default profiles (`default`, `human_chat`, `text_only`, `sales_agent`) are seeded from `gilbert.yaml` on first run.
+- Default profiles (`default`, `human_chat`, `text_only`, `sales_agent`) are seeded from built-in constants in `AIService` on first run.
 - New services that call `ai.chat()` should declare their `ai_calls` and pass the call name. The profile assignment can be configured without code changes.
 
 ### Key Directories
 
-- `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, plugins, WS)
-- `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging
+- `src/gilbert/interfaces/` — ABCs and protocol definitions (AI, tools, storage, events, TTS, auth, users, vision, tunnel, knowledge, configuration, plugins, WS)
+- `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging, config loading
 - `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services (including WS RPC handlers via `WsHandlerProvider`)
-- `src/gilbert/integrations/` — Concrete backend implementations (e.g., ElevenLabs TTS)
+- `src/gilbert/integrations/` — Concrete backend implementations (e.g., ElevenLabs TTS, Anthropic AI, ngrok tunnel, Google auth/directory, Gmail, GDrive)
 - `src/gilbert/storage/` — Storage backend implementations (SQLite)
 - `src/gilbert/plugins/` — Plugin loader
+- `src/gilbert/web/` — Web server, SPA assets, API routes
 - `tests/unit/` — Unit tests with mocks
 - `tests/integration/` — Tests against real backends (e.g., SQLite)
-- `.gilbert/` — Per-installation data directory (gitignored): config overrides, database, logs
+- `.gilbert/` — Per-installation data directory (gitignored): bootstrap config, database, logs
 
 ## Agent Memory System
 
@@ -137,7 +171,7 @@ gotchas, etc.
 
 ## Privacy
 
-**Never put private or personal information in tracked files.** API keys, credentials, voice IDs, email addresses, and any other personal data must only go in gitignored locations (`.gilbert/config.yaml`, `.gilbert/credentials/`, etc.). This includes `.claude/memory/` files — those are committed to the repo. If you need to remember something private, use the user-scoped memory system instead of the project-scoped one.
+**Never put private or personal information in tracked files.** API keys, credentials, voice IDs, email addresses, and any other personal data must only go in gitignored locations (entity storage in `.gilbert/gilbert.db`, `.gilbert/config.yaml`, etc.). This includes `.claude/memory/` files — those are committed to the repo. If you need to remember something private, use the user-scoped memory system instead of the project-scoped one.
 
 ## Development Guidelines
 

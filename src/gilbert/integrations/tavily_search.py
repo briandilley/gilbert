@@ -18,6 +18,26 @@ _DEFAULT_TIMEOUT = 15
 class TavilySearch(WebSearchBackend):
     """Tavily Search API implementation."""
 
+    backend_name = "tavily"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="api_key", type=ToolParameterType.STRING,
+                description="Tavily API key.",
+                sensitive=True, restart_required=True,
+            ),
+            ConfigParam(
+                key="timeout", type=ToolParameterType.INTEGER,
+                description="Request timeout in seconds.",
+                default=_DEFAULT_TIMEOUT,
+            ),
+        ]
+
     def __init__(self) -> None:
         self._api_key: str = ""
         self._client: httpx.AsyncClient | None = None

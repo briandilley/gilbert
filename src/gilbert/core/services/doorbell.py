@@ -38,9 +38,9 @@ class DoorbellService(Service):
         self._resolver: ServiceResolver | None = None
         self._poll_interval: float = _DEFAULT_POLL_INTERVAL
         self._last_ring_ts: float = 0.0  # epoch ms of last seen ring
-        self._doorbell_names: dict[str, str] = {}  # camera name -> friendly door name
+        self._doorbell_names: list[str] = []  # selected doorbell/camera names to monitor
         self._speakers: list[str] = []  # speaker names for announcements
-        self._voice_name: str = ""  # TTS voice name
+        self._available_doorbells: list[str] = []  # cached from backend
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -71,18 +71,15 @@ class DoorbellService(Service):
                 full_section = config_svc.get_section("doorbell")
                 self._apply_config(full_section)
 
-        # Resolve credentials and initialize backend
-        init_config: dict[str, object] = dict(full_section.get("unifi_protect", {}))
-        cred_svc = resolver.get_capability("credentials")
-        if cred_svc is not None and init_config.get("credential"):
-            from gilbert.core.services.credentials import CredentialService
+        # Initialize backend with settings
+        settings: dict[str, object] = dict(full_section.get("settings", {}))
+        await self._backend.initialize(settings)
 
-            if isinstance(cred_svc, CredentialService):
-                cred = cred_svc.get(str(init_config["credential"]))
-                if cred:
-                    init_config["_resolved_credential"] = cred
-
-        await self._backend.initialize(init_config)
+        # Cache available doorbell names for dynamic choices
+        try:
+            self._available_doorbells = await self._backend.list_doorbell_names()
+        except Exception:
+            logger.debug("Could not cache doorbell names on start")
 
         # Initialize last ring timestamp to now (don't trigger on old events)
         self._last_ring_ts = time.time() * 1000
@@ -109,15 +106,14 @@ class DoorbellService(Service):
         poll = section.get("poll_interval_seconds")
         if poll is not None:
             self._poll_interval = float(poll)
-        names = section.get("doorbell_names")
-        if isinstance(names, dict):
-            self._doorbell_names = names
+        settings = section.get("settings", {})
+        if isinstance(settings, dict):
+            names = settings.get("doorbell_names")
+            if isinstance(names, list):
+                self._doorbell_names = names
         speakers = section.get("speakers")
         if isinstance(speakers, list):
             self._speakers = speakers
-        voice = section.get("voice_name")
-        if isinstance(voice, str):
-            self._voice_name = voice
 
     # --- Configurable protocol ---
 
@@ -125,8 +121,14 @@ class DoorbellService(Service):
     def config_namespace(self) -> str:
         return "doorbell"
 
+    @property
+    def config_category(self) -> str:
+        return "Monitoring"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
+        from gilbert.interfaces.doorbell import DoorbellBackend
+
+        params = [
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
                 description="Whether doorbell monitoring is enabled.",
@@ -138,21 +140,27 @@ class DoorbellService(Service):
                 default=_DEFAULT_POLL_INTERVAL,
             ),
             ConfigParam(
-                key="doorbell_names", type=ToolParameterType.OBJECT,
-                description="Map camera names to friendly door names (e.g., {'G4 Doorbell': 'Front Door'}).",
-                default={},
-            ),
-            ConfigParam(
                 key="speakers", type=ToolParameterType.ARRAY,
                 description="Speaker names for doorbell announcements (empty = all speakers).",
                 default=[],
+                choices_from="speakers",
             ),
             ConfigParam(
-                key="voice_name", type=ToolParameterType.STRING,
-                description="TTS voice name for doorbell announcements.",
-                default="",
+                key="backend", type=ToolParameterType.STRING,
+                description="Doorbell backend provider.",
+                default="unifi", restart_required=True,
+                choices=tuple(DoorbellBackend.registered_backends().keys()) or ("unifi",),
             ),
         ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
@@ -179,9 +187,13 @@ class DoorbellService(Service):
             # New ring detected
             self._last_ring_ts = event.timestamp
             camera_name = event.camera_name
-            door_name = self._doorbell_names.get(camera_name, camera_name)
 
-            logger.info("Doorbell ring detected: %s (%s)", door_name, camera_name)
+            # If specific doorbells are selected, only monitor those
+            if self._doorbell_names and camera_name not in self._doorbell_names:
+                continue
+
+            door_name = camera_name
+            logger.info("Doorbell ring detected: %s", door_name)
 
             if self._event_bus is not None:
                 await self._event_bus.publish(Event(
@@ -214,7 +226,6 @@ class DoorbellService(Service):
             await speaker_svc.announce(
                 text,
                 speaker_names=self._speakers or None,
-                voice_name=self._voice_name or None,
             )
         except Exception:
             logger.warning("Failed to announce doorbell ring", exc_info=True)

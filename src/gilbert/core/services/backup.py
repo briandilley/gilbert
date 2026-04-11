@@ -13,8 +13,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from typing import Any
+
 from gilbert.config import DATA_DIR
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,43 @@ class BackupService(Service):
 
     async def stop(self) -> None:
         pass
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "backup"
+
+    @property
+    def config_category(self) -> str:
+        return "Infrastructure"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the backup service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="retention_days", type=ToolParameterType.INTEGER,
+                description="Number of days to retain backups.",
+                default=30,
+            ),
+            ConfigParam(
+                key="backup_hour", type=ToolParameterType.INTEGER,
+                description="Hour of day to run backup (0-23).",
+                default=3, restart_required=True,
+            ),
+            ConfigParam(
+                key="backup_minute", type=ToolParameterType.INTEGER,
+                description="Minute of hour to run backup (0-59).",
+                default=0, restart_required=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._retention_days = int(config.get("retention_days", self._retention_days))
 
     async def _run_backup(self) -> None:
         """Scheduler callback — create archive and prune old backups."""

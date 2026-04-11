@@ -70,6 +70,10 @@ class StorageService(Service):
     def config_namespace(self) -> str:
         return "storage"
 
+    @property
+    def config_category(self) -> str:
+        return "Infrastructure"
+
     def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(

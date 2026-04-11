@@ -8,7 +8,6 @@ import pytest
 
 from gilbert.core.services.ai import AIContextProfile, AIService
 from gilbert.core.services.access_control import AccessControlService
-from gilbert.core.services.credentials import CredentialService
 from gilbert.core.services.storage import StorageService
 from gilbert.interfaces.ai import (
     AIBackend,
@@ -19,7 +18,6 @@ from gilbert.interfaces.ai import (
     StopReason,
 )
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.credentials import ApiKeyCredential
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
 from gilbert.interfaces.tools import (
@@ -176,7 +174,6 @@ async def resolver(
     stub_storage: StubStorage, stub_backend: StubAIBackend, tool_provider: StubToolProvider,
 ) -> ServiceResolver:
     storage_svc = StorageService(stub_storage)
-    cred_svc = CredentialService({"anthropic": ApiKeyCredential(api_key="sk-test")})
     acl_svc = AccessControlService()
 
     # Persona stub
@@ -188,7 +185,6 @@ async def resolver(
     mock = AsyncMock(spec=ServiceResolver)
 
     caps: dict[str, Any] = {
-        "credentials": cred_svc,
         "entity_storage": storage_svc,
         "persona": persona_svc,
         "access_control": acl_svc,
@@ -229,7 +225,7 @@ async def ai_svc(
     stub_backend: StubAIBackend, resolver: ServiceResolver, acl_svc: AccessControlService,
 ) -> AIService:
     """Started AI service with profiles loaded."""
-    svc = AIService(backend=stub_backend, credential_name="anthropic")
+    svc = AIService(backend=stub_backend)
     svc._config = {"max_tokens": 1024, "temperature": 0.5}
     svc._system_prompt = "Test assistant"
     svc._max_tool_rounds = 3

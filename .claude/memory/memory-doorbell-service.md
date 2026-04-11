@@ -6,7 +6,7 @@ Detects doorbell ring events via a pluggable `DoorbellBackend` and announces ove
 ## Details
 
 ### Architecture
-- **Interface:** `src/gilbert/interfaces/doorbell.py` — `DoorbellBackend` ABC with `initialize()`, `close()`, `get_ring_events()`
+- **Interface:** `src/gilbert/interfaces/doorbell.py` — `DoorbellBackend` ABC with `initialize()`, `close()`, `get_ring_events()`, `list_doorbell_names()`
 - **Implementation:** `src/gilbert/integrations/unifi/doorbell.py` — `UniFiProtectDoorbellBackend` (creates its own UniFi Protect client, independent of presence service)
 - **Service:** `src/gilbert/core/services/doorbell.py` — `DoorbellService(backend)`
 
@@ -14,25 +14,37 @@ Detects doorbell ring events via a pluggable `DoorbellBackend` and announces ove
 - Requires: `scheduler`, `event_bus`
 - Optional: `configuration`, `credentials`, `speaker_control`, `text_to_speech`
 - Registers a system timer `doorbell-poll` at configurable interval (default 5s)
-- Resolves credentials for the backend during `start()` (same pattern as presence service)
 
 ### Ring Detection
 - Polls backend for ring events with 10-second lookback window
 - Tracks `_last_ring_ts` (epoch ms) to only process new rings
-- Maps camera names to friendly door names via `doorbell_names` config
+- Filters by `doorbell_names` from backend settings (selected doorbells to monitor)
 
 ### Announcements
 - Announces "Someone is at the {door_name}." via SpeakerService
-- Configurable `speakers` list and `voice_name`
 
 ### Events Published
 - `doorbell.ring` — data: `{door, camera, timestamp}`
 
+### UniFi Backend
+- Standard backend pattern with settings passed via `initialize(config)`
+- Config params: `host`, `username`, `password` (credentials inline, no CredentialService), `doorbell_names`
+- `doorbell_names` is an array of camera names to monitor (empty = all). Uses `choices_from="doorbells"` for dynamic choices resolved from the backend's `list_doorbell_names()`.
+
 ### Configuration
-- `DoorbellConfig` in config.py: `enabled`, `backend`, `poll_interval_seconds`, `doorbell_names`, `speakers`, `voice_name`
-- Backend config nested under `unifi_protect: {host, credential}`
-- `doorbell_names` maps camera names to friendly names (e.g., "G4 Doorbell Pro" -> "Front Door")
+```yaml
+doorbell:
+  enabled: false
+  backend: unifi
+  poll_interval_seconds: 5.0
+  speakers: []
+  settings:
+    host: ""
+    username: ""
+    password: ""
+    doorbell_names: []   # array of camera names to monitor (empty = all)
+```
 
 ## Related
 - [Scheduler Service](memory-scheduler-service.md) — runs the polling timer
-- `tests/unit/test_doorbell_service.py` — 9 tests
+- `tests/unit/test_doorbell_service.py` — unit tests

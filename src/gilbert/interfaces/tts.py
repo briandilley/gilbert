@@ -50,6 +50,23 @@ class SynthesisResult:
 class TTSBackend(ABC):
     """Abstract text-to-speech backend. Implementation-agnostic."""
 
+    _registry: dict[str, type["TTSBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            TTSBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["TTSBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
     @abstractmethod
     async def initialize(self, config: dict[str, object]) -> None:
         """Initialize the backend with provider-specific configuration."""

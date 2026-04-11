@@ -19,6 +19,7 @@ class Camera:
     model: str
     state: str
     last_motion: int  # epoch ms
+    is_doorbell: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,12 +65,19 @@ class UniFiProtect:
 
         cameras: list[Camera] = []
         for c in data if isinstance(data, list) else []:
+            feature_flags = c.get("featureFlags", {}) or {}
+            model_name = c.get("type", "")
+            is_doorbell = (
+                feature_flags.get("hasChime", False)
+                or "doorbell" in model_name.lower()
+            )
             cameras.append(Camera(
                 camera_id=c.get("id", ""),
                 name=c.get("name", ""),
-                model=c.get("type", ""),
+                model=model_name,
                 state=c.get("state", ""),
                 last_motion=c.get("lastMotion", 0),
+                is_doorbell=is_doorbell,
             ))
         return cameras
 

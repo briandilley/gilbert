@@ -46,9 +46,24 @@ def _mime_from_path(path: Path) -> str:
 class LocalDocumentBackend(DocumentBackend):
     """Serves documents from a local filesystem directory."""
 
-    def __init__(self, name: str, base_path: str) -> None:
+    backend_name = "local"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="path", type=ToolParameterType.STRING,
+                description="Local filesystem directory path to index.",
+                restart_required=True,
+            ),
+        ]
+
+    def __init__(self, name: str = "local") -> None:
         self._name = name
-        self._base_path = Path(base_path)
+        self._base_path = Path(".")
 
     @property
     def source_id(self) -> str:
@@ -59,6 +74,10 @@ class LocalDocumentBackend(DocumentBackend):
         return f"Local: {self._name} ({self._base_path})"
 
     async def initialize(self, config: dict[str, object]) -> None:
+        self._name = str(config.get("name", self._name))
+        path = str(config.get("path", ""))
+        if path:
+            self._base_path = Path(path)
         if not self._base_path.exists():
             self._base_path.mkdir(parents=True, exist_ok=True)
             logger.info("Created document directory: %s", self._base_path)

@@ -206,4 +206,4 @@ def test_config_doorbell_defaults() -> None:
     config = GilbertConfig.model_validate({})
     assert config.doorbell.enabled is False
     assert config.doorbell.poll_interval_seconds == 5.0
-    assert config.doorbell.doorbell_names == {}
+    assert config.doorbell.speakers == []

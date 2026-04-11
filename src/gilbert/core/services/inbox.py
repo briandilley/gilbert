@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.email import EmailAddress, EmailAttachment, EmailBackend, EmailMessage
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
@@ -31,21 +32,11 @@ class InboxService(Service):
     Capabilities: email, ai_tools
     """
 
-    def __init__(
-        self,
-        backend: EmailBackend,
-        credential_name: str = "",
-        email_address: str = "",
-        poll_interval: int = 60,
-        max_body_length: int = 50000,
-        google_account: str = "",
-    ) -> None:
+    def __init__(self, backend: EmailBackend) -> None:
         self._backend = backend
-        self._credential_name = credential_name
-        self._email_address = email_address
-        self._poll_interval = poll_interval
-        self._max_body_length = max_body_length
-        self._google_account = google_account
+        self._email_address: str = ""
+        self._poll_interval: int = 60
+        self._max_body_length: int = 50000
 
         self._storage: Any = None  # StorageBackend
         self._event_bus: Any = None  # EventBus
@@ -57,12 +48,31 @@ class InboxService(Service):
             name="inbox",
             capabilities=frozenset({"email", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage", "scheduler"}),
-            optional=frozenset({"event_bus", "google_api", "knowledge"}),
+            optional=frozenset({"event_bus", "knowledge", "configuration"}),
             events=frozenset({"inbox.message.received", "inbox.message.replied", "inbox.message.sent"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         from gilbert.interfaces.storage import IndexDefinition
+
+        # Load config
+        settings: dict[str, Any] = {}
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("inbox")
+                self._email_address = section.get("email_address", self._email_address)
+                self._poll_interval = int(section.get("poll_interval", self._poll_interval))
+                self._max_body_length = int(section.get("max_body_length", self._max_body_length))
+                settings = section.get("settings", {})
+
+        # Initialize backend with settings (includes credentials)
+        # Pass email_address into settings so the backend has it
+        if self._email_address and "email_address" not in settings:
+            settings["email_address"] = self._email_address
+        await self._backend.initialize(settings)
 
         # Storage
         storage_svc = resolver.require_capability("entity_storage")
@@ -85,25 +95,6 @@ class InboxService(Service):
         event_bus_svc = resolver.get_capability("event_bus")
         if event_bus_svc:
             self._event_bus = getattr(event_bus_svc, "bus", event_bus_svc)
-
-        # Google API — build Gmail service if backend needs it
-        google_svc = resolver.get_capability("google_api")
-        if google_svc and self._google_account:
-            try:
-                gmail_service = google_svc.build_service(
-                    account=self._google_account,
-                    service_name="gmail",
-                    version="v1",
-                    subject=self._email_address or None,
-                )
-                # GmailBackend expects the service resource
-                if hasattr(self._backend, "set_service"):
-                    self._backend.set_service(gmail_service)
-            except Exception:
-                logger.exception("Failed to build Gmail API service")
-                raise
-
-        await self._backend.initialize()
 
         # Schedule polling
         from gilbert.core.services.scheduler import SchedulerService
@@ -130,6 +121,55 @@ class InboxService(Service):
         self._unsubscribes.clear()
         await self._backend.close()
         logger.info("Inbox service stopped")
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "inbox"
+
+    @property
+    def config_category(self) -> str:
+        return "Communication"
+
+    def config_params(self) -> list[ConfigParam]:
+        from gilbert.interfaces.email import EmailBackend
+
+        params = [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the inbox service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="poll_interval", type=ToolParameterType.INTEGER,
+                description="How often to check for new email (seconds).",
+                default=60,
+            ),
+            ConfigParam(
+                key="max_body_length", type=ToolParameterType.INTEGER,
+                description="Maximum email body length to store (characters).",
+                default=50000,
+            ),
+            ConfigParam(
+                key="backend", type=ToolParameterType.STRING,
+                description="Email backend provider.",
+                default="gmail", restart_required=True,
+                choices=tuple(EmailBackend.registered_backends().keys()) or ("gmail",),
+            ),
+        ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, multiline=bp.multiline, backend_param=True,
+            ))
+        return params
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._poll_interval = int(config.get("poll_interval", self._poll_interval))
+        self._max_body_length = int(config.get("max_body_length", self._max_body_length))
 
     # ── Polling ────────────────────────────────────────────────
 

@@ -15,6 +15,7 @@ from gilbert.interfaces.knowledge import (
     SearchResponse,
     SearchResult,
 )
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -32,7 +33,7 @@ class KnowledgeService(Service):
     Capabilities: knowledge, ai_tools
     """
 
-    def __init__(self, has_gdrive: bool = False) -> None:
+    def __init__(self) -> None:
         self._backends: dict[str, DocumentBackend] = {}
         self._chroma_client: Any = None
         self._collection: Any = None
@@ -44,19 +45,13 @@ class KnowledgeService(Service):
         self._storage: Any = None
         self._vision: Any = None  # VisionService
         self._ocr: Any = None  # OCRService
-        self._has_gdrive = has_gdrive
 
     def service_info(self) -> ServiceInfo:
-        # If gdrive sources are configured, require google_api so we start after it
-        required: set[str] = {"entity_storage"}
-        if self._has_gdrive:
-            required.add("google_api")
-        optional = frozenset({"scheduler", "google_api", "configuration", "credentials", "event_bus", "vision", "ocr"}) - required
         return ServiceInfo(
             name="knowledge",
             capabilities=frozenset({"knowledge", "ai_tools", "ws_handlers"}),
-            requires=required,
-            optional=optional,
+            requires=frozenset({"entity_storage"}),
+            optional=frozenset({"scheduler", "configuration", "event_bus", "vision", "ocr"}),
             events=frozenset({"knowledge.document.indexed", "knowledge.document.removed", "knowledge.document.discovered"}),
         )
 
@@ -70,7 +65,7 @@ class KnowledgeService(Service):
     async def start(self, resolver: ServiceResolver) -> None:
         # Load config
         config_svc = resolver.get_capability("configuration")
-        sources: list[dict[str, Any]] = []
+        backend_configs: list[dict[str, Any]] = []
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
@@ -80,7 +75,9 @@ class KnowledgeService(Service):
                 self._chunk_overlap = int(section.get("chunk_overlap", 200))
                 self._max_results = int(section.get("max_search_results", 10))
                 self._sync_interval = int(section.get("sync_interval_seconds", 300))
-                sources = section.get("sources", [])
+                # Build backend configs from per-type sub-sections (new format)
+                # or fall back to legacy "backends"/"sources" array
+                backend_configs = self._build_backend_configs(section)
                 chromadb_path = section.get("chromadb_path", ".gilbert/chromadb")
 
         # Initialize ChromaDB
@@ -116,50 +113,34 @@ class KnowledgeService(Service):
             if isinstance(event_bus_svc, EventBusService):
                 self._event_bus = event_bus_svc.bus
 
-        google_svc = resolver.get_capability("google_api")
+        from gilbert.interfaces.knowledge import DocumentBackend
 
-        for src in sources:
-            if not isinstance(src, dict):
+        for cfg in backend_configs:
+            if not isinstance(cfg, dict):
                 continue
-            if not src.get("enabled", True):
+            if not cfg.get("enabled", True):
                 continue
-            src_type = src.get("type", "")
-            src_name = src.get("name", "")
+            backend_type = cfg.get("type", "")
+            backend_label = cfg.get("name", backend_type)
+
+            backend_cls = DocumentBackend.registered_backends().get(backend_type)
+            if backend_cls is None:
+                # Try importing known backends
+                import gilbert.integrations.local_documents  # noqa: F401
+                import gilbert.integrations.gdrive_documents  # noqa: F401
+                backend_cls = DocumentBackend.registered_backends().get(backend_type)
+
+            if backend_cls is None:
+                logger.warning("Unknown knowledge backend type: %s", backend_type)
+                continue
 
             try:
-                if src_type == "local":
-                    from gilbert.integrations.local_documents import LocalDocumentBackend
-
-                    backend = LocalDocumentBackend(name=src_name, base_path=src.get("path", ""))
-                    await backend.initialize({})
-                    self._backends[backend.source_id] = backend
-                    logger.info("Registered document source: %s", backend.source_id)
-
-                elif src_type == "gdrive":
-                    if google_svc is None:
-                        logger.warning(
-                            "Cannot initialize gdrive source '%s': Google service not available. "
-                            "Ensure google.enabled is true in config.",
-                            src_name,
-                        )
-                        continue
-
-                    from gilbert.integrations.gdrive_documents import GoogleDriveDocumentBackend
-
-                    backend = GoogleDriveDocumentBackend(
-                        name=src_name,
-                        account=src.get("account", ""),
-                        folder_id=src.get("folder_id", ""),
-                        shared_drive_id=src.get("shared_drive_id", ""),
-                    )
-                    await backend.initialize({"_google_service": google_svc})
-                    self._backends[backend.source_id] = backend
-                    logger.info("Registered document source: %s", backend.source_id)
-
-                else:
-                    logger.warning("Unknown document source type: %s", src_type)
+                backend = backend_cls(name=backend_label)
+                await backend.initialize(dict(cfg))
+                self._backends[backend.source_id] = backend
+                logger.info("Registered knowledge backend: %s", backend.source_id)
             except Exception:
-                logger.exception("Failed to initialize document source: %s:%s", src_type, src_name)
+                logger.exception("Failed to initialize knowledge backend: %s:%s", backend_type, backend_label)
 
         # Register sync job with scheduler
         scheduler = resolver.get_capability("scheduler")
@@ -190,7 +171,7 @@ class KnowledgeService(Service):
                 )
 
         logger.info(
-            "Knowledge service started — %d sources, ChromaDB %s",
+            "Knowledge service started — %d backends, ChromaDB %s",
             len(self._backends),
             "ready" if self._collection else "unavailable",
         )
@@ -199,6 +180,112 @@ class KnowledgeService(Service):
         for backend in self._backends.values():
             await backend.close()
         self._backends.clear()
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "knowledge"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list[ConfigParam]:
+        from gilbert.interfaces.knowledge import DocumentBackend
+
+        # Ensure backend modules are imported so they register
+        import gilbert.integrations.local_documents  # noqa: F401
+        import gilbert.integrations.gdrive_documents  # noqa: F401
+
+        params = [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the knowledge service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="chunk_size", type=ToolParameterType.INTEGER,
+                description="Text chunk size for document indexing.",
+                default=800,
+            ),
+            ConfigParam(
+                key="chunk_overlap", type=ToolParameterType.INTEGER,
+                description="Overlap between text chunks.",
+                default=200,
+            ),
+            ConfigParam(
+                key="max_search_results", type=ToolParameterType.INTEGER,
+                description="Maximum results returned per search.",
+                default=20,
+            ),
+            ConfigParam(
+                key="sync_interval_seconds", type=ToolParameterType.INTEGER,
+                description="How often to sync document sources (seconds).",
+                default=300,
+            ),
+            ConfigParam(
+                key="chromadb_path", type=ToolParameterType.STRING,
+                description="Path to ChromaDB persistence directory.",
+                default=".gilbert/chromadb", restart_required=True,
+            ),
+            ConfigParam(
+                key="vision_enabled", type=ToolParameterType.BOOLEAN,
+                description="Enable vision-based document analysis.",
+                default=True,
+            ),
+        ]
+        # Add per-backend-type enable toggle + config params
+        for name, backend_cls in DocumentBackend.registered_backends().items():
+            params.append(ConfigParam(
+                key=f"{name}.enabled", type=ToolParameterType.BOOLEAN,
+                description=f"Enable the {name} knowledge backend.",
+                default=False, restart_required=True, backend_param=True,
+            ))
+            params.append(ConfigParam(
+                key=f"{name}.name", type=ToolParameterType.STRING,
+                description=f"Display name for this {name} backend.",
+                default=name, restart_required=True, backend_param=True,
+            ))
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"{name}.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=True, backend_param=True,
+                    sensitive=bp.sensitive, choices=bp.choices,
+                    multiline=bp.multiline,
+                ))
+        return params
+
+    @staticmethod
+    def _build_backend_configs(section: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build backend config list from per-type sub-sections or legacy arrays."""
+        from gilbert.interfaces.knowledge import DocumentBackend
+
+        configs: list[dict[str, Any]] = []
+
+        # Ensure backend modules are imported so they register
+        import gilbert.integrations.local_documents  # noqa: F401
+        import gilbert.integrations.gdrive_documents  # noqa: F401
+
+        # New format: per-type sub-sections (e.g., local: {enabled: true, path: ...})
+        for backend_name in DocumentBackend.registered_backends():
+            sub = section.get(backend_name)
+            if isinstance(sub, dict) and sub.get("enabled"):
+                configs.append({
+                    "type": backend_name,
+                    "name": sub.get("name", backend_name),
+                    "enabled": True,
+                    **{k: v for k, v in sub.items() if k not in ("enabled", "name", "type")},
+                })
+
+        return configs
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._chunk_size = int(config.get("chunk_size", self._chunk_size))
+        self._chunk_overlap = int(config.get("chunk_overlap", self._chunk_overlap))
+        self._max_results = int(config.get("max_search_results", self._max_results))
+        self._sync_interval = int(config.get("sync_interval_seconds", self._sync_interval))
 
     # --- Indexing ---
 

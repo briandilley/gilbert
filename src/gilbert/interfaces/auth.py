@@ -1,4 +1,4 @@
-"""Authentication interfaces — UserContext, AuthInfo, and AuthProvider ABC."""
+"""Authentication interfaces — UserContext, AuthInfo, and AuthBackend ABC."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ UserContext.GUEST = UserContext(
 
 @dataclass(frozen=True)
 class AuthInfo:
-    """Result returned by an AuthProvider after successful authentication.
+    """Result returned by an AuthBackend after successful authentication.
 
     Contains provider-specific identity information that the AuthService
     uses to resolve or create a local user.
@@ -63,13 +63,30 @@ class AuthInfo:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-class AuthProvider(ABC):
-    """Abstract authentication provider.
+class AuthBackend(ABC):
+    """Abstract authentication provider (backend).
 
     Concrete implementations handle a specific authentication mechanism
-    (local passwords, Google OAuth, Zoho, etc.). Multiple providers
-    are aggregated by the AuthService.
+    (local passwords, Google OAuth, etc.). Multiple providers are
+    aggregated by the AuthService.
     """
+
+    _registry: dict[str, type["AuthBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            AuthBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["AuthBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
 
     @property
     @abstractmethod
@@ -91,6 +108,10 @@ class AuthProvider(ABC):
         Returns AuthInfo on success, None on failure.
         """
 
+    async def handle_callback(self, params: dict[str, Any]) -> AuthInfo | None:
+        """Handle an OAuth/external callback. Default: not supported."""
+        return None
+
     async def sync_users(self) -> list[AuthInfo]:
         """Pull users from an external system. Default: no-op (local providers)."""
         return []
@@ -104,7 +125,7 @@ class AuthProvider(ABC):
 class LoginMethod:
     """Describes a login option to render on the login page.
 
-    Each AuthenticationService provides one of these so the login page
+    Each AuthBackend provides one of these so the login page
     can display all available authentication options.
     """
 
@@ -119,28 +140,3 @@ class LoginMethod:
     form_action: str = ""
 
 
-class AuthenticationService(ABC):
-    """Abstract authentication service.
-
-    Each implementation handles a specific authentication mechanism and
-    exposes enough metadata for the login page to render UI for it.
-    Implementations should also be ``Service`` subclasses so they
-    participate in the service lifecycle.
-    """
-
-    @property
-    @abstractmethod
-    def provider_type(self) -> str:
-        """Unique identifier (e.g., ``'local'``, ``'google'``)."""
-
-    @abstractmethod
-    def get_login_method(self) -> LoginMethod:
-        """Describe how this service appears on the login page."""
-
-    @abstractmethod
-    async def authenticate(self, credentials: dict[str, Any]) -> AuthInfo | None:
-        """Authenticate. Returns AuthInfo on success, None on failure."""
-
-    async def handle_callback(self, params: dict[str, Any]) -> AuthInfo | None:
-        """Handle an OAuth/external callback. Default: not supported."""
-        return None

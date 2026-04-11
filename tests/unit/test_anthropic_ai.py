@@ -153,11 +153,11 @@ def test_build_tools() -> None:
 def test_build_request_body_includes_system() -> None:
     backend = AnthropicAI()
     backend._model = "test-model"
+    backend._max_tokens = 100
+    backend._temperature = 0.3
     request = AIRequest(
         messages=[Message(role=MessageRole.USER, content="Hi")],
         system_prompt="Be helpful",
-        max_tokens=100,
-        temperature=0.3,
     )
     body = backend._build_request_body(request)
     assert body["system"] == "Be helpful"

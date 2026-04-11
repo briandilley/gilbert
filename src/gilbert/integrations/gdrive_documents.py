@@ -65,17 +65,34 @@ def _type_from_mime(mime: str, name: str) -> DocumentType:
 class GoogleDriveDocumentBackend(DocumentBackend):
     """Serves documents from a Google Drive folder or shared drive."""
 
-    def __init__(
-        self,
-        name: str,
-        account: str,
-        folder_id: str = "",
-        shared_drive_id: str = "",
-    ) -> None:
+    backend_name = "gdrive"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="service_account_json", type=ToolParameterType.STRING,
+                description="Google service account key (paste JSON content).",
+                sensitive=True, restart_required=True, multiline=True,
+            ),
+            ConfigParam(
+                key="delegated_user", type=ToolParameterType.STRING,
+                description="Email of the user to impersonate via domain-wide delegation.",
+                default="", restart_required=True,
+            ),
+            ConfigParam(
+                key="folder_id", type=ToolParameterType.STRING,
+                description="Google Drive folder or Shared Drive ID to index.",
+                restart_required=True,
+            ),
+        ]
+
+    def __init__(self, name: str = "gdrive") -> None:
         self._name = name
-        self._account = account
-        self._folder_id = folder_id
-        self._shared_drive_id = shared_drive_id
+        self._folder_id: str = ""
         self._drive: Any = None
         self._file_cache: dict[str, dict[str, Any]] = {}
         # path → folder_id cache for directory navigation
@@ -92,17 +109,41 @@ class GoogleDriveDocumentBackend(DocumentBackend):
         return f"Google Drive: {self._name}"
 
     async def initialize(self, config: dict[str, object]) -> None:
-        google_svc = config.get("_google_service")
-        if google_svc is None:
-            raise RuntimeError("Google service required for Drive backend")
-        self._drive = google_svc.build_service(
-            self._account, "drive", "v3",
-        )
+        import json as _json
+
+        self._folder_id = str(config.get("folder_id", "") or config.get("shared_drive_id", ""))
+        self._name = str(config.get("name", self._name))
+
+        sa_json = config.get("service_account_json", "")
+        delegated_user = str(config.get("delegated_user", ""))
+
+        if sa_json:
+            try:
+                sa_info = _json.loads(sa_json) if isinstance(sa_json, str) else sa_json
+                from google.oauth2 import service_account
+                from googleapiclient.discovery import build
+
+                scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+                creds = service_account.Credentials.from_service_account_info(
+                    sa_info, scopes=scopes,
+                )
+                if delegated_user:
+                    creds = creds.with_subject(delegated_user)
+
+                self._drive = await asyncio.to_thread(
+                    build, "drive", "v3", credentials=creds,
+                )
+            except Exception:
+                logger.exception("Failed to initialize Google Drive backend '%s'", self._name)
+                return
+        else:
+            logger.warning("Google Drive backend '%s': no credentials configured", self._name)
+            return
+
         logger.info(
-            "Google Drive backend '%s' initialized (folder=%s, shared_drive=%s)",
+            "Google Drive backend '%s' initialized (folder=%s)",
             self._name,
             self._folder_id or "(root)",
-            self._shared_drive_id or "(none)",
         )
 
     async def close(self) -> None:
@@ -405,8 +446,7 @@ class GoogleDriveDocumentBackend(DocumentBackend):
             "media_body": media,
             "fields": "id, name, mimeType, size, modifiedTime, md5Checksum",
         }
-        if self._shared_drive_id:
-            kwargs["supportsAllDrives"] = True
+        kwargs["supportsAllDrives"] = True
 
         async with self._api_lock:
             result = await asyncio.to_thread(
@@ -425,8 +465,7 @@ class GoogleDriveDocumentBackend(DocumentBackend):
             raise RuntimeError("Drive not initialized")
 
         kwargs: dict[str, Any] = {"fileId": file_id}
-        if self._shared_drive_id:
-            kwargs["supportsAllDrives"] = True
+        kwargs["supportsAllDrives"] = True
 
         async with self._api_lock:
             await asyncio.to_thread(self._drive.files().delete(**kwargs).execute)

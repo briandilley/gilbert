@@ -8,6 +8,7 @@ Multi-backend document knowledge store with ChromaDB vector search. Indexes docu
 ### Interface
 - `src/gilbert/interfaces/knowledge.py` — `DocumentBackend` ABC, `DocumentMeta`, `DocumentContent`, `DocumentChunk`, `SearchResult`, `SearchResponse`, `DocumentType` enum
 - Documents identified by `source_id:path` (document_id)
+- Configuration uses per-type sub-sections (`local`, `gdrive`) instead of a sources array. Each sub-section has its own `enabled` flag and settings.
 
 ### Service
 - `src/gilbert/core/services/knowledge.py` — `KnowledgeService`
@@ -28,7 +29,7 @@ Multi-backend document knowledge store with ChromaDB vector search. Indexes docu
 
 ### Backends
 - `src/gilbert/integrations/local_documents.py` — `LocalDocumentBackend`: recursive dir scan, path traversal prevention, extension-to-type mapping
-- `src/gilbert/integrations/gdrive_documents.py` — `GoogleDriveDocumentBackend`: service account via GoogleService, exports Google-native docs as Office formats
+- `src/gilbert/integrations/gdrive_documents.py` — `GoogleDriveDocumentBackend`: self-contained with its own `service_account_json` config param. Builds its own Drive API client during `initialize()`. No external GoogleService dependency. Exports Google-native docs as Office formats.
 
 ### AI Tools (all default to "user" role)
 - `search_documents` — semantic vector search
@@ -49,6 +50,28 @@ Multi-backend document knowledge store with ChromaDB vector search. Indexes docu
 - `knowledge.document.indexed` — document chunked and embedded in ChromaDB
 - `knowledge.document.removed` — document disappeared from backend, removed from index
 
+### Configuration
+```yaml
+knowledge:
+  enabled: false
+  local:
+    enabled: false
+    name: local
+    path: ""
+  gdrive:
+    enabled: false
+    name: gdrive
+    folder_id: ""
+    # service_account_json in backend settings
+  sync_interval_seconds: 300
+  chunk_size: 800
+  chunk_overlap: 200
+  max_search_results: 20
+  chromadb_path: ".gilbert/chromadb"
+  vision_enabled: true
+  vision_model: "claude-sonnet-4-5-20250929"
+```
+
 ### Dependencies (heavy)
 - chromadb (pulls sentence-transformers + torch ~2GB)
 - pymupdf (PyMuPDF for PDF rendering + text extraction)
@@ -59,5 +82,5 @@ Multi-backend document knowledge store with ChromaDB vector search. Indexes docu
 
 ## Related
 - `src/gilbert/core/services/scheduler.py` — runs periodic sync job
-- `src/gilbert/core/services/google.py` — provides Drive API clients
-- `tests/unit/test_knowledge_service.py` — 16 tests
+- `src/gilbert/integrations/gdrive_documents.py` — GDrive backend (self-contained, owns service_account_json)
+- `tests/unit/test_knowledge_service.py` — unit tests

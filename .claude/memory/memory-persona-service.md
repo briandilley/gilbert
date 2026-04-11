@@ -9,6 +9,8 @@ Manages the AI assistant's personality, tone, and behavioral instructions. Store
 - `src/gilbert/core/services/persona.py` — `PersonaService`
 - Capabilities: `persona`, `ai_tools`
 - Requires: `entity_storage`
+- Implements `Configurable` protocol with `config_namespace = "persona"` (category: "Intelligence")
+- Exposes a `default_persona` config param (multiline string) so the default persona text can be viewed/edited via the ConfigurationService web UI
 - Always registered (not optional) — AI service depends on it
 - Stores persona in `persona` collection, entity ID `active`
 - Tracks `is_customized` flag — False until user explicitly updates

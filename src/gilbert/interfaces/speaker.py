@@ -53,6 +53,23 @@ class PlayRequest:
 class SpeakerBackend(ABC):
     """Abstract speaker system backend. Implementation-agnostic."""
 
+    _registry: dict[str, type["SpeakerBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            SpeakerBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["SpeakerBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
     @abstractmethod
     async def initialize(self, config: dict[str, object]) -> None:
         """Initialize the backend with provider-specific configuration."""
@@ -89,6 +106,9 @@ class SpeakerBackend(ABC):
     async def stop(self, speaker_ids: list[str] | None = None) -> None:
         """Stop playback on the specified speakers (or all if None)."""
         ...
+
+    async def clear_queue(self, speaker_ids: list[str] | None = None) -> None:
+        """Clear the playback queue. Override in backends that have queues."""
 
     # --- Volume ---
 

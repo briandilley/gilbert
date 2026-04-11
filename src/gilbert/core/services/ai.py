@@ -18,7 +18,7 @@ from gilbert.interfaces.ai import (
 )
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
-from gilbert.interfaces.credentials import ApiKeyCredential
+
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, Query, SortField, StorageBackend
 from gilbert.interfaces.tools import (
@@ -97,10 +97,8 @@ class AIService(Service):
     def __init__(
         self,
         backend: AIBackend,
-        credential_name: str,
     ) -> None:
         self._backend = backend
-        self._credential_name = credential_name
         # Tunable config — loaded from ConfigurationService during start()
         self._config: dict[str, Any] = {}
         self._system_prompt: str = ""
@@ -119,7 +117,7 @@ class AIService(Service):
         return ServiceInfo(
             name="ai",
             capabilities=frozenset({"ai_chat", "ai_tools", "ws_handlers"}),
-            requires=frozenset({"credentials", "entity_storage", "persona"}),
+            requires=frozenset({"entity_storage", "persona"}),
             optional=frozenset({"ai_tools", "configuration", "access_control"}),
             events=frozenset({"chat.conversation.renamed"}),
         )
@@ -129,7 +127,6 @@ class AIService(Service):
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
-        from gilbert.core.services.credentials import CredentialService
         from gilbert.core.services.storage import StorageService
 
         # Load tunable config from ConfigurationService if available
@@ -141,20 +138,8 @@ class AIService(Service):
                 section = config_svc.get_section("ai")
                 self._apply_config(section)
 
-        # Resolve credential
-        cred_svc = resolver.require_capability("credentials")
-        if not isinstance(cred_svc, CredentialService):
-            raise TypeError("Expected CredentialService for 'credentials' capability")
-
-        cred = cred_svc.require(self._credential_name)
-        if not isinstance(cred, ApiKeyCredential):
-            raise TypeError(
-                f"Credential '{self._credential_name}' must be an api_key credential"
-            )
-
-        # Initialize backend
-        init_config: dict[str, Any] = {**self._config, "api_key": cred.api_key}
-        await self._backend.initialize(init_config)
+        # Initialize backend with settings (includes API key)
+        await self._backend.initialize(self._config)
 
         # Resolve storage
         storage_svc = resolver.require_capability("entity_storage")
@@ -175,15 +160,13 @@ class AIService(Service):
         await self._load_profiles()
 
         logger.info(
-            "AI service started (credential=%s, profiles=%d, assignments=%d)",
-            self._credential_name,
+            "AI service started (profiles=%d, assignments=%d)",
             len(self._profiles),
             len(self._assignments),
         )
 
     def _apply_config(self, section: dict[str, Any]) -> None:
         """Apply tunable config values from a config section."""
-        self._system_prompt = section.get("system_prompt", self._system_prompt)
         self._max_history_messages = section.get(
             "max_history_messages", self._max_history_messages
         )
@@ -196,13 +179,12 @@ class AIService(Service):
     def config_namespace(self) -> str:
         return "ai"
 
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
-            ConfigParam(
-                key="system_prompt", type=ToolParameterType.STRING,
-                description="System prompt that defines the AI's personality and instructions.",
-                default="You are Gilbert, an AI assistant for home and business automation.",
-            ),
+        params = [
             ConfigParam(
                 key="max_history_messages", type=ToolParameterType.INTEGER,
                 description="Maximum conversation messages to include in each request.",
@@ -214,29 +196,10 @@ class AIService(Service):
                 default=10,
             ),
             ConfigParam(
-                key="settings.temperature", type=ToolParameterType.NUMBER,
-                description="AI temperature (0.0=deterministic, 1.0=creative).",
-                default=0.7,
-            ),
-            ConfigParam(
-                key="settings.max_tokens", type=ToolParameterType.INTEGER,
-                description="Maximum tokens in AI response.",
-                default=4096,
-            ),
-            ConfigParam(
-                key="settings.model", type=ToolParameterType.STRING,
-                description="AI model identifier.",
-                default="claude-sonnet-4-20250514",
-            ),
-            ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="AI backend provider.",
                 default="anthropic", restart_required=True,
-            ),
-            ConfigParam(
-                key="credential", type=ToolParameterType.STRING,
-                description="Name of the API key credential to use.",
-                restart_required=True,
+                choices=tuple(AIBackend.registered_backends().keys()) or ("anthropic",),
             ),
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
@@ -244,6 +207,16 @@ class AIService(Service):
                 default=False, restart_required=True,
             ),
         ]
+        # Include backend-declared params under settings.*
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
@@ -488,8 +461,6 @@ class AIService(Service):
                 messages=truncated,
                 system_prompt=round_prompt,
                 tools=tool_defs if tool_defs else [],
-                max_tokens=int(self._config.get("max_tokens", 4096)),
-                temperature=float(self._config.get("temperature", 0.7)),
             )
 
             response = await self._backend.generate(request)

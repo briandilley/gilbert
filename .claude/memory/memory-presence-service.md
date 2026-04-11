@@ -14,7 +14,6 @@ User presence detection with polling, event publishing, and AI tools. UniFi impl
 - State tracked in entity store (`user_presence` collection): record exists = here, no record = gone
 - Each poll: loads stored IDs, polls backend, diffs → `presence.arrived` for new, `presence.departed` for missing (record deleted)
 - Publishes events: `presence.arrived`, `presence.departed`
-- Resolves credentials for subsystem controllers and passes full config to backend
 - AI tools: `check_presence`, `who_is_here`, `list_all_presence`
 
 ### UniFi Backend
@@ -34,9 +33,29 @@ User presence detection with polling, event publishing, and AI tools. UniFi impl
 
 ### Configuration
 - `PresenceConfig` + `UniFiControllerConfig` in config.py
-- Separate host+credential for network controller (UDM) vs protect/access (UNVR)
+- UniFi credentials inline in config: each `UniFiControllerConfig` has `host`, `username`, `password`, `verify_ssl` — no CredentialService
+- Separate controller configs for network (UDM) vs protect/access (UNVR)
 - Client deduplication: shared host → shared UniFiClient instance
 - Error isolation: each subsystem failure is caught independently
+
+```yaml
+presence:
+  enabled: false
+  backend: unifi
+  poll_interval_seconds: 30
+  unifi_network:
+    host: ""
+    username: ""
+    password: ""
+  unifi_protect:
+    host: ""
+    username: ""
+    password: ""
+  device_person_map: {}
+  zone_aliases: {}
+  face_lookback_minutes: 30
+  badge_lookback_hours: 24
+```
 
 ## Related
 - `src/gilbert/interfaces/events.py` — EventBus for presence events

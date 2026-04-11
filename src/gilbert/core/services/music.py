@@ -80,9 +80,8 @@ def _playlist_to_dict(p: PlaylistInfo) -> dict[str, Any]:
 class MusicService(Service):
     """Exposes a MusicBackend as a service with search, metadata, and speaker playback."""
 
-    def __init__(self, backend: MusicBackend, credential_name: str) -> None:
+    def __init__(self, backend: MusicBackend) -> None:
         self._backend = backend
-        self._credential_name = credential_name
         self._config: dict[str, object] = {}
         self._speaker_svc: Any | None = None
 
@@ -90,7 +89,6 @@ class MusicService(Service):
         return ServiceInfo(
             name="music",
             capabilities=frozenset({"music", "ai_tools"}),
-            requires=frozenset({"credentials"}),
             optional=frozenset({"configuration", "speaker_control"}),
         )
 
@@ -99,9 +97,6 @@ class MusicService(Service):
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
-        from gilbert.core.services.credentials import CredentialService
-        from gilbert.interfaces.credentials import ApiKeyPairCredential
-
         # Speaker integration (optional)
         self._speaker_svc = resolver.get_capability("speaker_control")
 
@@ -114,24 +109,9 @@ class MusicService(Service):
                 section = config_svc.get_section("music")
                 self._apply_config(section)
 
-        # Resolve credentials
-        cred_svc = resolver.require_capability("credentials")
-        if not isinstance(cred_svc, CredentialService):
-            raise TypeError("Expected CredentialService for 'credentials' capability")
-
-        cred = cred_svc.require(self._credential_name)
-        if not isinstance(cred, ApiKeyPairCredential):
-            raise TypeError(
-                f"Credential '{self._credential_name}' must be an api_key_pair credential"
-            )
-
-        init_config: dict[str, object] = {
-            **self._config,
-            "client_id": cred.client_id,
-            "client_secret": cred.client_secret,
-        }
-        await self._backend.initialize(init_config)
-        logger.info("Music service started (credential=%s)", self._credential_name)
+        # Initialize backend with settings (includes credentials)
+        await self._backend.initialize(self._config)
+        logger.info("Music service started")
 
     def _apply_config(self, section: dict[str, Any]) -> None:
         self._config = section.get("settings", self._config)
@@ -142,29 +122,33 @@ class MusicService(Service):
     def config_namespace(self) -> str:
         return "music"
 
+    @property
+    def config_category(self) -> str:
+        return "Media"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
+        params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Music backend type.",
                 default="spotify", restart_required=True,
+                choices=tuple(MusicBackend.registered_backends().keys()) or ("spotify",),
             ),
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
                 description="Whether the music service is enabled.",
                 default=False, restart_required=True,
             ),
-            ConfigParam(
-                key="credential", type=ToolParameterType.STRING,
-                description="Name of the credential to use.",
-                restart_required=True,
-            ),
-            ConfigParam(
-                key="settings", type=ToolParameterType.OBJECT,
-                description="Backend-specific settings.",
-                default={},
-            ),
         ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)

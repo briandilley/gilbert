@@ -106,6 +106,23 @@ class SearchResponse:
 class DocumentBackend(ABC):
     """Abstract document backend. Each instance represents one source."""
 
+    _registry: dict[str, type["DocumentBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            DocumentBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["DocumentBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
     @property
     @abstractmethod
     def source_id(self) -> str:

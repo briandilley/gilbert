@@ -124,24 +124,23 @@ class TestConfig:
         config = GilbertConfig.model_validate({})
         assert config.knowledge.enabled is False
         assert config.knowledge.chunk_size == 800
-        assert config.knowledge.sources == []
+        assert config.knowledge.local.enabled is False
+        assert config.knowledge.gdrive.enabled is False
 
     def test_knowledge_full(self) -> None:
         raw = {
             "knowledge": {
                 "enabled": True,
                 "sync_interval_seconds": 120,
-                "sources": [
-                    {"type": "local", "name": "docs", "path": "/tmp/docs"},
-                    {"type": "gdrive", "name": "lib", "account": "drive", "folder_id": "abc123"},
-                ],
+                "local": {"enabled": True, "name": "docs", "path": "/tmp/docs"},
+                "gdrive": {"enabled": True, "name": "lib", "folder_id": "abc123"},
             }
         }
         config = GilbertConfig.model_validate(raw)
         assert config.knowledge.enabled is True
-        assert len(config.knowledge.sources) == 2
-        assert config.knowledge.sources[0].type == "local"
-        assert config.knowledge.sources[1].folder_id == "abc123"
+        assert config.knowledge.local.enabled is True
+        assert config.knowledge.local.path == "/tmp/docs"
+        assert config.knowledge.gdrive.folder_id == "abc123"
 
 
 # --- SearchResult / SearchResponse ---

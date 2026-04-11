@@ -13,6 +13,7 @@ Music search, metadata, and playback service with abstract interface and Spotify
 
 ### Spotify Integration
 - `src/gilbert/integrations/spotify_music.py` — `SpotifyMusic` using httpx against the Spotify Web API
+- Credentials inline in backend settings: `client_id`, `client_secret` (no external CredentialService)
 - Uses OAuth2 client credentials flow (no user auth needed for search/metadata)
 - Auto-refreshes tokens before expiry
 - Returns `spotify:track:xxx` URIs that Sonos can play natively via SoCo
@@ -20,13 +21,8 @@ Music search, metadata, and playback service with abstract interface and Spotify
 ### Service
 - `src/gilbert/core/services/music.py` — `MusicService` implementing Service, Configurable, ToolProvider
 - Capabilities: `music`, `ai_tools`
-- Requires: `credentials` (ApiKeyPairCredential for client_id/client_secret)
 - Optional: `configuration`, `speaker_control`
 - `play_track` method integrates with SpeakerService — resolves URIs, speaker names, and supports `position_seconds` for seek
-
-### Credential Type
-- Added `ApiKeyPairCredential` (type: `api_key_pair`) to `src/gilbert/interfaces/credentials.py`
-- Fields: `client_id`, `client_secret` — for OAuth2 client credentials (Spotify, etc.)
 
 ### Speaker Position Support
 - `PlayRequest.position_seconds` field added to speaker interface
@@ -41,10 +37,15 @@ Music search, metadata, and playback service with abstract interface and Spotify
 - `play_track` — play on speakers with optional position_seconds and volume
 
 ### Configuration
-- Config model: `MusicConfig` in `src/gilbert/config.py`
-- YAML section: `music:` with `enabled`, `backend`, `credential`, `settings`
+```yaml
+music:
+  enabled: false
+  backend: spotify
+  settings:
+    client_id: ""      # Spotify app client ID
+    client_secret: ""  # Spotify app client secret
+```
 
 ## Related
 - [Speaker System](memory-speaker-system.md) — playback target for music
-- `src/gilbert/interfaces/credentials.py` — ApiKeyPairCredential type
-- `tests/unit/test_music_service.py` — 19 unit tests
+- `tests/unit/test_music_service.py` — unit tests

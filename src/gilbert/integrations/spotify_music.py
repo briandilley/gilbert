@@ -83,6 +83,26 @@ def _parse_playlist(raw: dict[str, Any]) -> PlaylistInfo:
 class SpotifyMusic(MusicBackend):
     """Spotify music backend using the Spotify Web API with client credentials."""
 
+    backend_name = "spotify"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="client_id", type=ToolParameterType.STRING,
+                description="Spotify OAuth client ID.",
+                sensitive=True, restart_required=True,
+            ),
+            ConfigParam(
+                key="client_secret", type=ToolParameterType.STRING,
+                description="Spotify OAuth client secret.",
+                sensitive=True, restart_required=True,
+            ),
+        ]
+
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
         self._client_id: str = ""

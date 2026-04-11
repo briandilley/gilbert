@@ -21,6 +21,7 @@ import markdown
 
 from gilbert.config import InboxAIChatConfig
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.email import EmailAttachment
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -98,6 +99,48 @@ class InboxAIChatService(Service):
         if self._unsubscribe:
             self._unsubscribe()
         logger.info("Inbox AI chat stopped")
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "inbox_ai_chat"
+
+    @property
+    def config_category(self) -> str:
+        return "Communication"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether email-to-AI chat is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="allowed_emails", type=ToolParameterType.ARRAY,
+                description="Email addresses allowed to chat with AI.",
+                default=[],
+            ),
+            ConfigParam(
+                key="allowed_domains", type=ToolParameterType.ARRAY,
+                description="Email domains allowed to chat with AI.",
+                default=[],
+            ),
+            ConfigParam(
+                key="required_subject", type=ToolParameterType.STRING,
+                description="Required subject line prefix (empty = no filter).",
+                default="",
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        emails = config.get("allowed_emails", [])
+        self._allowed_emails = [e.lower() for e in emails]
+        domains = config.get("allowed_domains", [])
+        self._allowed_domains = [d.lower().lstrip("@") for d in domains]
+        subj = config.get("required_subject", "")
+        self._required_subject = subj.lower().strip() if subj else ""
 
     # ── Event handler ──────────────────────────────────────────
 

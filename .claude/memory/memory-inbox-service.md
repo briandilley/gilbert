@@ -11,7 +11,7 @@ Email inbox service that syncs messages from an email backend into entity storag
 - The backend is never consulted for reads — all reads come from entity storage.
 
 ### Service
-- **InboxService** (`core/services/inbox.py`) — capabilities: `email`, `ai_tools`. Requires: `entity_storage`, `scheduler`. Optional: `event_bus`, `google_api`.
+- **InboxService** (`core/services/inbox.py`) — capabilities: `email`, `ai_tools`, `ws_handlers`. Requires: `entity_storage`, `scheduler`. Optional: `event_bus`, `knowledge`, `configuration`.
 - Polls via scheduler system job (`inbox-poll`). Lists message IDs (up to 500, paginated), walks newest-first, stops at first known message. Only fetches full content for new messages.
 - After syncing a message, marks it as read in the remote provider.
 - Detects own outbound messages by comparing sender to configured `email_address`.
@@ -36,9 +36,9 @@ Email inbox service that syncs messages from an email backend into entity storag
 - `inbox.message.replied` — reply sent in existing thread
 
 ### Gmail Backend
-- **GmailBackend** (`integrations/gmail.py`) — uses google-api-python-client via GoogleService.
-- Requires a Google account profile with `gmail.modify` + `gmail.send` scopes and domain-wide delegation.
-- `set_service()` called by InboxService after GoogleService builds the API client.
+- **GmailBackend** (`integrations/gmail.py`) — self-contained backend using google-api-python-client with its own `service_account_json` config param.
+- No external GoogleService dependency. Backend builds its own Gmail API client from the service account JSON during `initialize()`.
+- Requires domain-wide delegation with `gmail.modify` + `gmail.send` scopes.
 - `list_message_ids` paginates internally via `nextPageToken`.
 - Threading: Gmail's `threadId` groups conversations. Stored on each message. `in_reply_to` field stores the message's RFC822 `Message-ID` header (used as `In-Reply-To` when replying).
 
@@ -47,10 +47,11 @@ Email inbox service that syncs messages from an email backend into entity storag
 inbox:
   enabled: false
   backend: gmail
-  credential: ""        # google.accounts key name
   email_address: ""     # mailbox to impersonate
   poll_interval: 60     # seconds
   max_body_length: 50000
+  settings:
+    service_account_json: ""  # inline service account JSON
 ```
 
 ### Design Decisions
@@ -104,7 +105,7 @@ inbox:
 - [Storage Backend](memory-storage-backend.md) — message persistence (SQLite with WAL mode)
 - `src/gilbert/interfaces/email.py` — EmailBackend ABC
 - `src/gilbert/core/services/inbox.py` — InboxService
-- `src/gilbert/integrations/gmail.py` — GmailBackend
+- `src/gilbert/integrations/gmail.py` — GmailBackend (self-contained, owns service_account_json)
 - `src/gilbert/web/routes/inbox.py` — Web routes (admin only)
 - `src/gilbert/web/templates/inbox.html` — Inbox UI template
-- `tests/unit/test_inbox_service.py` — 23 unit tests
+- `tests/unit/test_inbox_service.py` — unit tests

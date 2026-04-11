@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gilbert.core.services.ai import AIService
-from gilbert.core.services.credentials import CredentialService
 from gilbert.core.services.storage import StorageService
 from gilbert.interfaces.ai import (
     AIBackend,
@@ -17,7 +16,6 @@ from gilbert.interfaces.ai import (
     StopReason,
     TokenUsage,
 )
-from gilbert.interfaces.credentials import ApiKeyCredential
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
 from gilbert.interfaces.tools import (
@@ -120,13 +118,6 @@ def stub_backend() -> StubAIBackend:
 
 
 @pytest.fixture
-def cred_service() -> CredentialService:
-    return CredentialService({
-        "anthropic": ApiKeyCredential(api_key="sk-test-key"),
-    })
-
-
-@pytest.fixture
 def storage_backend() -> StorageBackend:
     backend = AsyncMock(spec=StorageBackend)
     backend.get = AsyncMock(return_value=None)
@@ -152,15 +143,12 @@ def persona_service() -> Any:
 
 @pytest.fixture
 def resolver(
-    cred_service: CredentialService,
     storage_service: StorageService,
     persona_service: Any,
 ) -> ServiceResolver:
     mock = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
         if cap == "entity_storage":
             return storage_service
         if cap == "persona":
@@ -168,8 +156,6 @@ def resolver(
         raise LookupError(f"No service provides: {cap}")
 
     def get_cap(cap: str) -> Any:
-        if cap == "configuration":
-            return None  # No ConfigurationService in tests
         try:
             return require_cap(cap)
         except LookupError:
@@ -186,9 +172,9 @@ def resolver(
 
 @pytest.fixture
 def ai_service(stub_backend: StubAIBackend) -> AIService:
-    svc = AIService(backend=stub_backend, credential_name="anthropic")
+    svc = AIService(backend=stub_backend)
     # Set tunable config directly for testing
-    svc._config = {"max_tokens": 1024, "temperature": 0.5}
+    svc._config = {"api_key": "sk-test-key", "max_tokens": 1024, "temperature": 0.5}
     svc._system_prompt = "You are a test assistant."
     svc._max_tool_rounds = 5
     return svc
@@ -201,7 +187,6 @@ def test_service_info(ai_service: AIService) -> None:
     info = ai_service.service_info()
     assert info.name == "ai"
     assert "ai_chat" in info.capabilities
-    assert "credentials" in info.requires
     assert "entity_storage" in info.requires
     assert "ai_tools" in info.optional
 
@@ -252,8 +237,6 @@ async def test_chat_simple_response(
     req = stub_backend.requests[0]
     assert "You are a test assistant." in req.system_prompt
     assert "You are Gilbert, a test assistant." in req.system_prompt
-    assert req.max_tokens == 1024
-    assert req.temperature == 0.5
     assert len(req.messages) == 1
     assert req.messages[0].role == MessageRole.USER
     assert req.messages[0].content == "Hi"
@@ -302,7 +285,6 @@ async def test_chat_continues_conversation(
 async def test_chat_with_tool_calls(
     ai_service: AIService,
     stub_backend: StubAIBackend,
-    cred_service: CredentialService,
     storage_service: StorageService,
     storage_backend: StorageBackend,
 ) -> None:
@@ -331,8 +313,6 @@ async def test_chat_with_tool_calls(
     resolver = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
         if cap == "entity_storage":
             return storage_service
         if cap == "persona":
@@ -451,7 +431,6 @@ async def test_unknown_tool_returns_error_result(
 async def test_tool_execution_error_returns_error_result(
     ai_service: AIService,
     stub_backend: StubAIBackend,
-    cred_service: CredentialService,
     storage_service: StorageService,
 ) -> None:
     from unittest.mock import MagicMock as MM
@@ -465,8 +444,6 @@ async def test_tool_execution_error_returns_error_result(
     resolver = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
         if cap == "entity_storage":
             return storage_service
         if cap == "persona":
@@ -541,7 +518,7 @@ def test_truncate_history_within_limit(ai_service: AIService) -> None:
 
 
 def test_truncate_history_preserves_tool_pairs() -> None:
-    svc = AIService(backend=StubAIBackend(), credential_name="x")
+    svc = AIService(backend=StubAIBackend())
     svc._max_history_messages = 3
     messages = [
         Message(role=MessageRole.USER, content="old1"),

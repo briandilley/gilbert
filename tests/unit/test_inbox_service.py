@@ -22,7 +22,7 @@ class FakeEmailBackend(EmailBackend):
         self.read_marks: list[str] = []
         self._next_send_id = "sent_001"
 
-    async def initialize(self) -> None:
+    async def initialize(self, config: dict | None = None) -> None:
         pass
 
     async def close(self) -> None:
@@ -229,11 +229,9 @@ def resolver(backend: FakeEmailBackend, event_bus_svc: FakeEventBusService) -> F
 async def inbox_service(
     backend: FakeEmailBackend, resolver: FakeResolver,
 ) -> InboxService:
-    svc = InboxService(
-        backend=backend,
-        email_address="gilbert@example.com",
-        poll_interval=60,
-    )
+    svc = InboxService(backend=backend)
+    svc._email_address = "gilbert@example.com"
+    svc._poll_interval = 60
     await svc.start(resolver)
     return svc
 

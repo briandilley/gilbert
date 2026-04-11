@@ -66,8 +66,6 @@ class AIRequest:
     messages: list[Message]
     system_prompt: str = ""
     tools: list[ToolDefinition] = field(default_factory=list)
-    max_tokens: int = 4096
-    temperature: float = 0.7
 
 
 @dataclass(frozen=True)
@@ -87,6 +85,29 @@ class AIBackend(ABC):
     for single-round completion. The agentic loop is handled by AIService,
     not here.
     """
+
+    _registry: dict[str, type["AIBackend"]] = {}
+    backend_name: str = ""
+    """Short identifier used in config (e.g., ``"anthropic"``)."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            AIBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["AIBackend"]]:
+        """Return ``{name: class}`` for all registered backends."""
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters.
+
+        Returned params are included in the owning service's config under
+        the ``settings`` namespace. Override in concrete backends.
+        """
+        return []
 
     @abstractmethod
     async def initialize(self, config: dict[str, Any]) -> None:

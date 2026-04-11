@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
@@ -43,7 +44,6 @@ class GreetingService(Service):
         self._cutoff_hour: int = 14
         self._style: str = ""
         self._speakers: list[str] = []
-        self._voice_name: str = ""
         self._timezone: str = "UTC"
 
     def service_info(self) -> ServiceInfo:
@@ -79,7 +79,6 @@ class GreetingService(Service):
                 self._cutoff_hour = int(section.get("cutoff_hour", 14))
                 self._style = section.get("style", "")
                 self._speakers = section.get("speakers", [])
-                self._voice_name = section.get("voice_name", "")
                 self._timezone = section.get("timezone", "UTC")
 
         # Schedule a one-shot check for people already present at startup.
@@ -108,6 +107,59 @@ class GreetingService(Service):
     async def stop(self) -> None:
         if self._unsubscribe:
             self._unsubscribe()
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "greeting"
+
+    @property
+    def config_category(self) -> str:
+        return "Communication"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the greeting service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="start_hour", type=ToolParameterType.INTEGER,
+                description="Hour of day to start greeting (0-23).",
+                default=6,
+            ),
+            ConfigParam(
+                key="cutoff_hour", type=ToolParameterType.INTEGER,
+                description="Hour of day to stop greeting (0-23).",
+                default=14,
+            ),
+            ConfigParam(
+                key="timezone", type=ToolParameterType.STRING,
+                description="Timezone for greeting window.",
+                default="UTC",
+            ),
+            ConfigParam(
+                key="style", type=ToolParameterType.STRING,
+                description="Custom style instructions for AI greeting generation.",
+                default="",
+                multiline=True,
+            ),
+            ConfigParam(
+                key="speakers", type=ToolParameterType.ARRAY,
+                description="Speaker names for announcements (empty = all).",
+                default=[],
+                choices_from="speakers",
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._start_hour = int(config.get("start_hour", self._start_hour))
+        self._cutoff_hour = int(config.get("cutoff_hour", self._cutoff_hour))
+        self._style = config.get("style", self._style)
+        self._speakers = config.get("speakers", self._speakers)
+        self._timezone = config.get("timezone", self._timezone)
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -417,7 +469,6 @@ class GreetingService(Service):
             await speaker_svc.announce(
                 text,
                 speaker_names=self._speakers or None,
-                voice_name=self._voice_name or None,
             )
         except Exception:
             logger.warning("Failed to announce greeting", exc_info=True)

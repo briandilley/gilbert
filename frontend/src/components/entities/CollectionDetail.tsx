@@ -51,7 +51,7 @@ export function CollectionDetail() {
     setSearchParams(params);
   }
 
-  const columns = data.sortable_fields.slice(0, 6);
+  const columns = data.display_columns ?? data.sortable_fields.slice(0, 6);
   const currentSort = searchParams.get("sort");
   const currentDir = searchParams.get("dir");
 

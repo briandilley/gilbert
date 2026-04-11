@@ -59,6 +59,7 @@ class WebApiService(Service):
             {"title": "Inbox", "description": "Email management", "url": "/inbox", "icon": "inbox", "required_role": "admin", "requires_capability": "email"},
             {"title": "Roles", "description": "Roles & access control", "url": "/roles", "icon": "shield", "required_role": "admin"},
             {"title": "Entities", "description": "Entity browser", "url": "/entities", "icon": "database", "required_role": "admin"},
+            {"title": "Settings", "description": "Service configuration", "url": "/settings", "icon": "sliders", "required_role": "admin"},
             {"title": "System", "description": "Service inspector", "url": "/system", "icon": "settings", "required_role": "admin"},
         ]
 
@@ -209,11 +210,31 @@ class WebApiService(Service):
         if hasattr(storage_svc.backend, "get_foreign_keys"):
             fk_map = await storage_svc.backend.get_foreign_keys(collection) or {}
 
+        # Build display columns: _id + indexed fields + FK fields
+        from gilbert.interfaces.storage import IndexDefinition
+
+        display_columns: list[str] = ["_id"]
+        try:
+            indexes = await storage_svc.backend.list_indexes(collection)
+            for idx in indexes:
+                for field in idx.fields:
+                    if field not in display_columns:
+                        display_columns.append(field)
+        except Exception:
+            pass
+
+        if isinstance(fk_map, dict):
+            for field in fk_map:
+                if field not in display_columns:
+                    display_columns.append(field)
+
+
         return {
             "type": "entities.collection.query.result", "ref": frame.get("id"),
             "collection": collection, "entities": entities, "total": total,
             "page": page, "total_pages": total_pages,
             "sortable_fields": sortable_fields, "fk_map": fk_map,
+            "display_columns": display_columns,
         }
 
     async def _ws_entity_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:

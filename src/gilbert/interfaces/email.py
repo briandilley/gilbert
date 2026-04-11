@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -62,8 +63,25 @@ class EmailBackend(ABC):
     All reads/searches/state changes after sync go through entity storage.
     """
 
+    _registry: dict[str, type["EmailBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            EmailBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["EmailBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
     @abstractmethod
-    async def initialize(self) -> None:
+    async def initialize(self, config: dict[str, Any] | None = None) -> None:
         """Authenticate and prepare the backend for use."""
         ...
 

@@ -1,79 +1,75 @@
-"""Google OAuth authentication service.
+"""Google OAuth authentication backend.
 
-Authenticates users via Google OAuth 2.0 authorization code flow.
-Uses the tunnel service (ngrok) for the HTTPS callback URL when available.
+Authenticates users via Google OAuth 2.0 ID token verification.
+Self-contained — reads OAuth client credentials from auth config.
 """
 
 import logging
 from typing import Any
 
 from gilbert.interfaces.auth import (
-    AuthenticationService,
+    AuthBackend,
     AuthInfo,
     LoginMethod,
 )
-from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 
 logger = logging.getLogger(__name__)
 
 
-class GoogleAuthenticationService(Service, AuthenticationService):
-    """Authenticates users via Google OAuth.
+class GoogleAuthBackend(AuthBackend):
+    """Authenticates users via Google OAuth ID tokens."""
 
-    Capabilities: ``authentication_provider``.
-    Requires: ``google_api``.
-    Optional: ``tunnel`` (for HTTPS callback URL).
-    """
+    backend_name = "google"
 
-    def __init__(
-        self,
-        domain: str = "",
-        use_tunnel: bool = True,
-    ) -> None:
-        self._domain = domain
-        self._use_tunnel = use_tunnel
-        self._google: Any = None
-        self._tunnel: Any = None
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="client_id", type=ToolParameterType.STRING,
+                description="Google OAuth client ID.",
+                restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="client_secret", type=ToolParameterType.STRING,
+                description="Google OAuth client secret.",
+                restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="domain", type=ToolParameterType.STRING,
+                description="Restrict Google login to this domain (empty = any).",
+                default="",
+            ),
+        ]
+
+    def __init__(self) -> None:
         self._oauth_client_id: str = ""
         self._client_secret: str = ""
-
-    def service_info(self) -> ServiceInfo:
-        return ServiceInfo(
-            name="auth_google",
-            capabilities=frozenset({"authentication_provider"}),
-            requires=frozenset({"google_api"}),
-            optional=frozenset({"tunnel"}),
-        )
-
-    async def start(self, resolver: ServiceResolver) -> None:
-        self._google = resolver.require_capability("google_api")
-        self._oauth_client_id = self._google.oauth_client_id
-        self._client_secret = self._google.oauth_client_secret
-        if self._use_tunnel:
-            self._tunnel = resolver.get_capability("tunnel")
-
-        if not self._oauth_client_id:
-            logger.warning("Google OAuth client ID not configured")
-
-        if self._tunnel:
-            logger.info(
-                "Google auth using tunnel callback: %s",
-                self._tunnel.public_url_for("/auth/login/google/callback"),
-            )
-
-        logger.info(
-            "Google authentication service started (domain=%s)",
-            self._domain or "(any)",
-        )
-
-    async def stop(self) -> None:
-        pass
-
-    # --- AuthenticationService ---
+        self._domain: str = ""
+        self._tunnel: Any = None
 
     @property
     def provider_type(self) -> str:
         return "google"
+
+    async def initialize(self, config: dict[str, Any]) -> None:
+        self._oauth_client_id = config.get("client_id", "")
+        self._client_secret = config.get("client_secret", "")
+        self._domain = config.get("domain", "")
+
+        if not self._oauth_client_id:
+            logger.warning("Google OAuth client ID not configured")
+        else:
+            logger.info("Google auth backend initialized (domain=%s)", self._domain or "(any)")
+
+    async def close(self) -> None:
+        pass
+
+    def set_tunnel(self, tunnel: Any) -> None:
+        """Set the tunnel service for HTTPS callback URLs."""
+        self._tunnel = tunnel
 
     def get_login_method(self) -> LoginMethod:
         return LoginMethod(
@@ -84,22 +80,12 @@ class GoogleAuthenticationService(Service, AuthenticationService):
         )
 
     def get_callback_url(self, request_base_url: str = "") -> str:
-        """Get the OAuth callback URL.
-
-        Uses the tunnel (ngrok) URL if available, otherwise falls back
-        to the request's base URL.
-        """
         if self._tunnel and self._tunnel.public_url:
             return self._tunnel.public_url_for("/auth/login/google/callback")
-        # Fallback to local URL.
         base = request_base_url.rstrip("/") if request_base_url else ""
         return f"{base}/auth/login/google/callback"
 
     async def authenticate(self, credentials: dict[str, Any]) -> AuthInfo | None:
-        """Authenticate with a Google OAuth ID token.
-
-        Expects: ``{"id_token": "..."}``.
-        """
         id_token_str = credentials.get("id_token", "")
         if not id_token_str:
             return None
@@ -124,11 +110,7 @@ class GoogleAuthenticationService(Service, AuthenticationService):
                 return None
 
             if self._domain and info.get("hd") != self._domain:
-                logger.warning(
-                    "Google auth rejected: domain %s != %s",
-                    info.get("hd"),
-                    self._domain,
-                )
+                logger.warning("Google auth rejected: domain %s != %s", info.get("hd"), self._domain)
                 return None
 
             return AuthInfo(
@@ -136,53 +118,42 @@ class GoogleAuthenticationService(Service, AuthenticationService):
                 provider_user_id=info.get("sub", ""),
                 email=email,
                 display_name=info.get("name", email.split("@")[0]),
-                raw=dict(info),
+                raw={"picture": info.get("picture", "")},
             )
-
         except Exception:
-            logger.exception("Google ID token verification failed")
+            logger.exception("Google OAuth token verification failed")
             return None
 
     async def handle_callback(self, params: dict[str, Any]) -> AuthInfo | None:
-        """Handle the OAuth callback with an authorization code."""
+        """Exchange OAuth authorization code for ID token and authenticate."""
         code = params.get("code", "")
-        if not code:
+        redirect_uri = params.get("redirect_uri", "")
+        if not code or not self._oauth_client_id:
             return None
 
         try:
             import httpx
 
-            redirect_uri = params.get("redirect_uri", "")
-
-            data: dict[str, str] = {
-                "code": code,
-                "client_id": self._oauth_client_id,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            }
-            if self._client_secret:
-                data["client_secret"] = self._client_secret
-
-            token_resp = httpx.post(
-                "https://oauth2.googleapis.com/token",
-                data=data,
-            )
-            if not token_resp.is_success:
-                logger.error(
-                    "Google token exchange failed: %s %s",
-                    token_resp.status_code,
-                    token_resp.text,
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "code": code,
+                        "client_id": self._oauth_client_id,
+                        "client_secret": self._client_secret,
+                        "redirect_uri": redirect_uri,
+                        "grant_type": "authorization_code",
+                    },
                 )
-                return None
-            tokens = token_resp.json()
+                resp.raise_for_status()
+                token_data = resp.json()
 
-            id_token_str = tokens.get("id_token", "")
+            id_token_str = token_data.get("id_token", "")
             if not id_token_str:
-                logger.error("No id_token in Google OAuth response")
+                logger.warning("Google OAuth token exchange returned no id_token")
                 return None
 
             return await self.authenticate({"id_token": id_token_str})
-
         except Exception:
             logger.exception("Google OAuth callback failed")
             return None
@@ -190,6 +161,10 @@ class GoogleAuthenticationService(Service, AuthenticationService):
     @property
     def oauth_client_id(self) -> str:
         return self._oauth_client_id
+
+    @property
+    def client_secret(self) -> str:
+        return self._client_secret
 
     @property
     def domain(self) -> str:

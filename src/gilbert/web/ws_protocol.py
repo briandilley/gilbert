@@ -65,6 +65,7 @@ _RPC_PERMISSIONS: dict[str, int] = {
     # user (100)
     "chat.": 100,
     # admin (0)
+    "config.": 0,
     "roles.": 0,
     "inbox.": 0,
     "system.": 0,

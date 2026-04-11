@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import logging
 import random
+from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ class RoastService(Service):
             "Be funny and teasing but never mean or hurtful. "
             "Keep it to 1-2 sentences."
         )
+        self._speakers: list[str] = []
         self._resolver: ServiceResolver | None = None
 
     def service_info(self) -> ServiceInfo:
@@ -62,6 +66,7 @@ class RoastService(Service):
             if isinstance(config_svc, ConfigurationService):
                 section = config_svc.get_section("roast")
                 self._probability = float(section.get("probability", 0.10))
+                self._speakers = section.get("speakers", [])
                 self._ai_prompt = section.get("ai_prompt", self._ai_prompt)
 
         # Register hourly job with the scheduler
@@ -84,6 +89,47 @@ class RoastService(Service):
 
     async def stop(self) -> None:
         pass
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "roast"
+
+    @property
+    def config_category(self) -> str:
+        return "Communication"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the roast service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="probability", type=ToolParameterType.NUMBER,
+                description="Probability of roasting per hour (0.0-1.0).",
+                default=0.10,
+            ),
+            ConfigParam(
+                key="ai_prompt", type=ToolParameterType.STRING,
+                description="AI prompt template for generating roasts. Use {name} as placeholder.",
+                default="Generate a playful, friendly roast of {name}. Be funny and teasing but never mean or hurtful. Keep it to 1-2 sentences.",
+                multiline=True,
+            ),
+            ConfigParam(
+                key="speakers", type=ToolParameterType.ARRAY,
+                description="Speaker names for roast announcements (empty = all).",
+                default=[],
+                choices_from="speakers",
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._probability = float(config.get("probability", self._probability))
+        self._ai_prompt = config.get("ai_prompt", self._ai_prompt)
+        self._speakers = config.get("speakers", self._speakers)
 
     async def _run_roast(self) -> None:
         """Scheduler callback — roll the dice and maybe roast someone."""
@@ -163,6 +209,6 @@ class RoastService(Service):
             return
 
         try:
-            await speaker_svc.announce(text)
+            await speaker_svc.announce(text, speaker_names=self._speakers or None)
         except Exception:
             logger.warning("Failed to announce roast", exc_info=True)

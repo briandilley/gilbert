@@ -25,11 +25,15 @@ Speaker control system with abstract interface and Sonos (SoCo) implementation. 
 - Speaker aliases stored in `speaker_aliases` entity collection with unique index on `alias` field
 - Alias collision detection against both existing speaker names and other aliases
 - "Last used" speaker tracking — if no speakers specified, reuses previous target set or falls back to all
-- **Announce tool**: generates audio via TTS service, saves to file, groups speakers if needed, plays
+- `default_announce_speakers` config — a list of speaker names used when no speakers specified in announce call (falls back before "last used" or "all")
+- **Announce tool**: generates audio via TTS service (single `voice_id` on TTS backend, no multi-voice), saves to file, groups speakers if needed, plays, then clears the queue after playback so the announcement doesn't linger in history
+- Silence padding is handled by the TTS service (`silence_padding` config param on TTSConfig), not the speaker service
 
 ### Configuration
 - Config model: `SpeakerConfig` in `src/gilbert/config.py`
 - YAML section: `speaker:` with `enabled`, `backend`, `default_announce_volume`, `settings`
+- `default_announce_speakers` lives in the speaker service settings (array of speaker names)
+- TTS config: `tts:` with `enabled`, `backend`, `silence_padding` (seconds, default 3.0), `settings`
 - Registered in `app.py` with factory for hot-swap support
 
 ### AI Tools Exposed

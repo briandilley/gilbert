@@ -5,7 +5,6 @@ from gilbert.core.services.ai import AIService
 from gilbert.core.services.auth import AuthService
 from gilbert.core.services.doorbell import DoorbellService
 from gilbert.core.services.configuration import ConfigurationService
-from gilbert.core.services.credentials import CredentialService
 from gilbert.core.services.event_bus import EventBusService
 from gilbert.core.services.inbox import InboxService
 from gilbert.core.services.inbox_ai_chat import InboxAIChatService
@@ -22,7 +21,6 @@ __all__ = [
     "AuthService",
     "DoorbellService",
     "ConfigurationService",
-    "CredentialService",
     "EventBusService",
     "InboxService",
     "InboxAIChatService",

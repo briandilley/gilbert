@@ -13,7 +13,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
-from gilbert.interfaces.users import ExternalUser, UserBackend, UserProviderService
+from gilbert.interfaces.users import ExternalUser, UserBackend, UserProviderBackend
 from gilbert.storage.user_storage import StorageUserBackend
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class UserService(Service):
     """Wraps a UserBackend as a discoverable service.
 
     Always registered (users are foundational). On startup ensures the
-    root user exists. Discovers UserProviderService instances to sync
+    root user exists. Discovers UserProviderBackend instances to sync
     external users on demand.
     """
 
@@ -88,6 +88,22 @@ class UserService(Service):
                 if allow is not None:
                     self._allow_user_creation = bool(allow)
 
+        # Initialize user provider backends from config
+        self._provider_backends: list[UserProviderBackend] = []
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("users")
+                gdir = section.get("google_directory", {})
+                if isinstance(gdir, dict) and gdir.get("enabled"):
+                    from gilbert.integrations.google_directory import GoogleDirectoryBackend
+
+                    backend = GoogleDirectoryBackend()
+                    await backend.initialize(gdir)
+                    self._provider_backends.append(backend)
+                    logger.info("Google Directory user provider initialized")
+
         await self._ensure_root_user()
 
     async def _ensure_root_user(self) -> None:
@@ -120,15 +136,9 @@ class UserService(Service):
 
     # ---- Provider discovery ----
 
-    def _get_providers(self) -> list[UserProviderService]:
-        """Discover all running UserProviderService instances."""
-        if self._resolver is None:
-            return []
-        providers: list[UserProviderService] = []
-        for svc in self._resolver.get_all("user_provider"):
-            if isinstance(svc, UserProviderService):
-                providers.append(svc)
-        return providers
+    def _get_providers(self) -> list[UserProviderBackend]:
+        """Return all initialized user provider backends."""
+        return list(self._provider_backends)
 
     # ---- Sync from providers ----
 
@@ -302,6 +312,10 @@ class UserService(Service):
     def config_namespace(self) -> str:
         return "users"
 
+    @property
+    def config_category(self) -> str:
+        return "Security"
+
     def config_params(self) -> list["ConfigParam"]:
         from gilbert.interfaces.configuration import ConfigParam
 
@@ -310,6 +324,27 @@ class UserService(Service):
                 key="sync_ttl_seconds", type=ToolParameterType.INTEGER,
                 description="How often to refresh users from external providers (seconds).",
                 default=3600,
+            ),
+            # Google Directory user provider
+            ConfigParam(
+                key="google_directory.enabled", type=ToolParameterType.BOOLEAN,
+                description="Enable Google Workspace directory sync.",
+                default=False, restart_required=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_directory.sa_json", type=ToolParameterType.STRING,
+                description="Google service account key for directory sync (paste JSON).",
+                sensitive=True, restart_required=True, multiline=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_directory.delegated_user", type=ToolParameterType.STRING,
+                description="Admin email to impersonate for directory API.",
+                restart_required=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_directory.domain", type=ToolParameterType.STRING,
+                description="Google Workspace domain to sync users from.",
+                restart_required=True, backend_param=True,
             ),
         ]
 

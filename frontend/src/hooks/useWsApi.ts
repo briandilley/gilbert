@@ -17,6 +17,7 @@ import type { CollectionGroup, CollectionData, EntityData } from "@/types/entiti
 import type { InboxStats, InboxMessage, MessageDetail, PendingReply } from "@/types/inbox";
 import type { UIBlock } from "@/types/ui";
 import type { SkillInfo } from "@/types/skills";
+import type { ConfigDescribeResponse, ConfigSectionResponse, ConfigSetResult } from "@/types/config";
 
 export function useWsApi() {
   const { rpc } = useWebSocket();
@@ -259,6 +260,20 @@ export function useWsApi() {
         skill_name: skillName,
         path,
       }),
+
+    // ── Config ─────────────────────────────────────────────────────
+
+    describeConfig: () =>
+      rpc<ConfigDescribeResponse>({ type: "config.describe.list" }),
+
+    getConfigSection: (namespace: string) =>
+      rpc<ConfigSectionResponse>({ type: "config.section.get", namespace }),
+
+    setConfigSection: (namespace: string, values: Record<string, unknown>) =>
+      rpc<ConfigSetResult>({ type: "config.section.set", namespace, values }),
+
+    resetConfigSection: (namespace: string) =>
+      rpc<{ status: string }>({ type: "config.section.reset", namespace }),
 
   }), [rpc]);
 }

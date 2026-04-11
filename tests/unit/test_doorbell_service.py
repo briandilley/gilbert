@@ -85,22 +85,24 @@ class TestRingDetection:
 
         assert service._last_ring_ts == 1700000005000
 
-    async def test_uses_friendly_door_name(
+    async def test_filters_by_selected_doorbells(
         self, service: DoorbellService, mock_backend: DoorbellBackend, mock_event_bus: EventBus
     ) -> None:
         service._event_bus = mock_event_bus
         service._last_ring_ts = 0
-        service._doorbell_names = {"G4 Doorbell": "Front Door"}
+        service._doorbell_names = ["G4 Doorbell"]
 
         mock_backend.get_ring_events = AsyncMock(return_value=[
             _ring("G4 Doorbell"),
+            _ring("Other Camera"),
         ])
 
         await service._check_for_rings()
 
+        # Only the selected doorbell should trigger an event
+        assert mock_event_bus.publish.call_count == 1
         event: Event = mock_event_bus.publish.call_args[0][0]
-        assert event.data["door"] == "Front Door"
-        assert event.data["camera"] == "G4 Doorbell"
+        assert event.data["door"] == "G4 Doorbell"
 
     async def test_backend_error_handled(
         self, service: DoorbellService, mock_backend: DoorbellBackend
@@ -136,7 +138,7 @@ class TestAnnouncement:
     ) -> None:
         service._event_bus = mock_event_bus
         service._last_ring_ts = 0
-        service._doorbell_names = {"G4 Doorbell Pro": "Front Door"}
+        service._doorbell_names = []  # empty = monitor all
 
         resolver = MagicMock()
         resolver.get_capability = MagicMock(return_value=mock_speaker)
@@ -149,9 +151,8 @@ class TestAnnouncement:
         await service._check_for_rings()
 
         mock_speaker.announce.assert_awaited_once_with(
-            "Someone is at the Front Door.",
+            "Someone is at the G4 Doorbell Pro.",
             speaker_names=None,
-            voice_name=None,
         )
 
     async def test_announce_uses_configured_speakers(
@@ -164,7 +165,6 @@ class TestAnnouncement:
         service._event_bus = mock_event_bus
         service._last_ring_ts = 0
         service._speakers = ["Living Room", "Kitchen"]
-        service._voice_name = "gilbert"
 
         resolver = MagicMock()
         resolver.get_capability = MagicMock(return_value=mock_speaker)
@@ -179,7 +179,6 @@ class TestAnnouncement:
         mock_speaker.announce.assert_awaited_once_with(
             "Someone is at the G4 Doorbell.",
             speaker_names=["Living Room", "Kitchen"],
-            voice_name="gilbert",
         )
 
     async def test_no_speaker_service_no_crash(

@@ -35,6 +35,10 @@ class EventBusService(Service):
     def config_namespace(self) -> str:
         return "event_bus"
 
+    @property
+    def config_category(self) -> str:
+        return "Infrastructure"
+
     def config_params(self) -> list[ConfigParam]:
         return []  # No configurable params — pure infrastructure
 

@@ -172,6 +172,10 @@ class RadioDJService(Service):
     def config_namespace(self) -> str:
         return "radio_dj"
 
+    @property
+    def config_category(self) -> str:
+        return "Media"
+
     def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(
@@ -198,6 +202,7 @@ class RadioDJService(Service):
                 key="speakers", type=ToolParameterType.ARRAY,
                 description="Speaker names (empty = all).",
                 default=[],
+                choices_from="speakers",
             ),
             ConfigParam(
                 key="stop_when_empty", type=ToolParameterType.BOOLEAN,

@@ -33,6 +33,10 @@ class StubConfigurableService(Service):
     def config_namespace(self) -> str:
         return "ai"
 
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
     def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(
@@ -117,7 +121,7 @@ async def test_set_tunable_param(config_svc: ConfigurationService, tmp_path: obj
     config_svc._service_manager = manager
 
     # Monkeypatch persistence to avoid writing real files
-    config_svc._persist = lambda: None  # type: ignore[assignment]
+    config_svc._persist = AsyncMock()  # type: ignore[assignment]
 
     result = await config_svc.set("ai.system_prompt", "New prompt!")
     assert result["status"] == "ok"
@@ -128,7 +132,7 @@ async def test_set_tunable_param(config_svc: ConfigurationService, tmp_path: obj
 
 
 async def test_set_invalid_config_rejected(config_svc: ConfigurationService) -> None:
-    config_svc._persist = lambda: None  # type: ignore[assignment]
+    config_svc._persist = AsyncMock()  # type: ignore[assignment]
 
     # Setting storage.backend to a non-string should fail validation
     # Actually, Pydantic coerces most types. Let's try something that truly fails.
@@ -146,7 +150,7 @@ async def test_set_restart_required_param(config_svc: ConfigurationService) -> N
 
     config_svc._resolver = manager
     config_svc._service_manager = manager
-    config_svc._persist = lambda: None  # type: ignore[assignment]
+    config_svc._persist = AsyncMock()  # type: ignore[assignment]
 
     # No factory registered — should report error
     result = await config_svc.set("ai.backend", "openai")

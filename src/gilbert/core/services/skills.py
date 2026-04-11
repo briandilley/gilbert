@@ -99,6 +99,45 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
     async def stop(self) -> None:
         pass
 
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "skills"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the skills system is enabled.",
+                default=True, restart_required=True,
+            ),
+            ConfigParam(
+                key="directories", type=ToolParameterType.ARRAY,
+                description="Directories to scan for skill definitions.",
+                default=["./skills"], restart_required=True,
+            ),
+            ConfigParam(
+                key="cache_dir", type=ToolParameterType.STRING,
+                description="Directory for cached remote skills.",
+                default=".gilbert/skill-cache", restart_required=True,
+            ),
+            ConfigParam(
+                key="user_dir", type=ToolParameterType.STRING,
+                description="Directory for user-installed skills.",
+                default=".gilbert/skills", restart_required=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        pass  # All skill params are restart_required
+
     # ── ToolProvider interface ───────────────────────────────────────
 
     @property

@@ -28,9 +28,41 @@ _API_VERSION = "2023-06-01"
 class AnthropicAI(AIBackend):
     """AI backend using the Anthropic Messages API via httpx."""
 
+    backend_name = "anthropic"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="api_key", type=ToolParameterType.STRING,
+                description="Anthropic API key.",
+                sensitive=True, restart_required=True,
+            ),
+            ConfigParam(
+                key="model", type=ToolParameterType.STRING,
+                description="Model ID (e.g., claude-sonnet-4-20250514).",
+                default=_DEFAULT_MODEL,
+            ),
+            ConfigParam(
+                key="max_tokens", type=ToolParameterType.INTEGER,
+                description="Maximum tokens in AI response.",
+                default=4096,
+            ),
+            ConfigParam(
+                key="temperature", type=ToolParameterType.NUMBER,
+                description="Temperature (0.0 = deterministic, 1.0 = creative).",
+                default=0.7,
+            ),
+        ]
+
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
         self._model: str = _DEFAULT_MODEL
+        self._max_tokens: int = 4096
+        self._temperature: float = 0.7
 
     async def initialize(self, config: dict[str, Any]) -> None:
         api_key = config.get("api_key")
@@ -38,6 +70,8 @@ class AnthropicAI(AIBackend):
             raise ValueError("AnthropicAI requires 'api_key' in config")
 
         self._model = str(config.get("model", _DEFAULT_MODEL))
+        self._max_tokens = int(config.get("max_tokens", 4096))
+        self._temperature = float(config.get("temperature", 0.7))
 
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
@@ -80,7 +114,7 @@ class AnthropicAI(AIBackend):
     def _build_request_body(self, request: AIRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._model,
-            "max_tokens": request.max_tokens,
+            "max_tokens": self._max_tokens,
             "messages": self._build_messages(request.messages),
         }
 
@@ -90,8 +124,7 @@ class AnthropicAI(AIBackend):
         if request.tools:
             body["tools"] = self._build_tools(request.tools)
 
-        if request.temperature is not None:
-            body["temperature"] = request.temperature
+        body["temperature"] = self._temperature
 
         return body
 

@@ -1,18 +1,12 @@
 """Configuration — loading and validation of Gilbert settings.
 
 Config layering:
-1. gilbert.yaml (committed defaults — shipped with the repo)
+1. gilbert.yaml (committed defaults — bootstrap only: storage, logging, web)
 2. .gilbert/config.yaml (per-installation overrides — gitignored)
-3. Explicit path override (if provided)
 
-The .gilbert/ directory is the per-installation data folder. It contains:
-- config.yaml (user overrides)
-- gilbert.db (SQLite database)
-- gilbert.log / ai_calls.log (log files)
-- plugins/ (plugin cache)
-
-Users clone the repo and run it. The .gilbert/ folder is auto-created
-on first run. No source files need to be edited.
+All non-bootstrap configuration is stored in entity storage and managed
+via the web UI at /settings. The .gilbert/ directory is auto-created on
+first run.
 """
 
 import logging
@@ -22,8 +16,6 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-from gilbert.interfaces.credentials import AnyCredential
-
 logger = logging.getLogger(__name__)
 
 # Base directory for per-installation data
@@ -32,6 +24,15 @@ DATA_DIR = Path(".gilbert")
 # Default config (committed) and override config (gitignored)
 DEFAULT_CONFIG_PATH = Path("gilbert.yaml")
 OVERRIDE_CONFIG_PATH = DATA_DIR / "config.yaml"
+
+# Sections that must remain in YAML (needed before entity storage exists)
+YAML_ONLY_SECTIONS = frozenset({"storage", "logging", "web"})
+
+
+class BaseConfig(BaseModel):
+    """Base for all non-bootstrap config models. Preserves unknown fields."""
+
+    model_config = {"extra": "allow"}
 
 
 class StorageConfig(BaseModel):
@@ -48,7 +49,7 @@ class PluginSource(BaseModel):
     enabled: bool = True
 
 
-class PluginsConfig(BaseModel):
+class PluginsConfig(BaseConfig):
     """Plugin system configuration."""
 
     directories: list[str] = []
@@ -57,20 +58,19 @@ class PluginsConfig(BaseModel):
     config: dict[str, dict[str, Any]] = {}
 
 
-class WebSearchConfig(BaseModel):
+class WebSearchConfig(BaseConfig):
     """Web search configuration."""
 
     enabled: bool = False
     backend: str = "tavily"
-    credential: str = ""
     settings: dict[str, Any] = {}
 
 
-class SkillsConfig(BaseModel):
+class SkillsConfig(BaseConfig):
     """Skills system configuration."""
 
     enabled: bool = True
-    directories: list[str] = ["skills"]
+    directories: list[str] = ["./skills"]
     cache_dir: str = ".gilbert/skill-cache"
     user_dir: str = ".gilbert/skills"
 
@@ -91,120 +91,63 @@ class WebConfig(BaseModel):
     port: int = 8765
 
 
-class TunnelConfig(BaseModel):
+class TunnelConfig(BaseConfig):
     """Public tunnel configuration (ngrok, etc.)."""
 
     enabled: bool = False
-    credential: str = ""  # name of an api_key credential for ngrok auth token
-    domain: str = ""  # custom ngrok domain (e.g., "myapp.ngrok.io")
+    backend: str = "ngrok"
+    settings: dict[str, Any] = {}
 
 
-class TTSVoiceConfig(BaseModel):
-    """A named TTS voice mapping."""
-
-    voice_id: str
-
-
-class TTSConfig(BaseModel):
+class TTSConfig(BaseConfig):
     """Text-to-speech configuration."""
 
     enabled: bool = False
     backend: str = "elevenlabs"
-    credential: str = ""
-    default_voice: str = ""
-    voices: dict[str, TTSVoiceConfig] = {}
+    silence_padding: float = 3.0
     settings: dict[str, Any] = {}
 
 
-class AIProfileConfig(BaseModel):
-    """An AI context profile — defines tool access for a named AI interaction."""
-
-    description: str = ""
-    tool_mode: str = "all"  # "all" | "include" | "exclude"
-    tools: list[str] = []
-    tool_roles: dict[str, str] = {}  # per-tool role overrides
-
-
-class AIConfig(BaseModel):
+class AIConfig(BaseConfig):
     """AI service configuration."""
 
     enabled: bool = False
     backend: str = "anthropic"
-    credential: str = ""
-    system_prompt: str = "You are Gilbert, an AI assistant for home and business automation."
     max_history_messages: int = 50
     max_tool_rounds: int = 10
     settings: dict[str, Any] = {}
-    profiles: dict[str, AIProfileConfig] = {}
 
 
-class AuthRoleMapping(BaseModel):
-    """Maps an external group to a Gilbert role."""
-
-    group: str
-    role: str
-
-
-class AuthProviderConfig(BaseModel):
-    """Configuration for a single auth provider."""
-
-    type: str
-    enabled: bool = True
-    credential: str = ""
-    domain: str = ""
-    role_mappings: list[AuthRoleMapping] = []
-    settings: dict[str, Any] = {}
-
-
-class AuthConfig(BaseModel):
+class AuthConfig(BaseConfig):
     """Authentication and user management configuration."""
 
-    enabled: bool = False
-    providers: list[AuthProviderConfig] = [AuthProviderConfig(type="local")]
+    enabled: bool = True
     default_roles: list[str] = ["user"]
     session_ttl_seconds: int = 86400
     root_password: str = ""
     allow_user_creation: bool = True
 
 
-class GoogleConfig(BaseModel):
-    """Google API configuration.
-
-    Supports multiple named credential profiles. Each consumer (directory
-    sync, email, etc.) references a profile by name.
-    """
-
-    enabled: bool = False
-    oauth_credential: str = ""
-    accounts: dict[str, "GoogleAccountConfig"] = {}
 
 
-class GoogleAccountConfig(BaseModel):
-    """A named Google service account profile."""
-
-    credential: str  # references a key in top-level credentials
-    delegated_user: str = ""
-    scopes: list[str] = []
-
-
-class MusicConfig(BaseModel):
+class MusicConfig(BaseConfig):
     """Music service configuration."""
 
     enabled: bool = False
     backend: str = "spotify"
-    credential: str = ""
     settings: dict[str, Any] = {}
 
 
-class UniFiControllerConfig(BaseModel):
+class UniFiControllerConfig(BaseConfig):
     """Connection config for a single UniFi OS controller."""
 
     host: str = ""
-    credential: str = ""
+    username: str = ""
+    password: str = ""
     verify_ssl: bool = False
 
 
-class PresenceConfig(BaseModel):
+class PresenceConfig(BaseConfig):
     """Presence detection configuration."""
 
     enabled: bool = False
@@ -219,58 +162,61 @@ class PresenceConfig(BaseModel):
     settings: dict[str, Any] = {}
 
 
-class DocumentSourceConfig(BaseModel):
-    """Configuration for a single document source/backend."""
 
-    type: str  # "local" or "gdrive"
-    name: str
-    enabled: bool = True
-    path: str = ""  # local filesystem path
-    account: str = ""  # google account profile name
-    folder_id: str = ""  # google drive folder ID
-    shared_drive_id: str = ""  # google shared drive ID
+class KnowledgeLocalConfig(BaseConfig):
+    """Local filesystem knowledge backend configuration."""
+
+    enabled: bool = False
+    name: str = "local"
+    path: str = ""
 
 
-class KnowledgeConfig(BaseModel):
+class KnowledgeGDriveConfig(BaseConfig):
+    """Google Drive knowledge backend configuration."""
+
+    enabled: bool = False
+    name: str = "gdrive"
+    folder_id: str = ""
+
+
+class KnowledgeConfig(BaseConfig):
     """Document knowledge store configuration."""
 
     enabled: bool = False
-    sources: list[DocumentSourceConfig] = []
+    local: KnowledgeLocalConfig = KnowledgeLocalConfig()
+    gdrive: KnowledgeGDriveConfig = KnowledgeGDriveConfig()
     sync_interval_seconds: int = 300
     chunk_size: int = 800
     chunk_overlap: int = 200
     max_search_results: int = 20
     chromadb_path: str = ".gilbert/chromadb"
     vision_enabled: bool = True
-    vision_credential: str = ""  # credential name for Vision API (defaults to AI credential)
     vision_model: str = "claude-sonnet-4-5-20250929"
 
 
-class DoorbellConfig(BaseModel):
+class DoorbellConfig(BaseConfig):
     """Doorbell monitoring configuration."""
 
     enabled: bool = False
     backend: str = "unifi"
     poll_interval_seconds: float = 5.0
-    doorbell_names: dict[str, str] = {}  # camera name → friendly door name
-    speakers: list[str] = []  # speaker names for announcements (empty = all)
-    voice_name: str = ""  # TTS voice name
-    unifi_protect: UniFiControllerConfig = UniFiControllerConfig()
+    speakers: list[str] = []
+    settings: dict[str, Any] = {}
 
 
-class GreetingConfig(BaseModel):
+
+class GreetingConfig(BaseConfig):
     """Morning greeting configuration."""
 
     enabled: bool = False
     start_hour: int = 6
     cutoff_hour: int = 14
     timezone: str = "UTC"
-    style: str = ""  # custom style instructions for AI greeting generation
-    speakers: list[str] = []  # speaker names to announce on (empty = all)
-    voice_name: str = ""  # TTS voice name (empty = default)
+    style: str = ""
+    speakers: list[str] = []
 
 
-class BackupConfig(BaseModel):
+class BackupConfig(BaseConfig):
     """Backup service configuration."""
 
     enabled: bool = False
@@ -279,7 +225,7 @@ class BackupConfig(BaseModel):
     backup_minute: int = 0
 
 
-class RadioDJConfig(BaseModel):
+class RadioDJConfig(BaseConfig):
     """Radio DJ service configuration."""
 
     enabled: bool = False
@@ -291,14 +237,14 @@ class RadioDJConfig(BaseModel):
         "funk",
         "80s hits",
     ]
-    min_switch_interval: int = 15  # minutes between auto genre switches
+    min_switch_interval: int = 15
     default_volume: int = 35
-    speakers: list[str] = []  # speaker names (empty = all)
+    speakers: list[str] = []
     stop_when_empty: bool = True
-    poll_interval: int = 60  # seconds
+    poll_interval: int = 60
 
 
-class RoastConfig(BaseModel):
+class RoastConfig(BaseConfig):
     """Random roast service configuration."""
 
     enabled: bool = False
@@ -306,7 +252,7 @@ class RoastConfig(BaseModel):
     ai_prompt: str = "Generate a playful, friendly roast of {name}. Be funny and teasing but never mean or hurtful. Keep it to 1-2 sentences."
 
 
-class ScreenConfig(BaseModel):
+class ScreenConfig(BaseConfig):
     """Remote display screen configuration."""
 
     enabled: bool = False
@@ -314,7 +260,7 @@ class ScreenConfig(BaseModel):
     cleanup_interval_seconds: int = 300
 
 
-class InboxAIChatConfig(BaseModel):
+class InboxAIChatConfig(BaseConfig):
     """Email-to-AI chat configuration."""
 
     enabled: bool = False
@@ -323,26 +269,25 @@ class InboxAIChatConfig(BaseModel):
     required_subject: str = ""
 
 
-class InboxConfig(BaseModel):
+class InboxConfig(BaseConfig):
     """Email inbox configuration."""
 
     enabled: bool = False
     backend: str = "gmail"
-    credential: str = ""
     email_address: str = ""
     poll_interval: int = 60
     max_body_length: int = 50000
 
 
-class SlackConfig(BaseModel):
+class SlackConfig(BaseConfig):
     """Slack integration configuration."""
 
     enabled: bool = False
-    bot_credential: str = ""  # Name of api_key credential for bot token
-    app_credential: str = ""  # Name of api_key credential for app token
+    bot_token: str = ""
+    app_token: str = ""
 
 
-class SpeakerConfig(BaseModel):
+class SpeakerConfig(BaseConfig):
     """Speaker system configuration."""
 
     enabled: bool = False
@@ -351,19 +296,17 @@ class SpeakerConfig(BaseModel):
     settings: dict[str, Any] = {}
 
 
-class GilbertConfig(BaseModel):
+class GilbertConfig(BaseConfig):
     """Top-level Gilbert configuration."""
 
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     web: WebConfig = WebConfig()
-    credentials: dict[str, AnyCredential] = {}
     plugins: PluginsConfig = PluginsConfig()
     output_ttl_seconds: int = 3600
     tts: TTSConfig = TTSConfig()
     ai: AIConfig = AIConfig()
     auth: AuthConfig = AuthConfig()
-    google: GoogleConfig = GoogleConfig()
     tunnel: TunnelConfig = TunnelConfig()
     knowledge: KnowledgeConfig = KnowledgeConfig()
     presence: PresenceConfig = PresenceConfig()
@@ -388,7 +331,7 @@ def load_config(
 ) -> GilbertConfig:
     """Load configuration with layered overrides.
 
-    1. Start with gilbert.yaml (committed defaults)
+    1. Start with gilbert.yaml (committed defaults — bootstrap only)
     2. Deep-merge plugin default configs (from plugin.yaml files)
     3. Deep-merge .gilbert/config.yaml on top (per-installation overrides)
     4. If an explicit path is given, use only that file instead.

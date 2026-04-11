@@ -11,13 +11,15 @@ from typing import Any
 
 from gilbert.config import AuthConfig
 from gilbert.interfaces.auth import (
-    AuthenticationService,
+    AuthBackend,
     AuthInfo,
     LoginMethod,
     UserContext,
 )
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +41,14 @@ class AuthService(Service):
         self._storage: StorageBackend | None = None
         self._user_service: Any = None
         self._resolver: ServiceResolver | None = None
+        self._backends: dict[str, AuthBackend] = {}
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="auth",
             capabilities=frozenset({"authentication"}),
             requires=frozenset({"users", "entity_storage"}),
-            optional=frozenset({"authentication_provider"}),
+            optional=frozenset({"tunnel", "configuration"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -54,38 +57,119 @@ class AuthService(Service):
         self._storage = storage_svc.backend  # type: ignore[attr-defined]
         self._resolver = resolver
 
-        providers = self._get_auth_services()
+        # Load config for auth backends
+        google_oauth_config: dict[str, Any] = {}
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("auth")
+                google_oauth_config = section.get("google_oauth", {})
+                if not isinstance(google_oauth_config, dict):
+                    google_oauth_config = {}
+
+        # Local auth backend — always enabled
+        from gilbert.integrations.local_auth import LocalAuthBackend
+
+        local = LocalAuthBackend()
+        await local.initialize({})
+        local.set_user_backend(self._user_service.backend)
+        self._backends["local"] = local
+
+        # Google OAuth backend — if enabled and configured
+        if google_oauth_config.get("enabled") and google_oauth_config.get("client_id"):
+            from gilbert.integrations.google_auth import GoogleAuthBackend
+
+            google = GoogleAuthBackend()
+            await google.initialize(google_oauth_config)
+            tunnel = resolver.get_capability("tunnel")
+            if tunnel:
+                google.set_tunnel(tunnel)
+            self._backends["google"] = google
+
         logger.info(
-            "Auth service started — %d authentication provider(s): %s",
-            len(providers),
-            ", ".join(p.provider_type for p in providers),
+            "Auth service started — %d backend(s): %s",
+            len(self._backends),
+            ", ".join(self._backends.keys()),
         )
 
     async def stop(self) -> None:
         pass
 
-    # ---- Provider discovery ----
+    # --- Configurable protocol ---
 
-    def _get_auth_services(self) -> list[AuthenticationService]:
-        """Discover all running AuthenticationService instances."""
-        if self._resolver is None:
-            return []
-        result: list[AuthenticationService] = []
-        for svc in self._resolver.get_all("authentication_provider"):
-            if isinstance(svc, AuthenticationService):
-                result.append(svc)
-        return result
+    @property
+    def config_namespace(self) -> str:
+        return "auth"
+
+    @property
+    def config_category(self) -> str:
+        return "Security"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="session_ttl_seconds", type=ToolParameterType.INTEGER,
+                description="Session time-to-live in seconds.",
+                default=86400,
+            ),
+            ConfigParam(
+                key="default_roles", type=ToolParameterType.ARRAY,
+                description="Default roles assigned to new users.",
+                default=["user"],
+            ),
+            ConfigParam(
+                key="allow_user_creation", type=ToolParameterType.BOOLEAN,
+                description="Whether new users can be created on first login.",
+                default=True,
+            ),
+            ConfigParam(
+                key="root_password", type=ToolParameterType.STRING,
+                description="Root admin password.",
+                default="", restart_required=True, sensitive=True,
+            ),
+            # Google OAuth backend
+            ConfigParam(
+                key="google_oauth.enabled", type=ToolParameterType.BOOLEAN,
+                description="Enable Google OAuth sign-in.",
+                default=False, restart_required=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_oauth.client_id", type=ToolParameterType.STRING,
+                description="Google OAuth client ID.",
+                restart_required=True, sensitive=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_oauth.client_secret", type=ToolParameterType.STRING,
+                description="Google OAuth client secret.",
+                restart_required=True, sensitive=True, backend_param=True,
+            ),
+            ConfigParam(
+                key="google_oauth.domain", type=ToolParameterType.STRING,
+                description="Restrict Google login to this domain (empty = any).",
+                default="", restart_required=True, backend_param=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        ttl = config.get("session_ttl_seconds")
+        if ttl is not None:
+            self._config.session_ttl_seconds = int(ttl)
+
+    # ---- Backend access ----
 
     def get_login_methods(self) -> list[LoginMethod]:
-        """Return login methods from all authentication providers."""
-        return [svc.get_login_method() for svc in self._get_auth_services()]
+        """Return login methods from all auth backends."""
+        return [b.get_login_method() for b in self._backends.values()]
 
-    def get_provider(self, provider_type: str) -> AuthenticationService | None:
-        """Get a specific authentication provider by type."""
-        for svc in self._get_auth_services():
-            if svc.provider_type == provider_type:
-                return svc
-        return None
+    def get_backend(self, provider_type: str) -> AuthBackend | None:
+        """Get a specific auth backend by type."""
+        return self._backends.get(provider_type)
+
+    # Legacy alias
+    def get_provider(self, provider_type: str) -> AuthBackend | None:
+        return self.get_backend(provider_type)
 
     # ---- Authentication ----
 

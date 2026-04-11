@@ -33,6 +33,7 @@ class SpeakerService(Service):
         self._config: dict[str, object] = {}
         self._output_ttl_seconds: int = 3600
         self._default_announce_volume: int | None = None
+        self._default_announce_speakers: list[str] = []
         self._web_host: str = "0.0.0.0"
         self._web_port: int = 8000
         # Track last-used speaker set for "use last" default
@@ -40,6 +41,7 @@ class SpeakerService(Service):
         # Announcement queue lock — prevents announcements from stepping
         # on each other by serializing TTS + playback.
         self._announce_lock = asyncio.Lock()
+        self._speaker_cache: list[Any] = []
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -52,6 +54,11 @@ class SpeakerService(Service):
     @property
     def backend(self) -> SpeakerBackend:
         return self._backend
+
+    @property
+    def cached_speakers(self) -> list[Any]:
+        """Last-known speaker list (populated after start)."""
+        return list(self._speaker_cache)
 
     async def start(self, resolver: ServiceResolver) -> None:
         # Store resolver references for runtime use
@@ -87,6 +94,12 @@ class SpeakerService(Service):
             unique=True,
         ))
 
+        # Populate speaker cache for dynamic choices
+        try:
+            self._speaker_cache = await self._backend.list_speakers()
+        except Exception:
+            logger.debug("Could not cache speakers on start")
+
         logger.info("Speaker service started")
 
     def _get_storage_backend(self) -> Any:
@@ -103,6 +116,9 @@ class SpeakerService(Service):
         vol = section.get("default_announce_volume")
         if vol is not None:
             self._default_announce_volume = int(vol)
+        spk = section.get("default_announce_speakers")
+        if isinstance(spk, list):
+            self._default_announce_speakers = spk
 
     # --- Configurable protocol ---
 
@@ -110,12 +126,19 @@ class SpeakerService(Service):
     def config_namespace(self) -> str:
         return "speaker"
 
+    @property
+    def config_category(self) -> str:
+        return "Media"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
+        from gilbert.interfaces.speaker import SpeakerBackend
+
+        params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Speaker backend type.",
                 default="sonos", restart_required=True,
+                choices=tuple(SpeakerBackend.registered_backends().keys()) or ("sonos",),
             ),
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
@@ -127,11 +150,20 @@ class SpeakerService(Service):
                 description="Default volume level for announcements (0-100). Unset means use current volume.",
             ),
             ConfigParam(
-                key="settings", type=ToolParameterType.OBJECT,
-                description="Backend-specific settings.",
-                default={},
+                key="default_announce_speakers", type=ToolParameterType.ARRAY,
+                description="Default speakers for announcements (empty = all).",
+                default=[],
+                choices_from="speakers",
             ),
         ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
@@ -326,25 +358,27 @@ class SpeakerService(Service):
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
-        voice_name: str | None = None,
     ) -> str:
         """Announce text over speakers using TTS.
+
+        If no speaker_names are given, falls back to the configured
+        default announce speakers (or all speakers if that's also empty).
 
         Announcements are serialized via a lock so they don't step on
         each other. After starting playback, waits for the estimated
         audio duration before releasing the lock.
         """
+        # Fall back to configured default speakers
+        if speaker_names is None and self._default_announce_speakers:
+            speaker_names = self._default_announce_speakers
         async with self._announce_lock:
-            return await self._announce_inner(
-                text, speaker_names, volume, voice_name,
-            )
+            return await self._announce_inner(text, speaker_names, volume)
 
     async def _announce_inner(
         self,
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
-        voice_name: str | None = None,
     ) -> str:
         """Inner announce — must be called under _announce_lock."""
         if self._tts_svc is None:
@@ -358,7 +392,7 @@ class SpeakerService(Service):
 
         # Generate TTS audio
         request = SynthesisRequest(text=text, voice_id="", output_format=AudioFormat.MP3)
-        result = await self._tts_svc.synthesize(request, voice_name=voice_name)
+        result = await self._tts_svc.synthesize(request)
 
         # Save to a file so the speaker can access it via URI
         output_dir = get_output_dir("speaker")
@@ -386,6 +420,12 @@ class SpeakerService(Service):
             await asyncio.sleep(duration + 0.5)
         else:
             await self._wait_for_playback(target_ids)
+
+        # Clear the queue so the announcement doesn't linger in history
+        try:
+            await self._backend.clear_queue(target_ids)
+        except Exception:
+            logger.debug("Failed to clear queue after announcement")
 
         return str(file_path)
 
@@ -588,12 +628,6 @@ class SpeakerService(Service):
                         description="Volume level (0-100) for the announcement.",
                         required=False,
                     ),
-                    ToolParameter(
-                        name="voice_name",
-                        type=ToolParameterType.STRING,
-                        description="TTS voice name to use (e.g., 'default', 'scary'). Uses default if omitted.",
-                        required=False,
-                    ),
                 ],
             ),
         ]
@@ -750,14 +784,12 @@ class SpeakerService(Service):
         text = arguments["text"]
         speaker_names: list[str] = arguments.get("speakers", [])
         volume: int | None = arguments.get("volume")
-        voice_name: str | None = arguments.get("voice_name")
 
         try:
             file_path = await self.announce(
                 text=text,
                 speaker_names=speaker_names or None,
                 volume=volume,
-                voice_name=voice_name,
             )
         except RuntimeError as e:
             return json.dumps({"error": str(e)})

@@ -27,6 +27,23 @@ class UserPresence:
 class PresenceBackend(ABC):
     """Abstract presence detection backend. Implementation-agnostic."""
 
+    _registry: dict[str, type["PresenceBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            PresenceBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["PresenceBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
     @abstractmethod
     async def initialize(self, config: dict[str, object]) -> None:
         """Initialize the backend with provider-specific configuration."""

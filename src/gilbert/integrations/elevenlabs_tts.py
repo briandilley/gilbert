@@ -26,48 +26,41 @@ _FORMAT_MAP: dict[AudioFormat, str] = {
     AudioFormat.PCM: "pcm_44100",
 }
 
-# Default silence padding in seconds
-_DEFAULT_SILENCE_PADDING: float = 3.0
-
-# PCM params used by ElevenLabs pcm_44100 format
-_PCM_SAMPLE_RATE = 44100
-_PCM_SAMPLE_WIDTH = 2  # 16-bit
-
-
-def _generate_pcm_silence(seconds: float) -> bytes:
-    """Generate raw 16-bit PCM silence at 44100 Hz."""
-    num_samples = int(_PCM_SAMPLE_RATE * seconds)
-    return b"\x00\x00" * num_samples
-
-
-def _generate_mp3_silence(seconds: float) -> bytes:
-    """Generate a minimal MP3 silence frame sequence.
-
-    Each MPEG1 Layer 3 frame at 128kbps / 44100 Hz is 417 or 418 bytes
-    and covers 1152 samples (~26.12ms). We emit enough zero-payload frames
-    to cover the requested duration.
-    """
-    frame_samples = 1152
-    frames_needed = int((_PCM_SAMPLE_RATE * seconds) / frame_samples) + 1
-    # MPEG1, Layer 3, 128kbps, 44100 Hz, mono, no padding bit
-    # Sync word: 0xFFE0 | version(11) | layer(01) | no CRC(1) = 0xFFFB
-    # bitrate index 1001 (128k), sample rate 00 (44100), padding 0, private 0 = 0x90
-    # mode 11 (mono), mode ext 00, copyright 0, original 0, emphasis 00 = 0xC0
-    header = b"\xff\xfb\x90\xc0"
-    # Frame size = 144 * 128000 / 44100 = 417.96 -> 417 bytes (no padding)
-    # Payload = 417 - 4 header = 413 bytes of zeros
-    frame = header + b"\x00" * 413
-    return frame * frames_needed
 
 
 class ElevenLabsTTS(TTSBackend):
+
+    backend_name = "elevenlabs"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="api_key", type=ToolParameterType.STRING,
+                description="ElevenLabs API key.",
+                sensitive=True, restart_required=True,
+            ),
+            ConfigParam(
+                key="voice_id", type=ToolParameterType.STRING,
+                description="ElevenLabs voice ID for speech synthesis.",
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="model_id", type=ToolParameterType.STRING,
+                description="ElevenLabs model ID.",
+                default="eleven_turbo_v2_5",
+            ),
+        ]
     """ElevenLabs text-to-speech implementation."""
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
         self._api_key: str = ""
+        self._voice_id: str = ""
         self._model_id: str = "eleven_turbo_v2_5"
-        self._silence_padding: float = _DEFAULT_SILENCE_PADDING
 
     async def initialize(self, config: dict[str, object]) -> None:
         api_key = config.get("api_key")
@@ -75,15 +68,12 @@ class ElevenLabsTTS(TTSBackend):
             raise ValueError("ElevenLabs TTS requires 'api_key' in config")
         self._api_key = api_key
 
+        self._voice_id = str(config.get("voice_id", ""))
+
         if "model_id" in config:
             model_id = config["model_id"]
             if isinstance(model_id, str):
                 self._model_id = model_id
-
-        if "silence_padding" in config:
-            val = config["silence_padding"]
-            if isinstance(val, (int, float)):
-                self._silence_padding = float(val)
 
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
@@ -93,11 +83,7 @@ class ElevenLabsTTS(TTSBackend):
             },
             timeout=60.0,
         )
-        logger.info(
-            "ElevenLabs TTS initialized (model=%s, silence_padding=%.1fs)",
-            self._model_id,
-            self._silence_padding,
-        )
+        logger.info("ElevenLabs TTS initialized (model=%s)", self._model_id)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -105,8 +91,16 @@ class ElevenLabsTTS(TTSBackend):
             self._client = None
 
     async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        # Use configured voice_id as default if request doesn't specify one
         if not request.voice_id:
-            raise ValueError("voice_id is required for ElevenLabs TTS synthesis")
+            if self._voice_id:
+                request = SynthesisRequest(
+                    text=request.text,
+                    voice_id=self._voice_id,
+                    output_format=request.output_format,
+                )
+            else:
+                raise ValueError("No voice_id configured — set voice_id in TTS backend settings")
 
         client = self._require_client()
 
@@ -133,9 +127,6 @@ class ElevenLabsTTS(TTSBackend):
         response.raise_for_status()
 
         audio = response.content
-
-        if self._silence_padding > 0:
-            audio = self._append_silence(audio, request.output_format)
 
         characters_used = len(request.text)
 
@@ -185,11 +176,3 @@ class ElevenLabsTTS(TTSBackend):
             raise RuntimeError("ElevenLabs TTS not initialized — call initialize() first")
         return self._client
 
-    def _append_silence(self, audio: bytes, fmt: AudioFormat) -> bytes:
-        """Append silence padding to the audio data."""
-        if fmt == AudioFormat.MP3:
-            return audio + _generate_mp3_silence(self._silence_padding)
-        elif fmt in (AudioFormat.PCM, AudioFormat.WAV):
-            return audio + _generate_pcm_silence(self._silence_padding)
-        # For OGG or unknown formats, return as-is (can't trivially append)
-        return audio

@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -19,11 +20,24 @@ export function InboxPage() {
   const queryClient = useQueryClient();
   const api = useWsApi();
   const { connected } = useWebSocket();
-  const [sender, setSender] = useState("");
-  const [subject, setSubject] = useState("");
-  const [selectedMsg, setSelectedMsg] = useState<MessageDetail | null>(null);
-  const [threadMsgs, setThreadMsgs] = useState<MessageDetail[]>([]);
-  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const sender = searchParams.get("sender") || "";
+  const subject = searchParams.get("subject") || "";
+  const messageId = searchParams.get("msg") || "";
+
+  const setSender = (v: string) => {
+    const p = new URLSearchParams(searchParams);
+    if (v) p.set("sender", v); else p.delete("sender");
+    p.delete("msg");
+    setSearchParams(p);
+  };
+  const setSubject = (v: string) => {
+    const p = new URLSearchParams(searchParams);
+    if (v) p.set("subject", v); else p.delete("subject");
+    p.delete("msg");
+    setSearchParams(p);
+  };
 
   const { data: stats } = useQuery({
     queryKey: ["inbox-stats"],
@@ -48,32 +62,32 @@ export function InboxPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inbox-pending"] }),
   });
 
-  async function handleRowClick(msg: InboxMessage) {
-    if (loadingDetail) return;
-    setLoadingDetail(true);
-    setThreadMsgs([]);
-    setSelectedMsg(null);
-    try {
-      if (msg.thread_id) {
-        // Load the full thread
-        try {
-          const threadDetails = await api.getThread(msg.thread_id);
-          if (threadDetails.length > 0) {
-            setSelectedMsg(threadDetails[0]);
-            setThreadMsgs(threadDetails);
-          }
-        } catch {
-          // Fall back to single message
-          const detail = await api.getMessage(msg.message_id);
-          setSelectedMsg(detail);
-        }
-      } else {
-        const detail = await api.getMessage(msg.message_id);
-        setSelectedMsg(detail);
-      }
-    } finally {
-      setLoadingDetail(false);
-    }
+  // Load message detail when msg param is set
+  const { data: selectedMsg, isLoading: loadingDetail } = useQuery({
+    queryKey: ["inbox-message", messageId],
+    queryFn: () => api.getMessage(messageId),
+    enabled: connected && !!messageId,
+  });
+
+  // Load thread if the selected message has a thread_id
+  const { data: threadData } = useQuery({
+    queryKey: ["inbox-thread", selectedMsg?.thread_id],
+    queryFn: () => api.getThread(selectedMsg!.thread_id!),
+    enabled: connected && !!selectedMsg?.thread_id,
+  });
+
+  const threadMsgs = threadData ?? (selectedMsg ? [selectedMsg] : []);
+
+  function handleRowClick(msg: InboxMessage) {
+    const p = new URLSearchParams(searchParams);
+    p.set("msg", msg.message_id);
+    setSearchParams(p);
+  }
+
+  function closeDetail() {
+    const p = new URLSearchParams(searchParams);
+    p.delete("msg");
+    setSearchParams(p);
   }
 
   return (
@@ -153,11 +167,11 @@ export function InboxPage() {
               {messages.map((msg) => (
                 <tr
                   key={msg.message_id}
-                  className="border-b hover:bg-accent/50 cursor-pointer"
+                  className={`border-b hover:bg-accent/50 cursor-pointer ${msg.message_id === messageId ? "bg-accent/30" : ""}`}
                   onClick={() => handleRowClick(msg)}
                 >
                   <td className="px-3 py-2">
-                    {msg.is_inbound ? "→" : "←"}
+                    {msg.is_inbound ? "\u2192" : "\u2190"}
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     {new Date(msg.date).toLocaleDateString()}
@@ -182,22 +196,22 @@ export function InboxPage() {
       </Dialog>
 
       {/* Message detail modal */}
-      <Dialog open={!!selectedMsg && !loadingDetail} onOpenChange={() => { setSelectedMsg(null); setThreadMsgs([]); }}>
+      <Dialog open={!!selectedMsg && !loadingDetail} onOpenChange={() => closeDetail()}>
         <DialogContent className="overflow-y-auto" style={{ maxWidth: "95vw", width: "95vw", height: "95vh", maxHeight: "95vh" }}>
           <DialogHeader>
             <DialogTitle>{selectedMsg?.subject}</DialogTitle>
           </DialogHeader>
           {selectedMsg && (
             <div className="text-sm space-y-0">
-              {(threadMsgs.length > 0 ? threadMsgs : [selectedMsg]).map((msg, i) => (
+              {threadMsgs.map((msg, i) => (
                 <div key={msg.message_id || i} className={i > 0 ? "border-t pt-4 mt-4" : ""}>
                   <div className="text-muted-foreground pb-3">
                     <div>From: {msg.sender_name || msg.sender_email}</div>
                     {msg.to?.length > 0 && (
-                      <div>To: {msg.to.map((a) => a.name || a.email).join(", ")}</div>
+                      <div>To: {msg.to.map((a: any) => a.name || a.email).join(", ")}</div>
                     )}
                     {msg.cc?.length > 0 && (
-                      <div>CC: {msg.cc.map((a) => a.name || a.email).join(", ")}</div>
+                      <div>CC: {msg.cc.map((a: any) => a.name || a.email).join(", ")}</div>
                     )}
                     <div>Date: {new Date(msg.date).toLocaleString()}</div>
                   </div>
@@ -226,7 +240,6 @@ function EmailFrame({ html }: { html: string }) {
     try {
       const doc = iframe.contentDocument;
       if (!doc?.body) return;
-      // Reset height so scrollHeight reflects actual content
       iframe.style.height = "0";
       const h = doc.documentElement.scrollHeight || doc.body.scrollHeight;
       iframe.style.height = h + "px";

@@ -1,10 +1,10 @@
-"""Tests for LocalAuthenticationService — password hashing and verification."""
+"""Tests for LocalAuthBackend — password hashing and verification."""
 
 from typing import Any
 
 import pytest
 
-from gilbert.integrations.local_auth import LocalAuthenticationService
+from gilbert.integrations.local_auth import LocalAuthBackend
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.users import UserBackend
 
@@ -123,11 +123,11 @@ class StubResolver(ServiceResolver):
 
 
 @pytest.fixture
-async def local_auth() -> LocalAuthenticationService:
+async def local_auth() -> LocalAuthBackend:
     backend = StubUserBackend()
-    svc = LocalAuthenticationService()
-    resolver = StubResolver({"users": StubUserService(backend)})
-    await svc.start(resolver)
+    svc = LocalAuthBackend()
+    await svc.initialize({})
+    svc.set_user_backend(backend)
 
     # Create a test user with a hashed password.
     pw_hash = svc.hash_password("secret123")
@@ -145,11 +145,11 @@ async def local_auth() -> LocalAuthenticationService:
 
 
 def test_provider_type() -> None:
-    svc = LocalAuthenticationService()
+    svc = LocalAuthBackend()
     assert svc.provider_type == "local"
 
 
-async def test_authenticate_success(local_auth: LocalAuthenticationService) -> None:
+async def test_authenticate_success(local_auth: LocalAuthBackend) -> None:
     info = await local_auth.authenticate({"email": "test@example.com", "password": "secret123"})
     assert info is not None
     assert info.email == "test@example.com"
@@ -157,21 +157,21 @@ async def test_authenticate_success(local_auth: LocalAuthenticationService) -> N
     assert info.provider_user_id == "u1"
 
 
-async def test_authenticate_wrong_password(local_auth: LocalAuthenticationService) -> None:
+async def test_authenticate_wrong_password(local_auth: LocalAuthBackend) -> None:
     info = await local_auth.authenticate({"email": "test@example.com", "password": "wrong"})
     assert info is None
 
 
-async def test_authenticate_unknown_email(local_auth: LocalAuthenticationService) -> None:
+async def test_authenticate_unknown_email(local_auth: LocalAuthBackend) -> None:
     info = await local_auth.authenticate({"email": "nobody@example.com", "password": "secret123"})
     assert info is None
 
 
-async def test_authenticate_empty_credentials(local_auth: LocalAuthenticationService) -> None:
+async def test_authenticate_empty_credentials(local_auth: LocalAuthBackend) -> None:
     assert await local_auth.authenticate({}) is None
     assert await local_auth.authenticate({"email": "", "password": ""}) is None
 
 
-async def test_hash_password_produces_valid_hash(local_auth: LocalAuthenticationService) -> None:
+async def test_hash_password_produces_valid_hash(local_auth: LocalAuthBackend) -> None:
     h = local_auth.hash_password("mypassword")
     assert h.startswith("$argon2")

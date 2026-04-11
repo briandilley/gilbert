@@ -8,9 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gilbert.core.services.credentials import CredentialService
 from gilbert.core.services.websearch import WebSearchService
-from gilbert.interfaces.credentials import ApiKeyCredential
 from gilbert.interfaces.service import ServiceResolver
 from gilbert.interfaces.websearch import WebSearchBackend, WebSearchResult
 
@@ -62,21 +60,14 @@ def stub_backend() -> StubSearchBackend:
 
 
 @pytest.fixture
-def cred_service() -> CredentialService:
-    return CredentialService({
-        "tavily_key": ApiKeyCredential(api_key="test-key-123"),
-    })
-
-
-@pytest.fixture
 def service(stub_backend: StubSearchBackend) -> WebSearchService:
-    return WebSearchService(stub_backend, "tavily_key")
+    return WebSearchService(stub_backend, settings={"api_key": "test-key-123"})
 
 
 @pytest.fixture
-def resolver(cred_service: CredentialService) -> MagicMock:
+def resolver() -> MagicMock:
     r = MagicMock(spec=ServiceResolver)
-    r.require_capability.return_value = cred_service
+    r.require_capability.side_effect = LookupError("not available")
     r.get_capability.return_value = None
     return r
 
@@ -98,7 +89,6 @@ class TestServiceLifecycle:
         assert info.name == "websearch"
         assert "websearch" in info.capabilities
         assert "ai_tools" in info.capabilities
-        assert "credentials" in info.requires
 
     @pytest.mark.asyncio
     async def test_start_initializes_backend(
@@ -116,13 +106,6 @@ class TestServiceLifecycle:
         await started_service.stop()
         assert not stub_backend.initialized
 
-    @pytest.mark.asyncio
-    async def test_wrong_credential_type(self, resolver: MagicMock) -> None:
-        bad_cred_svc = CredentialService({"key": MagicMock()})
-        resolver.require_capability.return_value = bad_cred_svc
-        svc = WebSearchService(StubSearchBackend(), "key")
-        with pytest.raises(TypeError, match="api_key"):
-            await svc.start(resolver)
 
 
 # --- ToolProvider ---
@@ -222,7 +205,7 @@ class TestToolExecution:
 
     @pytest.mark.asyncio
     async def test_search_error_handled(self, resolver: MagicMock) -> None:
-        svc = WebSearchService(ErrorSearchBackend(), "tavily_key")
+        svc = WebSearchService(ErrorSearchBackend())
         await svc.start(resolver)
         result = await svc.execute_tool(
             "web_search", {"query": "test"},

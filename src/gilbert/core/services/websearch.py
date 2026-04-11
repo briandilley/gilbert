@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from gilbert.interfaces.credentials import ApiKeyCredential
+
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -85,11 +85,9 @@ class WebSearchService(Service, ToolProvider):
     def __init__(
         self,
         backend: WebSearchBackend,
-        credential_name: str,
         settings: dict[str, Any] | None = None,
     ) -> None:
         self._backend = backend
-        self._credential_name = credential_name
         self._settings = settings or {}
         self._http_client: httpx.AsyncClient | None = None
 
@@ -97,23 +95,20 @@ class WebSearchService(Service, ToolProvider):
         return ServiceInfo(
             name="websearch",
             capabilities=frozenset({"websearch", "ai_tools"}),
-            requires=frozenset({"credentials"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
-        cred_svc = resolver.require_capability("credentials")
-        cred = cred_svc.require(self._credential_name)
+        # Load config
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
 
-        if not isinstance(cred, ApiKeyCredential):
-            raise TypeError(
-                f"Credential '{self._credential_name}' must be an api_key credential"
-            )
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("websearch")
+                self._settings = section.get("settings", self._settings)
 
-        init_config: dict[str, object] = {
-            **self._settings,
-            "api_key": cred.api_key,
-        }
-        await self._backend.initialize(init_config)
+        # Initialize backend with settings (includes API key)
+        await self._backend.initialize(self._settings)
         self._http_client = httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT,
             follow_redirects=True,
@@ -126,6 +121,45 @@ class WebSearchService(Service, ToolProvider):
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "websearch"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+
+        params = [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the web search service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="backend", type=ToolParameterType.STRING,
+                description="Web search backend provider.",
+                default="tavily", restart_required=True,
+                choices=tuple(WebSearchBackend.registered_backends().keys()) or ("tavily",),
+            ),
+        ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._settings = config.get("settings", self._settings)
 
     # ── ToolProvider ─────────────────────────────────────────────────
 

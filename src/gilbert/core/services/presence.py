@@ -96,18 +96,6 @@ class PresenceService(Service):
         if user_svc is not None:
             init_config["_user_service"] = user_svc
 
-        cred_svc = resolver.get_capability("credentials")
-        if cred_svc is not None:
-            from gilbert.core.services.credentials import CredentialService
-
-            if isinstance(cred_svc, CredentialService):
-                for key in ("unifi_network", "unifi_protect"):
-                    sub = init_config.get(key)
-                    if isinstance(sub, dict) and sub.get("credential"):
-                        cred = cred_svc.get(str(sub["credential"]))
-                        if cred:
-                            sub["_resolved_credential"] = cred
-
         await self._backend.initialize(init_config)
 
         # First poll flag — on the very first poll we skip event emission
@@ -146,12 +134,19 @@ class PresenceService(Service):
     def config_namespace(self) -> str:
         return "presence"
 
+    @property
+    def config_category(self) -> str:
+        return "Monitoring"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
+        from gilbert.interfaces.presence import PresenceBackend
+
+        params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Presence backend type.",
-                restart_required=True,
+                default="unifi", restart_required=True,
+                choices=tuple(PresenceBackend.registered_backends().keys()) or ("unifi",),
             ),
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
@@ -163,12 +158,18 @@ class PresenceService(Service):
                 description="How often to poll for presence changes (seconds).",
                 default=_DEFAULT_POLL_INTERVAL,
             ),
-            ConfigParam(
-                key="settings", type=ToolParameterType.OBJECT,
-                description="Backend-specific settings.",
-                default={},
-            ),
         ]
+        # Backend params use actual config paths (not settings.* prefix)
+        # because the presence backend receives the full section, not just settings.
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=bp.key, type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, choices_from=bp.choices_from,
+                multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)

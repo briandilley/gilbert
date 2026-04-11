@@ -19,16 +19,15 @@ Web search capability exposed as an AI tool. Interface-first design with Tavily 
 websearch:
   enabled: false
   backend: tavily
-  credential: tavily_api_key  # api_key credential name
-  settings: {}
+  settings:
+    api_key: ""  # Tavily API key, inline in backend settings
 ```
 
 ### Credential
-Requires an `api_key` credential. API key sent in Tavily request body (not header).
+Credentials are inline in backend settings (`api_key`). No external CredentialService. API key sent in Tavily request body (not header).
 
 ## Related
 - [AI Service](memory-ai-service.md) — discovers web_search tool via ToolProvider
-- [Credential Service](memory-credential-service.md) — provides API key
 - `src/gilbert/interfaces/websearch.py`
 - `src/gilbert/core/services/websearch.py`
 - `src/gilbert/integrations/tavily_search.py`

@@ -86,6 +86,31 @@ class PersonaService(Service):
     async def stop(self) -> None:
         pass
 
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "persona"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="default_persona", type=ToolParameterType.STRING,
+                description="Default persona instructions for the AI assistant.",
+                default=DEFAULT_PERSONA,
+                multiline=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        # Persona is managed via entity storage, not config — but the default
+        # can be changed here for fresh installs.
+        pass
+
     # --- Public API ---
 
     @property

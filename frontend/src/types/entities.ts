@@ -17,6 +17,7 @@ export interface CollectionData {
   total_pages: number;
   sortable_fields: string[];
   fk_map: Record<string, string>;
+  display_columns: string[];
 }
 
 export interface EntityData {

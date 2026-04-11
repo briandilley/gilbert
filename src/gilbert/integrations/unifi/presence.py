@@ -53,6 +53,66 @@ class UniFiPresenceBackend(PresenceBackend):
     5. No signals → AWAY
     """
 
+    backend_name = "unifi"
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="unifi_network.host", type=ToolParameterType.STRING,
+                description="UniFi Network controller URL (e.g., https://192.168.1.1).",
+                default="", restart_required=True,
+            ),
+            ConfigParam(
+                key="unifi_network.username", type=ToolParameterType.STRING,
+                description="UniFi Network username.",
+                default="", restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="unifi_network.password", type=ToolParameterType.STRING,
+                description="UniFi Network password.",
+                default="", restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="unifi_network.verify_ssl", type=ToolParameterType.BOOLEAN,
+                description="Verify SSL certificates for Network controller.",
+                default=False,
+            ),
+            ConfigParam(
+                key="unifi_protect.host", type=ToolParameterType.STRING,
+                description="UniFi Protect controller URL (e.g., https://192.168.1.1).",
+                default="", restart_required=True,
+            ),
+            ConfigParam(
+                key="unifi_protect.username", type=ToolParameterType.STRING,
+                description="UniFi Protect username.",
+                default="", restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="unifi_protect.password", type=ToolParameterType.STRING,
+                description="UniFi Protect password.",
+                default="", restart_required=True, sensitive=True,
+            ),
+            ConfigParam(
+                key="unifi_protect.verify_ssl", type=ToolParameterType.BOOLEAN,
+                description="Verify SSL certificates for Protect controller.",
+                default=False,
+            ),
+            ConfigParam(
+                key="face_lookback_minutes", type=ToolParameterType.INTEGER,
+                description="Minutes to look back for face detection events.",
+                default=30,
+            ),
+            ConfigParam(
+                key="badge_lookback_hours", type=ToolParameterType.INTEGER,
+                description="Hours to look back for badge/access events.",
+                default=24,
+            ),
+        ]
+
     def __init__(self) -> None:
         self._clients: dict[str, UniFiClient] = {}
         self._network: UniFiNetwork | None = None
@@ -106,16 +166,17 @@ class UniFiPresenceBackend(PresenceBackend):
         if host in self._clients:
             return self._clients[host]
 
-        cred = cfg.get("_resolved_credential")
-        if cred is None:
-            logger.warning("No credential resolved for UniFi host %s", host)
+        username = cfg.get("username", "")
+        password = cfg.get("password", "")
+        if not username or not password:
+            logger.warning("No credentials configured for UniFi host %s", host)
             return None
 
         verify_ssl = cfg.get("verify_ssl", False)
         client = UniFiClient(
             host=host,
-            username=cred.username,
-            password=cred.password,
+            username=str(username),
+            password=str(password),
             verify_ssl=bool(verify_ssl),
         )
 

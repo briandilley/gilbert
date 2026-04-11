@@ -1,16 +1,31 @@
-"""Configuration service — runtime config management with hot-swap support."""
+"""Configuration service — runtime config management with entity storage backend.
+
+Stores all non-bootstrap configuration in entity storage (one entity per
+namespace in the ``gilbert.config`` collection).  Bootstrap sections
+(storage, logging, web) remain in YAML because they're needed before
+entity storage exists.
+
+On first run the service seeds entity storage from the merged YAML config.
+Subsequent starts read directly from entity storage.
+"""
 
 import json
 import logging
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import yaml
 
-from gilbert.config import GilbertConfig, OVERRIDE_CONFIG_PATH, _deep_merge
+from gilbert.config import (
+    GilbertConfig,
+    OVERRIDE_CONFIG_PATH,
+    YAML_ONLY_SECTIONS,
+    _deep_merge,
+)
 from gilbert.interfaces.configuration import ConfigParam, Configurable
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.storage import Query, StorageBackend
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -22,15 +37,23 @@ logger = logging.getLogger(__name__)
 # Type for factory functions that create services from config
 ServiceFactory = Callable[[dict[str, Any]], Service]
 
+# Entity storage collection names (within the gilbert. namespace)
+_CONFIG_COLLECTION = "gilbert.config"
+_META_COLLECTION = "gilbert.config_meta"
+_SCHEMA_ENTITY_ID = "_schema"
+_SCHEMA_VERSION = 1
+
 
 class ConfigurationService(Service):
     """Manages runtime configuration with read/write, persistence, and hot-swap.
 
     - Holds the live GilbertConfig and raw config dict
+    - On first run, seeds entity storage from merged YAML config
+    - On subsequent runs, loads config from entity storage
     - Discovers Configurable services lazily
     - Tunable param changes: updates config, calls on_config_changed()
     - Structural param changes: uses registered factory to reconstruct service
-    - Persists changes to .gilbert/config.yaml (override layer only)
+    - Persists non-bootstrap changes to entity storage
     """
 
     def __init__(self, config: GilbertConfig) -> None:
@@ -39,11 +62,12 @@ class ConfigurationService(Service):
         self._resolver: ServiceResolver | None = None
         self._service_manager: Any = None  # ServiceManager, set during start
         self._factories: dict[str, ServiceFactory] = {}
+        self._storage: StorageBackend | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="configuration",
-            capabilities=frozenset({"configuration", "ai_tools"}),
+            capabilities=frozenset({"configuration", "ai_tools", "ws_handlers"}),
             optional=frozenset({"event_bus"}),
             events=frozenset({"config.changed"}),
         )
@@ -66,6 +90,72 @@ class ConfigurationService(Service):
         """Register a factory for reconstructing a service from config."""
         self._factories[namespace] = factory
 
+    # --- Entity storage lifecycle ---
+
+    async def seed_storage(self, storage: StorageBackend) -> None:
+        """Seed entity storage from merged YAML config on first run.
+
+        Checks for a ``_schema`` sentinel entity in ``gilbert.config_meta``.
+        If absent, writes each non-bootstrap config section as an entity in
+        ``gilbert.config`` and creates the sentinel.
+        """
+        self._storage = storage
+
+        schema = await storage.get(_META_COLLECTION, _SCHEMA_ENTITY_ID)
+        if schema is not None:
+            logger.debug("Config already seeded (schema v%s)", schema.get("version"))
+            return
+
+        logger.info("First run — seeding entity storage from YAML config")
+        for key, value in self._raw.items():
+            if key in YAML_ONLY_SECTIONS:
+                continue
+            # Serialize through JSON to strip Pydantic/enum types
+            try:
+                safe = json.loads(json.dumps(value, default=str))
+            except (TypeError, ValueError):
+                logger.warning("Skipping non-serializable config section: %s", key)
+                continue
+            await storage.put(_CONFIG_COLLECTION, key, safe if isinstance(safe, dict) else {"_value": safe})
+
+        # Write sentinel
+        await storage.put(_META_COLLECTION, _SCHEMA_ENTITY_ID, {
+            "version": _SCHEMA_VERSION,
+            "migrated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "yaml",
+        })
+        logger.info("Config seeded to entity storage")
+
+    async def load_from_storage(self, storage: StorageBackend) -> None:
+        """Load config from entity storage, merging over YAML defaults.
+
+        Entity-stored values override YAML defaults for non-bootstrap sections.
+        The result is re-validated via ``GilbertConfig``.
+        """
+        self._storage = storage
+
+        entities = await storage.query(Query(collection=_CONFIG_COLLECTION))
+        if not entities:
+            logger.debug("No config entities in storage — using YAML defaults")
+            return
+
+        for entity in entities:
+            namespace = entity.pop("_id", None)
+            if namespace is None or namespace in YAML_ONLY_SECTIONS:
+                continue
+            # Unwrap scalar values stored as {"_value": ...}
+            if "_value" in entity and len(entity) == 1:
+                self._raw[namespace] = entity["_value"]
+            else:
+                self._raw[namespace] = entity
+
+        # Re-validate
+        try:
+            self._config = GilbertConfig.model_validate(self._raw)
+            self._raw = self._config.model_dump()
+        except Exception:
+            logger.exception("Config validation failed after loading from storage — using YAML defaults")
+
     # --- Read API ---
 
     def get(self, path: str) -> Any:
@@ -87,6 +177,18 @@ class ConfigurationService(Service):
         if isinstance(section, dict):
             return dict(section)
         return {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        """Get a service's config section as JSON-safe plain dicts.
+
+        Pydantic model instances (e.g. credential objects) are converted
+        to plain dicts via a JSON round-trip.
+        """
+        section = self.get_section(namespace)
+        try:
+            return json.loads(json.dumps(section, default=str))
+        except (TypeError, ValueError):
+            return {}
 
     # --- Write API ---
 
@@ -122,8 +224,8 @@ class ConfigurationService(Service):
             self._raw = self._config.model_dump()
             return {"status": "error", "message": f"Validation failed: {exc}"}
 
-        # Persist to override file
-        self._persist()
+        # Persist
+        await self._persist(namespace)
 
         # Notify or restart
         if restart_needed:
@@ -163,6 +265,148 @@ class ConfigurationService(Service):
             if svc is not None and isinstance(svc, Configurable):
                 result[svc.config_namespace] = svc.config_params()
 
+        return result
+
+    def describe_categories(self) -> list[dict[str, Any]]:
+        """Describe all config organized by category for the web UI.
+
+        Returns a list of category dicts, each containing sections with
+        their params and current values.
+        """
+        if self._resolver is None:
+            return []
+
+        from gilbert.core.service_manager import ServiceManager
+
+        if not isinstance(self._resolver, ServiceManager):
+            return []
+
+        sm = self._resolver
+
+        # Gather sections grouped by category
+        categories: dict[str, list[dict[str, Any]]] = {}
+        for name in list(sm._registered.keys()):
+            svc = sm._registered[name]
+            if not isinstance(svc, Configurable):
+                continue
+
+            ns = svc.config_namespace
+            if ns in YAML_ONLY_SECTIONS:
+                continue
+            cat = svc.config_category
+            params = svc.config_params()
+            if not params:
+                continue
+            started = name in sm.started_services
+            failed = name in sm.failed_services
+
+            section = self.get_section_safe(ns)
+
+            categories.setdefault(cat, []).append({
+                "namespace": ns,
+                "service_name": name,
+                "enabled": section.get("enabled", True),
+                "started": started,
+                "failed": failed,
+                "params": [self._serialize_param(p, section) for p in params],
+                "values": section,
+            })
+
+        # Sort categories in a stable display order
+        order = [
+            "Intelligence", "Media", "Communication",
+            "Security", "Monitoring", "Infrastructure",
+        ]
+        rank = {name: i for i, name in enumerate(order)}
+
+        result = []
+        for cat_name in sorted(categories.keys(), key=lambda c: (rank.get(c, 999), c)):
+            sections = sorted(categories[cat_name], key=lambda s: s["namespace"])
+            result.append({"name": cat_name, "sections": sections})
+        return result
+
+    # --- Param serialization ---
+
+    def _serialize_param(self, p: ConfigParam, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Serialize a ConfigParam for the WS response, resolving dynamic choices."""
+        choices = list(p.choices) if p.choices else None
+        if p.choices_from:
+            resolved = self._resolve_dynamic_choices(p.choices_from)
+            if resolved is not None:
+                choices = resolved
+            elif values is not None and p.type.value == "array":
+                # Fallback: use currently stored values as choices so the UI
+                # can at least show what's selected (e.g., before backend starts)
+                current = values
+                for part in p.key.split("."):
+                    if isinstance(current, dict):
+                        current = current.get(part)
+                    else:
+                        current = None
+                        break
+                if isinstance(current, list) and current:
+                    choices = [str(v) for v in current]
+        return {
+            "key": p.key,
+            "type": p.type.value,
+            "description": p.description,
+            "default": p.default,
+            "restart_required": p.restart_required,
+            "sensitive": p.sensitive,
+            "choices": choices,
+            "multiline": p.multiline,
+            "backend_param": p.backend_param,
+        }
+
+    def _resolve_dynamic_choices(self, source: str) -> list[str] | None:
+        """Resolve a dynamic choices source to a list of values."""
+        if self._resolver is None:
+            return None
+        if source == "speakers":
+            svc = self._resolver.get_capability("speaker_control")
+            if svc is not None:
+                try:
+                    return [s.name for s in svc.cached_speakers]
+                except Exception:
+                    pass
+        elif source == "doorbells":
+            svc = self._resolver.get_capability("doorbell")
+            if svc is not None:
+                try:
+                    return list(svc._available_doorbells)
+                except Exception:
+                    pass
+        return None
+
+    # --- Sensitive field masking ---
+
+    _SENSITIVE_KEYS = frozenset({"api_key", "password", "client_secret", "secret"})
+    _MASK = "********"
+
+    @classmethod
+    def _mask_sensitive(
+        cls, section: dict[str, Any], params: list[ConfigParam],
+    ) -> dict[str, Any]:
+        """Return a copy of *section* with sensitive fields masked."""
+        sensitive_keys = {p.key for p in params if p.sensitive}
+        result = dict(section)
+        for key in sensitive_keys:
+            if key in result and result[key]:
+                result[key] = cls._MASK
+        # Also mask any nested dict values that look like credentials
+        return cls._deep_mask(result)
+
+    @classmethod
+    def _deep_mask(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Recursively mask values whose keys match known sensitive names."""
+        result = {}
+        for k, v in d.items():
+            if k in cls._SENSITIVE_KEYS and isinstance(v, str) and v:
+                result[k] = cls._MASK
+            elif isinstance(v, dict):
+                result[k] = cls._deep_mask(v)
+            else:
+                result[k] = v
         return result
 
     # --- Internal ---
@@ -256,10 +500,35 @@ class ConfigurationService(Service):
             d = d[key]
         d[keys[-1]] = value
 
-    def _persist(self) -> None:
-        """Write current config overrides to .gilbert/config.yaml."""
+    async def _persist(self, namespace: str) -> None:
+        """Persist a config change to the appropriate backend.
+
+        Non-bootstrap sections go to entity storage.
+        Bootstrap sections (storage, logging, web) go to .gilbert/config.yaml.
+        """
+        if namespace not in YAML_ONLY_SECTIONS and self._storage is not None:
+            await self._persist_to_storage(namespace)
+        else:
+            self._persist_to_yaml()
+
+    async def _persist_to_storage(self, namespace: str) -> None:
+        """Write a single config section to entity storage."""
+        section = self._raw.get(namespace)
+        if section is None:
+            return
         try:
-            # Load existing overrides
+            safe = json.loads(json.dumps(section, default=str))
+            if isinstance(safe, dict):
+                await self._storage.put(_CONFIG_COLLECTION, namespace, safe)  # type: ignore[union-attr]
+            else:
+                await self._storage.put(_CONFIG_COLLECTION, namespace, {"_value": safe})  # type: ignore[union-attr]
+            logger.debug("Config persisted to entity storage: %s", namespace)
+        except Exception:
+            logger.exception("Failed to persist config section %s to entity storage", namespace)
+
+    def _persist_to_yaml(self) -> None:
+        """Write bootstrap config sections to .gilbert/config.yaml."""
+        try:
             override_path = OVERRIDE_CONFIG_PATH
             existing: dict[str, Any] = {}
             if override_path.exists():
@@ -268,20 +537,19 @@ class ConfigurationService(Service):
                     if isinstance(raw, dict):
                         existing = raw
 
-            # Merge current raw config into overrides
-            # We write the full config to the override file since we can't
-            # easily diff against defaults
-            merged = _deep_merge(existing, self._raw)
+            # Only write YAML-only sections
+            for section in YAML_ONLY_SECTIONS:
+                if section in self._raw:
+                    existing[section] = self._raw[section]
 
             override_path.parent.mkdir(parents=True, exist_ok=True)
-            # Use safe_dump to avoid !!python tags for enum/custom types.
-            safe = json.loads(json.dumps(merged, default=str))
+            safe = json.loads(json.dumps(existing, default=str))
             with open(override_path, "w") as f:
                 yaml.safe_dump(safe, f, default_flow_style=False, sort_keys=False)
 
-            logger.debug("Config persisted to %s", override_path)
+            logger.debug("Bootstrap config persisted to %s", override_path)
         except Exception:
-            logger.exception("Failed to persist config")
+            logger.exception("Failed to persist bootstrap config")
 
     async def _publish_config_event(self, path: str, value: Any) -> None:
         """Publish a config.changed event if event bus is available."""
@@ -406,6 +674,9 @@ class ConfigurationService(Service):
                         "description": p.description,
                         "default": p.default,
                         "restart_required": p.restart_required,
+                        "sensitive": p.sensitive,
+                        "choices": list(p.choices) if p.choices else None,
+                        "multiline": p.multiline,
                     }
                     for p in params
                 ],
@@ -420,7 +691,136 @@ class ConfigurationService(Service):
                     "description": p.description,
                     "default": p.default,
                     "restart_required": p.restart_required,
+                    "sensitive": p.sensitive,
+                    "choices": list(p.choices) if p.choices else None,
                 }
                 for p in params
             ]
         return json.dumps(result)
+
+    # --- WsHandlerProvider protocol ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "config.describe.list": self._ws_describe_list,
+            "config.section.get": self._ws_section_get,
+            "config.section.set": self._ws_section_set,
+            "config.section.reset": self._ws_section_reset,
+        }
+
+    async def _ws_describe_list(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return all config organized by category."""
+        categories = self.describe_categories()
+        return {
+            "type": "config.describe.list.result",
+            "ref": frame.get("id"),
+            "categories": categories,
+        }
+
+    async def _ws_section_get(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return a single namespace's params + values."""
+        namespace = frame.get("namespace", "")
+        if not namespace:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "namespace required", "code": 400,
+            }
+
+        configurable = self._find_configurable(namespace)
+        section = self.get_section_safe(namespace)
+
+        if configurable is None:
+            return {
+                "type": "config.section.get.result",
+                "ref": frame.get("id"),
+                "namespace": namespace,
+                "params": [],
+                "values": section,
+            }
+
+        params = configurable.config_params()
+        return {
+            "type": "config.section.get.result",
+            "ref": frame.get("id"),
+            "namespace": namespace,
+            "params": [
+                {
+                    "key": p.key,
+                    "type": p.type.value,
+                    "description": p.description,
+                    "default": p.default,
+                    "restart_required": p.restart_required,
+                    "sensitive": p.sensitive,
+                    "choices": list(p.choices) if p.choices else None,
+                }
+                for p in params
+            ],
+            "values": section,
+        }
+
+    async def _ws_section_set(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Set one or more values in a namespace."""
+        namespace = frame.get("namespace", "")
+        values = frame.get("values", {})
+        if not namespace or not isinstance(values, dict):
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "namespace and values required", "code": 400,
+            }
+
+        # Skip masked values (user didn't change the sensitive field)
+        filtered = {k: v for k, v in values.items() if v != self._MASK}
+
+        results: dict[str, Any] = {}
+        for key, value in filtered.items():
+            path = f"{namespace}.{key}" if key else namespace
+            result = await self.set(path, value)
+            results[key] = result
+
+        return {
+            "type": "config.section.set.result",
+            "ref": frame.get("id"),
+            "namespace": namespace,
+            "results": results,
+        }
+
+    async def _ws_section_reset(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Reset a namespace to its default values."""
+        namespace = frame.get("namespace", "")
+        if not namespace:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "namespace required", "code": 400,
+            }
+
+        configurable = self._find_configurable(namespace)
+        if configurable is None:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": f"No configurable service for '{namespace}'", "code": 404,
+            }
+
+        # Build default values from config_params
+        defaults: dict[str, Any] = {}
+        for param in configurable.config_params():
+            if param.default is not None:
+                defaults[param.key] = param.default
+
+        # Apply each default
+        for key, value in defaults.items():
+            await self.set(f"{namespace}.{key}", value)
+
+        return {
+            "type": "config.section.reset.result",
+            "ref": frame.get("id"),
+            "namespace": namespace,
+            "status": "ok",
+        }

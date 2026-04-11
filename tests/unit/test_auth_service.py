@@ -7,28 +7,30 @@ import pytest
 from gilbert.config import AuthConfig
 from gilbert.core.services.auth import AuthService
 from gilbert.core.services.users import UserService
-from gilbert.interfaces.auth import AuthenticationService, AuthInfo, LoginMethod
+from gilbert.interfaces.auth import AuthBackend, AuthInfo, LoginMethod
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
 
 # --- Stubs ---
 
 
-class StubAuthProvider(Service, AuthenticationService):
-    """Auth provider that always succeeds for a known email."""
+class StubAuthBackend(AuthBackend):
+    """Auth backend that always succeeds for a known email."""
+
+    backend_name = ""  # don't register globally
 
     def __init__(self, email: str = "test@example.com") -> None:
         self._email = email
 
-    def service_info(self) -> ServiceInfo:
-        return ServiceInfo(
-            name="auth_stub",
-            capabilities=frozenset({"authentication_provider"}),
-        )
-
     @property
     def provider_type(self) -> str:
         return "stub"
+
+    async def initialize(self, config: dict[str, Any]) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
 
     def get_login_method(self) -> LoginMethod:
         return LoginMethod(
@@ -131,34 +133,39 @@ async def auth_service(
 async def auth_service_with_provider(
     sqlite_storage: StorageBackend, user_service: UserService
 ) -> AuthService:
-    """AuthService with a StubAuthProvider already wired in."""
+    """AuthService with a StubAuthBackend injected."""
     config = AuthConfig(
         enabled=True,
         providers=[],
         session_ttl_seconds=3600,
     )
     svc = AuthService(config)
-    caps = _make_auth_service_resolver(
-        sqlite_storage, user_service, providers=[StubAuthProvider()]
-    )
+    caps = _make_auth_service_resolver(sqlite_storage, user_service)
     resolver = StubResolver(caps)
     await svc.start(resolver)
+    # Inject stub backend after start (local is already there)
+    stub = StubAuthBackend()
+    await stub.initialize({})
+    svc._backends["stub"] = stub
     return svc
 
 
 # --- Tests ---
 
 
-async def test_no_providers_by_default(auth_service: AuthService) -> None:
-    assert auth_service.get_login_methods() == []
+async def test_local_provider_always_present(auth_service: AuthService) -> None:
+    methods = auth_service.get_login_methods()
+    assert len(methods) >= 1
+    assert any(m.provider_type == "local" for m in methods)
 
 
-async def test_provider_discovered_via_resolver(
-    auth_service_with_provider: AuthService,
+async def test_local_backend_provides_login_method(
+    auth_service: AuthService,
 ) -> None:
-    methods = auth_service_with_provider.get_login_methods()
-    assert len(methods) == 1
-    assert methods[0].provider_type == "stub"
+    methods = auth_service.get_login_methods()
+    local_methods = [m for m in methods if m.provider_type == "local"]
+    assert len(local_methods) == 1
+    assert local_methods[0].method == "form"
 
 
 async def test_authenticate_unknown_provider(auth_service: AuthService) -> None:

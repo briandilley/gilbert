@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from gilbert.core.context import get_current_user
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -93,6 +94,28 @@ class MemoryService(Service):
 
         memories.sort(key=sort_key)
         return memories
+
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "memory"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the AI memory system is enabled.",
+                default=True, restart_required=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        pass
 
     # ── ToolProvider Protocol ───────────────────────────────────
 

@@ -1,15 +1,16 @@
-"""TTS service — wraps a TTSBackend as a discoverable service."""
+"""TTS service — wraps a TTSBackend as a discoverable service.
+
+Adds backend-agnostic silence padding to synthesized audio so speakers
+don't cut off the last word.
+"""
 
 import json
 import logging
 import uuid
-from dataclasses import replace
 from typing import Any
 
-from gilbert.config import TTSVoiceConfig
 from gilbert.core.output import cleanup_old_files, get_output_dir
 from gilbert.interfaces.configuration import ConfigParam
-from gilbert.interfaces.credentials import ApiKeyCredential
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -26,6 +27,33 @@ from gilbert.interfaces.tts import (
 
 logger = logging.getLogger(__name__)
 
+_PCM_SAMPLE_RATE = 44100
+
+
+def _generate_pcm_silence(seconds: float) -> bytes:
+    """Generate raw 16-bit PCM silence at 44100 Hz."""
+    return b"\x00\x00" * int(_PCM_SAMPLE_RATE * seconds)
+
+
+def _generate_mp3_silence(seconds: float) -> bytes:
+    """Generate minimal valid MP3 silence frames (MPEG1 Layer 3, 128kbps, 44100 Hz)."""
+    frame_samples = 1152
+    frames_needed = int((_PCM_SAMPLE_RATE * seconds) / frame_samples) + 1
+    header = b"\xff\xfb\x90\xc0"
+    frame = header + b"\x00" * 413  # 417-byte frame: 4 header + 413 payload
+    return frame * frames_needed
+
+
+def _append_silence(audio: bytes, fmt: AudioFormat, seconds: float) -> bytes:
+    """Append silence padding to audio data."""
+    if seconds <= 0:
+        return audio
+    if fmt == AudioFormat.MP3:
+        return audio + _generate_mp3_silence(seconds)
+    if fmt in (AudioFormat.PCM, AudioFormat.WAV):
+        return audio + _generate_pcm_silence(seconds)
+    return audio
+
 
 class TTSService(Service):
     """Exposes a TTSBackend as a service with text_to_speech capability."""
@@ -33,21 +61,16 @@ class TTSService(Service):
     def __init__(
         self,
         backend: TTSBackend,
-        credential_name: str,
     ) -> None:
         self._backend = backend
-        self._credential_name = credential_name
-        # Tunable config — loaded from ConfigurationService during start()
         self._config: dict[str, object] = {}
-        self._voices: dict[str, TTSVoiceConfig] = {}
-        self._default_voice: str = ""
+        self._silence_padding: float = 3.0
         self._output_ttl_seconds: int = 3600
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="tts",
             capabilities=frozenset({"text_to_speech", "ai_tools"}),
-            requires=frozenset({"credentials"}),
             optional=frozenset({"configuration"}),
         )
 
@@ -55,61 +78,23 @@ class TTSService(Service):
     def backend(self) -> TTSBackend:
         return self._backend
 
-    @property
-    def default_voice(self) -> str:
-        return self._default_voice
-
-    @property
-    def voices(self) -> dict[str, TTSVoiceConfig]:
-        return dict(self._voices)
-
-    def resolve_voice(self, name: str) -> str:
-        """Resolve a named voice to its voice_id. Raises KeyError if not found."""
-        voice_cfg = self._voices.get(name)
-        if voice_cfg is None:
-            raise KeyError(f"Unknown voice name: {name!r}")
-        return voice_cfg.voice_id
-
     async def start(self, resolver: ServiceResolver) -> None:
-        from gilbert.core.services.credentials import CredentialService
-
-        # Load tunable config from ConfigurationService if available
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
                 section = config_svc.get_section("tts")
-                self._apply_config(section)
-                # Also pick up global output_ttl_seconds
+                self._config = section.get("settings", self._config)
+                sp = section.get("silence_padding")
+                if sp is not None:
+                    self._silence_padding = float(sp)
                 global_ttl = config_svc.get("output_ttl_seconds")
                 if global_ttl is not None:
                     self._output_ttl_seconds = int(global_ttl)
 
-        cred_svc = resolver.require_capability("credentials")
-        if not isinstance(cred_svc, CredentialService):
-            raise TypeError("Expected CredentialService for 'credentials' capability")
-
-        cred = cred_svc.require(self._credential_name)
-        if not isinstance(cred, ApiKeyCredential):
-            raise TypeError(
-                f"Credential '{self._credential_name}' must be an api_key credential"
-            )
-
-        init_config: dict[str, object] = {**self._config, "api_key": cred.api_key}
-        await self._backend.initialize(init_config)
-        logger.info("TTS service started (credential=%s)", self._credential_name)
-
-    def _apply_config(self, section: dict[str, Any]) -> None:
-        """Apply tunable config values from a config section."""
-        self._default_voice = section.get("default_voice", self._default_voice)
-        self._config = section.get("settings", self._config)
-        raw_voices = section.get("voices", {})
-        if raw_voices:
-            self._voices = {
-                k: TTSVoiceConfig(**v) if isinstance(v, dict) else v
-                for k, v in raw_voices.items()
-            }
+        await self._backend.initialize(self._config)
+        logger.info("TTS service started")
 
     # --- Configurable protocol ---
 
@@ -117,32 +102,22 @@ class TTSService(Service):
     def config_namespace(self) -> str:
         return "tts"
 
+    @property
+    def config_category(self) -> str:
+        return "Media"
+
     def config_params(self) -> list[ConfigParam]:
-        return [
+        params = [
             ConfigParam(
-                key="default_voice", type=ToolParameterType.STRING,
-                description="Default voice name for speech synthesis.",
-                default="",
-            ),
-            ConfigParam(
-                key="voices", type=ToolParameterType.OBJECT,
-                description="Named voice mappings (name → {voice_id: str}).",
-                default={},
-            ),
-            ConfigParam(
-                key="settings", type=ToolParameterType.OBJECT,
-                description="Backend-specific settings (e.g., model_id, silence_padding).",
-                default={},
+                key="silence_padding", type=ToolParameterType.NUMBER,
+                description="Seconds of silence appended after synthesized audio.",
+                default=3.0,
             ),
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="TTS backend provider.",
                 default="elevenlabs", restart_required=True,
-            ),
-            ConfigParam(
-                key="credential", type=ToolParameterType.STRING,
-                description="Name of the API key credential to use.",
-                restart_required=True,
+                choices=tuple(TTSBackend.registered_backends().keys()) or ("elevenlabs",),
             ),
             ConfigParam(
                 key="enabled", type=ToolParameterType.BOOLEAN,
@@ -150,48 +125,40 @@ class TTSService(Service):
                 default=False, restart_required=True,
             ),
         ]
+        for bp in self._backend.backend_config_params():
+            params.append(ConfigParam(
+                key=f"settings.{bp.key}", type=bp.type,
+                description=bp.description, default=bp.default,
+                restart_required=bp.restart_required, sensitive=bp.sensitive,
+                choices=bp.choices, multiline=bp.multiline, backend_param=True,
+            ))
+        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        self._apply_config(config)
+        self._config = config.get("settings", self._config)
+        sp = config.get("silence_padding")
+        if sp is not None:
+            self._silence_padding = float(sp)
 
     async def stop(self) -> None:
         await self._backend.close()
 
-    async def synthesize(
-        self, request: SynthesisRequest, *, voice_name: str | None = None
-    ) -> SynthesisResult:
-        """Synthesize speech from text.
-
-        If voice_name is given, its voice_id overrides the request's voice_id.
-        If request.voice_id is empty and no voice_name is given, the default voice is used.
-        """
-        effective_request = self._resolve_request(request, voice_name)
-        return await self._backend.synthesize(effective_request)
+    async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        """Synthesize speech from text. Appends silence padding if configured."""
+        result = await self._backend.synthesize(request)
+        if self._silence_padding > 0:
+            padded = _append_silence(result.audio, result.format, self._silence_padding)
+            return SynthesisResult(
+                audio=padded,
+                format=result.format,
+                duration_seconds=result.duration_seconds,
+                characters_used=result.characters_used,
+            )
+        return result
 
     async def list_voices(self) -> list[Voice]:
-        """List available voices."""
+        """List available voices from the backend."""
         return await self._backend.list_voices()
-
-    async def get_voice(self, voice_id: str) -> Voice | None:
-        """Get a voice by ID."""
-        return await self._backend.get_voice(voice_id)
-
-    def _resolve_request(
-        self, request: SynthesisRequest, voice_name: str | None
-    ) -> SynthesisRequest:
-        """Determine the effective voice_id for a request."""
-        if voice_name is not None:
-            return replace(request, voice_id=self.resolve_voice(voice_name))
-        if not request.voice_id and self._default_voice:
-            default_id = self._voices.get(self._default_voice)
-            if default_id is not None:
-                return replace(request, voice_id=default_id.voice_id)
-        if not request.voice_id:
-            raise ValueError(
-                "No voice_id provided and no default voice configured. "
-                "Set a default_voice in the TTS config or pass a voice_id/voice_name."
-            )
-        return request
 
     # --- ToolProvider protocol ---
 
@@ -200,10 +167,6 @@ class TTSService(Service):
         return "tts"
 
     def get_tools(self) -> list[ToolDefinition]:
-        # Build voice name hint for the tool description
-        voice_names = list(self._voices.keys())
-        voice_hint = f" Available: {', '.join(voice_names)}." if voice_names else ""
-
         return [
             ToolDefinition(
                 name="synthesize",
@@ -218,27 +181,12 @@ class TTSService(Service):
                         type=ToolParameterType.STRING,
                         description="The text to speak.",
                     ),
-                    ToolParameter(
-                        name="voice_name",
-                        type=ToolParameterType.STRING,
-                        description=(
-                            "Configured voice name to use. Uses default if omitted."
-                            + voice_hint
-                        ),
-                        required=False,
-                    ),
-                    ToolParameter(
-                        name="voice_id",
-                        type=ToolParameterType.STRING,
-                        description="Raw voice ID from the TTS provider. Use voice_name instead when possible.",
-                        required=False,
-                    ),
                 ],
                 required_role="everyone",
             ),
             ToolDefinition(
                 name="list_voices",
-                description="List all available TTS voices.",
+                description="List all available TTS voices from the provider.",
                 required_role="everyone",
             ),
         ]
@@ -254,13 +202,9 @@ class TTSService(Service):
 
     async def _tool_synthesize(self, arguments: dict[str, Any]) -> str:
         text = arguments["text"]
-        voice_name = arguments.get("voice_name")
-        voice_id = arguments.get("voice_id", "")
+        request = SynthesisRequest(text=text, voice_id="", output_format=AudioFormat.MP3)
+        result = await self.synthesize(request)
 
-        request = SynthesisRequest(text=text, voice_id=voice_id, output_format=AudioFormat.MP3)
-        result = await self.synthesize(request, voice_name=voice_name)
-
-        # Clean up old files, then write new one
         output_dir = get_output_dir("tts")
         cleanup_old_files(output_dir, self._output_ttl_seconds)
 
@@ -282,7 +226,6 @@ class TTSService(Service):
                 "name": v.name,
                 "language": v.language,
                 "description": v.description,
-                "labels": v.labels,
             }
             for v in voices
         ])

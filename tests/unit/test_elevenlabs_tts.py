@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gilbert.integrations.elevenlabs_tts import ElevenLabsTTS, _generate_mp3_silence, _generate_pcm_silence
+from gilbert.core.services.tts import _generate_mp3_silence, _generate_pcm_silence
+from gilbert.integrations.elevenlabs_tts import ElevenLabsTTS
 from gilbert.interfaces.tts import AudioFormat, SynthesisRequest
 
 
@@ -32,24 +33,6 @@ async def test_initialize_default_model(backend: ElevenLabsTTS) -> None:
 async def test_initialize_custom_model(backend: ElevenLabsTTS) -> None:
     await backend.initialize({"api_key": "sk-test", "model_id": "eleven_multilingual_v2"})
     assert backend._model_id == "eleven_multilingual_v2"
-    await backend.close()
-
-
-async def test_initialize_default_silence_padding(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test"})
-    assert backend._silence_padding == 3.0
-    await backend.close()
-
-
-async def test_initialize_custom_silence_padding(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 5})
-    assert backend._silence_padding == 5.0
-    await backend.close()
-
-
-async def test_initialize_zero_silence_padding(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 0})
-    assert backend._silence_padding == 0.0
     await backend.close()
 
 
@@ -140,57 +123,8 @@ async def test_synthesize_calls_api(backend: ElevenLabsTTS) -> None:
     await backend.close()
 
 
-async def test_synthesize_appends_silence_padding(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 1})
-
-    mock_response = AsyncMock()
-    mock_response.content = b"audio"
-    mock_response.raise_for_status = lambda: None
-
-    with patch.object(backend._client, "post", return_value=mock_response):  # type: ignore[union-attr]
-        request = SynthesisRequest(text="Hi", voice_id="v1")
-        result = await backend.synthesize(request)
-
-    # Audio should be longer than just "audio" because silence was appended
-    assert len(result.audio) > len(b"audio")
-    # Should start with the original audio
-    assert result.audio[:5] == b"audio"
-    await backend.close()
-
-
-async def test_synthesize_no_silence_when_zero(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 0})
-
-    mock_response = AsyncMock()
-    mock_response.content = b"audio"
-    mock_response.raise_for_status = lambda: None
-
-    with patch.object(backend._client, "post", return_value=mock_response):  # type: ignore[union-attr]
-        request = SynthesisRequest(text="Hi", voice_id="v1")
-        result = await backend.synthesize(request)
-
-    assert result.audio == b"audio"
-    await backend.close()
-
-
-async def test_synthesize_pcm_silence_padding(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 1})
-
-    mock_response = AsyncMock()
-    mock_response.content = b"pcm-data"
-    mock_response.raise_for_status = lambda: None
-
-    with patch.object(backend._client, "post", return_value=mock_response):  # type: ignore[union-attr]
-        request = SynthesisRequest(text="Hi", voice_id="v1", output_format=AudioFormat.PCM)
-        result = await backend.synthesize(request)
-
-    # Should have original + 88200 bytes of silence (1 second at 44100 Hz, 16-bit)
-    assert len(result.audio) == len(b"pcm-data") + 88200
-    await backend.close()
-
-
 async def test_synthesize_passes_voice_settings(backend: ElevenLabsTTS) -> None:
-    await backend.initialize({"api_key": "sk-test", "silence_padding": 0})
+    await backend.initialize({"api_key": "sk-test"})
 
     mock_response = AsyncMock()
     mock_response.content = b"audio"

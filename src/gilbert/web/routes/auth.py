@@ -58,14 +58,12 @@ async def login_local(request: Request) -> Any:
 
 
 def _get_google_provider(request: Request) -> Any:
-    """Get the GoogleAuthenticationService or raise 503."""
-    from gilbert.integrations.google_auth import GoogleAuthenticationService
-
+    """Get the Google auth backend or raise 503."""
     auth_svc = _get_auth_service(request)
-    provider = auth_svc.get_provider("google")
-    if provider is None or not isinstance(provider, GoogleAuthenticationService):
+    backend = auth_svc.get_backend("google")
+    if backend is None:
         raise HTTPException(status_code=503, detail="Google auth not available")
-    return provider
+    return backend
 
 
 def _get_google_callback_url(request: Request, provider: Any) -> str:

@@ -1,7 +1,7 @@
 # Plugin System
 
 ## Summary
-Plugins extend Gilbert with new services, tools, and capabilities. They can live in external directories, declare dependencies on other plugins, provide default configuration, and store data in isolated directories.
+Plugins extend Gilbert with new services, tools, and capabilities. They can live in external directories, declare dependencies on other plugins, provide default configuration, and store data in isolated directories. Plugins implement the `Configurable` protocol to read settings from the `ConfigurationService`; there is no CredentialService. Config is stored in entity storage.
 
 ## Details
 
@@ -61,6 +61,9 @@ plugins:
 
 ### Plugin Data Directory
 Plugins store persistent data in `.gilbert/plugin-data/<plugin-name>/`. Plugins never write to their own source directory. The data dir is created automatically during plugin setup.
+
+### Credential Handling
+There is no CredentialService. Plugins store credentials inline in their configuration (via `ConfigurationService` and entity storage). Sensitive config params are marked with `sensitive=True` in `ConfigParam` declarations.
 
 ## Related
 - `src/gilbert/interfaces/plugin.py` — Plugin, PluginMeta, PluginContext

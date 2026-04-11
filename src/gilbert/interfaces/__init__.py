@@ -11,7 +11,7 @@ from gilbert.interfaces.ai import (
 )
 from gilbert.interfaces.auth import (
     AuthInfo,
-    AuthProvider,
+    AuthBackend,
     UserContext,
 )
 from gilbert.interfaces.configuration import (
@@ -61,7 +61,7 @@ from gilbert.interfaces.users import UserBackend
 
 __all__ = [
     "AuthInfo",
-    "AuthProvider",
+    "AuthBackend",
     "ConfigParam",
     "Configurable",
     "AIBackend",

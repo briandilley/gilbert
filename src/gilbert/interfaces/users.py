@@ -22,12 +22,35 @@ class ExternalUser:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class UserProviderService(ABC):
-    """Abstract external user source.
+class UserProviderBackend(ABC):
+    """Abstract external user source (backend).
 
     Implementations (e.g., Google Directory, LDAP) are discovered by the
     UserService and queried to ensure external users have local equivalents.
     """
+
+    _registry: dict[str, type["UserProviderBackend"]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            UserProviderBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type["UserProviderBackend"]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list["ConfigParam"]:
+        """Describe backend-specific configuration parameters."""
+        return []
+
+    async def initialize(self, config: dict[str, Any]) -> None:
+        """Initialize from config. Override in backends."""
+
+    async def close(self) -> None:
+        """Release resources. Override in backends."""
 
     @property
     @abstractmethod

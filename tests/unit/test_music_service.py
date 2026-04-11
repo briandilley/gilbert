@@ -7,9 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gilbert.config import GilbertConfig
-from gilbert.core.services.credentials import CredentialService
 from gilbert.core.services.music import MusicService
-from gilbert.interfaces.credentials import ApiKeyPairCredential
 from gilbert.interfaces.music import (
     AlbumInfo,
     ArtistInfo,
@@ -122,37 +120,18 @@ def stub_backend() -> StubMusicBackend:
 
 
 @pytest.fixture
-def cred_service() -> CredentialService:
-    return CredentialService({
-        "spotify": ApiKeyPairCredential(
-            client_id="test-client-id",
-            client_secret="test-client-secret",
-        ),
-    })
-
-
-@pytest.fixture
-def resolver(cred_service: CredentialService) -> ServiceResolver:
+def resolver() -> ServiceResolver:
     mock = AsyncMock(spec=ServiceResolver)
-
-    def get_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
-        return None
-
-    def require_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
-        raise LookupError(cap)
-
-    mock.get_capability.side_effect = get_cap
-    mock.require_capability.side_effect = require_cap
+    mock.get_capability.return_value = None
+    mock.require_capability.side_effect = LookupError("not available")
     return mock
 
 
 @pytest.fixture
 def service(stub_backend: StubMusicBackend) -> MusicService:
-    return MusicService(stub_backend, credential_name="spotify")
+    svc = MusicService(stub_backend)
+    svc._config = {"client_id": "test-client-id", "client_secret": "test-client-secret"}
+    return svc
 
 
 # --- Service info ---
@@ -163,7 +142,6 @@ def test_service_info(service: MusicService) -> None:
     assert info.name == "music"
     assert "music" in info.capabilities
     assert "ai_tools" in info.capabilities
-    assert "credentials" in info.requires
 
 
 # --- Lifecycle ---
@@ -330,7 +308,6 @@ async def test_tool_play_track_no_speakers(
 
 async def test_tool_play_track_with_speakers(
     stub_backend: StubMusicBackend,
-    cred_service: CredentialService,
 ) -> None:
     """Test play_track when speaker service is available."""
     from gilbert.core.services.speaker import SpeakerService
@@ -351,21 +328,14 @@ async def test_tool_play_track_with_speakers(
     resolver = AsyncMock(spec=ServiceResolver)
 
     def get_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
         if cap == "speaker_control":
             return speaker_svc
         return None
 
-    def require_cap(cap: str) -> Any:
-        if cap == "credentials":
-            return cred_service
-        raise LookupError(cap)
-
     resolver.get_capability.side_effect = get_cap
-    resolver.require_capability.side_effect = require_cap
+    resolver.require_capability.side_effect = LookupError("not available")
 
-    service = MusicService(stub_backend, credential_name="spotify")
+    service = MusicService(stub_backend)
     await service.start(resolver)
 
     result = await service.execute_tool("play_track", {
@@ -394,7 +364,6 @@ def test_config_music_defaults() -> None:
     config = GilbertConfig.model_validate({})
     assert config.music.enabled is False
     assert config.music.backend == "spotify"
-    assert config.music.credential == ""
     assert config.music.settings == {}
 
 
@@ -403,34 +372,16 @@ def test_config_music_full() -> None:
         "music": {
             "enabled": True,
             "backend": "spotify",
-            "credential": "my-spotify",
-            "settings": {"market": "US"},
+            "settings": {"client_id": "xxx", "client_secret": "yyy"},
         }
     }
     config = GilbertConfig.model_validate(raw)
     assert config.music.enabled is True
-    assert config.music.credential == "my-spotify"
-    assert config.music.settings["market"] == "US"
+    assert config.music.settings["client_id"] == "xxx"
 
 
 # --- Credential type ---
 
-
-def test_api_key_pair_credential_config() -> None:
-    raw = {
-        "credentials": {
-            "spotify": {
-                "type": "api_key_pair",
-                "client_id": "abc123",
-                "client_secret": "secret456",
-            }
-        }
-    }
-    config = GilbertConfig.model_validate(raw)
-    cred = config.credentials["spotify"]
-    assert isinstance(cred, ApiKeyPairCredential)
-    assert cred.client_id == "abc123"
-    assert cred.client_secret == "secret456"
 
 
 # --- Unknown tool ---

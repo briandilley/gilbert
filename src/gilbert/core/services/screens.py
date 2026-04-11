@@ -161,6 +161,42 @@ class ScreenService(Service):
     async def stop(self) -> None:
         self._cleanup_all()
 
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "screens"
+
+    @property
+    def config_category(self) -> str:
+        return "Infrastructure"
+
+    def config_params(self) -> list["ConfigParam"]:
+        from gilbert.interfaces.configuration import ConfigParam
+        from gilbert.interfaces.tools import ToolParameterType
+
+        return [
+            ConfigParam(
+                key="enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the screen display service is enabled.",
+                default=False, restart_required=True,
+            ),
+            ConfigParam(
+                key="tmp_ttl_seconds", type=ToolParameterType.INTEGER,
+                description="Time-to-live for temporary files (seconds).",
+                default=1800,
+            ),
+            ConfigParam(
+                key="cleanup_interval_seconds", type=ToolParameterType.INTEGER,
+                description="Interval between cleanup runs (seconds).",
+                default=300,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._ttl = int(config.get("tmp_ttl_seconds", self._ttl))
+        self._cleanup_interval = int(config.get("cleanup_interval_seconds", self._cleanup_interval))
+
     @property
     def _knowledge(self) -> Any:
         """Lazily resolve KnowledgeService — it may start after us."""
