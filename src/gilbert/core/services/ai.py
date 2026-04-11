@@ -24,7 +24,7 @@ from gilbert.interfaces.ai import (
     StopReason,
 )
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
-from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, IndexDefinition, Query, SortField, StorageBackend
@@ -644,20 +644,18 @@ class AIService(Service):
 
         # Also seed from config (config overrides built-ins)
         config_svc = self._resolver.get_capability("configuration") if self._resolver else None
-        if config_svc is not None:
-            get_section = getattr(config_svc, "get_section", None)
-            if get_section:
-                ai_section = get_section("ai")
-                config_profiles = ai_section.get("profiles", {})
-                for name, pdata in config_profiles.items():
-                    if isinstance(pdata, dict):
-                        await self._storage.put(_PROFILES_COLLECTION, name, {
-                            "name": name,
-                            "description": pdata.get("description", ""),
-                            "tool_mode": pdata.get("tool_mode", "all"),
-                            "tools": pdata.get("tools", []),
-                            "tool_roles": pdata.get("tool_roles", {}),
-                        })
+        if config_svc is not None and isinstance(config_svc, ConfigurationReader):
+            ai_section = config_svc.get_section("ai")
+            config_profiles = ai_section.get("profiles", {})
+            for name, pdata in config_profiles.items():
+                if isinstance(pdata, dict):
+                    await self._storage.put(_PROFILES_COLLECTION, name, {
+                        "name": name,
+                        "description": pdata.get("description", ""),
+                        "tool_mode": pdata.get("tool_mode", "all"),
+                        "tools": pdata.get("tools", []),
+                        "tool_roles": pdata.get("tool_roles", {}),
+                    })
 
         # Load all profiles from storage
         await self._refresh_profiles()

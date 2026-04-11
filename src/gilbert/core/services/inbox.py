@@ -853,11 +853,9 @@ class InboxService(Service):
             return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": []}
 
         storage_svc = gilbert.service_manager.get_by_capability("entity_storage")
-        if storage_svc is None:
+        if storage_svc is None or not isinstance(storage_svc, StorageProvider):
             return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": []}
-        raw_storage = getattr(storage_svc, "raw_backend", None)
-        if raw_storage is None:
-            return {"type": "inbox.pending.list.result", "ref": frame.get("id"), "pending": []}
+        raw_storage = storage_svc.raw_backend
 
         from gilbert.interfaces.storage import Filter, FilterOp, Query, SortField
         from datetime import datetime, timedelta, timezone as tz
@@ -897,9 +895,9 @@ class InboxService(Service):
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
 
         storage_svc = gilbert.service_manager.get_by_capability("entity_storage")
-        raw_storage = getattr(storage_svc, "raw_backend", None) if storage_svc else None
-        if raw_storage is None:
+        if storage_svc is None or not isinstance(storage_svc, StorageProvider):
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Storage not available", "code": 503}
+        raw_storage = storage_svc.raw_backend
 
         _PENDING_COLLECTIONS = ["gilbert.plugin.current-sales-assistant.pending_replies"]
         for collection in _PENDING_COLLECTIONS:

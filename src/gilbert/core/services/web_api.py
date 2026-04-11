@@ -209,10 +209,7 @@ class WebApiService(Service):
         if entities:
             sortable_fields = sorted(entities[0].keys())
 
-        # FK map
-        fk_map = {}
-        if hasattr(storage_svc.backend, "get_foreign_keys"):
-            fk_map = await storage_svc.backend.get_foreign_keys(collection) or {}
+        fk_map: dict[str, Any] = {}
 
         # Build display columns: _id + indexed fields + FK fields
         from gilbert.interfaces.storage import IndexDefinition

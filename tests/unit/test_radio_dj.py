@@ -77,6 +77,10 @@ class FakeStorageService:
     def raw_backend(self) -> FakeStorage:
         return self._backend
 
+    def create_namespaced(self, namespace: str) -> Any:
+        from gilbert.interfaces.storage import NamespacedStorageBackend
+        return NamespacedStorageBackend(self._backend, namespace)
+
     def service_info(self) -> Any:
         from gilbert.interfaces.service import ServiceInfo
         return ServiceInfo(name="storage", capabilities=frozenset({"entity_storage"}))

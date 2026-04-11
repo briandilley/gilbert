@@ -539,14 +539,14 @@ class ConfigurationService(Service):
     async def _persist_to_storage(self, namespace: str) -> None:
         """Write a single config section to entity storage."""
         section = self._raw.get(namespace)
-        if section is None:
+        if section is None or self._storage is None:
             return
         try:
             safe = json.loads(json.dumps(section, default=str))
             if isinstance(safe, dict):
-                await self._storage.put(_CONFIG_COLLECTION, namespace, safe)  # type: ignore[union-attr]
+                await self._storage.put(_CONFIG_COLLECTION, namespace, safe)
             else:
-                await self._storage.put(_CONFIG_COLLECTION, namespace, {"_value": safe})  # type: ignore[union-attr]
+                await self._storage.put(_CONFIG_COLLECTION, namespace, {"_value": safe})
             logger.debug("Config persisted to entity storage: %s", namespace)
         except Exception:
             logger.exception("Failed to persist config section %s to entity storage", namespace)

@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 
 class PlaybackState(StrEnum):
@@ -167,3 +168,13 @@ class SpeakerBackend(ABC):
 
         Default is a no-op — backends that support it should override.
         """
+
+
+@runtime_checkable
+class SpeakerProvider(Protocol):
+    """Protocol for services providing speaker control capabilities."""
+
+    @property
+    def backend(self) -> SpeakerBackend:
+        """Access the speaker backend."""
+        ...

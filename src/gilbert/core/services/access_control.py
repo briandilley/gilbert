@@ -7,6 +7,7 @@ from typing import Any
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
+from gilbert.interfaces.users import UserManagementProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -768,7 +769,7 @@ class AccessControlService(Service):
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
 
         profiles_raw = ai_svc.list_profiles()
-        assignments = ai_svc._assignments
+        assignments = ai_svc.list_assignments()
 
         profiles = []
         for p in profiles_raw:
@@ -866,7 +867,7 @@ class AccessControlService(Service):
                 "roles": u.get("roles", []),
             })
         role_names = sorted(self._role_levels.keys())
-        allow_creation = getattr(user_svc, "allow_user_creation", False)
+        allow_creation = user_svc.allow_user_creation if isinstance(user_svc, UserManagementProvider) else False
         return {
             "type": "roles.user.list.result", "ref": frame.get("id"),
             "users": result, "role_names": role_names,
@@ -885,6 +886,8 @@ class AccessControlService(Service):
 
         user_id = frame.get("user_id", "")
         roles = frame.get("roles", [])
+        if not isinstance(user_svc, UserManagementProvider):
+            return {"type": "gilbert.error", "ref": frame.get("id"), "error": "User service not available", "code": 503}
         await user_svc.backend.update_user(user_id, {"roles": roles})
         return {"type": "roles.user.set.result", "ref": frame.get("id"), "status": "ok"}
 

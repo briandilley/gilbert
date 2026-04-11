@@ -124,10 +124,12 @@ class UniFiPresenceBackend(PresenceBackend):
         self._name_resolver: NameResolver = NameResolver()
 
     async def initialize(self, config: dict[str, object]) -> None:
-        self._device_person_map = dict(config.get("device_person_map", {}) or {})  # type: ignore[arg-type]
-        self._face_lookback_minutes = int(config.get("face_lookback_minutes", 30) or 30)
-        self._badge_lookback_hours = int(config.get("badge_lookback_hours", 24) or 24)
-        zone_aliases: dict[str, list[str]] = config.get("zone_aliases", {}) or {}  # type: ignore[assignment]
+        dpm = config.get("device_person_map", {}) or {}
+        self._device_person_map = dict(dpm) if isinstance(dpm, dict) else {}
+        self._face_lookback_minutes = int(str(config.get("face_lookback_minutes", 30) or 30))
+        self._badge_lookback_hours = int(str(config.get("badge_lookback_hours", 24) or 24))
+        za = config.get("zone_aliases", {}) or {}
+        zone_aliases: dict[str, list[str]] = dict(za) if isinstance(za, dict) else {}
 
         # Initialize network controller
         net_cfg = config.get("unifi_network", {})

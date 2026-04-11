@@ -14,7 +14,8 @@ router = APIRouter(prefix="/api", tags=["api"])
 
 
 def _gilbert(request: Request) -> Gilbert:
-    return request.app.state.gilbert  # type: ignore[no-any-return]
+    result: Gilbert = request.app.state.gilbert
+    return result
 
 
 @router.get("/auth/methods")

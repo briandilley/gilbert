@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -167,3 +167,26 @@ class UserBackend(ABC):
         self, provider_type: str, limit: int | None = None, offset: int = 0
     ) -> list[dict[str, Any]]:
         """List cached remote users for a given provider."""
+
+
+@runtime_checkable
+class UserManagementProvider(Protocol):
+    """Protocol for services providing user management capabilities.
+
+    Used by other services (e.g., access control) to query user data
+    without depending on the concrete UserService class.
+    """
+
+    @property
+    def allow_user_creation(self) -> bool:
+        """Whether new user creation is allowed."""
+        ...
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        """List all users."""
+        ...
+
+    @property
+    def backend(self) -> UserBackend:
+        """Access the user storage backend."""
+        ...

@@ -31,7 +31,7 @@ from gilbert.core.services.configuration import ConfigurationService
 from gilbert.interfaces.events import EventBus
 from gilbert.interfaces.plugin import Plugin, PluginContext
 from gilbert.interfaces.service import Service
-from gilbert.interfaces.storage import StorageBackend
+from gilbert.interfaces.storage import StorageBackend, StorageProvider
 from gilbert.plugins.loader import PluginLoader, PluginManifest
 from gilbert.storage.sqlite import SQLiteStorage
 
@@ -264,9 +264,9 @@ class Gilbert:
         plugin_config = self.config.plugins.config
 
         # Get the raw storage backend for creating namespaced wrappers.
-        # Use _registered directly since services haven't started yet.
-        storage_svc = self.service_manager._registered.get("storage")
-        raw_backend = getattr(storage_svc, "raw_backend", None) if storage_svc else None
+        # Use list_services() since services haven't started yet.
+        storage_svc = self.service_manager.list_services().get("storage")
+        raw_backend = storage_svc.raw_backend if storage_svc is not None and isinstance(storage_svc, StorageProvider) else None
 
         def _make_context(name: str) -> PluginContext:
             data_dir = PLUGIN_DATA_DIR / name

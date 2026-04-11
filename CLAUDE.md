@@ -282,6 +282,48 @@ gotchas, etc.
 - **Keep business logic out of web routes.** Routes parse requests, call services, and format responses. Authorization checks, AI prompt construction, backend resolution, and third-party API URL building belong in services or backends.
 - **Shared data lives in `interfaces/`.** If two integrations or two layers need the same constant/mapping/policy data, put it in the appropriate `interfaces/` module. Never import across integration modules or from `web/` into `core/`.
 
+## Architecture Violation Checklist
+
+When asked to "check the rules" or "check for violations," audit the entire codebase (including `plugins/`) against every item below. Fix violations immediately.
+
+### Layer Import Violations
+
+These are the most critical. Scan imports in each layer:
+
+- **`interfaces/`** imports from `core/`, `integrations/`, `storage/`, or `web/` — must import nothing outside `interfaces/`, stdlib, and third-party type packages.
+- **`core/services/`** imports from `integrations/`** (except side-effect `import gilbert.integrations.foo  # noqa: F401` for backend registration) or from `web/`.
+- **`integrations/`** imports from `core/services/`, `web/`, or another integration module.
+- **`storage/`** imports from `core/`, `integrations/`, or `web/`.
+- **`web/`** imports from `integrations/` or `storage/` directly.
+- **Plugins** import from `core/services/`, `integrations/`, `web/`, or `storage/`. Plugins must only import from `gilbert.interfaces.*` and their own internal modules.
+
+### Concrete Class Violations
+
+- **`isinstance` checks against concrete service classes** (e.g., `isinstance(svc, ConfigurationService)`). Must use capability protocols from `interfaces/` instead (e.g., `ConfigurationReader`, `EventBusProvider`, `SchedulerProvider`).
+- **Direct instantiation of backend classes** (e.g., `ElevenLabsTTS()`). Must use the backend registry: `Backend.registered_backends().get("name")`.
+- **Direct import of concrete backends** from `integrations/` outside of `app.py` or side-effect registration imports.
+
+### Duck-Typing and Private Access Violations
+
+- **`getattr(obj, "method", ...)`** to access service capabilities — must use `isinstance` check against the appropriate protocol instead.
+- **Private attribute access** (`obj._field`) on objects from other modules.
+- **`# type: ignore`** comments — each one should be reviewed. Most indicate a missing type narrowing that can be resolved with `isinstance` guards, `str()` wrapping for numeric conversions, or filtering with `if isinstance(item, dict)` in comprehensions.
+
+### Business Logic in Wrong Layer
+
+- **Web routes** implementing authorization logic, AI prompt construction, backend resolution, or third-party API URL building. Routes should only parse requests, call services, and format responses.
+- **Shared constants/mappings** defined in `core/`, `integrations/`, or `web/` that are used by multiple layers — these belong in `interfaces/`.
+
+### Plugin-Specific Checks
+
+- Plugin resolves dependencies via **concrete imports** instead of `resolver.require_capability()` / `resolver.get_capability()`.
+- Plugin reads config via `context.config` for runtime settings instead of implementing `Configurable` and using the `ConfigurationReader` protocol.
+- Plugin accesses `_private` attributes on resolved services.
+
+### How to Run
+
+The user can ask to check these rules at any time by saying "check the rules," "check for violations," "audit the architecture," or similar. Run the full checklist across `src/` and `plugins/`, report all findings, and fix them.
+
 ## Commands
 
 ```bash

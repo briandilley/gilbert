@@ -11,11 +11,12 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from gilbert.interfaces.configuration import ConfigParam
-from gilbert.interfaces.events import Event, EventBus
+from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
+from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.music import SearchResults, TrackInfo
-from gilbert.interfaces.presence import PresenceState, UserPresence
+from gilbert.interfaces.presence import PresenceProvider, PresenceState, UserPresence
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.storage import StorageProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -93,13 +94,11 @@ class RadioDJService(Service):
     async def start(self, resolver: ServiceResolver) -> None:
         # Check enabled
         config_svc = resolver.get_capability("configuration")
-        if config_svc is not None:
-            get_section = getattr(config_svc, "get_section", None)
-            if get_section is not None:
-                section = get_section(self.config_namespace)
-                if not section.get("enabled", False):
-                    logger.info("Radio DJ service disabled")
-                    return
+        if config_svc is not None and isinstance(config_svc, ConfigurationReader):
+            section = config_svc.get_section(self.config_namespace)
+            if not section.get("enabled", False):
+                logger.info("Radio DJ service disabled")
+                return
 
         self._enabled = True
 
@@ -115,33 +114,27 @@ class RadioDJService(Service):
 
         # Storage
         storage_svc = resolver.get_capability("entity_storage")
-        if storage_svc is not None:
-            backend = getattr(storage_svc, "backend", None)
-            if backend is not None:
-                from gilbert.interfaces.storage import NamespacedStorageBackend
+        if storage_svc is not None and isinstance(storage_svc, StorageProvider):
+            from gilbert.interfaces.storage import NamespacedStorageBackend
 
-                self._storage = NamespacedStorageBackend(backend, "radio_dj")
+            self._storage = NamespacedStorageBackend(storage_svc.backend, "radio_dj")
 
         # Event bus
         event_bus_svc = resolver.get_capability("event_bus")
-        if event_bus_svc is not None:
-            bus = getattr(event_bus_svc, "bus", None)
-            if bus is not None:
-                self._event_bus = bus
-                self._unsubs.append(
-                    self._event_bus.subscribe("presence.arrived", self._on_presence_arrived)
-                )
-                self._unsubs.append(
-                    self._event_bus.subscribe("presence.departed", self._on_presence_departed)
-                )
+        if event_bus_svc is not None and isinstance(event_bus_svc, EventBusProvider):
+            self._event_bus = event_bus_svc.bus
+            self._unsubs.append(
+                self._event_bus.subscribe("presence.arrived", self._on_presence_arrived)
+            )
+            self._unsubs.append(
+                self._event_bus.subscribe("presence.departed", self._on_presence_departed)
+            )
 
         # Configuration
         config_svc = resolver.get_capability("configuration")
-        if config_svc is not None:
-            get_section = getattr(config_svc, "get_section", None)
-            if get_section is not None:
-                section = get_section("radio_dj")
-                self._apply_config(section)
+        if config_svc is not None and isinstance(config_svc, ConfigurationReader):
+            section = config_svc.get_section("radio_dj")
+            self._apply_config(section)
 
         # Restore persisted state
         await self._restore_state()
@@ -298,9 +291,8 @@ class RadioDJService(Service):
         if self._presence_svc is None:
             return set()
         try:
-            who_is_here = getattr(self._presence_svc, "who_is_here", None)
-            if who_is_here is not None:
-                here = await who_is_here()
+            if isinstance(self._presence_svc, PresenceProvider):
+                here = await self._presence_svc.who_is_here()
                 return {p.user_id for p in here}
         except Exception:
             logger.debug("Failed to get presence", exc_info=True)
