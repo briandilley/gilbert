@@ -65,24 +65,54 @@ def _find_device(devices: dict[str, SoCo], speaker_id: str) -> SoCo:
     return device
 
 
-def _to_sonos_spotify_uri_and_meta(spotify_uri: str, title: str = "") -> tuple[str, str]:
+def _detect_spotify_sn(devices: dict[str, SoCo]) -> int:
+    """Detect the Spotify account serial number from the Sonos system.
+
+    The SoCo accounts API doesn't always expose the Spotify account, so
+    we also inspect the currently-playing track URI on discovered speakers
+    to extract the ``sn`` parameter.
+    """
+    import re
+
+    from soco.music_services.accounts import Account
+
+    # Method 1: check the accounts API
+    for acct in Account.get_accounts().values():
+        if acct.service_type == 3079:
+            return int(acct.serial_number)
+
+    # Method 2: inspect speakers' current track for sn=
+    for speaker in devices.values():
+        try:
+            track = speaker.get_current_track_info()
+            uri = track.get("uri", "")
+            if "spotify" in uri:
+                m = re.search(r"sn=(\d+)", uri)
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+
+    return 0
+
+
+def _to_sonos_spotify_uri_and_meta(spotify_uri: str, title: str = "", sn: int = 0) -> tuple[str, str]:
     """Convert a ``spotify:track:ID`` URI to Sonos-compatible URI and DIDL metadata.
 
-    Uses SoCo's ``MusicService`` to build the correct URI with the proper
-    service ID and serial number for the local Sonos system's Spotify
-    account linkage.  Returns ``(uri, didl_meta)`` — the metadata tells
-    Sonos to resolve the track through its linked Spotify account.
+    Builds the ``x-sonos-spotify:`` URI with the correct service ID, flags,
+    and serial number for the local Sonos system's linked Spotify account.
+    Returns ``(uri, didl_meta)``.
     """
     from xml.sax.saxutils import escape
 
     from soco.music_services import MusicService
 
     svc = MusicService("Spotify")
-    sonos_uri = str(svc.sonos_uri_from_id(spotify_uri))
+    sid = svc.service_id
+    encoded = spotify_uri.replace(":", "%3a")
 
-    # Build DIDL-Lite metadata with Spotify service descriptor so Sonos
-    # resolves the track via its linked Spotify account instead of
-    # treating it as a generic stream (which causes MIME-type errors).
+    sonos_uri = f"x-sonos-spotify:{encoded}?sid={sid}&flags=8232&sn={sn}"
+
     didl = (
         '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
@@ -95,7 +125,7 @@ def _to_sonos_spotify_uri_and_meta(spotify_uri: str, title: str = "") -> tuple[s
         'metadata-1-0/">{service}</desc>'
         "</item></DIDL-Lite>"
     ).format(
-        item_id=escape(spotify_uri.replace(":", "%3a")),
+        item_id=escape(encoded),
         title=escape(title or "Spotify"),
         service=svc.desc,
     )
@@ -110,10 +140,15 @@ class SonosSpeaker(SpeakerBackend):
 
     def __init__(self) -> None:
         self._devices: dict[str, SoCo] = {}
+        self._spotify_sn: int = 0
 
     async def initialize(self, config: dict[str, object]) -> None:
         await self._discover()
-        logger.info("Sonos backend initialized — %d speakers found", len(self._devices))
+        self._spotify_sn = await asyncio.to_thread(_detect_spotify_sn, self._devices)
+        logger.info(
+            "Sonos backend initialized — %d speakers found (spotify sn=%d)",
+            len(self._devices), self._spotify_sn,
+        )
 
     async def close(self) -> None:
         self._devices.clear()
@@ -168,7 +203,7 @@ class SonosSpeaker(SpeakerBackend):
         meta = ""
 
         if uri.startswith("spotify:"):
-            uri, meta = await asyncio.to_thread(_to_sonos_spotify_uri_and_meta, uri, title)
+            uri, meta = await asyncio.to_thread(_to_sonos_spotify_uri_and_meta, uri, title, self._spotify_sn)
         try:
             await asyncio.to_thread(coordinator.play_uri, uri, meta=meta, title=title)
         except Exception:
