@@ -77,10 +77,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
     @staticmethod
     def _is_tunnel_request(request: Request, gilbert: Any) -> bool:
         """Check if the request came through the public tunnel (ngrok)."""
+        from gilbert.interfaces.tunnel import TunnelProvider
+
         tunnel_svc = gilbert.service_manager.get_by_capability("tunnel")
-        if tunnel_svc is None:
+        if not isinstance(tunnel_svc, TunnelProvider):
             return False
-        public_url = getattr(tunnel_svc, "public_url", "")
+        public_url = tunnel_svc.public_url
         if not public_url:
             return False
         from urllib.parse import urlparse

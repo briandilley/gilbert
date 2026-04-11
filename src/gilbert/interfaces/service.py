@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -55,3 +56,34 @@ class Service(ABC):
 
     async def stop(self) -> None:
         """Called during shutdown, in reverse-start order. Override if needed."""
+
+
+@runtime_checkable
+class ServiceEnumerator(Protocol):
+    """Protocol for enumerating and managing registered services.
+
+    Used by ConfigurationService to discover Configurable services
+    and restart them on config changes.
+    """
+
+    @property
+    def started_services(self) -> list[str]:
+        """Names of successfully started services."""
+        ...
+
+    @property
+    def failed_services(self) -> set[str]:
+        """Names of services that failed to start."""
+        ...
+
+    def get_service(self, name: str) -> Service | None:
+        """Get a service by name."""
+        ...
+
+    def list_services(self) -> dict[str, Service]:
+        """Return all registered services."""
+        ...
+
+    async def restart_service(self, name: str, new_instance: Service | None = None) -> None:
+        """Restart a service, optionally replacing it with a new instance."""
+        ...

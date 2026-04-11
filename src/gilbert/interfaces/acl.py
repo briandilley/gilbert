@@ -70,3 +70,33 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "gilbert.peer.publish": 0,
 }
 DEFAULT_RPC_LEVEL: int = 100  # unlisted frame types → user role
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+def resolve_default_rpc_level(frame_type: str) -> int:
+    """Resolve the minimum role level from the hardcoded RPC defaults.
+
+    Longest prefix match wins.
+    """
+    best_match = ""
+    best_level = DEFAULT_RPC_LEVEL
+    for prefix, level in DEFAULT_RPC_PERMISSIONS.items():
+        if frame_type.startswith(prefix) and len(prefix) > len(best_match):
+            best_match = prefix
+            best_level = level
+    return best_level
+
+
+def resolve_default_event_level(event_type: str) -> int:
+    """Resolve the minimum role level from the hardcoded event visibility defaults.
+
+    Longest prefix match wins.
+    """
+    best_match = ""
+    best_level = DEFAULT_VISIBILITY_LEVEL
+    for prefix, level in DEFAULT_EVENT_VISIBILITY.items():
+        if event_type.startswith(prefix) and len(prefix) > len(best_match):
+            best_match = prefix
+            best_level = level
+    return best_level

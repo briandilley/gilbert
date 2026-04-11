@@ -120,6 +120,10 @@ class ServiceManager(ServiceResolver):
             if name in self._started
         ]
 
+    def list_services(self) -> dict[str, Service]:
+        """Return all registered services (started or not)."""
+        return dict(self._registered)
+
     def list_capabilities(self) -> dict[str, list[str]]:
         """List all registered capabilities and their providing service names."""
         return {cap: list(names) for cap, names in self._capabilities.items()}

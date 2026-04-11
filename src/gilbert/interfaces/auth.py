@@ -156,3 +156,7 @@ class AccessControlProvider(Protocol):
     def get_effective_level(self, user_ctx: UserContext) -> int:
         """Get the user's effective permission level (lowest = most privileged)."""
         ...
+
+    def resolve_rpc_level(self, frame_type: str) -> int:
+        """Resolve the required role level for an RPC frame type."""
+        ...

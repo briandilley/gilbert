@@ -105,7 +105,12 @@ Services resolve dependencies via `resolver.get_capability("name")`, which retur
 | `SchedulerProvider` | `interfaces/scheduler.py` | `"scheduler"` | `add_job()`, `remove_job()`, `enable_job()`, `disable_job()`, `list_jobs()`, `get_job()`, `run_now()` |
 | `EventBusProvider` | `interfaces/events.py` | `"event_bus"` | `bus` property → `EventBus` |
 | `StorageProvider` | `interfaces/storage.py` | `"entity_storage"` | `backend` / `raw_backend` properties, `create_namespaced()` |
-| `AccessControlProvider` | `interfaces/auth.py` | `"access_control"` | `get_role_level()`, `get_effective_level()` |
+| `AccessControlProvider` | `interfaces/auth.py` | `"access_control"` | `get_role_level()`, `get_effective_level()`, `resolve_rpc_level()` |
+| `SkillsProvider` | `interfaces/skills.py` | `"skills"` | `get_active_skills()`, `get_active_allowed_tools()`, `build_skills_context()` |
+| `PresenceProvider` | `interfaces/presence.py` | `"presence"` | `who_is_here()` |
+| `TTSProvider` | `interfaces/tts.py` | `"text_to_speech"` | `synthesize()` |
+| `TunnelProvider` | `interfaces/tunnel.py` | `"tunnel"` | `public_url` property |
+| `ServiceEnumerator` | `interfaces/service.py` | (resolver) | `list_services()`, `restart_service()`, `started_services`, `failed_services` |
 
 **Usage pattern** (this is the only correct way to access service capabilities):
 
@@ -160,7 +165,7 @@ AI interactions use **named profiles** that control which tools are available. T
 
 ### Key Directories
 
-- `src/gilbert/interfaces/` — ABCs, protocol definitions, and shared data types (AI, tools, storage, events, TTS, auth, users, vision, tunnel, knowledge, configuration, ACL defaults, plugins, WS)
+- `src/gilbert/interfaces/` — ABCs, protocol definitions, shared data types, and WS connection protocol (`WsConnectionBase`, `RpcHandler`). Includes ACL policy defaults (`acl.py`), AI profile dataclass, document type mappings, and all capability protocols.
 - `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging, config loading, shared business logic (`core/chat.py`)
 - `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services (including WS RPC handlers via `WsHandlerProvider`)
 - `src/gilbert/integrations/` — Concrete backend implementations (e.g., ElevenLabs TTS, Anthropic AI, ngrok tunnel, Google auth/directory, Gmail, GDrive)

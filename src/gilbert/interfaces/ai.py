@@ -78,6 +78,17 @@ class AIResponse:
     usage: TokenUsage | None = None
 
 
+@dataclass
+class AIContextProfile:
+    """Named profile that controls which tools are available for an AI interaction."""
+
+    name: str
+    description: str = ""
+    tool_mode: str = "all"  # "all" | "include" | "exclude"
+    tools: list[str] = field(default_factory=list)
+    tool_roles: dict[str, str] = field(default_factory=dict)
+
+
 class AIBackend(ABC):
     """Abstract AI backend — provider-agnostic.
 

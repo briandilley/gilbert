@@ -11,29 +11,22 @@ import asyncio
 import fnmatch
 import logging
 import time
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable
 
 from gilbert.interfaces.acl import (
-    DEFAULT_EVENT_VISIBILITY as _EVENT_VISIBILITY,
-    DEFAULT_RPC_LEVEL as _DEFAULT_RPC_LEVEL,
-    DEFAULT_RPC_PERMISSIONS as _RPC_PERMISSIONS,
-    DEFAULT_VISIBILITY_LEVEL as _DEFAULT_VISIBILITY_LEVEL,
+    resolve_default_event_level,
+    resolve_default_rpc_level,
 )
-from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.events import Event, EventBusProvider
+from gilbert.interfaces.ws import RpcHandler, WsConnectionBase
 
 logger = logging.getLogger(__name__)
 
 
 def get_rpc_permission_level(frame_type: str) -> int:
     """Resolve the minimum role level for an RPC frame type (longest prefix match)."""
-    best_match = ""
-    best_level = _DEFAULT_RPC_LEVEL
-    for prefix, level in _RPC_PERMISSIONS.items():
-        if frame_type.startswith(prefix) and len(prefix) > len(best_match):
-            best_match = prefix
-            best_level = level
-    return best_level
+    return resolve_default_rpc_level(frame_type)
 
 
 # Peer role level
@@ -45,13 +38,7 @@ _PING_TIMEOUT = 90
 
 def get_event_visibility_level(event_type: str) -> int:
     """Resolve the minimum role level for an event type (longest prefix match)."""
-    best_match = ""
-    best_level = _DEFAULT_VISIBILITY_LEVEL
-    for prefix, level in _EVENT_VISIBILITY.items():
-        if event_type.startswith(prefix) and len(prefix) > len(best_match):
-            best_match = prefix
-            best_level = level
-    return best_level
+    return resolve_default_event_level(event_type)
 
 
 def can_see_event(user_level: int, event_type: str) -> bool:
@@ -60,9 +47,6 @@ def can_see_event(user_level: int, event_type: str) -> bool:
         return True
     return user_level <= get_event_visibility_level(event_type)
 
-
-# Type alias for RPC handler functions
-RpcHandler = Callable[["WsConnection", dict[str, Any]], Coroutine[Any, Any, dict[str, Any] | None]]
 
 # Registry of RPC handlers: frame type → handler function
 _rpc_handlers: dict[str, RpcHandler] = {}
@@ -358,21 +342,14 @@ async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str,
 def _resolve_rpc_level(conn: WsConnection, frame_type: str) -> int:
     """Resolve the required level for an RPC frame type.
 
-    Checks AccessControlService overrides first, then hardcoded defaults.
+    Delegates to AccessControlService if available, otherwise falls back
+    to hardcoded defaults.
     """
-    # Check overrides from ACL service (if available)
     gilbert = conn.manager._gilbert
     if gilbert is not None:
         acl_svc = gilbert.service_manager.get_by_capability("access_control")
-        if acl_svc is not None and hasattr(acl_svc, "_rpc_acl"):
-            # Longest prefix match on overrides
-            best = ""
-            for prefix in acl_svc._rpc_acl:
-                if frame_type.startswith(prefix) and len(prefix) > len(best):
-                    best = prefix
-            if best:
-                role_name = acl_svc._rpc_acl[best]
-                return acl_svc.get_role_level(role_name)
+        if isinstance(acl_svc, AccessControlProvider):
+            return acl_svc.resolve_rpc_level(frame_type)
 
     # Fall back to hardcoded defaults
     return get_rpc_permission_level(frame_type)

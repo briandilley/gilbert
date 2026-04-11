@@ -28,3 +28,23 @@ class SkillContent:
     catalog: SkillCatalogEntry
     instructions: str
     resources: list[str] = field(default_factory=list)
+
+
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class SkillsProvider(Protocol):
+    """Protocol for querying active skills from a service."""
+
+    async def get_active_skills(self, conversation_id: str) -> list[str]:
+        """Get active skill names for a conversation."""
+        ...
+
+    def get_active_allowed_tools(self, active_skills: list[str]) -> set[str]:
+        """Get the set of tool names allowed by the given active skills."""
+        ...
+
+    async def build_skills_context(self, conversation_id: str) -> str:
+        """Build a system prompt fragment describing active skills."""
+        ...

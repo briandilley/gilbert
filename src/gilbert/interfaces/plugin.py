@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from gilbert.core.service_manager import ServiceManager
+    from gilbert.interfaces.service import ServiceEnumerator, ServiceResolver
     from gilbert.interfaces.storage import StorageBackend
 
 
@@ -28,7 +28,7 @@ class PluginMeta:
 class PluginContext:
     """Everything a plugin receives during setup."""
 
-    services: ServiceManager
+    services: ServiceEnumerator
     config: dict[str, Any]
     data_dir: Path
     storage: StorageBackend | None = None

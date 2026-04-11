@@ -16,6 +16,7 @@ from typing import Any
 from gilbert.core.context import get_current_user
 from gilbert.interfaces.ai import (
     AIBackend,
+    AIContextProfile,
     AIRequest,
     AIResponse,
     Message,
@@ -378,17 +379,6 @@ class _ToolMemoryHelper:
                 Filter(field="namespace", op=FilterOp.EQ, value=namespace),
             ],
         ))
-
-
-@dataclass
-class AIContextProfile:
-    """Named profile that controls which tools are available for an AI interaction."""
-
-    name: str
-    description: str = ""
-    tool_mode: str = "all"  # "all" | "include" | "exclude"
-    tools: list[str] = field(default_factory=list)
-    tool_roles: dict[str, str] = field(default_factory=dict)
 
 
 # Built-in profiles seeded on first start
@@ -812,9 +802,9 @@ class AIService(Service):
         if self._resolver:
             skills_svc = self._resolver.get_capability("skills")
             if skills_svc is not None:
-                from gilbert.core.services.skills import SkillService
+                from gilbert.interfaces.skills import SkillsProvider
 
-                if isinstance(skills_svc, SkillService):
+                if isinstance(skills_svc, SkillsProvider):
                     active = await skills_svc.get_active_skills(conversation_id)
                     if active:
                         skill_tool_names = skills_svc.get_active_allowed_tools(active)
@@ -1020,9 +1010,9 @@ class AIService(Service):
                 )
                 if conversation_id:
                     try:
-                        from gilbert.core.services.skills import SkillService
+                        from gilbert.interfaces.skills import SkillsProvider
 
-                        if isinstance(skills_svc, SkillService):
+                        if isinstance(skills_svc, SkillsProvider):
                             skills_ctx = await skills_svc.build_skills_context(
                                 conversation_id,
                             )
@@ -1912,7 +1902,7 @@ class AIService(Service):
         }
 
     async def _ws_chat_send(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         message = frame.get("message", "").strip()
@@ -1993,7 +1983,7 @@ class AIService(Service):
 
     async def _ws_conversation_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """Create an empty named personal conversation."""
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         title = (frame.get("title") or "").strip() or "New conversation"
@@ -2020,7 +2010,7 @@ class AIService(Service):
         }
 
     async def _ws_form_submit(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2091,7 +2081,7 @@ class AIService(Service):
         }
 
     async def _ws_history_load(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2146,7 +2136,7 @@ class AIService(Service):
 
     async def _ws_conversation_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import conv_summary
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         personal = await self.list_conversations(user_id=conn.user_id, limit=30)
@@ -2159,7 +2149,7 @@ class AIService(Service):
 
     async def _ws_conversation_rename(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import check_conversation_access, publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2188,7 +2178,7 @@ class AIService(Service):
         return {"type": "chat.conversation.rename.result", "ref": frame.get("id"), "status": "ok", "title": title}
 
     async def _ws_conversation_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2212,7 +2202,7 @@ class AIService(Service):
 
     async def _ws_room_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         title = (frame.get("title") or "").strip()
@@ -2256,7 +2246,7 @@ class AIService(Service):
 
     async def _ws_room_join(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2290,7 +2280,7 @@ class AIService(Service):
 
     async def _ws_room_leave(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2323,7 +2313,7 @@ class AIService(Service):
 
     async def _ws_room_kick(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2352,7 +2342,7 @@ class AIService(Service):
 
     async def _ws_room_invite(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2411,7 +2401,7 @@ class AIService(Service):
         return {"type": "chat.room.invite.result", "ref": frame.get("id"), "status": "ok", "invited": invited}
 
     async def _ws_room_invite_revoke(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2448,7 +2438,7 @@ class AIService(Service):
 
     async def _ws_room_invite_respond(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         from gilbert.core.chat import publish_event
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         conversation_id = frame.get("conversation_id")
@@ -2504,7 +2494,7 @@ class AIService(Service):
 
     async def _ws_chat_list_users(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """List all users for invite modal."""
-        from gilbert.web.ws_protocol import WsConnection
+        from gilbert.interfaces.ws import WsConnectionBase as WsConnection
         conn: WsConnection = conn
 
         gilbert = conn.manager._gilbert

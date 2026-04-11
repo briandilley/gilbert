@@ -78,11 +78,10 @@ class ConfigurationService(Service):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
-        # Import here to avoid circular deps
-        from gilbert.core.service_manager import ServiceManager
+        from gilbert.interfaces.service import ServiceEnumerator
 
         # The resolver IS the ServiceManager
-        if isinstance(resolver, ServiceManager):
+        if isinstance(resolver, ServiceEnumerator):
             self._service_manager = resolver
         logger.info("Configuration service started")
 
@@ -261,12 +260,12 @@ class ConfigurationService(Service):
         if self._resolver is None:
             return result
 
-        from gilbert.core.service_manager import ServiceManager
+        from gilbert.interfaces.service import ServiceEnumerator
 
-        if not isinstance(self._resolver, ServiceManager):
+        if not isinstance(self._resolver, ServiceEnumerator):
             return result
 
-        for svc in self._resolver._registered.values():
+        for svc in self._resolver.list_services().values():
             if isinstance(svc, Configurable):
                 result[svc.config_namespace] = svc.config_params()
 
@@ -281,9 +280,9 @@ class ConfigurationService(Service):
         if self._resolver is None:
             return []
 
-        from gilbert.core.service_manager import ServiceManager
+        from gilbert.interfaces.service import ServiceEnumerator
 
-        if not isinstance(self._resolver, ServiceManager):
+        if not isinstance(self._resolver, ServiceEnumerator):
             return []
 
         sm = self._resolver
@@ -293,9 +292,10 @@ class ConfigurationService(Service):
         toggle_values: dict[str, Any] = {}
 
         # Gather sections grouped by category
+        all_services = sm.list_services()
         categories: dict[str, list[dict[str, Any]]] = {}
-        for name in list(sm._registered.keys()):
-            svc = sm._registered[name]
+        for name in list(all_services.keys()):
+            svc = all_services[name]
             if not isinstance(svc, Configurable):
                 continue
 
@@ -468,14 +468,14 @@ class ConfigurationService(Service):
         if self._resolver is None:
             return None
 
-        from gilbert.core.service_manager import ServiceManager
+        from gilbert.interfaces.service import ServiceEnumerator
 
-        if not isinstance(self._resolver, ServiceManager):
+        if not isinstance(self._resolver, ServiceEnumerator):
             return None
 
         # Search all registered services (not just started ones) so that
         # disabled services' config can still be viewed and modified.
-        for svc in self._resolver._registered.values():
+        for svc in self._resolver.list_services().values():
             if isinstance(svc, Configurable) and svc.config_namespace == namespace:
                 return svc
         return None
@@ -492,7 +492,7 @@ class ConfigurationService(Service):
 
         # Find the registered service for this namespace
         svc_name: str | None = None
-        for name, svc in self._service_manager._registered.items():
+        for name, svc in self._service_manager.list_services().items():
             if isinstance(svc, Configurable) and svc.config_namespace == namespace:
                 svc_name = name
                 break

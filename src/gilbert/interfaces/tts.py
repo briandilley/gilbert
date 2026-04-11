@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 
 class AudioFormat(StrEnum):
@@ -90,4 +91,13 @@ class TTSBackend(ABC):
     @abstractmethod
     async def get_voice(self, voice_id: str) -> Voice | None:
         """Get a voice by ID, or None if not found."""
+        ...
+
+
+@runtime_checkable
+class TTSProvider(Protocol):
+    """Protocol for text-to-speech synthesis from a service."""
+
+    async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        """Synthesize speech from text."""
         ...

@@ -162,9 +162,9 @@ class RoastService(Service):
             return ""
 
         try:
-            from gilbert.core.services.presence import PresenceService
+            from gilbert.interfaces.presence import PresenceProvider
 
-            if isinstance(presence_svc, PresenceService):
+            if isinstance(presence_svc, PresenceProvider):
                 present = await presence_svc.who_is_here()
                 if not present:
                     return ""

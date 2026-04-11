@@ -426,10 +426,9 @@ class SpeakerService(Service):
         if self._tts_svc is None:
             raise RuntimeError("TTS service is not available — cannot announce")
 
-        from gilbert.core.services.tts import TTSService
-        from gilbert.interfaces.tts import AudioFormat, SynthesisRequest
+        from gilbert.interfaces.tts import AudioFormat, SynthesisRequest, TTSProvider
 
-        if not isinstance(self._tts_svc, TTSService):
+        if not isinstance(self._tts_svc, TTSProvider):
             raise TypeError("Expected TTSService for text_to_speech capability")
 
         # Generate TTS audio

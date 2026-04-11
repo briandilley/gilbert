@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 
 class PresenceState(StrEnum):
@@ -67,4 +68,13 @@ class PresenceBackend(ABC):
     @abstractmethod
     async def list_tracked_users(self) -> list[str]:
         """List user IDs that this backend is tracking."""
+        ...
+
+
+@runtime_checkable
+class PresenceProvider(Protocol):
+    """Protocol for querying user presence from a service."""
+
+    async def who_is_here(self) -> list[UserPresence]:
+        """Get all users who are present or nearby."""
         ...

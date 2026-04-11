@@ -167,6 +167,25 @@ class AccessControlService(Service):
         required_level = self.get_role_level(required_role)
         return effective <= required_level
 
+    def resolve_rpc_level(self, frame_type: str) -> int:
+        """Resolve the required role level for an RPC frame type.
+
+        Checks overrides first (longest prefix match), then falls back
+        to the hardcoded defaults in ``interfaces.acl``.
+        """
+        from gilbert.interfaces.acl import resolve_default_rpc_level
+
+        # Longest prefix match on overrides
+        best = ""
+        for prefix in self._rpc_acl:
+            if frame_type.startswith(prefix) and len(prefix) > len(best):
+                best = prefix
+        if best:
+            return self.get_role_level(self._rpc_acl[best])
+
+        # Fall back to hardcoded defaults
+        return resolve_default_rpc_level(frame_type)
+
     # --- Role CRUD ---
 
     async def list_roles(self) -> list[dict[str, Any]]:
@@ -789,7 +808,7 @@ class AccessControlService(Service):
         if ai_svc is None:
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "AI service not available", "code": 503}
 
-        from gilbert.core.services.ai import AIContextProfile
+        from gilbert.interfaces.ai import AIContextProfile
         profile = AIContextProfile(
             name=frame.get("name", ""),
             description=frame.get("description", ""),
