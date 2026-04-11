@@ -169,7 +169,11 @@ class SonosSpeaker(SpeakerBackend):
 
         if uri.startswith("spotify:"):
             uri, meta = await asyncio.to_thread(_to_sonos_spotify_uri_and_meta, uri, title)
-        await asyncio.to_thread(coordinator.play_uri, uri, meta=meta, title=title)
+        try:
+            await asyncio.to_thread(coordinator.play_uri, uri, meta=meta, title=title)
+        except Exception:
+            logger.exception("Sonos play_uri failed: uri=%s speaker=%s", uri, coordinator.player_name)
+            raise
 
         # Seek to position if requested
         if request.position_seconds is not None and request.position_seconds > 0:

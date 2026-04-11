@@ -85,6 +85,7 @@ class MusicService(Service):
         self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._speaker_svc: Any | None = None
+        self._resolver: ServiceResolver | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -99,9 +100,18 @@ class MusicService(Service):
     def backend(self) -> MusicBackend | None:
         return self._backend
 
+    def _get_speaker_svc(self) -> Any:
+        """Lazily resolve the speaker service.
+
+        The speaker service may start after the music service (it's optional),
+        so we resolve it on first use rather than at startup.
+        """
+        if self._speaker_svc is None and self._resolver is not None:
+            self._speaker_svc = self._resolver.get_capability("speaker_control")
+        return self._speaker_svc
+
     async def start(self, resolver: ServiceResolver) -> None:
-        # Speaker integration (optional)
-        self._speaker_svc = resolver.get_capability("speaker_control")
+        self._resolver = resolver
 
         # Load config
         config_svc = resolver.get_capability("configuration")
@@ -225,7 +235,8 @@ class MusicService(Service):
         """
         if self._backend is None:
             raise RuntimeError("Music service is not enabled")
-        if self._speaker_svc is None:
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
 
         track = await self._backend.get_track(track_id)
@@ -235,7 +246,7 @@ class MusicService(Service):
         uri = await self._backend.get_playable_uri(track_id)
         title = f"{track.name} — {', '.join(a.name for a in track.artists)}"
 
-        await self._speaker_svc.play_on_speakers(
+        await speaker_svc.play_on_speakers(
             uri=uri,
             speaker_names=speaker_names,
             volume=volume,
@@ -419,8 +430,10 @@ class MusicService(Service):
                 position_seconds=position,
             )
         except RuntimeError as e:
+            logger.error("play_track failed: %s", e)
             return json.dumps({"error": str(e)})
         except KeyError as e:
+            logger.error("play_track failed: %s", e)
             return json.dumps({"error": str(e)})
 
         result = _track_to_dict(track)
