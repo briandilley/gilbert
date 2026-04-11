@@ -145,7 +145,7 @@ def _to_sonos_spotify_uri_and_meta(spotify_uri: str, title: str = "", sn: int = 
     ).format(
         item_id=escape(encoded),
         title=escape(title or "Spotify"),
-        service=svc.desc,
+        service=f"SA_RINCON{svc.service_type}_{sn}",
     )
 
     return sonos_uri, didl
