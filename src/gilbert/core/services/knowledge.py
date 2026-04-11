@@ -920,7 +920,7 @@ class KnowledgeService(Service):
         if content is None:
             return json.dumps({"error": f"Document not found: {document_id}"})
 
-        text = extract_text(content)
+        text, _stats = extract_text(content)
         return json.dumps({
             "document_id": document_id,
             "name": content.meta.name,

@@ -2109,7 +2109,11 @@ class AIService(Service):
             visible_to = m.get("visible_to")
             if visible_to is not None and conn.user_id not in visible_to:
                 continue
-            msg: dict[str, Any] = {"role": role, "content": m.get("content", "")}
+            content = m.get("content", "")
+            # Skip empty assistant messages (tool-use-only turns)
+            if role == "assistant" and not content:
+                continue
+            msg: dict[str, Any] = {"role": role, "content": content}
             if is_shared:
                 msg["author_id"] = m.get("author_id", "")
                 msg["author_name"] = m.get("author_name", "")
