@@ -1,6 +1,7 @@
 """Tests for KnowledgeService — document indexing, search, and multi-backend aggregation."""
 
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,7 @@ import pytest
 from gilbert.config import GilbertConfig
 from gilbert.core.documents.chunking import chunk_text
 from gilbert.core.documents.extractors import extract_text
+from gilbert.core.services.knowledge import KnowledgeService
 from gilbert.interfaces.knowledge import (
     DocumentBackend,
     DocumentContent,
@@ -165,3 +167,124 @@ class TestSearchModels:
         assert response.query == "revenue growth"
         assert len(response.results) == 1
         assert response.results[0].relevance_score == 0.92
+
+
+# --- render_document_page tool ---
+
+
+def _make_pdf_bytes() -> bytes:
+    """Create a minimal single-page PDF using PyMuPDF."""
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=100)
+    page.insert_text((10, 50), "Test page content")
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+class TestRenderDocumentPage:
+    @pytest.fixture
+    def knowledge_service(self) -> KnowledgeService:
+        svc = KnowledgeService()
+        svc._enabled = True
+        return svc
+
+    @pytest.fixture
+    def pdf_content(self) -> DocumentContent:
+        meta = DocumentMeta(
+            source_id="local:docs", path="manual.pdf", name="manual.pdf",
+            document_type=DocumentType.PDF,
+        )
+        return DocumentContent(meta=meta, data=_make_pdf_bytes())
+
+    @pytest.fixture
+    def stub_backend(self, pdf_content: DocumentContent) -> AsyncMock:
+        backend = AsyncMock(spec=DocumentBackend)
+        backend.get_document.return_value = pdf_content
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_renders_pdf_page(
+        self, knowledge_service: KnowledgeService,
+        stub_backend: AsyncMock, tmp_path: Path,
+    ) -> None:
+        knowledge_service._backends = {"local:docs": stub_backend}
+
+        with patch("gilbert.core.services.knowledge.get_output_dir", return_value=tmp_path):
+            result = await knowledge_service._tool_render_page({
+                "document_id": "local:docs:manual.pdf",
+                "page": 1,
+            })
+
+        data = json.loads(result)
+        assert data["page"] == 1
+        assert "/output/knowledge/" in data["image_url"]
+        assert "![manual.pdf - Page 1]" in data["markdown"]
+        # Verify image file was written
+        png_files = list(tmp_path.glob("*.png"))
+        assert len(png_files) == 1
+        assert png_files[0].stat().st_size > 0
+
+    @pytest.mark.asyncio
+    async def test_page_out_of_range(
+        self, knowledge_service: KnowledgeService,
+        stub_backend: AsyncMock,
+    ) -> None:
+        knowledge_service._backends = {"local:docs": stub_backend}
+
+        result = await knowledge_service._tool_render_page({
+            "document_id": "local:docs:manual.pdf",
+            "page": 999,
+        })
+        data = json.loads(result)
+        assert "error" in data
+        assert "out of range" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_non_pdf_rejected(
+        self, knowledge_service: KnowledgeService,
+    ) -> None:
+        meta = DocumentMeta(
+            source_id="local:docs", path="notes.txt", name="notes.txt",
+            document_type=DocumentType.TEXT,
+        )
+        content = DocumentContent(meta=meta, data=b"hello")
+        backend = AsyncMock(spec=DocumentBackend)
+        backend.get_document.return_value = content
+        knowledge_service._backends = {"local:docs": backend}
+
+        result = await knowledge_service._tool_render_page({
+            "document_id": "local:docs:notes.txt",
+            "page": 1,
+        })
+        data = json.loads(result)
+        assert "error" in data
+        assert "PDF" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_negative_page_number(
+        self, knowledge_service: KnowledgeService,
+    ) -> None:
+        result = await knowledge_service._tool_render_page({
+            "document_id": "local:docs:manual.pdf",
+            "page": 0,
+        })
+        data = json.loads(result)
+        assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_document_not_found(
+        self, knowledge_service: KnowledgeService,
+    ) -> None:
+        backend = AsyncMock(spec=DocumentBackend)
+        backend.get_document.return_value = None
+        knowledge_service._backends = {"local:docs": backend}
+
+        result = await knowledge_service._tool_render_page({
+            "document_id": "local:docs:missing.pdf",
+            "page": 1,
+        })
+        data = json.loads(result)
+        assert "error" in data
+        assert "not found" in data["error"].lower()

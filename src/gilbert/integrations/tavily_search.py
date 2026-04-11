@@ -93,3 +93,23 @@ class TavilySearch(WebSearchBackend):
             ))
 
         return results
+
+    async def search_images(
+        self, query: str, count: int = 5,
+    ) -> list[str]:
+        if self._client is None:
+            raise RuntimeError("TavilySearch not initialized")
+
+        payload = {
+            "api_key": self._api_key,
+            "query": query,
+            "max_results": count,
+            "search_depth": "basic",
+            "include_images": True,
+        }
+
+        response = await self._client.post(_API_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+        return list(data.get("images", []))[:count]

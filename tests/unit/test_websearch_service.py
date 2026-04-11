@@ -23,9 +23,13 @@ class StubSearchBackend(WebSearchBackend):
         self.initialized = False
         self.init_config: dict[str, Any] = {}
         self._results: list[WebSearchResult] = []
+        self._image_urls: list[str] = []
 
     def set_results(self, results: list[WebSearchResult]) -> None:
         self._results = results
+
+    def set_image_urls(self, urls: list[str]) -> None:
+        self._image_urls = urls
 
     async def initialize(self, config: dict[str, Any]) -> None:
         self.init_config = config
@@ -36,6 +40,9 @@ class StubSearchBackend(WebSearchBackend):
 
     async def search(self, query: str, count: int = 5) -> list[WebSearchResult]:
         return self._results[:count]
+
+    async def search_images(self, query: str, count: int = 5) -> list[str]:
+        return self._image_urls[:count]
 
 
 class ErrorSearchBackend(WebSearchBackend):
@@ -123,7 +130,7 @@ class TestToolProvider:
     def test_get_tools(self, service: WebSearchService) -> None:
         tools = service.get_tools()
         names = {t.name for t in tools}
-        assert names == {"web_search", "fetch_url", "fetch_url_raw"}
+        assert names == {"web_search", "image_search", "fetch_url", "fetch_url_raw"}
 
 
 # --- Tool Execution ---
@@ -225,6 +232,59 @@ class TestToolExecution:
     ) -> None:
         with pytest.raises(KeyError, match="Unknown tool"):
             await started_service.execute_tool("nonexistent", {})
+
+
+# --- Image Search ---
+
+
+class TestImageSearch:
+    @pytest.mark.asyncio
+    async def test_image_search_returns_markdown(
+        self, started_service: WebSearchService, stub_backend: StubSearchBackend,
+    ) -> None:
+        stub_backend.set_image_urls([
+            "https://example.com/img1.jpg",
+            "https://example.com/img2.jpg",
+        ])
+        result = await started_service.execute_tool(
+            "image_search", {"query": "sunset"},
+        )
+        assert "![sunset - image 1](https://example.com/img1.jpg)" in result
+        assert "![sunset - image 2](https://example.com/img2.jpg)" in result
+        assert "Found 2 image(s)" in result
+
+    @pytest.mark.asyncio
+    async def test_image_search_no_results(
+        self, started_service: WebSearchService, stub_backend: StubSearchBackend,
+    ) -> None:
+        stub_backend.set_image_urls([])
+        result = await started_service.execute_tool(
+            "image_search", {"query": "nonexistent"},
+        )
+        data = json.loads(result)
+        assert data["images"] == []
+        assert "No images found" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_image_search_empty_query(
+        self, started_service: WebSearchService,
+    ) -> None:
+        result = await started_service.execute_tool(
+            "image_search", {"query": ""},
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_image_search_count_capped_at_5(
+        self, started_service: WebSearchService, stub_backend: StubSearchBackend,
+    ) -> None:
+        stub_backend.set_image_urls([f"https://example.com/{i}.jpg" for i in range(10)])
+        result = await started_service.execute_tool(
+            "image_search", {"query": "test", "count": 20},
+        )
+        # Should have at most 5 images
+        assert "image 5" in result
+        assert "image 6" not in result
 
 
 # --- Fetch URL ---

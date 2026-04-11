@@ -1,5 +1,6 @@
 """Knowledge service — document indexing, vector search, and multi-backend aggregation."""
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 
 from gilbert.core.documents.chunking import chunk_text
 from gilbert.core.documents.extractors import extract_text
+from gilbert.core.output import get_output_dir
 from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.knowledge import (
     DocumentBackend,
@@ -828,6 +830,27 @@ class KnowledgeService(Service):
                 required_role="user",
             ),
             ToolDefinition(
+                name="render_document_page",
+                description=(
+                    "Render a specific page of a PDF document as an image and "
+                    "return it for display in chat. Use when the user wants to "
+                    "see a diagram, picture, chart, or visual content from a "
+                    "document in the knowledge base. Search results include "
+                    "page numbers that can be used here."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="document_id", type=ToolParameterType.STRING,
+                        description="Document ID (source_id:path).",
+                    ),
+                    ToolParameter(
+                        name="page", type=ToolParameterType.INTEGER,
+                        description="Page number to render (1-based).",
+                    ),
+                ],
+                required_role="user",
+            ),
+            ToolDefinition(
                 name="upload_document",
                 description="Upload a new document to a writable source and index it.",
                 parameters=[
@@ -877,6 +900,8 @@ class KnowledgeService(Service):
                 return await self._tool_list_documents(arguments)
             case "list_document_sources":
                 return self._tool_list_sources()
+            case "render_document_page":
+                return await self._tool_render_page(arguments)
             case "upload_document":
                 return await self._tool_upload(arguments)
             case "index_document":
@@ -926,6 +951,74 @@ class KnowledgeService(Service):
             "name": content.meta.name,
             "type": content.meta.document_type.value,
             "text": text[:50000],  # Cap at 50K chars for AI context
+        })
+
+    async def _tool_render_page(self, arguments: dict[str, Any]) -> str:
+        document_id = arguments["document_id"]
+        page_num = int(arguments["page"])
+
+        if page_num < 1:
+            return json.dumps({"error": "Page number must be >= 1"})
+
+        try:
+            backend, path = self._resolve_backend(document_id)
+        except KeyError as e:
+            return json.dumps({"error": str(e)})
+
+        content = await backend.get_document(path)
+        if content is None:
+            return json.dumps({"error": f"Document not found: {document_id}"})
+
+        if content.meta.document_type != DocumentType.PDF:
+            return json.dumps({
+                "error": f"Page rendering is only supported for PDF documents, "
+                         f"got {content.meta.document_type.value}",
+            })
+
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            return json.dumps({"error": "PyMuPDF is not installed"})
+
+        try:
+            doc = fitz.open(stream=content.data, filetype="pdf")
+        except Exception as exc:
+            return json.dumps({"error": f"Failed to open PDF: {exc}"})
+
+        total_pages = len(doc)
+        if page_num > total_pages:
+            doc.close()
+            return json.dumps({
+                "error": f"Page {page_num} out of range (document has {total_pages} pages)",
+            })
+
+        page = doc[page_num - 1]  # 0-based index
+        # Render at 2x resolution for readability
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat)
+        png_data = pix.tobytes("png")
+        doc.close()
+
+        # Save to output directory with a stable filename
+        digest = hashlib.sha256(
+            f"{document_id}:{page_num}".encode()
+        ).hexdigest()[:12]
+        out_dir = get_output_dir("knowledge")
+        filename = f"page_{digest}.png"
+        out_path = out_dir / filename
+        out_path.write_bytes(png_data)
+
+        image_url = f"/output/knowledge/{filename}"
+        return json.dumps({
+            "document_id": document_id,
+            "page": page_num,
+            "total_pages": total_pages,
+            "image_url": image_url,
+            "markdown": f"![{content.meta.name} - Page {page_num}]({image_url})",
+            "instructions": (
+                "Include the markdown image tag in your response "
+                "to display the page in the chat."
+            ),
         })
 
     async def _tool_list_documents(self, arguments: dict[str, Any]) -> str:

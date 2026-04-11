@@ -221,6 +221,28 @@ class WebSearchService(Service, ToolProvider):
                 required_role="user",
             ),
             ToolDefinition(
+                name="image_search",
+                description=(
+                    "Search the web for images. Returns image URLs that can be "
+                    "displayed in chat using markdown image syntax. Use when the "
+                    "user asks to see a picture, photo, or image of something."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="query",
+                        type=ToolParameterType.STRING,
+                        description="Descriptive search query for the image.",
+                    ),
+                    ToolParameter(
+                        name="count",
+                        type=ToolParameterType.INTEGER,
+                        description="Number of images to return (default 3, max 5).",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+            ),
+            ToolDefinition(
                 name="fetch_url",
                 description=(
                     "Fetch the content of a web page and extract its text. "
@@ -264,12 +286,44 @@ class WebSearchService(Service, ToolProvider):
         match name:
             case "web_search":
                 return await self._exec_web_search(arguments)
+            case "image_search":
+                return await self._exec_image_search(arguments)
             case "fetch_url":
                 return await self._exec_fetch_url(arguments)
             case "fetch_url_raw":
                 return await self._exec_fetch_url_raw(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
+
+    async def _exec_image_search(self, arguments: dict[str, Any]) -> str:
+        query = arguments.get("query", "")
+        if not query:
+            return json.dumps({"error": "query is required"})
+
+        if self._backend is None:
+            return json.dumps({"error": "Service not initialized"})
+
+        count = min(int(arguments.get("count", 3)), 5)
+
+        try:
+            urls = await self._backend.search_images(query, count=count)
+        except Exception as exc:
+            logger.warning("Image search failed for %r: %s", query, exc)
+            return json.dumps({"error": f"Image search failed: {exc}"})
+
+        if not urls:
+            return json.dumps({"query": query, "images": [], "message": "No images found"})
+
+        # Return markdown image syntax so the AI can embed them in its reply
+        parts = [f"Found {len(urls)} image(s) for: {query}\n"]
+        for i, url in enumerate(urls, 1):
+            parts.append(f"{i}. ![{query} - image {i}]({url})")
+
+        parts.append(
+            "\nInclude the markdown image tags above in your response "
+            "to display them in the chat."
+        )
+        return "\n".join(parts)
 
     async def _exec_fetch_url(self, arguments: dict[str, Any]) -> str:
         url = arguments.get("url", "")
