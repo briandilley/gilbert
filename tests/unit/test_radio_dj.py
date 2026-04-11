@@ -576,6 +576,7 @@ class TestEventHandling:
 
 class TestTools:
     def test_tool_definitions(self, dj: RadioDJService) -> None:
+        dj._enabled = True
         tools = dj.get_tools()
         names = {t.name for t in tools}
         assert names == {
@@ -585,6 +586,7 @@ class TestTools:
         }
 
     def test_admin_tools_require_admin_role(self, dj: RadioDJService) -> None:
+        dj._enabled = True
         tools = dj.get_tools()
         admin_tools = [t for t in tools if t.required_role == "admin"]
         assert len(admin_tools) == 1
@@ -701,7 +703,6 @@ class TestConfig:
     def test_config_params_list(self, dj: RadioDJService) -> None:
         params = dj.config_params()
         keys = {p.key for p in params}
-        assert "enabled" in keys
         assert "default_genres" in keys
         assert "min_switch_interval" in keys
         assert "default_volume" in keys

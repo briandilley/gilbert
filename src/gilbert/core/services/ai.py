@@ -1,10 +1,16 @@
-"""AI service — orchestrates AI conversations, tool execution, and persistence."""
+"""AI service — orchestrates AI conversations, tool execution, and persistence.
 
+Also includes internal helpers for persona, user memory, and tool memory
+(previously separate services, now merged into AIService).
+"""
+
+import hashlib
 import json as _json
 import logging
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from gilbert.core.context import get_current_user
@@ -20,7 +26,7 @@ from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.storage import Filter, FilterOp, Query, SortField, StorageBackend
+from gilbert.interfaces.storage import Filter, FilterOp, IndexDefinition, Query, SortField, StorageBackend
 from gilbert.interfaces.tools import (
     ToolCall,
     ToolDefinition,
@@ -36,6 +42,331 @@ ai_logger = logging.getLogger("gilbert.ai")
 _COLLECTION = "ai_conversations"
 _PROFILES_COLLECTION = "ai_profiles"
 _ASSIGNMENTS_COLLECTION = "ai_profile_assignments"
+
+# ── Persona constants and helper ──────────────────────────────
+
+_PERSONA_COLLECTION = "persona"
+_PERSONA_ID = "active"
+
+# Default persona shipped with Gilbert
+DEFAULT_PERSONA = """\
+You are Gilbert, a home and business automation assistant.
+
+## Personality
+- Casual, friendly, and professional.
+- A bit sarcastic and occasionally funny — but never at the user's expense.
+- Keep responses concise. Don't over-explain or narrate what you're doing under the hood.
+
+## Announcements
+- When making announcements over speakers after a period of silence, \
+open with a brief, natural intro like "Hey team, Gilbert here" or \
+"Quick heads up from Gilbert" — vary it each time, keep it fresh, \
+don't repeat yourself.
+- For rapid follow-up announcements, skip the intro.
+
+## Tool use
+- When you use a tool, just confirm the result briefly. \
+Don't reveal internal details (voice IDs, speaker UIDs, API endpoints, \
+credential names, backend types) unless the user specifically asks about configuration.
+- If something fails, give a clear, helpful message — not a stack trace.
+- Only describe capabilities you actually have tools for. The tools available \
+to you depend on the current user's role. If you don't have a tool for \
+something, don't mention it at all — not even to say you can't do it. \
+Just focus on what you CAN do.\
+"""
+
+
+class _PersonaHelper:
+    """Internal helper — manages the AI persona text in entity storage."""
+
+    def __init__(self, storage: StorageBackend) -> None:
+        self._storage = storage
+        self._persona: str = DEFAULT_PERSONA
+        self._is_customized: bool = False
+
+    async def load(self) -> None:
+        saved = await self._storage.get(_PERSONA_COLLECTION, _PERSONA_ID)
+        if saved and saved.get("text"):
+            self._persona = saved["text"]
+            self._is_customized = saved.get("customized", False)
+            logger.info("Persona loaded from storage (customized=%s)", self._is_customized)
+        else:
+            logger.info("No persona stored — using default")
+
+    @property
+    def persona(self) -> str:
+        return self._persona
+
+    @property
+    def is_customized(self) -> bool:
+        return self._is_customized
+
+    async def update_persona(self, text: str) -> None:
+        self._persona = text
+        self._is_customized = True
+        await self._storage.put(
+            _PERSONA_COLLECTION, _PERSONA_ID, {"text": text, "customized": True}
+        )
+        logger.info("Persona updated (%d chars)", len(text))
+
+    async def reset_persona(self) -> None:
+        self._persona = DEFAULT_PERSONA
+        self._is_customized = False
+        await self._storage.put(
+            _PERSONA_COLLECTION, _PERSONA_ID,
+            {"text": DEFAULT_PERSONA, "customized": False},
+        )
+        logger.info("Persona reset to default")
+
+
+# ── Memory helper ─────────────────────────────────────────────
+
+_MEMORY_COLLECTION = "user_memories"
+
+
+class _MemoryHelper:
+    """Internal helper — per-user persistent memories."""
+
+    def __init__(self, storage: StorageBackend) -> None:
+        self._storage = storage
+
+    async def setup_indexes(self) -> None:
+        await self._storage.ensure_index(IndexDefinition(
+            collection=_MEMORY_COLLECTION,
+            fields=["user_id"],
+        ))
+
+    async def get_user_summaries(self, user_id: str) -> str:
+        memories = await self._get_user_memories(user_id)
+        if not memories:
+            return ""
+        lines = [f"## Memories for this user ({len(memories)} stored)"]
+        for m in memories:
+            mid = m.get("_id", "")
+            summary = m.get("summary", "")
+            source = m.get("source", "user")
+            lines.append(f"- [{mid}] {summary} ({source})")
+        return "\n".join(lines)
+
+    async def _get_user_memories(self, user_id: str) -> list[dict[str, Any]]:
+        memories = await self._storage.query(Query(
+            collection=_MEMORY_COLLECTION,
+            filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
+        ))
+
+        def sort_key(m: dict[str, Any]) -> tuple[int, int, str]:
+            source_rank = 0 if m.get("source") == "user" else 1
+            access = -(m.get("access_count", 0))
+            created = m.get("created_at", "")
+            return (source_rank, access, created)
+
+        memories.sort(key=sort_key)
+        return memories
+
+    async def remember(self, user_id: str, args: dict[str, Any]) -> str:
+        summary = args.get("summary", "").strip()
+        content = args.get("content", "").strip()
+        source = args.get("source", "user")
+        if not summary:
+            return "I need a summary to remember."
+        if not content:
+            content = summary
+        now = datetime.now(timezone.utc).isoformat()
+        memory_id = f"memory_{uuid.uuid4().hex[:12]}"
+        await self._storage.put(_MEMORY_COLLECTION, memory_id, {
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "summary": summary,
+            "content": content,
+            "source": source,
+            "access_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        })
+        logger.info("Memory created for %s: %s", user_id, summary[:60])
+        return f"Got it, I'll remember that. (memory {memory_id})"
+
+    async def recall(self, user_id: str, args: dict[str, Any]) -> str:
+        ids: list[str] = args.get("ids", [])
+        if not ids:
+            return "I need memory IDs to recall. Use 'list' first to see available memories."
+        results: list[str] = []
+        for mid in ids:
+            mid = str(mid)
+            record = await self._storage.get(_MEMORY_COLLECTION, mid)
+            if not record:
+                results.append(f"[{mid}] Not found.")
+                continue
+            if record.get("user_id") != user_id:
+                results.append(f"[{mid}] Not your memory.")
+                continue
+            record["access_count"] = record.get("access_count", 0) + 1
+            await self._storage.put(_MEMORY_COLLECTION, mid, record)
+            results.append(
+                f"[{mid}] {record.get('summary', '')}\n"
+                f"Content: {record.get('content', '')}\n"
+                f"Source: {record.get('source', 'user')} | "
+                f"Created: {record.get('created_at', '')} | "
+                f"Accessed: {record['access_count']} times"
+            )
+        return "\n\n".join(results)
+
+    async def update(self, user_id: str, args: dict[str, Any]) -> str:
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return "I need a memory ID to update."
+        record = await self._storage.get(_MEMORY_COLLECTION, str(memory_id))
+        if not record:
+            return f"Memory {memory_id} not found."
+        if record.get("user_id") != user_id:
+            return f"Memory {memory_id} doesn't belong to you."
+        summary = args.get("summary")
+        content = args.get("content")
+        if summary:
+            record["summary"] = summary
+        if content:
+            record["content"] = content
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await self._storage.put(_MEMORY_COLLECTION, str(memory_id), record)
+        logger.info("Memory updated for %s: %s", user_id, memory_id)
+        return f"Memory {memory_id} updated."
+
+    async def forget(self, user_id: str, args: dict[str, Any]) -> str:
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return "I need a memory ID to forget."
+        record = await self._storage.get(_MEMORY_COLLECTION, str(memory_id))
+        if not record:
+            return f"Memory {memory_id} not found."
+        if record.get("user_id") != user_id:
+            return f"Memory {memory_id} doesn't belong to you."
+        await self._storage.delete(_MEMORY_COLLECTION, str(memory_id))
+        logger.info("Memory forgotten for %s: %s", user_id, memory_id)
+        return f"Memory {memory_id} forgotten."
+
+    async def list_memories(self, user_id: str) -> str:
+        memories = await self._get_user_memories(user_id)
+        if not memories:
+            return "No memories stored for you yet."
+        lines = [f"{len(memories)} memory/memories stored:"]
+        for m in memories:
+            mid = m.get("_id", "")
+            summary = m.get("summary", "")
+            source = m.get("source", "user")
+            access = m.get("access_count", 0)
+            lines.append(f"  [{mid}] {summary} ({source}) — accessed {access}x")
+        return "\n".join(lines)
+
+
+# ── Tool memory helper ────────────────────────────────────────
+
+_TOOL_MEMORY_COLLECTION = "tool_memories"
+
+
+def _tool_memory_entity_id(user_id: str, namespace: str, key: str) -> str:
+    """Deterministic entity ID from (user_id, namespace, key)."""
+    raw = f"{user_id}:{namespace}:{key}"
+    return f"tm_{hashlib.sha256(raw.encode()).hexdigest()[:16]}"
+
+
+class _ToolMemoryHelper:
+    """Internal helper — per-user key-value store for tools and skills."""
+
+    def __init__(self, storage: StorageBackend) -> None:
+        self._storage = storage
+
+    async def setup_indexes(self) -> None:
+        await self._storage.ensure_index(IndexDefinition(
+            collection=_TOOL_MEMORY_COLLECTION,
+            fields=["user_id", "namespace"],
+        ))
+        await self._storage.ensure_index(IndexDefinition(
+            collection=_TOOL_MEMORY_COLLECTION,
+            fields=["user_id"],
+        ))
+
+    async def get(self, user_id: str, namespace: str, key: str) -> Any | None:
+        eid = _tool_memory_entity_id(user_id, namespace, key)
+        record = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
+        if record is None:
+            return None
+        if record.get("user_id") != user_id:
+            return None
+        return record.get("value")
+
+    async def put(
+        self, user_id: str, namespace: str, key: str, value: Any,
+    ) -> None:
+        eid = _tool_memory_entity_id(user_id, namespace, key)
+        now = datetime.now(UTC).isoformat()
+        existing = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
+        created_at = existing.get("created_at", now) if existing else now
+        await self._storage.put(_TOOL_MEMORY_COLLECTION, eid, {
+            "user_id": user_id,
+            "namespace": namespace,
+            "key": key,
+            "value": value,
+            "created_at": created_at,
+            "updated_at": now,
+        })
+
+    async def delete(self, user_id: str, namespace: str, key: str) -> bool:
+        eid = _tool_memory_entity_id(user_id, namespace, key)
+        record = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
+        if record is None or record.get("user_id") != user_id:
+            return False
+        await self._storage.delete(_TOOL_MEMORY_COLLECTION, eid)
+        return True
+
+    async def list_keys(self, user_id: str, namespace: str) -> list[str]:
+        records = await self._query_namespace(user_id, namespace)
+        return [r.get("key", "") for r in records]
+
+    async def get_all(self, user_id: str, namespace: str) -> dict[str, Any]:
+        records = await self._query_namespace(user_id, namespace)
+        return {r.get("key", ""): r.get("value") for r in records}
+
+    async def delete_all(self, user_id: str, namespace: str) -> int:
+        records = await self._query_namespace(user_id, namespace)
+        for r in records:
+            eid = r.get("_id", "")
+            if eid:
+                await self._storage.delete(_TOOL_MEMORY_COLLECTION, eid)
+        return len(records)
+
+    async def get_user_summaries(self, user_id: str) -> str:
+        records = await self._storage.query(Query(
+            collection=_TOOL_MEMORY_COLLECTION,
+            filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
+        ))
+        if not records:
+            return ""
+        by_ns: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for r in records:
+            by_ns[r.get("namespace", "unknown")].append(r)
+        lines = [f"## Tool Memories for this user ({len(records)} stored)"]
+        for ns in sorted(by_ns):
+            lines.append(f"### {ns}")
+            for r in by_ns[ns]:
+                key = r.get("key", "")
+                value = r.get("value")
+                try:
+                    val_str = _json.dumps(value) if not isinstance(value, str) else value
+                except (TypeError, ValueError):
+                    val_str = str(value)
+                lines.append(f"- {key}: {val_str}")
+        return "\n".join(lines)
+
+    async def _query_namespace(
+        self, user_id: str, namespace: str,
+    ) -> list[dict[str, Any]]:
+        return await self._storage.query(Query(
+            collection=_TOOL_MEMORY_COLLECTION,
+            filters=[
+                Filter(field="user_id", op=FilterOp.EQ, value=user_id),
+                Filter(field="namespace", op=FilterOp.EQ, value=namespace),
+            ],
+        ))
 
 
 @dataclass
@@ -58,21 +389,14 @@ _BUILTIN_PROFILES = [
     ),
     AIContextProfile(
         name="human_chat",
-        description="Human conversations via web or Slack — excludes internal service tools",
-        tool_mode="exclude",
-        tools=["sales_lead"],
+        description="Human conversations via web or Slack",
+        tool_mode="all",
     ),
     AIContextProfile(
         name="text_only",
         description="Text generation only, no tool access",
         tool_mode="include",
         tools=[],
-    ),
-    AIContextProfile(
-        name="sales_agent",
-        description="Sales lead qualification pipeline",
-        tool_mode="include",
-        tools=["sales_lead"],
     ),
 ]
 
@@ -94,11 +418,10 @@ class AIService(Service):
     - History truncation
     """
 
-    def __init__(
-        self,
-        backend: AIBackend,
-    ) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: AIBackend | None = None
+        self._backend_name: str = "anthropic"
+        self._enabled: bool = False
         # Tunable config — loaded from ConfigurationService during start()
         self._config: dict[str, Any] = {}
         self._system_prompt: str = ""
@@ -106,24 +429,32 @@ class AIService(Service):
         self._max_tool_rounds: int = 10
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
-        self._persona_svc: Any | None = None
         self._acl_svc: Any | None = None
         self._current_conversation_id: str | None = None
         # AI context profiles
         self._profiles: dict[str, AIContextProfile] = {}
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
+        # Internal helpers (initialized in start())
+        self._persona: _PersonaHelper | None = None
+        self._memory: _MemoryHelper | None = None
+        self._tool_memory: _ToolMemoryHelper | None = None
+        self._memory_enabled: bool = True
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="ai",
-            capabilities=frozenset({"ai_chat", "ai_tools", "ws_handlers"}),
-            requires=frozenset({"entity_storage", "persona"}),
+            capabilities=frozenset({"ai_chat", "ai_tools", "ws_handlers", "persona", "user_memory", "tool_memory"}),
+            requires=frozenset({"entity_storage"}),
             optional=frozenset({"ai_tools", "configuration", "access_control"}),
             events=frozenset({"chat.conversation.renamed"}),
+            toggleable=True,
+            toggle_description="AI chat and tool execution",
         )
 
     @property
     def backend(self) -> AIBackend:
+        if self._backend is None:
+            raise RuntimeError("AI backend not initialized — service is disabled or not started")
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -131,12 +462,35 @@ class AIService(Service):
 
         # Load tunable config from ConfigurationService if available
         config_svc = resolver.get_capability("configuration")
+        section: dict[str, Any] = {}
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
                 section = config_svc.get_section("ai")
                 self._apply_config(section)
+
+        # Check enabled — if False, skip backend init and return early
+        if not section.get("enabled", False) and not self._enabled:
+            logger.info("AI service disabled")
+            return
+
+        self._enabled = True
+
+        # Create backend from registry (skip if already injected, e.g. in tests)
+        if self._backend is None:
+            backend_name = section.get("backend", "anthropic")
+            self._backend_name = backend_name
+            # Import to trigger registration
+            try:
+                import gilbert.integrations.anthropic_ai  # noqa: F401
+            except ImportError:
+                pass
+            backends = AIBackend.registered_backends()
+            backend_cls = backends.get(backend_name)
+            if backend_cls is None:
+                raise ValueError(f"Unknown AI backend: {backend_name}")
+            self._backend = backend_cls()
 
         # Initialize backend with settings (includes API key)
         await self._backend.initialize(self._config)
@@ -147,14 +501,29 @@ class AIService(Service):
             raise TypeError("Expected StorageService for 'entity_storage' capability")
         self._storage = storage_svc.backend
 
-        # Resolve persona service
-        self._persona_svc = resolver.require_capability("persona")
+        # Initialize internal helpers
+        self._persona = _PersonaHelper(self._storage)
+        await self._persona.load()
+
+        self._memory = _MemoryHelper(self._storage)
+        await self._memory.setup_indexes()
+
+        self._tool_memory = _ToolMemoryHelper(self._storage)
+        await self._tool_memory.setup_indexes()
 
         # Resolve access control (optional — if missing, no filtering)
         self._acl_svc = resolver.get_capability("access_control")
 
         # Save resolver for lazy tool discovery
         self._resolver = resolver
+
+        # Load memory enabled setting
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                memory_section = config_svc.get_section("memory")
+                self._memory_enabled = memory_section.get("enabled", True)
 
         # Load profiles and assignments
         await self._load_profiles()
@@ -184,6 +553,12 @@ class AIService(Service):
         return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.anthropic_ai  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
             ConfigParam(
                 key="max_history_messages", type=ToolParameterType.INTEGER,
@@ -202,27 +577,38 @@ class AIService(Service):
                 choices=tuple(AIBackend.registered_backends().keys()) or ("anthropic",),
             ),
             ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the AI service is enabled.",
-                default=False, restart_required=True,
+                key="default_persona", type=ToolParameterType.STRING,
+                description="Default persona instructions for the AI assistant.",
+                default=DEFAULT_PERSONA,
+                multiline=True,
+            ),
+            ConfigParam(
+                key="memory_enabled", type=ToolParameterType.BOOLEAN,
+                description="Whether the AI memory system is enabled.",
+                default=True, restart_required=True,
             ),
         ]
         # Include backend-declared params under settings.*
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, choices_from=bp.choices_from,
-                multiline=bp.multiline, backend_param=True,
-            ))
+        # Use the registry class (not an instance) so params are available even when disabled
+        backends = AIBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, choices_from=bp.choices_from,
+                    multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
 
     # --- AI Context Profiles ---
 
@@ -386,6 +772,8 @@ class AIService(Service):
             ``ui_blocks`` is a list of serialized UI block dicts (possibly empty).
             ``tool_usage`` is a list of {tool_name, is_error} dicts.
         """
+        if self._backend is None:
+            raise RuntimeError("AI service is not enabled")
         if user_ctx is None:
             user_ctx = get_current_user()
         # Load or create conversation
@@ -548,46 +936,35 @@ class AIService(Service):
 
         if self._system_prompt:
             parts.append(self._system_prompt)
-        if self._persona_svc is not None:
-            from gilbert.core.services.persona import PersonaService
-
-            if isinstance(self._persona_svc, PersonaService):
-                parts.append(self._persona_svc.persona)
-                if not self._persona_svc.is_customized:
-                    parts.append(
-                        "IMPORTANT: The persona has not been customized yet. "
-                        "At the start of the FIRST conversation only, briefly let the user know "
-                        "they can customize your personality and behavior by asking you to "
-                        "update the persona. Only mention this once — never bring it up again "
-                        "in subsequent messages or conversations."
-                    )
+        if self._persona is not None:
+            parts.append(self._persona.persona)
+            if not self._persona.is_customized:
+                parts.append(
+                    "IMPORTANT: The persona has not been customized yet. "
+                    "At the start of the FIRST conversation only, briefly let the user know "
+                    "they can customize your personality and behavior by asking you to "
+                    "update the persona. Only mention this once — never bring it up again "
+                    "in subsequent messages or conversations."
+                )
 
         # Inject user memory summaries if available
-        if user_ctx and user_ctx.user_id not in ("system", "guest") and self._resolver:
-            memory_svc = self._resolver.get_capability("user_memory")
-            if memory_svc is not None:
+        if user_ctx and user_ctx.user_id not in ("system", "guest"):
+            if self._memory is not None and self._memory_enabled:
                 try:
-                    from gilbert.core.services.memory import MemoryService
-
-                    if isinstance(memory_svc, MemoryService):
-                        summaries = await memory_svc.get_user_summaries(user_ctx.user_id)
-                        if summaries:
-                            parts.append(summaries)
+                    summaries = await self._memory.get_user_summaries(user_ctx.user_id)
+                    if summaries:
+                        parts.append(summaries)
                 except Exception:
                     pass  # Memory unavailable — not critical
 
             # Inject tool memory summaries if available
-            tool_memory_svc = self._resolver.get_capability("tool_memory")
-            if tool_memory_svc is not None:
+            if self._tool_memory is not None:
                 try:
-                    from gilbert.core.services.tool_memory import ToolMemoryService
-
-                    if isinstance(tool_memory_svc, ToolMemoryService):
-                        summaries = await tool_memory_svc.get_user_summaries(
-                            user_ctx.user_id,
-                        )
-                        if summaries:
-                            parts.append(summaries)
+                    summaries = await self._tool_memory.get_user_summaries(
+                        user_ctx.user_id,
+                    )
+                    if summaries:
+                        parts.append(summaries)
                 except Exception:
                     pass  # Tool memory unavailable — not critical
 
@@ -1136,7 +1513,9 @@ class AIService(Service):
         return "ai"
 
     def get_tools(self) -> list[ToolDefinition]:
-        return [
+        if not self._enabled:
+            return []
+        tools = [
             ToolDefinition(
                 name="rename_conversation",
                 description="Rename the current chat conversation to a user-specified title.",
@@ -1195,7 +1574,90 @@ class AIService(Service):
                 ],
                 required_role="admin",
             ),
+            # Persona tools
+            ToolDefinition(
+                name="get_persona",
+                description="Get the current AI persona (personality, tone, and behavioral instructions).",
+                required_role="everyone",
+            ),
+            ToolDefinition(
+                name="update_persona",
+                description=(
+                    "Update the AI persona. This changes how Gilbert behaves, speaks, "
+                    "and responds. The full persona text is replaced."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="text",
+                        type=ToolParameterType.STRING,
+                        description="The new persona text (full replacement).",
+                    ),
+                ],
+                required_role="admin",
+            ),
+            ToolDefinition(
+                name="reset_persona",
+                description="Reset the AI persona to the default.",
+                required_role="admin",
+            ),
         ]
+        # Memory tool (only when enabled)
+        if self._memory_enabled:
+            tools.append(
+                ToolDefinition(
+                    name="memory",
+                    description=(
+                        "Manage persistent memories for the current user. "
+                        "Use 'remember' when the user tells you something worth remembering "
+                        "(preferences, project details, personal info). Use 'auto' source when "
+                        "you notice something worth remembering that the user didn't explicitly ask to save. "
+                        "Use 'list' to see what you remember about them. "
+                        "Use 'recall' to load full content of specific memories by ID. "
+                        "Use 'update' to modify a memory. Use 'forget' to delete one."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="action",
+                            type=ToolParameterType.STRING,
+                            description="Action to perform.",
+                            enum=["remember", "recall", "update", "forget", "list"],
+                        ),
+                        ToolParameter(
+                            name="summary",
+                            type=ToolParameterType.STRING,
+                            description="Short summary sentence (for remember, or update).",
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="content",
+                            type=ToolParameterType.STRING,
+                            description="Detailed memory content (for remember, or update).",
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="source",
+                            type=ToolParameterType.STRING,
+                            description="'user' if they explicitly asked to remember, 'auto' if you decided to.",
+                            enum=["user", "auto"],
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="ids",
+                            type=ToolParameterType.ARRAY,
+                            description="Memory IDs to recall (for recall action).",
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="id",
+                            type=ToolParameterType.STRING,
+                            description="Memory ID (for update or forget).",
+                            required=False,
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
+        return tools
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         match name:
@@ -1211,6 +1673,14 @@ class AIService(Service):
                 return await self._tool_assign_profile(arguments)
             case "clear_ai_assignment":
                 return await self._tool_clear_assignment(arguments)
+            case "get_persona":
+                return await self._tool_get_persona()
+            case "update_persona":
+                return await self._tool_update_persona(arguments)
+            case "reset_persona":
+                return await self._tool_reset_persona()
+            case "memory":
+                return await self._tool_memory_action(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -1261,6 +1731,95 @@ class AIService(Service):
     async def _tool_clear_assignment(self, arguments: dict[str, Any]) -> str:
         await self.clear_assignment(arguments["call_name"])
         return _json.dumps({"status": "cleared"})
+
+    # --- Persona tool handlers ---
+
+    async def _tool_get_persona(self) -> str:
+        persona_text = self._persona.persona if self._persona else DEFAULT_PERSONA
+        return _json.dumps({"persona": persona_text})
+
+    async def _tool_update_persona(self, arguments: dict[str, Any]) -> str:
+        if self._persona is None:
+            return _json.dumps({"error": "Persona not initialized"})
+        text = arguments["text"]
+        await self._persona.update_persona(text)
+        return _json.dumps({"status": "updated", "length": len(text)})
+
+    async def _tool_reset_persona(self) -> str:
+        if self._persona is None:
+            return _json.dumps({"error": "Persona not initialized"})
+        await self._persona.reset_persona()
+        return _json.dumps({"status": "reset"})
+
+    # --- Memory tool handler ---
+
+    async def _tool_memory_action(self, arguments: dict[str, Any]) -> str:
+        if self._memory is None:
+            return "Memory system not initialized."
+        action = arguments.get("action", "")
+        user = get_current_user()
+        user_id = user.user_id
+        if user_id in ("system", "guest"):
+            return "Memory requires an authenticated user."
+        match action:
+            case "remember":
+                return await self._memory.remember(user_id, arguments)
+            case "recall":
+                return await self._memory.recall(user_id, arguments)
+            case "update":
+                return await self._memory.update(user_id, arguments)
+            case "forget":
+                return await self._memory.forget(user_id, arguments)
+            case "list":
+                return await self._memory.list_memories(user_id)
+            case _:
+                return f"Unknown memory action: {action}"
+
+    # --- Public tool memory API ---
+
+    async def get_tool_memory(self, user_id: str, namespace: str, key: str) -> Any | None:
+        """Get a tool memory value."""
+        if self._tool_memory is None:
+            return None
+        return await self._tool_memory.get(user_id, namespace, key)
+
+    async def put_tool_memory(
+        self, user_id: str, namespace: str, key: str, value: Any,
+    ) -> None:
+        """Store a tool memory value (upsert)."""
+        if self._tool_memory is None:
+            return
+        await self._tool_memory.put(user_id, namespace, key, value)
+
+    async def delete_tool_memory(self, user_id: str, namespace: str, key: str) -> bool:
+        """Delete a single tool memory entry."""
+        if self._tool_memory is None:
+            return False
+        return await self._tool_memory.delete(user_id, namespace, key)
+
+    async def list_tool_memory_keys(self, user_id: str, namespace: str) -> list[str]:
+        """List all keys in a tool memory namespace for a user."""
+        if self._tool_memory is None:
+            return []
+        return await self._tool_memory.list_keys(user_id, namespace)
+
+    async def get_all_tool_memory(self, user_id: str, namespace: str) -> dict[str, Any]:
+        """Get all key-value pairs in a tool memory namespace for a user."""
+        if self._tool_memory is None:
+            return {}
+        return await self._tool_memory.get_all(user_id, namespace)
+
+    async def delete_all_tool_memory(self, user_id: str, namespace: str) -> int:
+        """Delete all entries in a tool memory namespace for a user."""
+        if self._tool_memory is None:
+            return 0
+        return await self._tool_memory.delete_all(user_id, namespace)
+
+    async def get_tool_memory_user_summaries(self, user_id: str) -> str:
+        """Get formatted tool memory summaries for a user."""
+        if self._tool_memory is None:
+            return ""
+        return await self._tool_memory.get_user_summaries(user_id)
 
     async def _tool_rename_conversation(self, arguments: dict[str, Any]) -> str:
         title = arguments.get("title", "").strip()

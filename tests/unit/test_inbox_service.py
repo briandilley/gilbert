@@ -216,6 +216,19 @@ def event_bus_svc() -> FakeEventBusService:
     return FakeEventBusService()
 
 
+class FakeConfigurationService:
+    """Minimal stub for ConfigurationService used by InboxService.start()."""
+
+    def __init__(self, section: dict[str, Any] | None = None) -> None:
+        self._section = section or {}
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return self._section
+
+    def get(self, key: str) -> Any:
+        return None
+
+
 @pytest.fixture
 def resolver(backend: FakeEmailBackend, event_bus_svc: FakeEventBusService) -> FakeResolver:
     r = FakeResolver()
@@ -229,10 +242,22 @@ def resolver(backend: FakeEmailBackend, event_bus_svc: FakeEventBusService) -> F
 async def inbox_service(
     backend: FakeEmailBackend, resolver: FakeResolver,
 ) -> InboxService:
-    svc = InboxService(backend=backend)
+    svc = InboxService()
+    # Directly set enabled state and backend for tests, bypassing
+    # the config-driven backend creation in start().
+    svc._enabled = True
+    svc._backend = backend
     svc._email_address = "gilbert@example.com"
     svc._poll_interval = 60
-    await svc.start(resolver)
+    # Skip start() entirely — call only the parts we need (storage, scheduler, etc.)
+    from gilbert.interfaces.storage import IndexDefinition
+
+    storage_svc = resolver.require_capability("entity_storage")
+    svc._storage = getattr(storage_svc, "backend", storage_svc)
+    event_bus_svc = resolver.get_capability("event_bus")
+    if event_bus_svc:
+        svc._event_bus = getattr(event_bus_svc, "bus", event_bus_svc)
+    svc._knowledge = resolver.get_capability("knowledge")
     return svc
 
 
@@ -241,21 +266,28 @@ async def inbox_service(
 
 class TestServiceInfo:
     def test_service_info(self) -> None:
-        svc = InboxService(backend=FakeEmailBackend())
+        svc = InboxService()
         info = svc.service_info()
         assert info.name == "inbox"
         assert "email" in info.capabilities
         assert "ai_tools" in info.capabilities
         assert "entity_storage" in info.requires
         assert "scheduler" in info.requires
+        assert info.toggleable is True
 
     def test_tool_definitions(self) -> None:
-        svc = InboxService(backend=FakeEmailBackend())
+        svc = InboxService()
+        svc._enabled = True
         tools = svc.get_tools()
         names = {t.name for t in tools}
         assert names == {"inbox_search", "inbox_read", "inbox_reply", "inbox_send"}
         for t in tools:
             assert t.required_role == "user"
+
+    def test_tools_empty_when_disabled(self) -> None:
+        svc = InboxService()
+        tools = svc.get_tools()
+        assert tools == []
 
 
 class TestPolling:

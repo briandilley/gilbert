@@ -37,6 +37,7 @@ class RoastService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         self._probability: float = 0.10
         self._ai_prompt: str = (
             "Generate a playful, friendly roast of {name}. "
@@ -53,21 +54,28 @@ class RoastService(Service):
             requires=frozenset({"scheduler"}),
             optional=frozenset({"ai_chat", "presence", "text_to_speech", "speaker_control"}),
             ai_calls=frozenset({"roast"}),
+            toggleable=True,
+            toggle_description="Random playful roasts",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
 
-        # Load config
+        # Check enabled
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("roast")
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Roast service disabled")
+                    return
                 self._probability = float(section.get("probability", 0.10))
                 self._speakers = section.get("speakers", [])
                 self._ai_prompt = section.get("ai_prompt", self._ai_prompt)
+
+        self._enabled = True
 
         # Register hourly job with the scheduler
         from gilbert.core.services.scheduler import SchedulerService
@@ -102,11 +110,6 @@ class RoastService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the roast service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="probability", type=ToolParameterType.NUMBER,
                 description="Probability of roasting per hour (0.0-1.0).",

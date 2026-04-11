@@ -99,6 +99,7 @@ class TestBackupStart:
         from gilbert.core.services.configuration import ConfigurationService
 
         config_svc = FakeConfigService({"backup": {
+            "enabled": True,
             "retention_days": 7,
             "backup_hour": 5,
             "backup_minute": 30,

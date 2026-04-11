@@ -1,4 +1,4 @@
-"""Tests for PersonaService — persona storage, editing, and defaults."""
+"""Tests for _PersonaHelper — persona storage, editing, and defaults."""
 
 import json
 from typing import Any
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gilbert.core.services.persona import DEFAULT_PERSONA, PersonaService
+from gilbert.core.services.ai import DEFAULT_PERSONA, AIService, _PersonaHelper
 from gilbert.core.services.storage import StorageService
 from gilbert.interfaces.service import ServiceResolver
 from gilbert.interfaces.storage import StorageBackend
@@ -67,6 +67,68 @@ def stub_storage() -> StubStorageBackend:
 
 
 @pytest.fixture
+def helper(stub_storage: StubStorageBackend) -> _PersonaHelper:
+    return _PersonaHelper(stub_storage)
+
+
+# --- Lifecycle ---
+
+
+async def test_load_uses_default_when_no_saved(
+    helper: _PersonaHelper,
+) -> None:
+    await helper.load()
+    assert helper.persona == DEFAULT_PERSONA
+    assert helper.is_customized is False
+
+
+async def test_load_loads_saved_persona(
+    helper: _PersonaHelper, stub_storage: StubStorageBackend
+) -> None:
+    await stub_storage.put("persona", "active", {
+        "text": "Custom persona text",
+        "customized": True,
+    })
+    await helper.load()
+    assert helper.persona == "Custom persona text"
+    assert helper.is_customized is True
+
+
+# --- Update ---
+
+
+async def test_update_persona(
+    helper: _PersonaHelper, stub_storage: StubStorageBackend
+) -> None:
+    await helper.load()
+    await helper.update_persona("Be a pirate.")
+    assert helper.persona == "Be a pirate."
+    assert helper.is_customized is True
+
+    saved = await stub_storage.get("persona", "active")
+    assert saved is not None
+    assert saved["text"] == "Be a pirate."
+    assert saved["customized"] is True
+
+
+async def test_reset_persona(
+    helper: _PersonaHelper, stub_storage: StubStorageBackend
+) -> None:
+    await helper.load()
+    await helper.update_persona("Custom")
+    await helper.reset_persona()
+    assert helper.persona == DEFAULT_PERSONA
+    assert helper.is_customized is False
+
+    saved = await stub_storage.get("persona", "active")
+    assert saved is not None
+    assert saved["customized"] is False
+
+
+# --- Tools via AIService ---
+
+
+@pytest.fixture
 def storage_service(stub_storage: StubStorageBackend) -> StorageService:
     return StorageService(stub_storage)
 
@@ -82,88 +144,24 @@ def resolver(storage_service: StorageService) -> ServiceResolver:
 
     mock.require_capability.side_effect = require_cap
     mock.get_capability.return_value = None
+    mock.get_all.return_value = []
     return mock
 
 
-@pytest.fixture
-def service() -> PersonaService:
-    return PersonaService()
+def test_ai_service_has_persona_tools() -> None:
+    """AIService exposes persona tools."""
+    from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
 
+    class _StubBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None: pass
+        async def close(self) -> None: pass
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
-# --- Service info ---
-
-
-def test_service_info(service: PersonaService) -> None:
-    info = service.service_info()
-    assert info.name == "persona"
-    assert "persona" in info.capabilities
-    assert "ai_tools" in info.capabilities
-    assert "entity_storage" in info.requires
-
-
-# --- Lifecycle ---
-
-
-async def test_start_uses_default_when_no_saved(
-    service: PersonaService, resolver: ServiceResolver
-) -> None:
-    await service.start(resolver)
-    assert service.persona == DEFAULT_PERSONA
-    assert service.is_customized is False
-
-
-async def test_start_loads_saved_persona(
-    service: PersonaService, resolver: ServiceResolver, stub_storage: StubStorageBackend
-) -> None:
-    await stub_storage.put("gilbert.persona", "active", {
-        "text": "Custom persona text",
-        "customized": True,
-    })
-    await service.start(resolver)
-    assert service.persona == "Custom persona text"
-    assert service.is_customized is True
-
-
-# --- Update ---
-
-
-async def test_update_persona(
-    service: PersonaService, resolver: ServiceResolver, stub_storage: StubStorageBackend
-) -> None:
-    await service.start(resolver)
-    await service.update_persona("Be a pirate.")
-    assert service.persona == "Be a pirate."
-    assert service.is_customized is True
-
-    saved = await stub_storage.get("gilbert.persona", "active")
-    assert saved is not None
-    assert saved["text"] == "Be a pirate."
-    assert saved["customized"] is True
-
-
-async def test_reset_persona(
-    service: PersonaService, resolver: ServiceResolver, stub_storage: StubStorageBackend
-) -> None:
-    await service.start(resolver)
-    await service.update_persona("Custom")
-    await service.reset_persona()
-    assert service.persona == DEFAULT_PERSONA
-    assert service.is_customized is False
-
-    saved = await stub_storage.get("gilbert.persona", "active")
-    assert saved is not None
-    assert saved["customized"] is False
-
-
-# --- Tools ---
-
-
-def test_tool_provider_name(service: PersonaService) -> None:
-    assert service.tool_provider_name == "persona"
-
-
-def test_get_tools(service: PersonaService) -> None:
-    tools = service.get_tools()
+    svc = AIService()
+    svc._backend = _StubBackend()
+    svc._enabled = True
+    tools = svc.get_tools()
     names = [t.name for t in tools]
     assert "get_persona" in names
     assert "update_persona" in names
@@ -171,40 +169,93 @@ def test_get_tools(service: PersonaService) -> None:
 
 
 async def test_tool_get_persona(
-    service: PersonaService, resolver: ServiceResolver
+    resolver: ServiceResolver,
 ) -> None:
-    await service.start(resolver)
-    result = await service.execute_tool("get_persona", {})
+    from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
+
+    class _StubBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None: pass
+        async def close(self) -> None: pass
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
+
+    svc = AIService()
+    svc._backend = _StubBackend()
+    svc._enabled = True
+    svc._config = {}
+    await svc.start(resolver)
+
+    result = await svc.execute_tool("get_persona", {})
     parsed = json.loads(result)
     assert parsed["persona"] == DEFAULT_PERSONA
 
 
 async def test_tool_update_persona(
-    service: PersonaService, resolver: ServiceResolver
+    resolver: ServiceResolver,
 ) -> None:
-    await service.start(resolver)
-    result = await service.execute_tool("update_persona", {"text": "Be helpful."})
+    from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
+
+    class _StubBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None: pass
+        async def close(self) -> None: pass
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
+
+    svc = AIService()
+    svc._backend = _StubBackend()
+    svc._enabled = True
+    svc._config = {}
+    await svc.start(resolver)
+
+    result = await svc.execute_tool("update_persona", {"text": "Be helpful."})
     parsed = json.loads(result)
     assert parsed["status"] == "updated"
-    assert service.persona == "Be helpful."
-    assert service.is_customized is True
+    assert svc._persona is not None
+    assert svc._persona.persona == "Be helpful."
+    assert svc._persona.is_customized is True
 
 
 async def test_tool_reset_persona(
-    service: PersonaService, resolver: ServiceResolver
+    resolver: ServiceResolver,
 ) -> None:
-    await service.start(resolver)
-    await service.update_persona("Custom")
-    result = await service.execute_tool("reset_persona", {})
+    from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
+
+    class _StubBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None: pass
+        async def close(self) -> None: pass
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
+
+    svc = AIService()
+    svc._backend = _StubBackend()
+    svc._enabled = True
+    svc._config = {}
+    await svc.start(resolver)
+
+    await svc.execute_tool("update_persona", {"text": "Custom"})
+    result = await svc.execute_tool("reset_persona", {})
     parsed = json.loads(result)
     assert parsed["status"] == "reset"
-    assert service.persona == DEFAULT_PERSONA
-    assert service.is_customized is False
+    assert svc._persona is not None
+    assert svc._persona.persona == DEFAULT_PERSONA
+    assert svc._persona.is_customized is False
 
 
 async def test_tool_unknown_raises(
-    service: PersonaService, resolver: ServiceResolver
+    resolver: ServiceResolver,
 ) -> None:
-    await service.start(resolver)
+    from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
+
+    class _StubBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None: pass
+        async def close(self) -> None: pass
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
+
+    svc = AIService()
+    svc._backend = _StubBackend()
+    svc._enabled = True
+    svc._config = {}
+    await svc.start(resolver)
     with pytest.raises(KeyError, match="Unknown tool"):
-        await service.execute_tool("nonexistent", {})
+        await svc.execute_tool("nonexistent", {})

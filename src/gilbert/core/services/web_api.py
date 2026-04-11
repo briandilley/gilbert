@@ -66,10 +66,12 @@ class WebApiService(Service):
         acl = gilbert.service_manager.get_by_capability("access_control")
         cards = []
         for card in _DASHBOARD_CARDS:
-            # Skip cards whose required service is not running
+            # Skip cards whose required service is not running or disabled
             cap = card.get("requires_capability")
-            if cap and gilbert.service_manager.get_by_capability(cap) is None:
-                continue
+            if cap:
+                svc = gilbert.service_manager.get_by_capability(cap)
+                if svc is None or not getattr(svc, "_enabled", True):
+                    continue
             if acl is not None:
                 required_level = acl.get_role_level(card["required_role"])
                 if conn.user_level > required_level:

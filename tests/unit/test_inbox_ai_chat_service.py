@@ -4,7 +4,6 @@ from typing import Any
 
 import pytest
 
-from gilbert.config import InboxAIChatConfig
 from gilbert.core.services.inbox_ai_chat import (
     InboxAIChatService,
     markdown_to_html,
@@ -213,10 +212,15 @@ class FakeResolver:
 # ── Fixtures ───────────────────────────────────────────────────
 
 
-def _make_config(**kwargs: Any) -> InboxAIChatConfig:
-    defaults = {"enabled": True, "allowed_domains": ["example.com"]}
+def _make_service(**kwargs: Any) -> InboxAIChatService:
+    """Create a service with the given config attributes."""
+    defaults: dict[str, Any] = {"enabled": True, "allowed_domains": ["example.com"]}
     defaults.update(kwargs)
-    return InboxAIChatConfig(**defaults)
+    svc = InboxAIChatService()
+    svc._enabled = defaults.pop("enabled", False)
+    svc._allowed_domains = [d.lower().lstrip("@") for d in defaults.pop("allowed_domains", [])]
+    svc._allowed_emails = [e.lower() for e in defaults.pop("allowed_emails", [])]
+    return svc
 
 
 @pytest.fixture
@@ -288,7 +292,7 @@ def resolver(
 
 @pytest.fixture
 async def service(resolver: FakeResolver) -> InboxAIChatService:
-    svc = InboxAIChatService(_make_config())
+    svc = _make_service()
     await svc.start(resolver)
     return svc
 
@@ -318,7 +322,7 @@ def _make_event(
 
 class TestServiceInfo:
     def test_service_info(self) -> None:
-        svc = InboxAIChatService(_make_config())
+        svc = _make_service()
         info = svc.service_info()
         assert info.name == "inbox_ai_chat"
         assert "email_ai_chat" in info.capabilities
@@ -329,26 +333,26 @@ class TestServiceInfo:
 
 class TestAllowlist:
     def test_allowed_by_domain(self) -> None:
-        svc = InboxAIChatService(_make_config(allowed_domains=["example.com"]))
+        svc = _make_service(allowed_domains=["example.com"])
         assert svc._is_allowed("alice@example.com")
         assert not svc._is_allowed("alice@other.com")
 
     def test_allowed_by_email(self) -> None:
-        svc = InboxAIChatService(_make_config(
+        svc = _make_service(
             allowed_emails=["special@other.com"], allowed_domains=[],
-        ))
+        )
         assert svc._is_allowed("special@other.com")
         assert not svc._is_allowed("alice@other.com")
 
     def test_case_insensitive(self) -> None:
-        svc = InboxAIChatService(_make_config(
+        svc = _make_service(
             allowed_emails=["Alice@Example.com"], allowed_domains=["CORP.COM"],
-        ))
+        )
         assert svc._is_allowed("alice@example.com")
         assert svc._is_allowed("bob@corp.com")
 
     def test_empty_allowlist_blocks_all(self) -> None:
-        svc = InboxAIChatService(_make_config(allowed_emails=[], allowed_domains=[]))
+        svc = _make_service(allowed_emails=[], allowed_domains=[])
         assert not svc._is_allowed("anyone@anywhere.com")
 
 
@@ -526,11 +530,11 @@ class TestMarkdownToHtml:
 
 class TestToolProvider:
     def test_tool_provider_name(self) -> None:
-        svc = InboxAIChatService(_make_config())
+        svc = _make_service()
         assert svc.tool_provider_name == "inbox_ai_chat"
 
     def test_get_tools_returns_email_attach(self) -> None:
-        svc = InboxAIChatService(_make_config())
+        svc = _make_service()
         tools = svc.get_tools()
         assert len(tools) == 1
         assert tools[0].name == "email_attach"
@@ -599,7 +603,7 @@ class TestEmailAttachTool:
         r.caps["email"] = FakeInboxService()
         r.caps["ai_chat"] = FakeAIService()
         r.caps["entity_storage"] = FakeStorageService()
-        svc = InboxAIChatService(_make_config())
+        svc = _make_service()
         await svc.start(r)
 
         result = await svc.execute_tool("email_attach", {

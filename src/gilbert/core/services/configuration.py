@@ -197,15 +197,21 @@ class ConfigurationService(Service):
 
         Returns a status dict: {"status": "ok"} or {"status": "error", "message": ...}
         """
-        # Determine namespace (first path segment)
+        # Redirect _services.X toggles to X.enabled
         parts = path.split(".")
+        is_service_toggle = parts[0] == "_services" and len(parts) == 2
+        if is_service_toggle:
+            path = f"{parts[1]}.enabled"
+            parts = path.split(".")
+
+        # Determine namespace (first path segment)
         namespace = parts[0]
 
         # Check if this param is restart_required
-        restart_needed = False
+        restart_needed = is_service_toggle  # Service toggles always require restart
         param_key = ".".join(parts[1:]) if len(parts) > 1 else ""
         configurable = self._find_configurable(namespace)
-        if configurable:
+        if not restart_needed and configurable:
             for param in configurable.config_params():
                 if param.key == param_key and param.restart_required:
                     restart_needed = True
@@ -260,9 +266,8 @@ class ConfigurationService(Service):
         if not isinstance(self._resolver, ServiceManager):
             return result
 
-        for name in self._resolver.started_services:
-            svc = self._resolver.get_service(name)
-            if svc is not None and isinstance(svc, Configurable):
+        for svc in self._resolver._registered.values():
+            if isinstance(svc, Configurable):
                 result[svc.config_namespace] = svc.config_params()
 
         return result
@@ -283,6 +288,10 @@ class ConfigurationService(Service):
 
         sm = self._resolver
 
+        # Build the "Services" toggle section for toggleable services
+        toggle_params: list[dict[str, Any]] = []
+        toggle_values: dict[str, Any] = {}
+
         # Gather sections grouped by category
         categories: dict[str, list[dict[str, Any]]] = {}
         for name in list(sm._registered.keys()):
@@ -293,8 +302,37 @@ class ConfigurationService(Service):
             ns = svc.config_namespace
             if ns in YAML_ONLY_SECTIONS:
                 continue
+
+            info = svc.service_info() if isinstance(svc, Service) else None
+
+            # Collect toggle params for the "Services" section
+            if info is not None and info.toggleable:
+                section = self.get_section_safe(ns)
+                enabled = section.get("enabled", False)
+                toggle_values[ns] = enabled
+                toggle_params.append(self._serialize_param(
+                    ConfigParam(
+                        key=ns,
+                        type=ToolParameterType.BOOLEAN,
+                        description=info.toggle_description or f"Enable {info.name} service",
+                        default=False,
+                        restart_required=True,
+                    ),
+                    toggle_values,
+                ))
+
+            # Skip disabled toggleable services — their config section
+            # only appears once the service is enabled via the Services tab.
+            if info is not None and info.toggleable:
+                section = self.get_section_safe(ns)
+                if not section.get("enabled", False):
+                    continue
+
             cat = svc.config_category
             params = svc.config_params()
+            # Filter out the 'enabled' param — it's shown in the "Services" section
+            if info is not None and info.toggleable:
+                params = [p for p in params if p.key != "enabled"]
             if not params:
                 continue
             started = name in sm.started_services
@@ -312,9 +350,23 @@ class ConfigurationService(Service):
                 "values": section,
             })
 
+        # Add the "Services" category if there are toggleable services
+        if toggle_params:
+            # Sort toggle params alphabetically by key
+            toggle_params.sort(key=lambda p: p["key"])
+            categories["Services"] = [{
+                "namespace": "_services",
+                "service_name": "_services",
+                "enabled": True,
+                "started": True,
+                "failed": False,
+                "params": toggle_params,
+                "values": toggle_values,
+            }]
+
         # Sort categories in a stable display order
         order = [
-            "Intelligence", "Media", "Communication",
+            "Services", "Intelligence", "Media", "Communication",
             "Security", "Monitoring", "Infrastructure",
         ]
         rank = {name: i for i, name in enumerate(order)}
@@ -421,75 +473,48 @@ class ConfigurationService(Service):
         if not isinstance(self._resolver, ServiceManager):
             return None
 
-        for name in self._resolver.started_services:
-            svc = self._resolver.get_service(name)
-            if svc is not None and isinstance(svc, Configurable):
-                if svc.config_namespace == namespace:
-                    return svc
+        # Search all registered services (not just started ones) so that
+        # disabled services' config can still be viewed and modified.
+        for svc in self._resolver._registered.values():
+            if isinstance(svc, Configurable) and svc.config_namespace == namespace:
+                return svc
         return None
 
     async def _handle_restart(self, namespace: str) -> dict[str, Any]:
-        """Handle a structural config change by restarting the service."""
+        """Handle a structural config change by restarting the service.
+
+        All services are always registered. This handles:
+        - Toggling enabled/disabled (service restarts with new config)
+        - Backend or structural config changes (factory creates new instance)
+        """
         if self._service_manager is None:
             return {"status": "error", "message": "No service manager available for restart"}
 
+        # Find the registered service for this namespace
+        svc_name: str | None = None
+        for name, svc in self._service_manager._registered.items():
+            if isinstance(svc, Configurable) and svc.config_namespace == namespace:
+                svc_name = name
+                break
+
+        if svc_name is None:
+            return {"status": "error", "message": f"No service registered for '{namespace}'"}
+
         factory = self._factories.get(namespace)
-        if factory is None:
-            return {
-                "status": "error",
-                "message": f"No factory registered for '{namespace}' — cannot hot-swap",
-            }
 
-        section = self.get_section(namespace)
-
-        # Check if service should be enabled
-        enabled = section.get("enabled", True)
-
-        # Find current service name for this namespace
-        configurable = self._find_configurable(namespace)
-        if configurable is None and not enabled:
-            return {"status": "ok", "message": f"Service '{namespace}' is not running"}
-
-        if configurable is None and enabled:
-            # Service wasn't running but now should be
-            try:
-                new_svc = factory(section)
-                await self._service_manager.register_and_start(new_svc)
-                return {"status": "ok", "message": f"Service '{namespace}' enabled and started"}
-            except Exception as exc:
-                logger.exception("Failed to enable service %s", namespace)
-                return {"status": "error", "message": f"Failed to enable: {exc}"}
-
-        if configurable is not None and not enabled:
-            # Service is running but should be disabled
-            svc_name = configurable.config_namespace
-            # Find the actual service name from the manager
-            for name in self._service_manager.started_services:
-                svc = self._service_manager.get_service(name)
-                if svc is configurable:
-                    try:
-                        await svc.stop()
-                        logger.info("Service disabled: %s", name)
-                    except Exception:
-                        logger.exception("Error stopping disabled service %s", name)
-                    return {"status": "ok", "message": f"Service '{namespace}' disabled"}
-            return {"status": "ok", "message": f"Service '{namespace}' disabled"}
-
-        # Service is running and should be restarted with new config
         try:
-            new_svc = factory(section)
-            # Find the registered name
-            for name in list(self._service_manager.started_services):
-                svc = self._service_manager.get_service(name)
-                if svc is not None and isinstance(svc, Configurable):
-                    if svc.config_namespace == namespace:
-                        await self._service_manager.restart_service(name, new_svc)
-                        return {"status": "ok", "message": f"Service '{namespace}' restarted"}
+            if factory is not None:
+                # Factory exists — create a fresh instance and hot-swap
+                section = self.get_section(namespace)
+                new_svc = factory(section)
+                await self._service_manager.restart_service(svc_name, new_svc)
+            else:
+                # No factory — just restart the existing service in place
+                await self._service_manager.restart_service(svc_name)
+            return {"status": "ok", "message": f"Service '{namespace}' restarted"}
         except Exception as exc:
             logger.exception("Failed to restart service %s", namespace)
             return {"status": "error", "message": f"Restart failed: {exc}"}
-
-        return {"status": "error", "message": f"Could not find running service for '{namespace}'"}
 
     @staticmethod
     def _set_nested(d: dict[str, Any], keys: list[str], value: Any) -> None:

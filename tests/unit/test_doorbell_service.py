@@ -32,7 +32,10 @@ def mock_speaker() -> MagicMock:
 
 @pytest.fixture
 def service(mock_backend: DoorbellBackend) -> DoorbellService:
-    return DoorbellService(mock_backend)
+    svc = DoorbellService()
+    svc._backend = mock_backend
+    svc._enabled = True
+    return svc
 
 
 def _ring(camera: str, ts: int = 1700000001000) -> RingEvent:

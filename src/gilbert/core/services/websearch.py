@@ -82,23 +82,24 @@ class _HTMLToText(HTMLParser):
 class WebSearchService(Service, ToolProvider):
     """Wraps a WebSearchBackend as a discoverable service with AI tools."""
 
-    def __init__(
-        self,
-        backend: WebSearchBackend,
-        settings: dict[str, Any] | None = None,
-    ) -> None:
-        self._backend = backend
-        self._settings = settings or {}
+    def __init__(self) -> None:
+        self._backend: WebSearchBackend | None = None
+        self._backend_name: str = "tavily"
+        self._enabled: bool = False
+        self._settings: dict[str, Any] = {}
         self._http_client: httpx.AsyncClient | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="websearch",
             capabilities=frozenset({"websearch", "ai_tools"}),
+            toggleable=True,
+            toggle_description="Web search and URL fetching",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         # Load config
+        backend_name = "tavily"
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
@@ -106,6 +107,25 @@ class WebSearchService(Service, ToolProvider):
             if isinstance(config_svc, ConfigurationService):
                 section = config_svc.get_section("websearch")
                 self._settings = section.get("settings", self._settings)
+                backend_name = section.get("backend", "tavily")
+
+                if not section.get("enabled", False):
+                    logger.info("Web search service disabled")
+                    return
+
+        self._enabled = True
+        self._backend_name = backend_name
+
+        try:
+            import gilbert.integrations.tavily_search  # noqa: F401
+        except ImportError:
+            pass
+
+        backends = WebSearchBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown web search backend: {backend_name}")
+        self._backend = backend_cls()
 
         # Initialize backend with settings (includes API key)
         await self._backend.initialize(self._settings)
@@ -117,10 +137,13 @@ class WebSearchService(Service, ToolProvider):
         logger.info("Web search service started")
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
+            self._backend = None
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
+        self._enabled = False
 
     # --- Configurable protocol ---
 
@@ -135,12 +158,13 @@ class WebSearchService(Service, ToolProvider):
     def config_params(self) -> list["ConfigParam"]:
         from gilbert.interfaces.configuration import ConfigParam
 
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.tavily_search  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the web search service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Web search backend provider.",
@@ -148,14 +172,17 @@ class WebSearchService(Service, ToolProvider):
                 choices=tuple(WebSearchBackend.registered_backends().keys()) or ("tavily",),
             ),
         ]
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, choices_from=bp.choices_from,
-                multiline=bp.multiline, backend_param=True,
-            ))
+        backends = WebSearchBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, choices_from=bp.choices_from,
+                    multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -168,6 +195,8 @@ class WebSearchService(Service, ToolProvider):
         return "websearch"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="web_search",
@@ -331,6 +360,9 @@ class WebSearchService(Service, ToolProvider):
         query = arguments.get("query", "")
         if not query:
             return json.dumps({"error": "query is required"})
+
+        if self._backend is None:
+            return json.dumps({"error": "Service not initialized"})
 
         count = min(int(arguments.get("count", 5)), 10)
 

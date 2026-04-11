@@ -58,11 +58,10 @@ def _append_silence(audio: bytes, fmt: AudioFormat, seconds: float) -> bytes:
 class TTSService(Service):
     """Exposes a TTSBackend as a service with text_to_speech capability."""
 
-    def __init__(
-        self,
-        backend: TTSBackend,
-    ) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: TTSBackend | None = None
+        self._backend_name: str = "elevenlabs"
+        self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._silence_padding: float = 3.0
         self._output_ttl_seconds: int = 3600
@@ -72,26 +71,51 @@ class TTSService(Service):
             name="tts",
             capabilities=frozenset({"text_to_speech", "ai_tools"}),
             optional=frozenset({"configuration"}),
+            toggleable=True,
+            toggle_description="Text-to-speech synthesis",
         )
 
     @property
-    def backend(self) -> TTSBackend:
+    def backend(self) -> TTSBackend | None:
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
         config_svc = resolver.get_capability("configuration")
+        section: dict[str, Any] = {}
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("tts")
-                self._config = section.get("settings", self._config)
-                sp = section.get("silence_padding")
-                if sp is not None:
-                    self._silence_padding = float(sp)
+                section = config_svc.get_section(self.config_namespace)
                 global_ttl = config_svc.get("output_ttl_seconds")
                 if global_ttl is not None:
                     self._output_ttl_seconds = int(global_ttl)
+
+        if not section.get("enabled", False):
+            logger.info("TTS service disabled")
+            return
+
+        self._enabled = True
+
+        self._config = section.get("settings", self._config)
+        sp = section.get("silence_padding")
+        if sp is not None:
+            self._silence_padding = float(sp)
+
+        backend_name = section.get("backend", "elevenlabs")
+        self._backend_name = backend_name
+        backends = TTSBackend.registered_backends()
+        if backend_name not in backends:
+            # Import known backends to trigger registration
+            try:
+                import gilbert.integrations.elevenlabs_tts  # noqa: F401
+            except ImportError:
+                pass
+            backends = TTSBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown TTS backend: {backend_name}")
+        self._backend = backend_cls()
 
         await self._backend.initialize(self._config)
         logger.info("TTS service started")
@@ -107,6 +131,12 @@ class TTSService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.elevenlabs_tts  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
             ConfigParam(
                 key="silence_padding", type=ToolParameterType.NUMBER,
@@ -119,19 +149,17 @@ class TTSService(Service):
                 default="elevenlabs", restart_required=True,
                 choices=tuple(TTSBackend.registered_backends().keys()) or ("elevenlabs",),
             ),
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the TTS service is enabled.",
-                default=False, restart_required=True,
-            ),
         ]
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, multiline=bp.multiline, backend_param=True,
-            ))
+        backends = TTSBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -141,10 +169,13 @@ class TTSService(Service):
             self._silence_padding = float(sp)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
 
     async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
         """Synthesize speech from text. Appends silence padding if configured."""
+        if self._backend is None:
+            raise RuntimeError("TTS service is not enabled")
         result = await self._backend.synthesize(request)
         if self._silence_padding > 0:
             padded = _append_silence(result.audio, result.format, self._silence_padding)
@@ -158,6 +189,8 @@ class TTSService(Service):
 
     async def list_voices(self) -> list[Voice]:
         """List available voices from the backend."""
+        if self._backend is None:
+            raise RuntimeError("TTS service is not enabled")
         return await self._backend.list_voices()
 
     # --- ToolProvider protocol ---
@@ -167,6 +200,8 @@ class TTSService(Service):
         return "tts"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="synthesize",

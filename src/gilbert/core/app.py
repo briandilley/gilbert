@@ -21,7 +21,6 @@ from gilbert.core.services import (
     EventBusService,
     InboxService,
     MusicService,
-    PersonaService,
     SpeakerService,
     StorageService,
     TTSService,
@@ -29,15 +28,10 @@ from gilbert.core.services import (
 )
 from gilbert.core.services.ai import AIService
 from gilbert.core.services.configuration import ConfigurationService
-from gilbert.interfaces.ai import AIBackend
 from gilbert.interfaces.events import EventBus
-from gilbert.interfaces.music import MusicBackend
 from gilbert.interfaces.plugin import Plugin, PluginContext
-from gilbert.interfaces.presence import PresenceBackend
 from gilbert.interfaces.service import Service
-from gilbert.interfaces.speaker import SpeakerBackend
 from gilbert.interfaces.storage import StorageBackend
-from gilbert.interfaces.tts import TTSBackend
 from gilbert.plugins.loader import PluginLoader, PluginManifest
 from gilbert.storage.sqlite import SQLiteStorage
 
@@ -150,141 +144,92 @@ class Gilbert:
             )
         )
 
-        # 6. Persona service (always — AI persona is core)
-        self.service_manager.register(PersonaService())
-
         # 6b. Scheduler service (always — timers, alarms, periodic jobs)
         from gilbert.core.services.scheduler import SchedulerService
 
         self.service_manager.register(SchedulerService())
 
-        # 6c. OCR service (always — gracefully degrades if backend not available)
+        # 6c. OCR service
         from gilbert.core.services.ocr import OCRService
 
-        ocr_backend = self._create_ocr_backend("tesseract")
-        self.service_manager.register(OCRService(ocr_backend))
+        self.service_manager.register(OCRService())
 
-        # 6d. Vision service (if knowledge + vision enabled)
-        if self.config.knowledge.enabled and self.config.knowledge.vision_enabled:
-            from gilbert.core.services.vision import VisionService
+        # 6d. Vision service
+        from gilbert.core.services.vision import VisionService
 
-            vision_backend = self._create_vision_backend("anthropic")
-            self.service_manager.register(VisionService(vision_backend))
+        self.service_manager.register(VisionService())
 
-        # 6. Tunnel service (if enabled — before auth, as Google OAuth uses it)
-        if self.config.tunnel.enabled:
-            from gilbert.core.services.tunnel import TunnelService
+        # 6e. Tunnel service (before auth, as Google OAuth uses it)
+        from gilbert.core.services.tunnel import TunnelService
 
-            tunnel_backend = self._create_tunnel_backend(
-                getattr(self.config.tunnel, "backend", "ngrok")
-            )
-            self.service_manager.register(
-                TunnelService(tunnel_backend, local_port=self.config.web.port)
-            )
+        self.service_manager.register(TunnelService())
 
         # 7. Authentication (always enabled, backends created internally)
         self.service_manager.register(AuthService(self.config.auth))
 
-        # 9. Register optional services (structural deps via constructor)
-        if self.config.tts.enabled:
-            tts_backend = self._create_tts_backend(self.config.tts.backend)
-            self.service_manager.register(TTSService(tts_backend))
+        # 8. Register all optional services (they self-manage enabled/disabled)
+        self.service_manager.register(TTSService())
+        self.service_manager.register(SpeakerService())
+        self.service_manager.register(MusicService())
 
-        if self.config.speaker.enabled:
-            speaker_backend = self._create_speaker_backend(self.config.speaker.backend)
-            self.service_manager.register(SpeakerService(speaker_backend))
+        from gilbert.core.services.knowledge import KnowledgeService
 
-        if self.config.music.enabled:
-            music_backend = self._create_music_backend(self.config.music.backend)
-            self.service_manager.register(MusicService(music_backend))
+        self.service_manager.register(KnowledgeService())
 
-        if self.config.knowledge.enabled:
-            from gilbert.core.services.knowledge import KnowledgeService
+        from gilbert.core.services.presence import PresenceService
 
-            self.service_manager.register(KnowledgeService())
+        self.service_manager.register(PresenceService())
 
-        if self.config.presence.enabled:
-            from gilbert.core.services.presence import PresenceService
+        from gilbert.core.services.doorbell import DoorbellService
 
-            presence_backend = self._create_presence_backend(self.config.presence.backend)
-            self.service_manager.register(PresenceService(presence_backend))
+        self.service_manager.register(DoorbellService())
 
-        if self.config.doorbell.enabled:
-            from gilbert.core.services.doorbell import DoorbellService
+        from gilbert.core.services.screens import ScreenService
 
-            doorbell_backend = self._create_doorbell_backend(self.config.doorbell.backend)
-            self.service_manager.register(DoorbellService(doorbell_backend))
+        self.service_manager.register(ScreenService())
 
-        if self.config.screens.enabled:
-            from gilbert.core.services.screens import ScreenService
+        from gilbert.core.services.greeting import GreetingService
 
-            self.service_manager.register(ScreenService())
+        self.service_manager.register(GreetingService())
 
-        if self.config.greeting.enabled:
-            from gilbert.core.services.greeting import GreetingService
+        from gilbert.core.services.backup import BackupService
 
-            self.service_manager.register(GreetingService())
+        self.service_manager.register(BackupService())
 
-        if self.config.backup.enabled:
-            from gilbert.core.services.backup import BackupService
+        from gilbert.core.services.radio_dj import RadioDJService
 
-            self.service_manager.register(BackupService())
+        self.service_manager.register(RadioDJService())
 
-        if self.config.radio_dj.enabled:
-            from gilbert.core.services.radio_dj import RadioDJService
+        from gilbert.core.services.roast import RoastService
 
-            self.service_manager.register(RadioDJService())
+        self.service_manager.register(RoastService())
 
-        if self.config.roast.enabled:
-            from gilbert.core.services.roast import RoastService
+        self.service_manager.register(InboxService())
 
-            self.service_manager.register(RoastService())
+        from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 
-        if self.config.inbox.enabled:
-            email_backend = self._create_email_backend(self.config.inbox.backend)
-            self.service_manager.register(InboxService(backend=email_backend))
+        self.service_manager.register(InboxAIChatService())
 
-        if self.config.inbox_ai_chat.enabled:
-            from gilbert.core.services.inbox_ai_chat import InboxAIChatService
+        from gilbert.integrations.slack import SlackService
 
-            self.service_manager.register(InboxAIChatService(self.config.inbox_ai_chat))
-
-        if self.config.slack.enabled:
-            from gilbert.integrations.slack import SlackService
-
-            self.service_manager.register(SlackService())
-
-        # Memory service (always — uses entity storage)
-        from gilbert.core.services.memory import MemoryService
-
-        self.service_manager.register(MemoryService())
-
-        # Tool memory service (per-user key-value store for tools/skills)
-        from gilbert.core.services.tool_memory import ToolMemoryService
-
-        self.service_manager.register(ToolMemoryService())
+        self.service_manager.register(SlackService())
 
         # Web search service
-        if self.config.websearch.enabled:
-            from gilbert.core.services.websearch import WebSearchService
+        from gilbert.core.services.websearch import WebSearchService
 
-            ws_backend = self._create_websearch_backend(self.config.websearch.backend)
-            self.service_manager.register(WebSearchService(ws_backend))
+        self.service_manager.register(WebSearchService())
 
         # Skills service
-        if self.config.skills.enabled:
-            from gilbert.core.services.skills import SkillService
+        from gilbert.core.services.skills import SkillService
 
-            self.service_manager.register(SkillService(self.config.skills))
+        self.service_manager.register(SkillService())
 
         # Web API service (always — dashboard, system inspector, entity browser)
         from gilbert.core.services.web_api import WebApiService
 
         self.service_manager.register(WebApiService())
 
-        if self.config.ai.enabled:
-            ai_backend = self._create_ai_backend(self.config.ai.backend)
-            self.service_manager.register(AIService(ai_backend))
+        self.service_manager.register(AIService())
 
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
@@ -394,135 +339,29 @@ class Gilbert:
 
         return PasswordHasher().hash(password)
 
-    # --- Backend factories ---
-
-    @staticmethod
-    def _create_email_backend(backend_name: str) -> "EmailBackend":
-        """Create an email backend by name."""
-        if backend_name == "gmail":
-            from gilbert.integrations.gmail import GmailBackend
-
-            return GmailBackend()
-        raise ValueError(f"Unknown email backend: {backend_name}")
-
-    @staticmethod
-    def _create_websearch_backend(backend_name: str) -> "WebSearchBackend":
-        """Create a web search backend by name."""
-        if backend_name == "tavily":
-            from gilbert.integrations.tavily_search import TavilySearch
-
-            return TavilySearch()
-        raise ValueError(f"Unknown web search backend: {backend_name}")
-
-    @staticmethod
-    def _create_ai_backend(backend_name: str) -> AIBackend:
-        """Create an AI backend by name."""
-        if backend_name == "anthropic":
-            from gilbert.integrations.anthropic_ai import AnthropicAI
-
-            return AnthropicAI()
-        raise ValueError(f"Unknown AI backend: {backend_name}")
-
-    @staticmethod
-    def _create_music_backend(backend_name: str) -> MusicBackend:
-        """Create a music backend by name."""
-        if backend_name == "spotify":
-            from gilbert.integrations.spotify_music import SpotifyMusic
-
-            return SpotifyMusic()
-        raise ValueError(f"Unknown music backend: {backend_name}")
-
-    @staticmethod
-    def _create_doorbell_backend(backend_name: str) -> "DoorbellBackend":
-        """Create a doorbell backend by name."""
-        if backend_name == "unifi":
-            from gilbert.integrations.unifi.doorbell import UniFiProtectDoorbellBackend
-
-            return UniFiProtectDoorbellBackend()
-        raise ValueError(f"Unknown doorbell backend: {backend_name}")
-
-    @staticmethod
-    def _create_presence_backend(backend_name: str) -> PresenceBackend:
-        """Create a presence backend by name."""
-        if backend_name == "unifi":
-            from gilbert.integrations.unifi import UniFiPresenceBackend
-
-            return UniFiPresenceBackend()
-        raise ValueError(f"Unknown presence backend: {backend_name}")
-
-    @staticmethod
-    def _create_speaker_backend(backend_name: str) -> SpeakerBackend:
-        """Create a speaker backend by name."""
-        if backend_name == "sonos":
-            from gilbert.integrations.sonos_speaker import SonosSpeaker
-
-            return SonosSpeaker()
-        raise ValueError(f"Unknown speaker backend: {backend_name}")
-
-    @staticmethod
-    def _create_tts_backend(backend_name: str) -> TTSBackend:
-        """Create a TTS backend by name."""
-        if backend_name == "elevenlabs":
-            from gilbert.integrations.elevenlabs_tts import ElevenLabsTTS
-
-            return ElevenLabsTTS()
-        raise ValueError(f"Unknown TTS backend: {backend_name}")
-
-    @staticmethod
-    def _create_vision_backend(backend_name: str) -> "VisionBackend":
-        """Create a vision backend by name."""
-        if backend_name == "anthropic":
-            from gilbert.integrations.anthropic_vision import AnthropicVision
-
-            return AnthropicVision()
-        raise ValueError(f"Unknown vision backend: {backend_name}")
-
-    @staticmethod
-    def _create_ocr_backend(backend_name: str) -> "OCRBackend":
-        """Create an OCR backend by name."""
-        if backend_name == "tesseract":
-            from gilbert.integrations.tesseract_ocr import TesseractOCR
-
-            return TesseractOCR()
-        raise ValueError(f"Unknown OCR backend: {backend_name}")
-
-    @staticmethod
-    def _create_tunnel_backend(backend_name: str) -> "TunnelBackend":
-        """Create a tunnel backend by name."""
-        if backend_name == "ngrok":
-            from gilbert.integrations.ngrok_tunnel import NgrokTunnel
-
-            return NgrokTunnel()
-        raise ValueError(f"Unknown tunnel backend: {backend_name}")
-
     # --- Service factories (for hot-swap via ConfigurationService) ---
 
     def _factory_ai(self, config: dict[str, Any]) -> Service:
         """Create an AIService from a config section."""
-        backend = self._create_ai_backend(config.get("backend", "anthropic"))
-        return AIService(backend=backend)
+        return AIService()
 
     def _factory_tts(self, config: dict[str, Any]) -> Service:
         """Create a TTSService from a config section."""
-        backend = self._create_tts_backend(config.get("backend", "elevenlabs"))
-        return TTSService(backend=backend)
+        return TTSService()
 
     def _factory_speaker(self, config: dict[str, Any]) -> Service:
         """Create a SpeakerService from a config section."""
-        backend = self._create_speaker_backend(config.get("backend", "sonos"))
-        return SpeakerService(backend=backend)
+        return SpeakerService()
 
     def _factory_music(self, config: dict[str, Any]) -> Service:
         """Create a MusicService from a config section."""
-        backend = self._create_music_backend(config.get("backend", "spotify"))
-        return MusicService(backend=backend)
+        return MusicService()
 
     def _factory_presence(self, config: dict[str, Any]) -> Service:
         """Create a PresenceService from a config section."""
         from gilbert.core.services.presence import PresenceService
 
-        backend = self._create_presence_backend(config.get("backend", "unifi"))
-        return PresenceService(backend=backend)
+        return PresenceService()
 
     # --- Storage init ---
 

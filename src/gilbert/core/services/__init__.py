@@ -9,7 +9,6 @@ from gilbert.core.services.event_bus import EventBusService
 from gilbert.core.services.inbox import InboxService
 from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 from gilbert.core.services.music import MusicService
-from gilbert.core.services.persona import PersonaService
 from gilbert.core.services.speaker import SpeakerService
 from gilbert.core.services.storage import StorageService
 from gilbert.core.services.tts import TTSService
@@ -25,7 +24,6 @@ __all__ = [
     "InboxService",
     "InboxAIChatService",
     "MusicService",
-    "PersonaService",
     "SpeakerService",
     "StorageService",
     "TTSService",

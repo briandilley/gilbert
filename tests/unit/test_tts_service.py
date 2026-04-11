@@ -71,7 +71,9 @@ def resolver() -> ServiceResolver:
 
 @pytest.fixture
 def service(stub_backend: StubTTSBackend) -> TTSService:
-    svc = TTSService(stub_backend)
+    svc = TTSService()
+    svc._backend = stub_backend
+    svc._enabled = True
     svc._config = {"api_key": "sk-test-key"}
     svc._silence_padding = 0.0  # disable for tests
     return svc
@@ -90,12 +92,23 @@ def test_service_info(service: TTSService) -> None:
 # --- Lifecycle ---
 
 
-async def test_start_initializes_backend(
-    stub_backend: StubTTSBackend, resolver: ServiceResolver
-) -> None:
-    svc = TTSService(stub_backend)
-    svc._config = {"api_key": "sk-test-key", "model_id": "v2"}
+async def test_start_disabled_without_config(resolver: ServiceResolver) -> None:
+    """Without a config service providing enabled=True, the service stays disabled."""
+    svc = TTSService()
     await svc.start(resolver)
+    assert not svc._enabled
+    assert svc._backend is None
+
+
+async def test_start_initializes_backend(
+    stub_backend: StubTTSBackend,
+) -> None:
+    """When the backend is set and enabled, initialization works correctly."""
+    svc = TTSService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    svc._config = {"api_key": "sk-test-key", "model_id": "v2"}
+    await svc._backend.initialize(svc._config)
 
     assert stub_backend.initialized
     assert stub_backend.init_config["api_key"] == "sk-test-key"
@@ -103,19 +116,21 @@ async def test_start_initializes_backend(
 
 
 async def test_stop_closes_backend(
-    service: TTSService, stub_backend: StubTTSBackend, resolver: ServiceResolver
+    service: TTSService, stub_backend: StubTTSBackend,
 ) -> None:
-    await service.start(resolver)
     await service.stop()
     assert stub_backend.closed
+
+
+async def test_stop_noop_when_no_backend() -> None:
+    svc = TTSService()
+    await svc.stop()  # should not raise
 
 
 # --- Synthesis ---
 
 
-async def test_synthesize(service: TTSService, resolver: ServiceResolver) -> None:
-    await service.start(resolver)
-
+async def test_synthesize(service: TTSService) -> None:
     request = SynthesisRequest(text="Hello world", voice_id="v1")
     result = await service.synthesize(request)
 
@@ -125,10 +140,8 @@ async def test_synthesize(service: TTSService, resolver: ServiceResolver) -> Non
 
 
 async def test_synthesize_explicit_voice_id_used(
-    service: TTSService, stub_backend: StubTTSBackend, resolver: ServiceResolver
+    service: TTSService, stub_backend: StubTTSBackend,
 ) -> None:
-    await service.start(resolver)
-
     request = SynthesisRequest(text="Hello", voice_id="explicit-id")
     await service.synthesize(request)
 
@@ -136,9 +149,7 @@ async def test_synthesize_explicit_voice_id_used(
     assert stub_backend.last_request.voice_id == "explicit-id"
 
 
-async def test_synthesize_with_options(service: TTSService, resolver: ServiceResolver) -> None:
-    await service.start(resolver)
-
+async def test_synthesize_with_options(service: TTSService) -> None:
     request = SynthesisRequest(
         text="Test",
         voice_id="v1",
@@ -153,9 +164,7 @@ async def test_synthesize_with_options(service: TTSService, resolver: ServiceRes
 # --- Voice listing ---
 
 
-async def test_list_voices(service: TTSService, resolver: ServiceResolver) -> None:
-    await service.start(resolver)
-
+async def test_list_voices(service: TTSService) -> None:
     voices = await service.list_voices()
     assert len(voices) == 2
     assert voices[0].voice_id == "v1"
@@ -202,13 +211,17 @@ def test_get_tools(service: TTSService) -> None:
     assert "list_voices" in names
 
 
+def test_get_tools_empty_when_disabled() -> None:
+    svc = TTSService()
+    assert svc.get_tools() == []
+
+
 async def test_tool_synthesize(
-    service: TTSService, resolver: ServiceResolver, tmp_path: Path, monkeypatch: object
+    service: TTSService, tmp_path: Path, monkeypatch: object
 ) -> None:
     import gilbert.core.output as output_mod
 
     monkeypatch.setattr(output_mod, "OUTPUT_DIR", tmp_path / "output")  # type: ignore[attr-defined]
-    await service.start(resolver)
 
     result = await service.execute_tool("synthesize", {"text": "Hello world"})
     parsed = json.loads(result)
@@ -219,9 +232,7 @@ async def test_tool_synthesize(
     assert Path(parsed["file_path"]).exists()
 
 
-async def test_tool_list_voices(service: TTSService, resolver: ServiceResolver) -> None:
-    await service.start(resolver)
-
+async def test_tool_list_voices(service: TTSService) -> None:
     result = await service.execute_tool("list_voices", {})
     parsed = json.loads(result)
 

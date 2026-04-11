@@ -34,6 +34,7 @@ class KnowledgeService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         self._backends: dict[str, DocumentBackend] = {}
         self._chroma_client: Any = None
         self._collection: Any = None
@@ -53,6 +54,8 @@ class KnowledgeService(Service):
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"scheduler", "configuration", "event_bus", "vision", "ocr"}),
             events=frozenset({"knowledge.document.indexed", "knowledge.document.removed", "knowledge.document.discovered"}),
+            toggleable=True,
+            toggle_description="Document knowledge store",
         )
 
     @property
@@ -63,8 +66,20 @@ class KnowledgeService(Service):
         return self._backends.get(source_id)
 
     async def start(self, resolver: ServiceResolver) -> None:
-        # Load config
+        # Check enabled
         config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Knowledge service disabled")
+                    return
+
+        self._enabled = True
+
+        # Load config
         backend_configs: list[dict[str, Any]] = []
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
@@ -199,11 +214,6 @@ class KnowledgeService(Service):
         import gilbert.integrations.gdrive_documents  # noqa: F401
 
         params = [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the knowledge service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="chunk_size", type=ToolParameterType.INTEGER,
                 description="Text chunk size for document indexing.",
@@ -757,6 +767,8 @@ class KnowledgeService(Service):
         return "knowledge"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="search_documents",

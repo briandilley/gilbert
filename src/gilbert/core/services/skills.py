@@ -29,7 +29,6 @@ async def _to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
         return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
     return await loop.run_in_executor(None, func, *args)
 
-from gilbert.config import SkillsConfig
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.skills import SkillCatalogEntry, SkillContent
 from gilbert.interfaces.storage import IndexDefinition, Query
@@ -54,14 +53,17 @@ _MAX_SCAN_DEPTH = 4
 class SkillService(Service, ToolProvider, WsHandlerProvider):
     """Discovers, manages, and serves Agent Skills to the AI system."""
 
-    def __init__(self, config: SkillsConfig) -> None:
-        self._config = config
+    def __init__(self) -> None:
+        self._enabled: bool = False
+        self._directories: list[str] = ["./skills"]
+        self._cache_dir: str = ".gilbert/skill-cache"
+        self._user_dir: str = ".gilbert/skills"
         self._catalog: dict[str, SkillCatalogEntry] = {}
         self._content_cache: dict[str, SkillContent] = {}
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any = None
         self._storage: Any = None
-        user_dir = Path(config.user_dir)
+        user_dir = Path(self._user_dir)
         self._user_skills_dir = user_dir if user_dir.is_absolute() else Path.cwd() / user_dir
 
     # ── Service interface ────────────────────────────────────────────
@@ -71,7 +73,9 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             name="skills",
             capabilities=frozenset({"skills", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
-            optional=frozenset({"access_control", "ai_chat"}),
+            optional=frozenset({"access_control", "ai_chat", "configuration"}),
+            toggleable=True,
+            toggle_description="Custom AI skills",
         )
 
     @property
@@ -83,6 +87,24 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+
+        # Check enabled and load config
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", True):
+                    logger.info("Skills service disabled")
+                    return
+                self._directories = section.get("directories", ["./skills"])
+                self._cache_dir = section.get("cache_dir", ".gilbert/skill-cache")
+                self._user_dir = section.get("user_dir", ".gilbert/skills")
+                user_dir = Path(self._user_dir)
+                self._user_skills_dir = user_dir if user_dir.is_absolute() else Path.cwd() / user_dir
+
+        self._enabled = True
         self._acl_svc = resolver.get_capability("access_control")
 
         storage_svc = resolver.get_capability("entity_storage")
@@ -114,11 +136,6 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
         return [
             ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the skills system is enabled.",
-                default=True, restart_required=True,
-            ),
-            ConfigParam(
                 key="directories", type=ToolParameterType.ARRAY,
                 description="Directories to scan for skill definitions.",
                 default=["./skills"], restart_required=True,
@@ -145,6 +162,8 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         return "skills"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="manage_skills",
@@ -450,7 +469,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         self._content_cache.clear()
 
         # Scan configured directories (shipped/global skills)
-        for directory in self._config.directories:
+        for directory in self._directories:
             skill_dir = Path(directory)
             if not skill_dir.is_absolute():
                 skill_dir = Path.cwd() / skill_dir
@@ -673,7 +692,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
     def _fetch_from_archive(self, url: str) -> Path:
         """Download and extract a zip or tar.gz archive into the skill cache."""
-        cache_dir = Path.cwd() / self._config.cache_dir
+        cache_dir = Path.cwd() / self._cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Derive a directory name from the URL
@@ -715,7 +734,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
     def _fetch_from_github(self, url: str) -> Path:
         """Clone or update a GitHub repository into the skill cache."""
-        cache_dir = Path.cwd() / self._config.cache_dir
+        cache_dir = Path.cwd() / self._cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         repo_name = url.rstrip("/").split("/")[-1]

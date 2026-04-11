@@ -152,10 +152,9 @@ async def test_set_restart_required_param(config_svc: ConfigurationService) -> N
     config_svc._service_manager = manager
     config_svc._persist = AsyncMock()  # type: ignore[assignment]
 
-    # No factory registered — should report error
+    # No factory registered — service restarts in place
     result = await config_svc.set("ai.backend", "openai")
-    assert result["status"] == "error"
-    assert "factory" in result["message"].lower() or "cannot" in result["message"].lower()
+    assert result["status"] == "ok"
 
 
 # --- Describe API ---

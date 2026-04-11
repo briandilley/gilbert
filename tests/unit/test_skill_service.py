@@ -16,6 +16,22 @@ from gilbert.core.services.skills import SkillService
 from gilbert.interfaces.skills import SkillCatalogEntry, SkillContent
 
 
+def _make_skill_service(
+    directories: list[str] | None = None,
+    user_dir: str = "",
+) -> SkillService:
+    """Create a SkillService with the given config attributes."""
+    svc = SkillService()
+    svc._enabled = True
+    if directories is not None:
+        svc._directories = directories
+    if user_dir:
+        svc._user_dir = user_dir
+        user_path = Path(user_dir)
+        svc._user_skills_dir = user_path if user_path.is_absolute() else Path.cwd() / user_path
+    return svc
+
+
 # --- Fixtures ---
 
 
@@ -56,7 +72,13 @@ def config(tmp_skills_dir: Path, tmp_path: Path) -> SkillsConfig:
 
 @pytest.fixture
 def service(config: SkillsConfig) -> SkillService:
-    return SkillService(config)
+    svc = SkillService()
+    svc._directories = config.directories
+    svc._user_dir = config.user_dir
+    user_dir = Path(config.user_dir)
+    svc._user_skills_dir = user_dir if user_dir.is_absolute() else Path.cwd() / user_dir
+    svc._enabled = True
+    return svc
 
 
 @pytest.fixture
@@ -170,10 +192,10 @@ class TestDiscovery:
         (skill_dir / "SKILL.md").write_text(
             "---\nname: no-desc\n---\nBody.\n"
         )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[str(tmp_path / "skills")],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         assert "no-desc" not in svc._catalog
 
@@ -186,10 +208,10 @@ class TestDiscovery:
         (skill_dir / "SKILL.md").write_text(
             "---\ndescription: A skill without a name field.\n---\nBody.\n"
         )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[str(tmp_path / "skills")],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         assert "dir-name" in svc._catalog
 
@@ -203,10 +225,10 @@ class TestDiscovery:
             (skill_dir / "SKILL.md").write_text(
                 "---\nname: dupe\ndescription: Duplicate.\n---\nBody.\n"
             )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[str(tmp_path / "skills")],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         assert "dupe" in svc._catalog
 
@@ -214,10 +236,10 @@ class TestDiscovery:
     async def test_nonexistent_directory_ignored(
         self, tmp_path: Path, mock_resolver: MagicMock,
     ) -> None:
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=["/nonexistent/path"],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         assert len(svc._catalog) == 0
 
@@ -236,10 +258,10 @@ class TestPerUserDiscovery:
         (skill_dir / "SKILL.md").write_text(
             "---\nname: alice-skill\ndescription: Alice's skill.\n---\nBody.\n"
         )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         key = "alice:alice-skill"
         assert key in svc._catalog
@@ -257,10 +279,10 @@ class TestPerUserDiscovery:
             (skill_dir / "SKILL.md").write_text(
                 f"---\nname: {user}-skill\ndescription: {user}'s skill.\n---\nBody.\n"
             )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
 
         # Alice should only see her skill
@@ -287,10 +309,10 @@ class TestPerUserDiscovery:
         (user_dir / "SKILL.md").write_text(
             "---\nname: shared\ndescription: Alice's version.\n---\nBody.\n"
         )
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         await svc.start(mock_resolver)
         assert "shared" in svc._catalog
         assert "alice:shared" in svc._catalog
@@ -725,10 +747,10 @@ class TestGitHubInstall:
     def install_service(self, tmp_path: Path) -> SkillService:
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
-        return SkillService(SkillsConfig(
+        return _make_skill_service(
             directories=[str(skills_dir)],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
 
     @pytest.mark.asyncio
     async def test_install_user_scope(
@@ -814,10 +836,10 @@ class TestArchiveInstall:
     def install_service(self, tmp_path: Path) -> SkillService:
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
-        return SkillService(SkillsConfig(
+        return _make_skill_service(
             directories=[str(skills_dir)],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
 
     def _make_zip(self, tmp_path: Path) -> bytes:
         """Create a zip archive containing a skill."""
@@ -961,10 +983,10 @@ class TestCreateSkill:
         storage.delete = AsyncMock()
         storage.ensure_index = AsyncMock()
 
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[],
             user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         return svc, storage
 
     @pytest.mark.asyncio
@@ -1060,9 +1082,9 @@ class TestDeleteEntitySkill:
              "scope": "user", "owner_id": "alice"},
         ])
 
-        svc = SkillService(SkillsConfig(
+        svc = _make_skill_service(
             directories=[], user_dir=str(tmp_path / "user-skills"),
-        ))
+        )
         resolver = MagicMock()
         resolver.get_capability.side_effect = (
             lambda cap: storage if cap == "entity_storage" else None

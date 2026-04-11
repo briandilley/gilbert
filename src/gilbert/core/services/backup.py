@@ -32,6 +32,7 @@ class BackupService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         self._retention_days: int = 30
         self._backup_hour: int = 3
         self._backup_minute: int = 0
@@ -42,21 +43,28 @@ class BackupService(Service):
             name="backup",
             capabilities=frozenset({"backup"}),
             requires=frozenset({"scheduler"}),
+            toggleable=True,
+            toggle_description="Database backup scheduling",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
 
-        # Load config
+        # Check enabled
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("backup")
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Backup service disabled")
+                    return
                 self._retention_days = int(section.get("retention_days", 30))
                 self._backup_hour = int(section.get("backup_hour", 3))
                 self._backup_minute = int(section.get("backup_minute", 0))
+
+        self._enabled = True
 
         # Ensure backups directory exists
         _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -99,11 +107,6 @@ class BackupService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the backup service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="retention_days", type=ToolParameterType.INTEGER,
                 description="Number of days to retain backups.",

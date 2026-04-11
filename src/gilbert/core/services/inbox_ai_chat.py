@@ -19,7 +19,6 @@ from typing import Any
 
 import markdown
 
-from gilbert.config import InboxAIChatConfig
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.email import EmailAttachment
@@ -45,10 +44,11 @@ class InboxAIChatService(Service):
     file attachments for the reply via the ``email_attach`` tool.
     """
 
-    def __init__(self, config: InboxAIChatConfig) -> None:
-        self._allowed_emails = [e.lower() for e in config.allowed_emails]
-        self._allowed_domains = [d.lower().lstrip("@") for d in config.allowed_domains]
-        self._required_subject = config.required_subject.lower().strip() if config.required_subject else ""
+    def __init__(self) -> None:
+        self._enabled: bool = False
+        self._allowed_emails: list[str] = []
+        self._allowed_domains: list[str] = []
+        self._required_subject: str = ""
 
         self._inbox: Any = None  # InboxService
         self._ai: Any = None  # AIService
@@ -68,11 +68,32 @@ class InboxAIChatService(Service):
             name="inbox_ai_chat",
             capabilities=frozenset({"email_ai_chat", "ai_tools"}),
             requires=frozenset({"email", "ai_chat", "entity_storage"}),
-            optional=frozenset({"event_bus", "users", "knowledge"}),
+            optional=frozenset({"event_bus", "users", "knowledge", "configuration"}),
             ai_calls=frozenset({"inbox_ai_chat"}),
+            toggleable=True,
+            toggle_description="Email-to-AI chat",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
+        # Check enabled and load config
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Inbox AI chat service disabled")
+                    return
+                emails = section.get("allowed_emails", [])
+                self._allowed_emails = [e.lower() for e in emails]
+                domains = section.get("allowed_domains", [])
+                self._allowed_domains = [d.lower().lstrip("@") for d in domains]
+                subj = section.get("required_subject", "")
+                self._required_subject = subj.lower().strip() if subj else ""
+
+        self._enabled = True
+
         self._inbox = resolver.require_capability("email")
         self._ai = resolver.require_capability("ai_chat")
 
@@ -112,11 +133,6 @@ class InboxAIChatService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether email-to-AI chat is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="allowed_emails", type=ToolParameterType.ARRAY,
                 description="Email addresses allowed to chat with AI.",
@@ -338,6 +354,8 @@ class InboxAIChatService(Service):
         return "inbox_ai_chat"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="email_attach",

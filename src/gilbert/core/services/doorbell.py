@@ -32,8 +32,10 @@ class DoorbellService(Service):
     Uses the scheduler service for periodic polling.
     """
 
-    def __init__(self, backend: DoorbellBackend) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: DoorbellBackend | None = None
+        self._backend_name: str = "unifi"
+        self._enabled: bool = False
         self._event_bus: EventBus | None = None
         self._resolver: ServiceResolver | None = None
         self._poll_interval: float = _DEFAULT_POLL_INTERVAL
@@ -49,6 +51,8 @@ class DoorbellService(Service):
             requires=frozenset({"scheduler", "event_bus"}),
             optional=frozenset({"configuration", "credentials", "speaker_control", "text_to_speech"}),
             events=frozenset({"doorbell.ring"}),
+            toggleable=True,
+            toggle_description="Doorbell ring detection",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -70,6 +74,27 @@ class DoorbellService(Service):
             if isinstance(config_svc, ConfigurationService):
                 full_section = config_svc.get_section("doorbell")
                 self._apply_config(full_section)
+
+        if not full_section.get("enabled", False):
+            logger.info("Doorbell service disabled")
+            return
+
+        self._enabled = True
+
+        # Resolve backend
+        backend_name = full_section.get("backend", "unifi")
+        self._backend_name = backend_name
+        backends = DoorbellBackend.registered_backends()
+        if backend_name not in backends:
+            try:
+                import gilbert.integrations.unifi.doorbell  # noqa: F401
+            except ImportError:
+                pass
+            backends = DoorbellBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown doorbell backend: {backend_name}")
+        self._backend = backend_cls()
 
         # Initialize backend with settings
         settings: dict[str, object] = dict(full_section.get("settings", {}))
@@ -126,14 +151,13 @@ class DoorbellService(Service):
         return "Monitoring"
 
     def config_params(self) -> list[ConfigParam]:
-        from gilbert.interfaces.doorbell import DoorbellBackend
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.unifi.doorbell  # noqa: F401
+        except ImportError:
+            pass
 
         params = [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether doorbell monitoring is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="poll_interval_seconds", type=ToolParameterType.NUMBER,
                 description="How often to poll for ring events (seconds).",
@@ -152,26 +176,34 @@ class DoorbellService(Service):
                 choices=tuple(DoorbellBackend.registered_backends().keys()) or ("unifi",),
             ),
         ]
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, choices_from=bp.choices_from,
-                multiline=bp.multiline, backend_param=True,
-            ))
+        backends = DoorbellBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, choices_from=bp.choices_from,
+                    multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
+            self._backend = None
+        self._enabled = False
 
     # --- Ring detection ---
 
     async def _check_for_rings(self) -> None:
         """Poll the backend for new ring events."""
+        if self._backend is None:
+            return
         try:
             events = await self._backend.get_ring_events(
                 lookback_seconds=_RING_LOOKBACK_SECONDS,

@@ -225,7 +225,9 @@ async def ai_svc(
     stub_backend: StubAIBackend, resolver: ServiceResolver, acl_svc: AccessControlService,
 ) -> AIService:
     """Started AI service with profiles loaded."""
-    svc = AIService(backend=stub_backend)
+    svc = AIService()
+    svc._backend = stub_backend
+    svc._enabled = True
     svc._config = {"max_tokens": 1024, "temperature": 0.5}
     svc._system_prompt = "Test assistant"
     svc._max_tool_rounds = 3
@@ -257,7 +259,6 @@ class TestProfileResolution:
         assert "default" in names
         assert "human_chat" in names
         assert "text_only" in names
-        assert "sales_agent" in names
 
     async def test_builtin_assignments_seeded(self, ai_svc: AIService) -> None:
         assignments = ai_svc.list_assignments()
@@ -277,11 +278,11 @@ class TestProfileResolution:
         assert profile is not None
         assert profile.name == "human_chat"
 
-    async def test_get_profile_resolves_sales(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("sales_initial_email", "sales_agent")
-        profile = ai_svc.get_profile("sales_initial_email")
+    async def test_get_profile_resolves_custom_assignment(self, ai_svc: AIService) -> None:
+        await ai_svc.set_assignment("custom_call", "text_only")
+        profile = ai_svc.get_profile("custom_call")
         assert profile is not None
-        assert profile.name == "sales_agent"
+        assert profile.name == "text_only"
 
 
 # =============================================================================
@@ -577,17 +578,24 @@ class TestChatWithProfile:
     async def test_chat_exclude_profile_hides_tools(
         self, ai_svc: AIService, stub_backend: StubAIBackend,
     ) -> None:
-        """human_chat profile excludes sales_lead."""
+        """Exclude profile hides listed tools."""
+        # Create a custom exclude profile and assign it
+        await ai_svc.set_profile(AIContextProfile(
+            name="exclude_test", description="Excludes user_tool",
+            tool_mode="exclude", tools=["user_tool"],
+        ))
+        await ai_svc.set_assignment("exclude_call", "exclude_test")
+
         stub_backend.queue_response(AIResponse(
             message=Message(role=MessageRole.ASSISTANT, content="ok"),
             model="stub",
         ))
 
-        await ai_svc.chat("test", ai_call="human_chat", user_ctx=_admin())
+        await ai_svc.chat("test", ai_call="exclude_call", user_ctx=_admin())
 
         tool_names = {t.name for t in stub_backend.requests[0].tools}
-        assert "sales_lead" not in tool_names
-        assert "user_tool" in tool_names
+        assert "user_tool" not in tool_names
+        assert "admin_tool" in tool_names
 
 
 # =============================================================================
@@ -670,9 +678,8 @@ class TestServiceInfoAiCalls:
         assert "roast" in svc.service_info().ai_calls
 
     def test_inbox_ai_chat_declares_ai_calls(self) -> None:
-        from gilbert.config import InboxAIChatConfig
         from gilbert.core.services.inbox_ai_chat import InboxAIChatService
-        svc = InboxAIChatService(config=InboxAIChatConfig())
+        svc = InboxAIChatService()
         assert "inbox_ai_chat" in svc.service_info().ai_calls
 
 

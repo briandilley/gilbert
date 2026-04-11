@@ -32,8 +32,10 @@ class InboxService(Service):
     Capabilities: email, ai_tools
     """
 
-    def __init__(self, backend: EmailBackend) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: EmailBackend | None = None
+        self._backend_name: str = "gmail"
+        self._enabled: bool = False
         self._email_address: str = ""
         self._poll_interval: int = 60
         self._max_body_length: int = 50000
@@ -50,6 +52,8 @@ class InboxService(Service):
             requires=frozenset({"entity_storage", "scheduler"}),
             optional=frozenset({"event_bus", "knowledge", "configuration"}),
             events=frozenset({"inbox.message.received", "inbox.message.replied", "inbox.message.sent"}),
+            toggleable=True,
+            toggle_description="Email inbox monitoring",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -58,15 +62,39 @@ class InboxService(Service):
         # Load config
         settings: dict[str, Any] = {}
         config_svc = resolver.get_capability("configuration")
+        section: dict[str, Any] = {}
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("inbox")
+                section = config_svc.get_section(self.config_namespace)
                 self._email_address = section.get("email_address", self._email_address)
                 self._poll_interval = int(section.get("poll_interval", self._poll_interval))
                 self._max_body_length = int(section.get("max_body_length", self._max_body_length))
                 settings = section.get("settings", {})
+
+        # Check enabled
+        if not section.get("enabled", False):
+            logger.info("Inbox service disabled")
+            return
+
+        self._enabled = True
+
+        # Create backend from registry
+        backend_name = section.get("backend", "gmail")
+        self._backend_name = backend_name
+        backends = EmailBackend.registered_backends()
+        if backend_name not in backends:
+            # Import known backends to trigger registration
+            try:
+                import gilbert.integrations.gmail  # noqa: F401
+            except ImportError:
+                pass
+            backends = EmailBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown email backend: {backend_name}")
+        self._backend = backend_cls()
 
         # Initialize backend with settings (includes credentials)
         # Pass email_address into settings so the backend has it
@@ -119,7 +147,8 @@ class InboxService(Service):
         for unsub in self._unsubscribes:
             unsub()
         self._unsubscribes.clear()
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
         logger.info("Inbox service stopped")
 
     # --- Configurable protocol ---
@@ -135,12 +164,13 @@ class InboxService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.email import EmailBackend
 
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.gmail  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the inbox service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="poll_interval", type=ToolParameterType.INTEGER,
                 description="How often to check for new email (seconds).",
@@ -158,13 +188,17 @@ class InboxService(Service):
                 choices=tuple(EmailBackend.registered_backends().keys()) or ("gmail",),
             ),
         ]
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, multiline=bp.multiline, backend_param=True,
-            ))
+        # Use registry class for backend params (not instance)
+        backends = EmailBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -175,6 +209,8 @@ class InboxService(Service):
 
     async def _poll(self) -> None:
         """List recent messages, walk until we hit one we already have."""
+        if self._backend is None:
+            return
         try:
             # Only fetch unread messages to avoid re-processing old mail.
             all_ids = await self._backend.list_message_ids(
@@ -348,6 +384,8 @@ class InboxService(Service):
         attachments: list[EmailAttachment] | None = None,
     ) -> str:
         """Reply to an existing message. Returns the sent message's ID."""
+        if self._backend is None:
+            raise RuntimeError("Inbox service is not enabled")
         record = await self._storage.get(_COLLECTION, message_id)
         if not record:
             raise ValueError(f"Message {message_id} not found")
@@ -410,6 +448,8 @@ class InboxService(Service):
         attachments: list[EmailAttachment] | None = None,
     ) -> str:
         """Compose and send a new email. Returns the sent message's ID."""
+        if self._backend is None:
+            raise RuntimeError("Inbox service is not enabled")
         sent_id = await self._backend.send(
             to=to,
             subject=subject,
@@ -457,6 +497,8 @@ class InboxService(Service):
         return "inbox"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="inbox_search",

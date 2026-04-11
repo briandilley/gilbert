@@ -110,6 +110,7 @@ class ScreenService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         self._screens: dict[str, ConnectedScreen] = {}
         self._tmp_dir: Path | None = None
         self._files: dict[str, TempFile] = {}
@@ -125,19 +126,33 @@ class ScreenService(Service):
             requires=frozenset(),
             optional=frozenset({"knowledge", "scheduler", "event_bus", "configuration"}),
             events=frozenset({"screen.connected", "screen.disconnected"}),
+            toggleable=True,
+            toggle_description="Remote display screens",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
-        self._event_bus_svc = resolver.get_capability("event_bus")
 
-        # Load config
+        # Check enabled
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("screens")
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Screen service disabled")
+                    return
+
+        self._enabled = True
+        self._event_bus_svc = resolver.get_capability("event_bus")
+
+        # Load config
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
                 self._ttl = int(section.get("tmp_ttl_seconds", 1800))
                 self._cleanup_interval = int(section.get("cleanup_interval_seconds", 300))
 
@@ -176,11 +191,6 @@ class ScreenService(Service):
         from gilbert.interfaces.tools import ToolParameterType
 
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the screen display service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="tmp_ttl_seconds", type=ToolParameterType.INTEGER,
                 description="Time-to-live for temporary files (seconds).",
@@ -677,6 +687,8 @@ class ScreenService(Service):
         return "screens"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="display",

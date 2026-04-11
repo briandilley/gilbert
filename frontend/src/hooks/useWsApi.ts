@@ -135,6 +135,9 @@ export function useWsApi() {
     deleteUser: (userId: string) =>
       rpc<{ status: string }>({ type: "users.user.delete", user_id: userId }),
 
+    resetUserPassword: (userId: string, password: string) =>
+      rpc<{ status: string }>({ type: "users.user.reset_password", user_id: userId, password }),
+
     listCollectionACLs: () =>
       rpc<{ collections: CollectionACL[]; role_names: string[] }>({ type: "roles.collection.list" }),
 

@@ -28,8 +28,10 @@ _ALIAS_COLLECTION = "speaker_aliases"
 class SpeakerService(Service):
     """Exposes a SpeakerBackend as a service with speaker control and announce capabilities."""
 
-    def __init__(self, backend: SpeakerBackend) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: SpeakerBackend | None = None
+        self._backend_name: str = "sonos"
+        self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._output_ttl_seconds: int = 3600
         self._default_announce_volume: int | None = None
@@ -49,10 +51,12 @@ class SpeakerService(Service):
             capabilities=frozenset({"speaker_control", "ai_tools"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"configuration", "text_to_speech"}),
+            toggleable=True,
+            toggle_description="Speaker playback and control",
         )
 
     @property
-    def backend(self) -> SpeakerBackend:
+    def backend(self) -> SpeakerBackend | None:
         return self._backend
 
     @property
@@ -66,13 +70,13 @@ class SpeakerService(Service):
         self._tts_svc = resolver.get_capability("text_to_speech")
 
         # Load config
+        section: dict[str, Any] = {}
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("speaker")
-                self._apply_config(section)
+                section = config_svc.get_section(self.config_namespace)
                 global_ttl = config_svc.get("output_ttl_seconds")
                 if global_ttl is not None:
                     self._output_ttl_seconds = int(global_ttl)
@@ -80,6 +84,25 @@ class SpeakerService(Service):
                 web_section = config_svc.get_section("web")
                 self._web_host = web_section.get("host", "0.0.0.0")
                 self._web_port = int(web_section.get("port", 8765))
+
+        if not section.get("enabled", False):
+            logger.info("Speaker service disabled")
+            return
+
+        self._enabled = True
+        self._apply_config(section)
+
+        backend_name = section.get("backend", "sonos")
+        self._backend_name = backend_name
+        try:
+            import gilbert.integrations.sonos_speaker  # noqa: F401
+        except ImportError:
+            pass
+        backends = SpeakerBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown speaker backend: {backend_name}")
+        self._backend = backend_cls()
 
         init_config: dict[str, object] = dict(self._config)
         await self._backend.initialize(init_config)
@@ -101,6 +124,12 @@ class SpeakerService(Service):
             logger.debug("Could not cache speakers on start")
 
         logger.info("Speaker service started")
+
+    def _require_backend(self) -> SpeakerBackend:
+        """Return the backend or raise if the service is not enabled."""
+        if self._backend is None:
+            raise RuntimeError("Speaker service is not enabled")
+        return self._backend
 
     def _get_storage_backend(self) -> Any:
         """Get the storage backend from the storage service."""
@@ -133,17 +162,18 @@ class SpeakerService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.speaker import SpeakerBackend
 
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.sonos_speaker  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Speaker backend type.",
                 default="sonos", restart_required=True,
                 choices=tuple(SpeakerBackend.registered_backends().keys()) or ("sonos",),
-            ),
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the speaker service is enabled.",
-                default=False, restart_required=True,
             ),
             ConfigParam(
                 key="default_announce_volume", type=ToolParameterType.INTEGER,
@@ -156,7 +186,14 @@ class SpeakerService(Service):
                 choices_from="speakers",
             ),
         ]
-        for bp in self._backend.backend_config_params():
+        # Use live backend instance if available, otherwise fall back to registry class
+        if self._backend is not None:
+            backend_params = self._backend.backend_config_params()
+        else:
+            backends = SpeakerBackend.registered_backends()
+            backend_cls = backends.get(self._backend_name)
+            backend_params = backend_cls.backend_config_params() if backend_cls else []
+        for bp in backend_params:
             params.append(ConfigParam(
                 key=f"settings.{bp.key}", type=bp.type,
                 description=bp.description, default=bp.default,
@@ -169,14 +206,16 @@ class SpeakerService(Service):
         self._apply_config(config)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
 
     # --- Alias management ---
 
     async def set_alias(self, speaker_id: str, alias: str) -> None:
         """Assign an alias name to a speaker. Raises ValueError on collision."""
+        backend = self._require_backend()
         # Check the alias doesn't collide with an existing speaker name
-        speakers = await self._backend.list_speakers()
+        speakers = await backend.list_speakers()
         for s in speakers:
             if s.name.lower() == alias.lower():
                 raise ValueError(
@@ -220,8 +259,9 @@ class SpeakerService(Service):
 
     async def resolve_speaker_name(self, name: str) -> str | None:
         """Resolve a speaker name or alias to a speaker_id. Returns None if not found."""
+        backend = self._require_backend()
         # Try direct match by speaker name
-        speakers = await self._backend.list_speakers()
+        speakers = await backend.list_speakers()
         for s in speakers:
             if s.name.lower() == name.lower():
                 return s.speaker_id
@@ -298,7 +338,8 @@ class SpeakerService(Service):
         if self._last_speaker_ids:
             return list(self._last_speaker_ids)
         # Fall back to all speakers
-        speakers = await self._backend.list_speakers()
+        backend = self._require_backend()
+        speakers = await backend.list_speakers()
         return [s.speaker_id for s in speakers]
 
     async def prepare_speakers(self, speaker_ids: list[str]) -> None:
@@ -310,13 +351,14 @@ class SpeakerService(Service):
 
         Backends that don't support grouping are skipped.
         """
-        if not self._backend.supports_grouping or not speaker_ids:
+        backend = self._require_backend()
+        if not backend.supports_grouping or not speaker_ids:
             return
 
         if len(speaker_ids) == 1:
-            await self._backend.ungroup_speakers(speaker_ids)
+            await backend.ungroup_speakers(speaker_ids)
         else:
-            await self._backend.group_speakers(speaker_ids)
+            await backend.group_speakers(speaker_ids)
 
     # --- Playback ---
 
@@ -335,7 +377,7 @@ class SpeakerService(Service):
         target_ids = await self._resolve_target_ids(speaker_names)
         await self.prepare_speakers(target_ids)
 
-        await self._backend.play_uri(PlayRequest(
+        await self._require_backend().play_uri(PlayRequest(
             uri=uri,
             speaker_ids=target_ids,
             volume=volume,
@@ -349,7 +391,7 @@ class SpeakerService(Service):
     ) -> None:
         """Stop playback on the specified speakers."""
         target_ids = await self._resolve_target_ids(speaker_names)
-        await self._backend.stop(target_ids)
+        await self._require_backend().stop(target_ids)
 
     # --- Announce ---
 
@@ -423,7 +465,7 @@ class SpeakerService(Service):
 
         # Clear the queue so the announcement doesn't linger in history
         try:
-            await self._backend.clear_queue(target_ids)
+            await self._require_backend().clear_queue(target_ids)
         except Exception:
             logger.debug("Failed to clear queue after announcement")
 
@@ -481,7 +523,7 @@ class SpeakerService(Service):
 
         while elapsed < timeout:
             try:
-                state = await self._backend.get_playback_state(target_id)
+                state = await self._require_backend().get_playback_state(target_id)
                 if state not in (PlaybackState.PLAYING, PlaybackState.TRANSITIONING):
                     return
             except Exception:
@@ -497,6 +539,8 @@ class SpeakerService(Service):
         return "speaker"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         tools = [
             ToolDefinition(
                 name="list_speakers",
@@ -633,7 +677,7 @@ class SpeakerService(Service):
         ]
 
         # Add grouping tools if the backend supports it
-        if self._backend.supports_grouping:
+        if self._backend is not None and self._backend.supports_grouping:
             tools.extend([
                 ToolDefinition(
                     name="list_speaker_groups",
@@ -693,7 +737,7 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown tool: {name}")
 
     async def _tool_list_speakers(self) -> str:
-        speakers = await self._backend.list_speakers()
+        speakers = await self._require_backend().list_speakers()
 
         # Enrich with aliases
         storage = self._get_storage_backend()
@@ -749,7 +793,7 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        await self._backend.set_volume(sid, volume)
+        await self._require_backend().set_volume(sid, volume)
         return json.dumps({"status": "ok", "speaker": name, "volume": volume})
 
     async def _tool_get_volume(self, arguments: dict[str, Any]) -> str:
@@ -757,7 +801,7 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        volume = await self._backend.get_volume(sid)
+        volume = await self._require_backend().get_volume(sid)
         return json.dumps({"speaker": name, "volume": volume})
 
     async def _tool_set_alias(self, arguments: dict[str, Any]) -> str:
@@ -801,7 +845,7 @@ class SpeakerService(Service):
         })
 
     async def _tool_list_groups(self) -> str:
-        groups = await self._backend.list_groups()
+        groups = await self._require_backend().list_groups()
         return json.dumps([
             {
                 "group_id": g.group_id,
@@ -817,7 +861,7 @@ class SpeakerService(Service):
         speaker_ids = await self.resolve_speaker_names(speaker_names)
 
         try:
-            group = await self._backend.group_speakers(speaker_ids)
+            group = await self._require_backend().group_speakers(speaker_ids)
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
@@ -831,5 +875,5 @@ class SpeakerService(Service):
     async def _tool_ungroup_speakers(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments["speakers"]
         speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._backend.ungroup_speakers(speaker_ids)
+        await self._require_backend().ungroup_speakers(speaker_ids)
         return json.dumps({"status": "ungrouped"})

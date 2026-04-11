@@ -131,28 +131,14 @@ def storage_service(storage_backend: StorageBackend) -> StorageService:
 
 
 @pytest.fixture
-def persona_service() -> Any:
-    from unittest.mock import MagicMock
-
-    from gilbert.core.services.persona import PersonaService
-
-    svc = MagicMock(spec=PersonaService)
-    svc.persona = "You are Gilbert, a test assistant."
-    return svc
-
-
-@pytest.fixture
 def resolver(
     storage_service: StorageService,
-    persona_service: Any,
 ) -> ServiceResolver:
     mock = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
         if cap == "entity_storage":
             return storage_service
-        if cap == "persona":
-            return persona_service
         raise LookupError(f"No service provides: {cap}")
 
     def get_cap(cap: str) -> Any:
@@ -172,7 +158,9 @@ def resolver(
 
 @pytest.fixture
 def ai_service(stub_backend: StubAIBackend) -> AIService:
-    svc = AIService(backend=stub_backend)
+    svc = AIService()
+    svc._backend = stub_backend
+    svc._enabled = True
     # Set tunable config directly for testing
     svc._config = {"api_key": "sk-test-key", "max_tokens": 1024, "temperature": 0.5}
     svc._system_prompt = "You are a test assistant."
@@ -236,7 +224,7 @@ async def test_chat_simple_response(
 
     req = stub_backend.requests[0]
     assert "You are a test assistant." in req.system_prompt
-    assert "You are Gilbert, a test assistant." in req.system_prompt
+    assert "You are Gilbert" in req.system_prompt
     assert len(req.messages) == 1
     assert req.messages[0].role == MessageRole.USER
     assert req.messages[0].content == "Hi"
@@ -303,20 +291,11 @@ async def test_chat_with_tool_calls(
         results={"get_weather": '{"temp": 72, "condition": "sunny"}'},
     )
 
-    from unittest.mock import MagicMock as MM
-
-    from gilbert.core.services.persona import PersonaService
-
-    _persona = MM(spec=PersonaService)
-    _persona.persona = "Test persona."
-
     resolver = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
         if cap == "entity_storage":
             return storage_service
-        if cap == "persona":
-            return _persona
         raise LookupError(cap)
 
     resolver.require_capability = require_cap
@@ -433,21 +412,12 @@ async def test_tool_execution_error_returns_error_result(
     stub_backend: StubAIBackend,
     storage_service: StorageService,
 ) -> None:
-    from unittest.mock import MagicMock as MM
-
-    from gilbert.core.services.persona import PersonaService
-
-    _persona = MM(spec=PersonaService)
-    _persona.persona = "Test persona."
-
     error_provider = ErrorToolProviderService()
     resolver = AsyncMock(spec=ServiceResolver)
 
     def require_cap(cap: str) -> Any:
         if cap == "entity_storage":
             return storage_service
-        if cap == "persona":
-            return _persona
         raise LookupError(cap)
 
     resolver.require_capability = require_cap
@@ -518,7 +488,9 @@ def test_truncate_history_within_limit(ai_service: AIService) -> None:
 
 
 def test_truncate_history_preserves_tool_pairs() -> None:
-    svc = AIService(backend=StubAIBackend())
+    svc = AIService()
+    svc._backend = StubAIBackend()
+    svc._enabled = True
     svc._max_history_messages = 3
     messages = [
         Message(role=MessageRole.USER, content="old1"),

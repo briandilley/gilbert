@@ -12,7 +12,7 @@
 - [User & Auth System](memory-user-auth-system.md) — multi-user support with local accounts, external providers, roles, sessions
 - [Speaker System](memory-speaker-system.md) — speaker control with Sonos/SoCo, aliases, grouping, TTS announcements
 - [Music Service](memory-music-service.md) — music search/metadata/playback with Spotify, seek support, speaker integration
-- [Persona Service](memory-persona-service.md) — AI personality/behavior stored in entity system, editable via chat
+- [Persona (AIService Internal)](memory-persona-service.md) — AI personality/behavior stored in entity system, merged into AIService as _PersonaHelper
 - [Presence Service](memory-presence-service.md) — user presence via UniFi (WiFi, cameras, badges), polling + events
 - [Scheduler Service](memory-scheduler-service.md) — system and user timers/alarms with asyncio task loops
 - [Doorbell Service](memory-doorbell-service.md) — UniFi Protect ring detection, publishes doorbell.ring events

@@ -44,7 +44,9 @@ class FakeResolver:
 
 @pytest.fixture
 def service() -> ScreenService:
-    return ScreenService()
+    svc = ScreenService()
+    svc._enabled = True
+    return svc
 
 
 @pytest.fixture

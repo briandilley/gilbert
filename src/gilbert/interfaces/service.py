@@ -16,6 +16,10 @@ class ServiceInfo:
     optional: frozenset[str] = field(default_factory=frozenset)
     ai_calls: frozenset[str] = field(default_factory=frozenset)
     events: frozenset[str] = field(default_factory=frozenset)
+    toggleable: bool = False
+    """If True, this service can be enabled/disabled via the Settings UI."""
+    toggle_description: str = ""
+    """Human-readable description shown in the Services toggle section."""
 
 
 class ServiceResolver(ABC):

@@ -48,6 +48,7 @@ class SlackService(Service):
 
     def __init__(self) -> None:
 
+        self._enabled: bool = False
         self._ai: Any = None
         self._user_svc: Any = None
         self._resolver: ServiceResolver | None = None
@@ -71,9 +72,22 @@ class SlackService(Service):
             capabilities=frozenset({"slack"}),
             requires=frozenset({"ai_chat"}),
             optional=frozenset({"users", "configuration"}),
+            toggleable=True,
+            toggle_description="Slack messaging integration",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
+        # Check enabled state from config
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Slack service is disabled")
+                    return
+
         try:
             from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
             from slack_bolt.async_app import AsyncApp
@@ -84,6 +98,7 @@ class SlackService(Service):
             )
             return
 
+        self._enabled = True
         self._resolver = resolver
         self._ai = resolver.require_capability("ai_chat")
         self._user_svc = resolver.get_capability("users")
@@ -91,7 +106,6 @@ class SlackService(Service):
         # Load tokens from config
         bot_token = ""
         app_token = ""
-        config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
@@ -159,11 +173,6 @@ class SlackService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the Slack integration is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="bot_token", type=ToolParameterType.STRING,
                 description="Slack bot token (xoxb-...).",

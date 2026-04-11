@@ -1,13 +1,15 @@
-"""Tests for MemoryService — per-user persistent memories."""
+"""Tests for _MemoryHelper — per-user persistent memories (via AIService)."""
 
 import json
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gilbert.core.services.memory import MemoryService
+from gilbert.core.services.ai import AIService, _MemoryHelper
+from gilbert.core.services.storage import StorageService
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.service import ServiceResolver
 
 
 # ── Fake storage ────────────────────────────────────────────
@@ -92,44 +94,52 @@ def _set_user(user_id: str = "brian@example.com") -> UserContext:
 
 
 @pytest.fixture
-def resolver() -> FakeResolver:
-    r = FakeResolver()
-    r.caps["entity_storage"] = FakeStorageService()
-    return r
+def fake_storage() -> FakeStorageBackend:
+    return FakeStorageBackend()
 
 
 @pytest.fixture
-async def memory_service(resolver: FakeResolver) -> MemoryService:
-    svc = MemoryService()
-    await svc.start(resolver)
-    return svc
+def helper(fake_storage: FakeStorageBackend) -> _MemoryHelper:
+    return _MemoryHelper(fake_storage)
+
+
+@pytest.fixture
+async def started_helper(helper: _MemoryHelper) -> _MemoryHelper:
+    await helper.setup_indexes()
+    return helper
 
 
 # ── Tests ───────────────────────────────────────────────────
 
 
-class TestMemoryService:
-    def test_service_info(self) -> None:
-        svc = MemoryService()
+class TestMemoryHelper:
+    def test_ai_service_has_memory_capability(self) -> None:
+        svc = AIService()
         info = svc.service_info()
-        assert info.name == "memory"
         assert "user_memory" in info.capabilities
-        assert "ai_tools" in info.capabilities
-        assert "entity_storage" in info.requires
 
-    def test_tool_definitions(self) -> None:
-        svc = MemoryService()
+    def test_ai_service_has_memory_tool(self) -> None:
+        from gilbert.interfaces.ai import AIBackend, AIRequest, AIResponse, Message, MessageRole
+
+        class _Stub(AIBackend):
+            async def initialize(self, config: dict[str, Any]) -> None: pass
+            async def close(self) -> None: pass
+            async def generate(self, request: AIRequest) -> AIResponse:
+                return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
+
+        svc = AIService()
+        svc._backend = _Stub()
+        svc._enabled = True
         tools = svc.get_tools()
-        assert len(tools) == 1
-        assert tools[0].name == "memory"
-        action_param = next(p for p in tools[0].parameters if p.name == "action")
+        assert any(t.name == "memory" for t in tools)
+        memory_tool = next(t for t in tools if t.name == "memory")
+        action_param = next(p for p in memory_tool.parameters if p.name == "action")
         assert set(action_param.enum) == {"remember", "recall", "update", "forget", "list"}
 
     @pytest.mark.asyncio
-    async def test_remember(self, memory_service: MemoryService) -> None:
+    async def test_remember(self, started_helper: _MemoryHelper) -> None:
         _set_user("brian@example.com")
-        result = await memory_service.execute_tool("memory", {
-            "action": "remember",
+        result = await started_helper.remember("brian@example.com", {
             "summary": "Prefers metric units",
             "content": "Brian prefers metric units for all measurements",
             "source": "user",
@@ -137,117 +147,95 @@ class TestMemoryService:
         assert "remember" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_list(self, memory_service: MemoryService) -> None:
+    async def test_list(self, started_helper: _MemoryHelper) -> None:
         _set_user("brian@example.com")
-        await memory_service.execute_tool("memory", {
-            "action": "remember",
+        await started_helper.remember("brian@example.com", {
             "summary": "Likes coffee",
             "content": "Brian likes strong black coffee",
         })
-        result = await memory_service.execute_tool("memory", {"action": "list"})
+        result = await started_helper.list_memories("brian@example.com")
         assert "1 memory" in result
         assert "Likes coffee" in result
 
     @pytest.mark.asyncio
-    async def test_recall(self, memory_service: MemoryService) -> None:
+    async def test_recall(self, started_helper: _MemoryHelper) -> None:
         _set_user("brian@example.com")
-        result = await memory_service.execute_tool("memory", {
-            "action": "remember",
+        result = await started_helper.remember("brian@example.com", {
             "summary": "Test memory",
             "content": "Detailed content here",
         })
         # Extract memory ID from result
         memory_id = result.split("memory ")[-1].rstrip(")")
-        recall_result = await memory_service.execute_tool("memory", {
-            "action": "recall",
+        recall_result = await started_helper.recall("brian@example.com", {
             "ids": [memory_id],
         })
         assert "Detailed content here" in recall_result
         assert "Accessed: 1 times" in recall_result
 
     @pytest.mark.asyncio
-    async def test_update(self, memory_service: MemoryService) -> None:
+    async def test_update(self, started_helper: _MemoryHelper) -> None:
         _set_user("brian@example.com")
-        result = await memory_service.execute_tool("memory", {
-            "action": "remember",
+        result = await started_helper.remember("brian@example.com", {
             "summary": "Old summary",
             "content": "Old content",
         })
         memory_id = result.split("memory ")[-1].rstrip(")")
-        update_result = await memory_service.execute_tool("memory", {
-            "action": "update",
+        update_result = await started_helper.update("brian@example.com", {
             "id": memory_id,
             "summary": "New summary",
         })
         assert "updated" in update_result.lower()
 
     @pytest.mark.asyncio
-    async def test_forget(self, memory_service: MemoryService) -> None:
+    async def test_forget(self, started_helper: _MemoryHelper) -> None:
         _set_user("brian@example.com")
-        result = await memory_service.execute_tool("memory", {
-            "action": "remember",
+        result = await started_helper.remember("brian@example.com", {
             "summary": "Temporary",
             "content": "Will be forgotten",
         })
         memory_id = result.split("memory ")[-1].rstrip(")")
-        forget_result = await memory_service.execute_tool("memory", {
-            "action": "forget",
+        forget_result = await started_helper.forget("brian@example.com", {
             "id": memory_id,
         })
         assert "forgotten" in forget_result.lower()
 
         # List should be empty now
-        list_result = await memory_service.execute_tool("memory", {"action": "list"})
+        list_result = await started_helper.list_memories("brian@example.com")
         assert "no memories" in list_result.lower()
 
     @pytest.mark.asyncio
-    async def test_ownership_isolation(self, memory_service: MemoryService) -> None:
-        _set_user("brian@example.com")
-        result = await memory_service.execute_tool("memory", {
-            "action": "remember",
+    async def test_ownership_isolation(self, started_helper: _MemoryHelper) -> None:
+        result = await started_helper.remember("brian@example.com", {
             "summary": "Brian's memory",
             "content": "Private stuff",
         })
         memory_id = result.split("memory ")[-1].rstrip(")")
 
-        # Switch to different user
-        _set_user("alice@example.com")
-        forget_result = await memory_service.execute_tool("memory", {
-            "action": "forget",
+        forget_result = await started_helper.forget("alice@example.com", {
             "id": memory_id,
         })
         assert "doesn't belong" in forget_result.lower()
 
         # Alice's list should be empty
-        list_result = await memory_service.execute_tool("memory", {"action": "list"})
+        list_result = await started_helper.list_memories("alice@example.com")
         assert "no memories" in list_result.lower()
 
     @pytest.mark.asyncio
-    async def test_requires_authenticated_user(self, memory_service: MemoryService) -> None:
-        from gilbert.core.context import set_current_user
-        set_current_user(UserContext.GUEST)
-        result = await memory_service.execute_tool("memory", {"action": "list"})
-        assert "authenticated" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_get_user_summaries(self, memory_service: MemoryService) -> None:
-        _set_user("brian@example.com")
-        await memory_service.execute_tool("memory", {
-            "action": "remember",
+    async def test_get_user_summaries(self, started_helper: _MemoryHelper) -> None:
+        await started_helper.remember("brian@example.com", {
             "summary": "Prefers metric",
             "content": "Uses metric units",
         })
-        await memory_service.execute_tool("memory", {
-            "action": "remember",
+        await started_helper.remember("brian@example.com", {
             "summary": "Drives a Tesla",
             "content": "Has a Model 3",
         })
-        summaries = await memory_service.get_user_summaries("brian@example.com")
+        summaries = await started_helper.get_user_summaries("brian@example.com")
         assert "Prefers metric" in summaries
         assert "Drives a Tesla" in summaries
         assert "2 stored" in summaries
 
     @pytest.mark.asyncio
-    async def test_get_user_summaries_empty(self, memory_service: MemoryService) -> None:
-        result = await memory_service.get_user_summaries("nobody@example.com")
+    async def test_get_user_summaries_empty(self, started_helper: _MemoryHelper) -> None:
+        result = await started_helper.get_user_summaries("nobody@example.com")
         assert result == ""

@@ -2,7 +2,6 @@
 
 import json
 import logging
-from dataclasses import asdict
 from typing import Any
 
 from gilbert.interfaces.configuration import ConfigParam
@@ -80,8 +79,10 @@ def _playlist_to_dict(p: PlaylistInfo) -> dict[str, Any]:
 class MusicService(Service):
     """Exposes a MusicBackend as a service with search, metadata, and speaker playback."""
 
-    def __init__(self, backend: MusicBackend) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: MusicBackend | None = None
+        self._backend_name: str = "spotify"
+        self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._speaker_svc: Any | None = None
 
@@ -90,10 +91,12 @@ class MusicService(Service):
             name="music",
             capabilities=frozenset({"music", "ai_tools"}),
             optional=frozenset({"configuration", "speaker_control"}),
+            toggleable=True,
+            toggle_description="Music playback and search",
         )
 
     @property
-    def backend(self) -> MusicBackend:
+    def backend(self) -> MusicBackend | None:
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -102,19 +105,35 @@ class MusicService(Service):
 
         # Load config
         config_svc = resolver.get_capability("configuration")
+        section: dict[str, Any] = {}
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("music")
-                self._apply_config(section)
+                section = config_svc.get_section(self.config_namespace)
+
+        if not section.get("enabled", False):
+            logger.info("Music service disabled")
+            return
+
+        self._enabled = True
+        self._config = section.get("settings", self._config)
+
+        backend_name = section.get("backend", "spotify")
+        self._backend_name = backend_name
+        try:
+            import gilbert.integrations.spotify_music  # noqa: F401
+        except ImportError:
+            pass
+        backends = MusicBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown music backend: {backend_name}")
+        self._backend = backend_cls()
 
         # Initialize backend with settings (includes credentials)
         await self._backend.initialize(self._config)
         logger.info("Music service started")
-
-    def _apply_config(self, section: dict[str, Any]) -> None:
-        self._config = section.get("settings", self._config)
 
     # --- Configurable protocol ---
 
@@ -127,6 +146,12 @@ class MusicService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.spotify_music  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
@@ -134,48 +159,57 @@ class MusicService(Service):
                 default="spotify", restart_required=True,
                 choices=tuple(MusicBackend.registered_backends().keys()) or ("spotify",),
             ),
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the music service is enabled.",
-                default=False, restart_required=True,
-            ),
         ]
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=f"settings.{bp.key}", type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, choices_from=bp.choices_from,
-                multiline=bp.multiline, backend_param=True,
-            ))
+        backends = MusicBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=f"settings.{bp.key}", type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, choices_from=bp.choices_from,
+                    multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        self._apply_config(config)
+        self._config = config.get("settings", self._config)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
 
     # --- Core operations ---
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResults:
         """Search for music."""
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         return await self._backend.search(query, limit=limit)
 
     async def get_track(self, track_id: str) -> TrackInfo | None:
         """Get track metadata."""
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         return await self._backend.get_track(track_id)
 
     async def get_album(self, album_id: str) -> AlbumInfo | None:
         """Get album metadata."""
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         return await self._backend.get_album(album_id)
 
     async def get_album_tracks(self, album_id: str) -> list[TrackInfo]:
         """Get all tracks in an album."""
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         return await self._backend.get_album_tracks(album_id)
 
     async def get_playlist(self, playlist_id: str) -> PlaylistDetail | None:
         """Get a playlist with its tracks."""
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         return await self._backend.get_playlist(playlist_id)
 
     async def play_track(
@@ -189,6 +223,8 @@ class MusicService(Service):
 
         Returns the track metadata for display purposes.
         """
+        if self._backend is None:
+            raise RuntimeError("Music service is not enabled")
         if self._speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
 
@@ -216,6 +252,8 @@ class MusicService(Service):
         return "music"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         tools = [
             ToolDefinition(
                 name="search_music",

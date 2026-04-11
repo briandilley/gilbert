@@ -79,7 +79,9 @@ async def test_service_delegates_to_backend() -> None:
     mock_backend.extract_text = AsyncMock(return_value="hello world")
     mock_backend.backend_config_params.return_value = []
 
-    svc = OCRService(mock_backend)
+    svc = OCRService()
+    svc._backend = mock_backend
+    svc._enabled = True
     assert svc.available is True
 
     result = await svc.extract_text(b"image data")
@@ -90,21 +92,17 @@ async def test_service_delegates_to_backend() -> None:
 def test_service_info() -> None:
     from gilbert.core.services.ocr import OCRService
 
-    mock_backend = MagicMock(spec=OCRBackend)
-    mock_backend.backend_config_params.return_value = []
-    svc = OCRService(mock_backend)
+    svc = OCRService()
     info = svc.service_info()
     assert info.name == "ocr"
     assert "ocr" in info.capabilities
+    assert info.toggleable is True
 
 
 def test_service_config_includes_backend_choice() -> None:
     from gilbert.core.services.ocr import OCRService
 
-    mock_backend = MagicMock(spec=OCRBackend)
-    mock_backend.backend_config_params.return_value = []
-    svc = OCRService(mock_backend)
+    svc = OCRService()
     params = svc.config_params()
     keys = [p.key for p in params]
     assert "backend" in keys
-    assert "enabled" in keys

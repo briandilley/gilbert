@@ -32,6 +32,7 @@ class GreetingService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         self._event_bus: EventBus | None = None
         self._storage_backend: Any = None  # StorageBackend
         self._ai: Any = None  # AIService
@@ -54,10 +55,25 @@ class GreetingService(Service):
             optional=frozenset({"ai", "speaker_control", "text_to_speech", "presence", "configuration"}),
             ai_calls=frozenset({"greeting"}),
             events=frozenset({"greeting.announced"}),
+            toggleable=True,
+            toggle_description="Automated greeting announcements",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+
+        # Check enabled
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Greeting service disabled")
+                    return
+
+        self._enabled = True
 
         # Get event bus and subscribe
         event_bus_svc = resolver.require_capability("event_bus")
@@ -69,12 +85,11 @@ class GreetingService(Service):
         self._storage_backend = getattr(storage_svc, "backend", storage_svc)
 
         # Load config
-        config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.core.services.configuration import ConfigurationService
 
             if isinstance(config_svc, ConfigurationService):
-                section = config_svc.get_section("greeting")
+                section = config_svc.get_section(self.config_namespace)
                 self._start_hour = int(section.get("start_hour", 6))
                 self._cutoff_hour = int(section.get("cutoff_hour", 14))
                 self._style = section.get("style", "")
@@ -120,11 +135,6 @@ class GreetingService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the greeting service is enabled.",
-                default=False, restart_required=True,
-            ),
             ConfigParam(
                 key="start_hour", type=ToolParameterType.INTEGER,
                 description="Hour of day to start greeting (0-23).",
@@ -422,6 +432,8 @@ class GreetingService(Service):
         return "greeting"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="greet",

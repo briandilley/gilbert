@@ -187,8 +187,8 @@ export function ConfigSection({ section }: ConfigSectionProps) {
             </div>
           )}
 
-          {/* Backend-specific settings — grouped by backend type */}
-          {backendSettingsParams.length > 0 && (
+          {/* Backend-specific settings — only shown when a backend is selected */}
+          {backendSettingsParams.length > 0 && (!backendParam || backendName) && (
             <div className="mt-4 pt-4 border-t border-dashed">
               {backendGroups(backendSettingsParams, backendName, !!backendParam).map((group) => {
                 // For multi-backend groups, check if this group's enabled toggle is on

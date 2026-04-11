@@ -61,7 +61,11 @@ def stub_backend() -> StubSearchBackend:
 
 @pytest.fixture
 def service(stub_backend: StubSearchBackend) -> WebSearchService:
-    return WebSearchService(stub_backend, settings={"api_key": "test-key-123"})
+    svc = WebSearchService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    svc._settings = {"api_key": "test-key-123"}
+    return svc
 
 
 @pytest.fixture
@@ -74,9 +78,11 @@ def resolver() -> MagicMock:
 
 @pytest.fixture
 async def started_service(
-    service: WebSearchService, resolver: MagicMock,
+    service: WebSearchService, stub_backend: StubSearchBackend,
 ) -> WebSearchService:
-    await service.start(resolver)
+    import httpx
+    await stub_backend.initialize(service._settings)
+    service._http_client = httpx.AsyncClient(timeout=30, follow_redirects=True)
     return service
 
 
@@ -92,10 +98,9 @@ class TestServiceLifecycle:
 
     @pytest.mark.asyncio
     async def test_start_initializes_backend(
-        self, service: WebSearchService, resolver: MagicMock,
+        self, started_service: WebSearchService,
         stub_backend: StubSearchBackend,
     ) -> None:
-        await service.start(resolver)
         assert stub_backend.initialized
         assert stub_backend.init_config["api_key"] == "test-key-123"
 
@@ -204,9 +209,10 @@ class TestToolExecution:
         assert "R10" not in result
 
     @pytest.mark.asyncio
-    async def test_search_error_handled(self, resolver: MagicMock) -> None:
-        svc = WebSearchService(ErrorSearchBackend())
-        await svc.start(resolver)
+    async def test_search_error_handled(self) -> None:
+        svc = WebSearchService()
+        svc._backend = ErrorSearchBackend()
+        svc._enabled = True
         result = await svc.execute_tool(
             "web_search", {"query": "test"},
         )

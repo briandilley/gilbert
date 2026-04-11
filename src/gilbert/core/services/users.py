@@ -359,6 +359,7 @@ class UserService(Service):
         return {
             "users.user.create": self._ws_user_create,
             "users.user.delete": self._ws_user_delete,
+            "users.user.reset_password": self._ws_user_reset_password,
         }
 
     async def _ws_user_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -428,6 +429,23 @@ class UserService(Service):
                 "error": str(e), "code": 403,
             }
         return {"type": "users.user.delete.result", "ref": frame.get("id"), "status": "ok"}
+
+    async def _ws_user_reset_password(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        user_id = frame.get("user_id", "")
+        if not user_id:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "user_id is required", "code": 400,
+            }
+        password = frame.get("password", "")
+        if not password:
+            return {
+                "type": "gilbert.error", "ref": frame.get("id"),
+                "error": "password is required", "code": 400,
+            }
+        password_hash = self._hash_password(password)
+        await self._backend.update_user(user_id, {"password_hash": password_hash})
+        return {"type": "users.user.reset_password.result", "ref": frame.get("id"), "status": "ok"}
 
     # --- ToolProvider protocol ---
 

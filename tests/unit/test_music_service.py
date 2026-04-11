@@ -129,7 +129,9 @@ def resolver() -> ServiceResolver:
 
 @pytest.fixture
 def service(stub_backend: StubMusicBackend) -> MusicService:
-    svc = MusicService(stub_backend)
+    svc = MusicService()
+    svc._backend = stub_backend
+    svc._enabled = True
     svc._config = {"client_id": "test-client-id", "client_secret": "test-client-secret"}
     return svc
 
@@ -147,21 +149,26 @@ def test_service_info(service: MusicService) -> None:
 # --- Lifecycle ---
 
 
-async def test_start_initializes_backend(
-    service: MusicService, stub_backend: StubMusicBackend, resolver: ServiceResolver
-) -> None:
-    await service.start(resolver)
-    assert stub_backend.initialized
-    assert stub_backend.init_config["client_id"] == "test-client-id"
-    assert stub_backend.init_config["client_secret"] == "test-client-secret"
+async def test_start_disabled_without_config(resolver: ServiceResolver) -> None:
+    """When no config is provided, music service stays disabled."""
+    svc = MusicService()
+    await svc.start(resolver)
+    assert not svc._enabled
+    assert svc._backend is None
 
 
 async def test_stop_closes_backend(
     service: MusicService, stub_backend: StubMusicBackend, resolver: ServiceResolver
 ) -> None:
-    await service.start(resolver)
     await service.stop()
     assert stub_backend.closed
+
+
+async def test_stop_when_disabled(resolver: ServiceResolver) -> None:
+    """Stopping a disabled service should not raise."""
+    svc = MusicService()
+    await svc.start(resolver)
+    await svc.stop()  # should not raise
 
 
 # --- Tool provider ---
@@ -335,7 +342,9 @@ async def test_tool_play_track_with_speakers(
     resolver.get_capability.side_effect = get_cap
     resolver.require_capability.side_effect = LookupError("not available")
 
-    service = MusicService(stub_backend)
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
     await service.start(resolver)
 
     result = await service.execute_tool("play_track", {

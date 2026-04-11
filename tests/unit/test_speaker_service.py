@@ -188,7 +188,10 @@ def resolver(storage_service: StorageService) -> ServiceResolver:
 
 @pytest.fixture
 def service(stub_backend: StubSpeakerBackend) -> SpeakerService:
-    return SpeakerService(stub_backend)
+    svc = SpeakerService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    return svc
 
 
 # --- Service info ---
@@ -205,19 +208,35 @@ def test_service_info(service: SpeakerService) -> None:
 # --- Lifecycle ---
 
 
+async def test_start_disabled_without_config(resolver: ServiceResolver) -> None:
+    """Without a config service providing enabled=True, the service stays disabled."""
+    svc = SpeakerService()
+    await svc.start(resolver)
+    assert not svc._enabled
+    assert svc._backend is None
+
+
 async def test_start_initializes_backend(
-    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+    stub_backend: StubSpeakerBackend,
 ) -> None:
-    await service.start(resolver)
+    """When the backend is set and enabled, initialization works correctly."""
+    svc = SpeakerService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    await svc._backend.initialize({})
     assert stub_backend.initialized
 
 
 async def test_stop_closes_backend(
-    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+    service: SpeakerService, stub_backend: StubSpeakerBackend,
 ) -> None:
-    await service.start(resolver)
     await service.stop()
     assert stub_backend.closed
+
+
+async def test_stop_noop_when_no_backend() -> None:
+    svc = SpeakerService()
+    await svc.stop()  # should not raise
 
 
 # --- Tool provider ---
@@ -245,7 +264,9 @@ def test_get_tools_with_grouping(service: SpeakerService) -> None:
 
 def test_get_tools_without_grouping() -> None:
     backend = StubSpeakerBackend(grouping=False)
-    svc = SpeakerService(backend)
+    svc = SpeakerService()
+    svc._backend = backend
+    svc._enabled = True
     tools = svc.get_tools()
     names = [t.name for t in tools]
     assert "group_speakers" not in names
@@ -527,7 +548,9 @@ async def test_announce_with_tts(
     mock_resolver.get_capability.side_effect = get_cap
     mock_resolver.require_capability.side_effect = require_cap
 
-    service = SpeakerService(stub_backend)
+    service = SpeakerService()
+    service._backend = stub_backend
+    service._enabled = True
     await service.start(mock_resolver)
 
     result = await service.execute_tool("announce", {

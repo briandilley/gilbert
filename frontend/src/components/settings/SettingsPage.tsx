@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigSection } from "./ConfigSection";
+import { ServiceToggles } from "./ServiceToggles";
 import type { ConfigCategory } from "@/types/config";
 
 export function SettingsPage() {
@@ -85,7 +86,9 @@ export function SettingsPage() {
       </div>
 
       {/* Service sections for active category */}
-      {current && (
+      {current && current.name === "Services" ? (
+        <ServiceToggles sections={current.sections} />
+      ) : current && (
         <div className="space-y-3">
           {current.sections.map((section) => (
             <ConfigSection key={section.namespace} section={section} />

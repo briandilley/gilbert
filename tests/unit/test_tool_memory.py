@@ -1,10 +1,10 @@
-"""Tests for ToolMemoryService — per-user key-value store for tools/skills."""
+"""Tests for _ToolMemoryHelper — per-user key-value store for tools/skills."""
 
 from typing import Any
 
 import pytest
 
-from gilbert.core.services.tool_memory import ToolMemoryService
+from gilbert.core.services.ai import AIService, _ToolMemoryHelper, _tool_memory_entity_id, _TOOL_MEMORY_COLLECTION
 
 
 # ── Fake storage (same pattern as test_memory_service) ─────
@@ -47,38 +47,16 @@ class FakeStorageBackend:
         self._indexes.append(index_def)
 
 
-class FakeStorageService:
-    def __init__(self) -> None:
-        self.backend = FakeStorageBackend()
-
-    def service_info(self) -> Any:
-        from gilbert.interfaces.service import ServiceInfo
-        return ServiceInfo(name="storage", capabilities=frozenset({"entity_storage"}))
-
-
-class FakeResolver:
-    def __init__(self) -> None:
-        self.caps: dict[str, Any] = {}
-
-    def require_capability(self, cap: str) -> Any:
-        svc = self.caps.get(cap)
-        if svc is None:
-            raise LookupError(cap)
-        return svc
+@pytest.fixture
+def fake_storage() -> FakeStorageBackend:
+    return FakeStorageBackend()
 
 
 @pytest.fixture
-def resolver() -> FakeResolver:
-    r = FakeResolver()
-    r.caps["entity_storage"] = FakeStorageService()
-    return r
-
-
-@pytest.fixture
-async def svc(resolver: FakeResolver) -> ToolMemoryService:
-    s = ToolMemoryService()
-    await s.start(resolver)
-    return s
+async def svc(fake_storage: FakeStorageBackend) -> _ToolMemoryHelper:
+    helper = _ToolMemoryHelper(fake_storage)
+    await helper.setup_indexes()
+    return helper
 
 
 USER = "brian@example.com"
@@ -90,58 +68,54 @@ NS2 = "sales_agent"
 # ── Tests ───────────────────────────────────────────────────
 
 
-class TestToolMemoryService:
-    def test_service_info(self) -> None:
-        s = ToolMemoryService()
-        info = s.service_info()
-        assert info.name == "tool_memory"
+class TestToolMemoryHelper:
+    def test_ai_service_has_tool_memory_capability(self) -> None:
+        svc = AIService()
+        info = svc.service_info()
         assert "tool_memory" in info.capabilities
-        assert "entity_storage" in info.requires
 
     @pytest.mark.asyncio
-    async def test_put_and_get(self, svc: ToolMemoryService) -> None:
+    async def test_put_and_get(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "query", "python async")
         result = await svc.get(USER, NS, "query")
         assert result == "python async"
 
     @pytest.mark.asyncio
-    async def test_get_missing(self, svc: ToolMemoryService) -> None:
+    async def test_get_missing(self, svc: _ToolMemoryHelper) -> None:
         result = await svc.get(USER, NS, "nonexistent")
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_put_upsert(self, svc: ToolMemoryService) -> None:
+    async def test_put_upsert(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "prefs", {"safe": True})
         await svc.put(USER, NS, "prefs", {"safe": False})
         result = await svc.get(USER, NS, "prefs")
         assert result == {"safe": False}
 
     @pytest.mark.asyncio
-    async def test_put_preserves_created_at(self, svc: ToolMemoryService) -> None:
+    async def test_put_preserves_created_at(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "key1", "v1")
-        # Read back to get created_at from the underlying storage
-        from gilbert.core.services.tool_memory import _entity_id, _COLLECTION
-        eid = _entity_id(USER, NS, "key1")
-        record1 = await svc._storage.get(_COLLECTION, eid)
+        eid = _tool_memory_entity_id(USER, NS, "key1")
+        record1 = await svc._storage.get(_TOOL_MEMORY_COLLECTION, eid)
         created1 = record1["created_at"]
 
         await svc.put(USER, NS, "key1", "v2")
-        record2 = await svc._storage.get(_COLLECTION, eid)
+        record2 = await svc._storage.get(_TOOL_MEMORY_COLLECTION, eid)
         assert record2["created_at"] == created1
         assert record2["updated_at"] >= created1
 
     @pytest.mark.asyncio
-    async def test_delete(self, svc: ToolMemoryService) -> None:
+    async def test_delete(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "temp", "data")
         assert await svc.delete(USER, NS, "temp") is True
         assert await svc.get(USER, NS, "temp") is None
 
     @pytest.mark.asyncio
-    async def test_delete_missing(self, svc: ToolMemoryService) -> None:
+    async def test_delete_missing(self, svc: _ToolMemoryHelper) -> None:
         assert await svc.delete(USER, NS, "nope") is False
 
     @pytest.mark.asyncio
-    async def test_list_keys(self, svc: ToolMemoryService) -> None:
+    async def test_list_keys(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "a", 1)
         await svc.put(USER, NS, "b", 2)
         await svc.put(USER, NS2, "c", 3)  # different namespace
@@ -149,14 +123,14 @@ class TestToolMemoryService:
         assert sorted(keys) == ["a", "b"]
 
     @pytest.mark.asyncio
-    async def test_get_all(self, svc: ToolMemoryService) -> None:
+    async def test_get_all(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "x", "hello")
         await svc.put(USER, NS, "y", 42)
         result = await svc.get_all(USER, NS)
         assert result == {"x": "hello", "y": 42}
 
     @pytest.mark.asyncio
-    async def test_delete_all(self, svc: ToolMemoryService) -> None:
+    async def test_delete_all(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "a", 1)
         await svc.put(USER, NS, "b", 2)
         await svc.put(USER, NS2, "keep", "this")
@@ -166,29 +140,28 @@ class TestToolMemoryService:
         assert await svc.get(USER, NS2, "keep") == "this"
 
     @pytest.mark.asyncio
-    async def test_user_isolation(self, svc: ToolMemoryService) -> None:
+    async def test_user_isolation(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "secret", "brian_data")
         await svc.put(USER2, NS, "secret", "alice_data")
         assert await svc.get(USER, NS, "secret") == "brian_data"
         assert await svc.get(USER2, NS, "secret") == "alice_data"
 
     @pytest.mark.asyncio
-    async def test_cross_namespace_access(self, svc: ToolMemoryService) -> None:
+    async def test_cross_namespace_access(self, svc: _ToolMemoryHelper) -> None:
         """Tools can read each other's namespaces."""
         await svc.put(USER, NS, "shared_key", "shared_value")
-        # Access from a different "tool" perspective (same API, different ns query)
         result = await svc.get(USER, NS, "shared_key")
         assert result == "shared_value"
 
     @pytest.mark.asyncio
-    async def test_complex_values(self, svc: ToolMemoryService) -> None:
+    async def test_complex_values(self, svc: _ToolMemoryHelper) -> None:
         value = {"nested": {"list": [1, 2, 3], "bool": True, "null": None}}
         await svc.put(USER, NS, "complex", value)
         result = await svc.get(USER, NS, "complex")
         assert result == value
 
     @pytest.mark.asyncio
-    async def test_get_user_summaries(self, svc: ToolMemoryService) -> None:
+    async def test_get_user_summaries(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "recent_queries", ["python", "sqlite"])
         await svc.put(USER, NS2, "lead", {"company": "Acme"})
         summaries = await svc.get_user_summaries(USER)
@@ -200,12 +173,12 @@ class TestToolMemoryService:
         assert "lead" in summaries
 
     @pytest.mark.asyncio
-    async def test_get_user_summaries_empty(self, svc: ToolMemoryService) -> None:
+    async def test_get_user_summaries_empty(self, svc: _ToolMemoryHelper) -> None:
         result = await svc.get_user_summaries("nobody@example.com")
         assert result == ""
 
     @pytest.mark.asyncio
-    async def test_delete_wrong_user(self, svc: ToolMemoryService) -> None:
+    async def test_delete_wrong_user(self, svc: _ToolMemoryHelper) -> None:
         await svc.put(USER, NS, "mine", "data")
         assert await svc.delete(USER2, NS, "mine") is False
         assert await svc.get(USER, NS, "mine") == "data"

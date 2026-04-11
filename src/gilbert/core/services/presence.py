@@ -38,8 +38,10 @@ class PresenceService(Service):
     Periodically polls the backend for state changes and publishes events.
     """
 
-    def __init__(self, backend: PresenceBackend) -> None:
-        self._backend = backend
+    def __init__(self) -> None:
+        self._backend: PresenceBackend | None = None
+        self._backend_name: str = "unifi"
+        self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._poll_interval: float = _DEFAULT_POLL_INTERVAL
         self._event_bus: EventBus | None = None
@@ -54,10 +56,12 @@ class PresenceService(Service):
             requires=frozenset({"users", "scheduler"}),
             optional=frozenset({"configuration", "event_bus", "credentials", "entity_storage"}),
             events=frozenset({"presence.arrived", "presence.departed"}),
+            toggleable=True,
+            toggle_description="User presence detection",
         )
 
     @property
-    def backend(self) -> PresenceBackend:
+    def backend(self) -> PresenceBackend | None:
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -80,6 +84,12 @@ class PresenceService(Service):
                 full_section = config_svc.get_section("presence")
                 self._apply_config(full_section)
 
+                if not full_section.get("enabled", False):
+                    logger.info("Presence service disabled")
+                    return
+
+        self._enabled = True
+
         # Storage for persisting presence state
         storage_svc = resolver.get_capability("entity_storage")
         if storage_svc is not None:
@@ -87,6 +97,27 @@ class PresenceService(Service):
 
             if isinstance(storage_svc, StorageService):
                 self._storage = storage_svc.backend
+
+        # Create backend from registry
+        backend_name = full_section.get("backend", "unifi")
+        if config_svc is not None:
+            from gilbert.core.services.configuration import ConfigurationService
+
+            if isinstance(config_svc, ConfigurationService):
+                section = config_svc.get_section("presence")
+                backend_name = section.get("backend", "unifi")
+        self._backend_name = backend_name
+
+        try:
+            import gilbert.integrations.unifi.presence  # noqa: F401
+        except ImportError:
+            pass
+
+        backends = PresenceBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            raise ValueError(f"Unknown presence backend: {backend_name}")
+        self._backend = backend_cls()
 
         # Pass the full config section to the backend (not just settings).
         # Also resolve credentials and inject user service for name resolution.
@@ -141,6 +172,12 @@ class PresenceService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.presence import PresenceBackend
 
+        # Import known backends so they register before we query the registry
+        try:
+            import gilbert.integrations.unifi.presence  # noqa: F401
+        except ImportError:
+            pass
+
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
@@ -149,33 +186,32 @@ class PresenceService(Service):
                 choices=tuple(PresenceBackend.registered_backends().keys()) or ("unifi",),
             ),
             ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Whether the presence service is enabled.",
-                default=False, restart_required=True,
-            ),
-            ConfigParam(
                 key="poll_interval_seconds", type=ToolParameterType.NUMBER,
                 description="How often to poll for presence changes (seconds).",
                 default=_DEFAULT_POLL_INTERVAL,
             ),
         ]
-        # Backend params use actual config paths (not settings.* prefix)
-        # because the presence backend receives the full section, not just settings.
-        for bp in self._backend.backend_config_params():
-            params.append(ConfigParam(
-                key=bp.key, type=bp.type,
-                description=bp.description, default=bp.default,
-                restart_required=bp.restart_required, sensitive=bp.sensitive,
-                choices=bp.choices, choices_from=bp.choices_from,
-                multiline=bp.multiline, backend_param=True,
-            ))
+        backends = PresenceBackend.registered_backends()
+        backend_cls = backends.get(self._backend_name)
+        if backend_cls is not None:
+            for bp in backend_cls.backend_config_params():
+                params.append(ConfigParam(
+                    key=bp.key, type=bp.type,
+                    description=bp.description, default=bp.default,
+                    restart_required=bp.restart_required, sensitive=bp.sensitive,
+                    choices=bp.choices, choices_from=bp.choices_from,
+                    multiline=bp.multiline, backend_param=True,
+                ))
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
 
     async def stop(self) -> None:
-        await self._backend.close()
+        if self._backend is not None:
+            await self._backend.close()
+            self._backend = None
+        self._enabled = False
 
     # --- Polling and event detection ---
 
@@ -184,6 +220,9 @@ class PresenceService(Service):
 
         Record exists = user is here. No record = user is gone.
         """
+        if self._backend is None:
+            return
+
         # 1. Load who was here last poll (record exists = was here)
         previously_here = await self._load_present_user_ids()
 
@@ -293,24 +332,34 @@ class PresenceService(Service):
 
     async def get_presence(self, user_id: str) -> UserPresence:
         """Get presence for a specific user."""
+        if self._backend is None:
+            return UserPresence(user_id=user_id, state=PresenceState.UNKNOWN)
         return await self._backend.get_presence(user_id)
 
     async def get_all_presence(self) -> list[UserPresence]:
         """Get presence for all tracked users."""
+        if self._backend is None:
+            return []
         return await self._backend.get_all_presence()
 
     async def is_present(self, user_id: str) -> bool:
         """Check if a user is present."""
+        if self._backend is None:
+            return False
         p = await self._backend.get_presence(user_id)
         return p.state == PresenceState.PRESENT
 
     async def is_nearby(self, user_id: str) -> bool:
         """Check if a user is present or nearby."""
+        if self._backend is None:
+            return False
         p = await self._backend.get_presence(user_id)
         return p.state in (PresenceState.PRESENT, PresenceState.NEARBY)
 
     async def who_is_here(self) -> list[UserPresence]:
         """Get all users who are present or nearby."""
+        if self._backend is None:
+            return []
         all_presence = await self._backend.get_all_presence()
         return [p for p in all_presence if p.state in (PresenceState.PRESENT, PresenceState.NEARBY)]
 
@@ -321,6 +370,8 @@ class PresenceService(Service):
         return "presence"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="check_presence",

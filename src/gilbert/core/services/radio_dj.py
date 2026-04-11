@@ -51,6 +51,7 @@ class RadioDJService(Service):
     """
 
     def __init__(self) -> None:
+        self._enabled: bool = False
         # Config
         self._default_genres: list[str] = list(_DEFAULT_GENRES)
         self._min_switch_minutes: int = _DEFAULT_MIN_SWITCH_MINUTES
@@ -85,9 +86,23 @@ class RadioDJService(Service):
             requires=frozenset({"music", "speaker_control", "scheduler"}),
             optional=frozenset({"presence", "entity_storage", "event_bus", "configuration"}),
             events=frozenset({"radio_dj.genre.changed", "radio_dj.started", "radio_dj.stopped", "radio_dj.track.liked", "radio_dj.track.vetoed"}),
+            toggleable=True,
+            toggle_description="AI radio DJ announcements",
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
+        # Check enabled
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            get_section = getattr(config_svc, "get_section", None)
+            if get_section is not None:
+                section = get_section(self.config_namespace)
+                if not section.get("enabled", False):
+                    logger.info("Radio DJ service disabled")
+                    return
+
+        self._enabled = True
+
         from gilbert.interfaces.scheduler import Schedule
 
         # Required dependencies
@@ -178,11 +193,6 @@ class RadioDJService(Service):
 
     def config_params(self) -> list[ConfigParam]:
         return [
-            ConfigParam(
-                key="enabled", type=ToolParameterType.BOOLEAN,
-                description="Enable/disable the radio DJ.", default=False,
-                restart_required=True,
-            ),
             ConfigParam(
                 key="default_genres", type=ToolParameterType.ARRAY,
                 description="Genre rotation for cold start.",
@@ -597,6 +607,8 @@ class RadioDJService(Service):
         return "radio_dj"
 
     def get_tools(self) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
         return [
             ToolDefinition(
                 name="radio_start",
