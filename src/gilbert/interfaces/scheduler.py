@@ -7,6 +7,74 @@ from enum import StrEnum
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 
+class ScheduledActionType(StrEnum):
+    """What a scheduled job does when it fires."""
+
+    #: Publish an ``alarm.fired`` / ``timer.fired`` event carrying
+    #: ``{name, message}`` — the legacy pub/sub behavior. This is the
+    #: default when no ``tool`` or ``ai_prompt`` is provided.
+    EVENT = "event"
+
+    #: Directly invoke a named tool with a fully-specified argument dict.
+    #: Deterministic and cheap — no AI roundtrip at fire time. Use for
+    #: high-frequency or well-defined actions.
+    TOOL = "tool"
+
+    #: Run an ``ai_prompt`` through the AI service with full tool access.
+    #: Flexible but rate-limited globally to prevent runaway cost on
+    #: frequent alarms. Use for complex, conditional, or natural-language
+    #: instructions that a structured tool call can't express.
+    AI_PROMPT = "ai_prompt"
+
+
+@dataclass
+class ScheduledAction:
+    """Describes what a timer or alarm does when it fires.
+
+    Exactly one of (``tool`` + ``tool_arguments``) or ``ai_prompt`` may
+    be set. If neither is set, the job falls back to publishing a
+    ``timer.fired`` / ``alarm.fired`` event carrying ``message``.
+    """
+
+    type: ScheduledActionType = ScheduledActionType.EVENT
+    #: Name of the tool to invoke when ``type == TOOL``.
+    tool: str = ""
+    #: Argument dict passed to the tool's ``execute_tool()``.
+    tool_arguments: dict[str, Any] = field(default_factory=dict)
+    #: Free-form instruction fed to the AI service when ``type == AI_PROMPT``.
+    ai_prompt: str = ""
+    #: Human-readable message published on event fires. Also included
+    #: in tool/AI dispatch logs for debugging.
+    message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for persistence."""
+        return {
+            "type": self.type.value,
+            "tool": self.tool,
+            "tool_arguments": dict(self.tool_arguments),
+            "ai_prompt": self.ai_prompt,
+            "message": self.message,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> ScheduledAction:
+        """Deserialize from a persisted dict."""
+        if not data:
+            return cls()
+        try:
+            action_type = ScheduledActionType(data.get("type") or "event")
+        except ValueError:
+            action_type = ScheduledActionType.EVENT
+        return cls(
+            type=action_type,
+            tool=str(data.get("tool") or ""),
+            tool_arguments=dict(data.get("tool_arguments") or {}),
+            ai_prompt=str(data.get("ai_prompt") or ""),
+            message=str(data.get("message") or ""),
+        )
+
+
 class JobState(StrEnum):
     """Lifecycle state of a scheduled job."""
 
@@ -70,6 +138,9 @@ class JobInfo:
     last_run: str = ""
     last_duration_seconds: float = 0.0
     last_error: str = ""
+    #: What the job does when it fires. Default is a pure event
+    #: publication for backward compatibility with existing alarms.
+    action: ScheduledAction = field(default_factory=ScheduledAction)
 
 
 # Callback type for scheduled jobs
