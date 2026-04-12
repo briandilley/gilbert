@@ -12,6 +12,7 @@ from gilbert.core.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.scheduler import (
+    ActionStep,
     JobCallback,
     JobInfo,
     JobState,
@@ -453,6 +454,8 @@ class SchedulerService(Service):
                 await self._dispatch_tool_action(job_name, action, owner)
             elif action.type == ScheduledActionType.AI_PROMPT:
                 await self._dispatch_ai_action(job_name, action, owner)
+            elif action.type == ScheduledActionType.SEQUENCE:
+                await self._dispatch_sequence_action(job_name, action, owner)
             else:
                 await self._dispatch_event_action(job_name, action, event_type)
         except Exception:
@@ -498,16 +501,94 @@ class SchedulerService(Service):
         changes after setup, the stale check stays in effect — acceptable
         for v1; a future enhancement could re-validate on each fire.
         """
-        if self._resolver is None:
+        if not action.tool:
             logger.warning(
-                "Scheduler: job '%s' cannot fire — no resolver", job_name
+                "Scheduler: job '%s' has tool action but no tool name", job_name
+            )
+            return
+        await self._invoke_tool_by_name(
+            job_name, action.tool, action.tool_arguments
+        )
+
+    async def _dispatch_sequence_action(
+        self,
+        job_name: str,
+        action: ScheduledAction,
+        owner: str,
+    ) -> None:
+        """Run an ordered sequence of tool calls with per-step delays.
+
+        Each step's ``delay_before_seconds`` is awaited (via
+        ``asyncio.sleep``) before the tool is invoked. A failing step
+        is logged but does NOT abort the remaining steps — this matches
+        the forgiving behavior of the single-tool dispatcher so a
+        recurring sequence can self-heal across fires. Inter-step
+        sleeps only hold THIS fire's coroutine; other scheduled jobs
+        continue to tick normally.
+        """
+        if not action.steps:
+            logger.warning(
+                "Scheduler: job '%s' has sequence action with no steps",
+                job_name,
             )
             return
 
-        tool_name = action.tool
-        if not tool_name:
+        for idx, step in enumerate(action.steps):
+            if step.delay_before_seconds > 0:
+                logger.debug(
+                    "Scheduler '%s' sequence: sleeping %.1fs before step %d/%d",
+                    job_name,
+                    step.delay_before_seconds,
+                    idx + 1,
+                    len(action.steps),
+                )
+                try:
+                    await asyncio.sleep(step.delay_before_seconds)
+                except asyncio.CancelledError:
+                    # Scheduler shutting down — abandon the remaining steps
+                    logger.info(
+                        "Scheduler '%s' sequence cancelled mid-run at step %d",
+                        job_name,
+                        idx + 1,
+                    )
+                    raise
+
+            if not step.tool:
+                logger.warning(
+                    "Scheduler '%s' sequence step %d has no tool — skipping",
+                    job_name,
+                    idx + 1,
+                )
+                continue
+
+            logger.debug(
+                "Scheduler '%s' sequence step %d/%d → %s",
+                job_name,
+                idx + 1,
+                len(action.steps),
+                step.tool,
+            )
+            # Per-step exceptions are logged inside the helper and do
+            # NOT propagate — the next step still runs.
+            await self._invoke_tool_by_name(
+                job_name, step.tool, step.tool_arguments
+            )
+
+    async def _invoke_tool_by_name(
+        self,
+        job_name: str,
+        tool_name: str,
+        tool_arguments: dict[str, Any],
+    ) -> None:
+        """Look up and invoke a tool by name. Logs + swallows failures.
+
+        Shared between ``_dispatch_tool_action`` (single-tool) and
+        ``_dispatch_sequence_action`` (multi-step) so both paths apply
+        the same discovery, error handling, and result logging.
+        """
+        if self._resolver is None:
             logger.warning(
-                "Scheduler: job '%s' has tool action but no tool name", job_name
+                "Scheduler: job '%s' cannot fire — no resolver", job_name
             )
             return
 
@@ -520,12 +601,16 @@ class SchedulerService(Service):
                 if tdef.name != tool_name:
                     continue
                 try:
-                    result = await svc.execute_tool(tool_name, dict(action.tool_arguments))
+                    result = await svc.execute_tool(
+                        tool_name, dict(tool_arguments)
+                    )
                     logger.info(
                         "Scheduler '%s' → %s: %s",
                         job_name,
                         tool_name,
-                        (result or "")[:200] if isinstance(result, str) else "(non-string result)",
+                        (result or "")[:200]
+                        if isinstance(result, str)
+                        else "(non-string result)",
                     )
                 except Exception:
                     logger.exception(
@@ -612,11 +697,81 @@ class SchedulerService(Service):
         tool_name = (arguments.get("tool") or "").strip()
         ai_prompt = (arguments.get("ai_prompt") or "").strip()
         message = arguments.get("message", "") or ""
+        raw_steps = arguments.get("steps")
+        # Explicit presence check — an empty list still counts as
+        # "caller is using the steps path" so we error on empty.
+        has_steps = raw_steps is not None
 
-        if tool_name and ai_prompt:
+        # Mutual exclusion: at most one of {tool, ai_prompt, steps}
+        mode_count = sum(
+            1 for x in (bool(tool_name), bool(ai_prompt), has_steps) if x
+        )
+        if mode_count > 1:
             return (
                 ScheduledAction(),
-                "Specify either 'tool' or 'ai_prompt', not both.",
+                "Specify only one of 'tool', 'ai_prompt', or 'steps'.",
+            )
+
+        if has_steps:
+            if not isinstance(raw_steps, list):
+                return (
+                    ScheduledAction(),
+                    "'steps' must be a list of step objects.",
+                )
+            if len(raw_steps) == 0:
+                return (
+                    ScheduledAction(),
+                    "'steps' must contain at least one step.",
+                )
+
+            steps: list[ActionStep] = []
+            for idx, raw in enumerate(raw_steps):
+                if not isinstance(raw, dict):
+                    return (
+                        ScheduledAction(),
+                        f"Step {idx + 1}: must be an object.",
+                    )
+                step_tool = (raw.get("tool") or "").strip()
+                if not step_tool:
+                    return (
+                        ScheduledAction(),
+                        f"Step {idx + 1}: missing 'tool'.",
+                    )
+                step_args_raw = raw.get("tool_arguments") or {}
+                if not isinstance(step_args_raw, dict):
+                    return (
+                        ScheduledAction(),
+                        f"Step {idx + 1}: 'tool_arguments' must be an object.",
+                    )
+                # RBAC check per step — the caller must be allowed to
+                # invoke each tool in the chain.
+                err = self._validate_tool_exists_and_allowed(step_tool)
+                if err:
+                    return (
+                        ScheduledAction(),
+                        f"Step {idx + 1} ('{step_tool}'): {err}",
+                    )
+                try:
+                    delay = float(raw.get("delay_before_seconds") or 0)
+                except (TypeError, ValueError):
+                    return (
+                        ScheduledAction(),
+                        f"Step {idx + 1}: 'delay_before_seconds' must be numeric.",
+                    )
+                steps.append(
+                    ActionStep(
+                        tool=step_tool,
+                        tool_arguments=dict(step_args_raw),
+                        delay_before_seconds=max(0.0, delay),
+                    )
+                )
+            return (
+                ScheduledAction(
+                    type=ScheduledActionType.SEQUENCE,
+                    steps=steps,
+                    message=message,
+                ),
+                None,
             )
 
         if tool_name:
@@ -850,13 +1005,14 @@ class SchedulerService(Service):
                 description=(
                     "Set a user timer that fires ONCE after a delay. By "
                     "default publishes a 'timer.fired' event; optionally "
-                    "invoke a specific tool with arguments (tool + "
-                    "tool_arguments) or run a natural-language "
-                    "instruction through the AI (ai_prompt). Persisted "
-                    "across restarts. Use 'tool' for deterministic, "
-                    "frequent, or cheap actions. Use 'ai_prompt' for "
-                    "complex or conditional actions — AI fires are "
-                    "globally rate-limited to avoid runaway cost."
+                    "invoke a specific tool (tool + tool_arguments), run "
+                    "an AI instruction (ai_prompt), or chain multiple "
+                    "tool calls with optional delays (steps). Persisted "
+                    "across restarts. Prefer 'tool' or 'steps' for "
+                    "deterministic, frequent, or cheap actions. Use "
+                    "'ai_prompt' for complex or conditional actions — "
+                    "AI fires are globally rate-limited to avoid "
+                    "runaway cost."
                 ),
                 parameters=[
                     ToolParameter(
@@ -873,9 +1029,9 @@ class SchedulerService(Service):
                         name="message",
                         type=ToolParameterType.STRING,
                         description=(
-                            "Optional free-text message. If no tool or "
-                            "ai_prompt is given, this message is "
-                            "published with the 'timer.fired' event."
+                            "Optional free-text message. If no tool / "
+                            "ai_prompt / steps is given, this message "
+                            "is published with the 'timer.fired' event."
                         ),
                         required=False,
                     ),
@@ -884,9 +1040,9 @@ class SchedulerService(Service):
                         type=ToolParameterType.STRING,
                         description=(
                             "Optional tool name to invoke when the timer "
-                            "fires. Mutually exclusive with ai_prompt. "
-                            "The caller must have permission to use the "
-                            "target tool at setup time."
+                            "fires. Mutually exclusive with ai_prompt "
+                            "and steps. The caller must have permission "
+                            "to use the target tool at setup time."
                         ),
                         required=False,
                     ),
@@ -905,8 +1061,28 @@ class SchedulerService(Service):
                         description=(
                             "Optional natural-language instruction to "
                             "run through the AI when the timer fires. "
-                            "Mutually exclusive with tool. AI fires are "
-                            "globally rate-limited."
+                            "Mutually exclusive with tool and steps. "
+                            "AI fires are globally rate-limited."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="steps",
+                        type=ToolParameterType.ARRAY,
+                        description=(
+                            "Optional ordered list of tool calls to run "
+                            "in sequence on each fire. Each step is an "
+                            "object with 'tool' (string, required), "
+                            "'tool_arguments' (object, optional), and "
+                            "'delay_before_seconds' (number, optional) "
+                            "which waits that many seconds before "
+                            "running the step. Example for 'play music "
+                            "for 5 seconds then announce': [{tool: "
+                            "'music_play', tool_arguments: {...}}, "
+                            "{tool: 'music_stop', tool_arguments: {...}, "
+                            "delay_before_seconds: 5}, {tool: "
+                            "'audio_output', tool_arguments: {...}}]. "
+                            "Mutually exclusive with tool and ai_prompt."
                         ),
                         required=False,
                     ),
@@ -917,12 +1093,12 @@ class SchedulerService(Service):
                 description=(
                     "Set a recurring user alarm (interval, daily, or "
                     "hourly). By default publishes an 'alarm.fired' "
-                    "event on each fire; optionally invoke a specific "
-                    "tool with arguments (tool + tool_arguments) or "
-                    "run an instruction through the AI (ai_prompt). "
-                    "Persisted across restarts. Prefer 'tool' for "
-                    "frequent alarms (every few seconds/minutes) — AI "
-                    "fires are globally rate-limited."
+                    "event on each fire; optionally invoke a single "
+                    "tool (tool + tool_arguments), run an AI "
+                    "instruction (ai_prompt), or chain multiple tool "
+                    "calls with delays (steps). Persisted across "
+                    "restarts. Prefer 'tool' or 'steps' for frequent "
+                    "alarms — AI fires are globally rate-limited."
                 ),
                 parameters=[
                     ToolParameter(
@@ -958,9 +1134,9 @@ class SchedulerService(Service):
                         name="message",
                         type=ToolParameterType.STRING,
                         description=(
-                            "Optional free-text message. If no tool or "
-                            "ai_prompt is given, published with the "
-                            "'alarm.fired' event on each fire."
+                            "Optional free-text message. If no tool / "
+                            "ai_prompt / steps is given, published with "
+                            "the 'alarm.fired' event on each fire."
                         ),
                         required=False,
                     ),
@@ -969,9 +1145,9 @@ class SchedulerService(Service):
                         type=ToolParameterType.STRING,
                         description=(
                             "Optional tool name to invoke on each fire. "
-                            "Mutually exclusive with ai_prompt. Caller "
-                            "must have permission for the target tool "
-                            "at setup time."
+                            "Mutually exclusive with ai_prompt and "
+                            "steps. Caller must have permission for "
+                            "the target tool at setup time."
                         ),
                         required=False,
                     ),
@@ -990,11 +1166,34 @@ class SchedulerService(Service):
                         description=(
                             "Optional natural-language instruction to "
                             "run through the AI on each fire. Mutually "
-                            "exclusive with tool. AI fires are globally "
-                            "rate-limited (default 1 per 15 minutes) — "
-                            "don't use this for alarms that fire more "
-                            "often than the rate limit allows, or most "
-                            "fires will be skipped."
+                            "exclusive with tool and steps. AI fires "
+                            "are globally rate-limited (default 1 per "
+                            "15 minutes) — don't use this for alarms "
+                            "that fire more often than the rate limit "
+                            "allows, or most fires will be skipped."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="steps",
+                        type=ToolParameterType.ARRAY,
+                        description=(
+                            "Optional ordered list of tool calls to run "
+                            "in sequence on each fire. Each step is an "
+                            "object with 'tool' (string, required), "
+                            "'tool_arguments' (object, optional), and "
+                            "'delay_before_seconds' (number, optional) "
+                            "which waits that many seconds before "
+                            "running the step. Example for 'play music "
+                            "for 5 seconds then announce': [{tool: "
+                            "'music_play', tool_arguments: {...}}, "
+                            "{tool: 'music_stop', tool_arguments: {...}, "
+                            "delay_before_seconds: 5}, {tool: "
+                            "'audio_output', tool_arguments: {...}}]. "
+                            "Mutually exclusive with tool and ai_prompt. "
+                            "Make sure the total sequence duration fits "
+                            "within the alarm interval to avoid "
+                            "overlapping fires."
                         ),
                         required=False,
                     ),

@@ -12,12 +12,12 @@ class ScheduledActionType(StrEnum):
 
     #: Publish an ``alarm.fired`` / ``timer.fired`` event carrying
     #: ``{name, message}`` — the legacy pub/sub behavior. This is the
-    #: default when no ``tool`` or ``ai_prompt`` is provided.
+    #: default when no ``tool``/``ai_prompt``/``steps`` is provided.
     EVENT = "event"
 
     #: Directly invoke a named tool with a fully-specified argument dict.
     #: Deterministic and cheap — no AI roundtrip at fire time. Use for
-    #: high-frequency or well-defined actions.
+    #: high-frequency or well-defined single-tool actions.
     TOOL = "tool"
 
     #: Run an ``ai_prompt`` through the AI service with full tool access.
@@ -26,14 +26,63 @@ class ScheduledActionType(StrEnum):
     #: instructions that a structured tool call can't express.
     AI_PROMPT = "ai_prompt"
 
+    #: Invoke an ordered sequence of tool calls, optionally with
+    #: per-step delays. Each step is a deterministic tool call — no AI
+    #: cost per fire. Use for chained actions like "play music, wait 5
+    #: seconds, then announce a message."
+    SEQUENCE = "sequence"
+
+
+@dataclass
+class ActionStep:
+    """A single tool invocation inside a ``SEQUENCE`` action.
+
+    Steps run in order. Before each step, the dispatcher awaits
+    ``delay_before_seconds`` seconds (if positive) — this is how you
+    express "play music, wait 5 seconds, then announce". Step failures
+    are logged but do not abort the remaining steps, so a recurring
+    sequence can self-heal the same way single-tool actions do.
+    """
+
+    #: Name of the tool to invoke.
+    tool: str
+    #: Argument dict passed to the tool's ``execute_tool()``.
+    tool_arguments: dict[str, Any] = field(default_factory=dict)
+    #: Seconds to await before running this step. Runs after the
+    #: previous step returns (or after the fire starts, for the first
+    #: step). Use to sequence "start music" → wait → "stop music".
+    delay_before_seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool": self.tool,
+            "tool_arguments": dict(self.tool_arguments),
+            "delay_before_seconds": float(self.delay_before_seconds),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> ActionStep:
+        if not data:
+            return cls(tool="")
+        try:
+            delay = float(data.get("delay_before_seconds") or 0)
+        except (TypeError, ValueError):
+            delay = 0.0
+        return cls(
+            tool=str(data.get("tool") or ""),
+            tool_arguments=dict(data.get("tool_arguments") or {}),
+            delay_before_seconds=max(0.0, delay),
+        )
+
 
 @dataclass
 class ScheduledAction:
     """Describes what a timer or alarm does when it fires.
 
-    Exactly one of (``tool`` + ``tool_arguments``) or ``ai_prompt`` may
-    be set. If neither is set, the job falls back to publishing a
-    ``timer.fired`` / ``alarm.fired`` event carrying ``message``.
+    Exactly one of (``tool`` + ``tool_arguments``), ``ai_prompt``, or
+    ``steps`` may be set. If none is set, the job falls back to
+    publishing a ``timer.fired`` / ``alarm.fired`` event carrying
+    ``message``.
     """
 
     type: ScheduledActionType = ScheduledActionType.EVENT
@@ -46,6 +95,10 @@ class ScheduledAction:
     #: Human-readable message published on event fires. Also included
     #: in tool/AI dispatch logs for debugging.
     message: str = ""
+    #: Ordered sequence of tool calls when ``type == SEQUENCE``. Each
+    #: step runs after the previous one returns, with an optional
+    #: ``delay_before_seconds`` wait inserted before the step.
+    steps: list[ActionStep] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for persistence."""
@@ -55,6 +108,7 @@ class ScheduledAction:
             "tool_arguments": dict(self.tool_arguments),
             "ai_prompt": self.ai_prompt,
             "message": self.message,
+            "steps": [s.to_dict() for s in self.steps],
         }
 
     @classmethod
@@ -66,12 +120,19 @@ class ScheduledAction:
             action_type = ScheduledActionType(data.get("type") or "event")
         except ValueError:
             action_type = ScheduledActionType.EVENT
+        raw_steps = data.get("steps") or []
+        steps: list[ActionStep] = []
+        if isinstance(raw_steps, list):
+            for raw in raw_steps:
+                if isinstance(raw, dict):
+                    steps.append(ActionStep.from_dict(raw))
         return cls(
             type=action_type,
             tool=str(data.get("tool") or ""),
             tool_arguments=dict(data.get("tool_arguments") or {}),
             ai_prompt=str(data.get("ai_prompt") or ""),
             message=str(data.get("message") or ""),
+            steps=steps,
         )
 
 

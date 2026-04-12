@@ -13,6 +13,7 @@ from gilbert.core.services.scheduler import (
     _AICallRateLimiter,
 )
 from gilbert.interfaces.scheduler import (
+    ActionStep,
     JobState,
     Schedule,
     ScheduledAction,
@@ -426,7 +427,7 @@ async def test_build_action_mutual_exclusion() -> None:
         {"tool": "x", "ai_prompt": "y"}
     )
     assert err is not None
-    assert "either 'tool' or 'ai_prompt'" in err
+    assert "only one of 'tool', 'ai_prompt', or 'steps'" in err
 
 
 @pytest.mark.asyncio
@@ -617,6 +618,454 @@ async def test_dispatch_event_action_publishes_event() -> None:
     assert published[0].data == {"name": "pizza-timer", "message": "pizza done"}
 
 
+# --- SEQUENCE action: _build_action_from_args validation ---
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_ok() -> None:
+    svc = SchedulerService()
+    music = _FakeTool(tool_name="music_play")
+    stopper = _FakeTool(tool_name="music_stop")
+    announcer = _FakeTool(tool_name="audio_output")
+    svc._resolver = _resolver_with(
+        tools=[music, stopper, announcer], acl=_FakeACL()
+    )
+
+    action, err = svc._build_action_from_args({
+        "steps": [
+            {"tool": "music_play", "tool_arguments": {"q": "random"}},
+            {"tool": "music_stop", "tool_arguments": {},
+             "delay_before_seconds": 5},
+            {"tool": "audio_output", "tool_arguments": {"text": "hi"}},
+        ],
+    })
+    assert err is None
+    assert action.type == ScheduledActionType.SEQUENCE
+    assert len(action.steps) == 3
+    assert action.steps[0].tool == "music_play"
+    assert action.steps[0].tool_arguments == {"q": "random"}
+    assert action.steps[0].delay_before_seconds == 0.0
+    assert action.steps[1].delay_before_seconds == 5.0
+    assert action.steps[2].tool == "audio_output"
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_rejects_empty_list() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[], acl=_FakeACL())
+    action, err = svc._build_action_from_args({"steps": []})
+    assert err is not None
+    assert "at least one step" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_rejects_non_list() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[], acl=_FakeACL())
+    action, err = svc._build_action_from_args({"steps": "not a list"})
+    assert err is not None
+    assert "list" in err.lower()
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_missing_tool_rejected() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "steps": [{"tool_arguments": {"x": 1}}],
+    })
+    assert err is not None
+    assert "missing 'tool'" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_unknown_tool_rejected() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "steps": [{"tool": "does_not_exist"}],
+    })
+    assert err is not None
+    assert "does_not_exist" in err
+    assert "Unknown tool" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_rbac_enforced_per_step() -> None:
+    """Each step is RBAC-checked individually — a non-admin user can't
+    schedule a sequence that includes an admin-only tool."""
+    svc = SchedulerService()
+    user_tool = _FakeTool(tool_name="user_tool", required_role="user")
+    admin_tool = _FakeTool(tool_name="admin_only", required_role="admin")
+    svc._resolver = _resolver_with(
+        tools=[user_tool, admin_tool], acl=_FakeACL(user_level=100),
+    )
+    action, err = svc._build_action_from_args({
+        "steps": [
+            {"tool": "user_tool"},
+            {"tool": "admin_only"},
+        ],
+    })
+    assert err is not None
+    assert "admin_only" in err
+    assert "permission" in err.lower()
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_invalid_tool_arguments() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "steps": [{"tool": "test_tool", "tool_arguments": "not a dict"}],
+    })
+    assert err is not None
+    assert "tool_arguments" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_invalid_delay_rejected() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "steps": [{"tool": "test_tool", "delay_before_seconds": "soon"}],
+    })
+    assert err is not None
+    assert "delay_before_seconds" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_negative_delay_clamped_to_zero() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "steps": [{"tool": "test_tool", "delay_before_seconds": -3}],
+    })
+    assert err is None
+    assert action.steps[0].delay_before_seconds == 0.0
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_mutually_exclusive_with_tool() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "tool": "test_tool",
+        "steps": [{"tool": "test_tool"}],
+    })
+    assert err is not None
+    assert "only one of" in err
+
+
+@pytest.mark.asyncio
+async def test_build_action_steps_mutually_exclusive_with_ai_prompt() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    action, err = svc._build_action_from_args({
+        "ai_prompt": "do stuff",
+        "steps": [{"tool": "test_tool"}],
+    })
+    assert err is not None
+    assert "only one of" in err
+
+
+# --- SEQUENCE action: _dispatch_sequence_action ---
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_runs_steps_in_order() -> None:
+    svc = SchedulerService()
+    tool_a = _FakeTool(tool_name="tool_a")
+    tool_b = _FakeTool(tool_name="tool_b")
+    tool_c = _FakeTool(tool_name="tool_c")
+    svc._resolver = _resolver_with(tools=[tool_a, tool_b, tool_c])
+
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE,
+        steps=[
+            ActionStep(tool="tool_a", tool_arguments={"i": 1}),
+            ActionStep(tool="tool_b", tool_arguments={"i": 2}),
+            ActionStep(tool="tool_c", tool_arguments={"i": 3}),
+        ],
+    )
+    await svc._dispatch_action(
+        "seq-test", action, owner="u1", event_type="alarm.fired"
+    )
+    assert len(tool_a.calls) == 1
+    assert tool_a.calls[0]["arguments"] == {"i": 1}
+    assert len(tool_b.calls) == 1
+    assert tool_b.calls[0]["arguments"] == {"i": 2}
+    assert len(tool_c.calls) == 1
+    assert tool_c.calls[0]["arguments"] == {"i": 3}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_respects_delays() -> None:
+    """Steps with delay_before_seconds actually wait via asyncio.sleep."""
+    svc = SchedulerService()
+    tool_a = _FakeTool(tool_name="tool_a")
+    tool_b = _FakeTool(tool_name="tool_b")
+    svc._resolver = _resolver_with(tools=[tool_a, tool_b])
+
+    sleep_calls: list[float] = []
+    original_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await original_sleep(0)
+
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE,
+        steps=[
+            ActionStep(tool="tool_a"),
+            ActionStep(tool="tool_b", delay_before_seconds=5.0),
+        ],
+    )
+
+    from unittest.mock import patch
+    with patch(
+        "gilbert.core.services.scheduler.asyncio.sleep",
+        side_effect=fake_sleep,
+    ):
+        await svc._dispatch_action(
+            "delay-test", action, owner="u1", event_type="alarm.fired"
+        )
+
+    # Only the second step had a delay — only one sleep call with 5s
+    assert sleep_calls == [5.0]
+    assert len(tool_a.calls) == 1
+    assert len(tool_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_continues_after_failed_step() -> None:
+    """A failing step is logged but subsequent steps still run."""
+    svc = SchedulerService()
+    good_a = _FakeTool(tool_name="good_a")
+    bad = _FakeTool(tool_name="bad")
+    bad.raise_exc = RuntimeError("middle step exploded")
+    good_c = _FakeTool(tool_name="good_c")
+    svc._resolver = _resolver_with(tools=[good_a, bad, good_c])
+
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE,
+        steps=[
+            ActionStep(tool="good_a"),
+            ActionStep(tool="bad"),
+            ActionStep(tool="good_c"),
+        ],
+    )
+    await svc._dispatch_action(
+        "resilient", action, owner="u1", event_type="alarm.fired"
+    )
+
+    assert len(good_a.calls) == 1
+    assert len(bad.calls) == 1
+    assert len(good_c.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_unknown_tool_skipped_not_fatal() -> None:
+    svc = SchedulerService()
+    good = _FakeTool(tool_name="good")
+    svc._resolver = _resolver_with(tools=[good])
+
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE,
+        steps=[
+            ActionStep(tool="missing"),
+            ActionStep(tool="good"),
+        ],
+    )
+    await svc._dispatch_action(
+        "unknown", action, owner="u1", event_type="alarm.fired"
+    )
+    assert len(good.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_empty_steps_no_crash() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[])
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE, steps=[]
+    )
+    await svc._dispatch_action(
+        "empty", action, owner="u1", event_type="alarm.fired"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sequence_step_with_empty_tool_skipped() -> None:
+    svc = SchedulerService()
+    good = _FakeTool(tool_name="good")
+    svc._resolver = _resolver_with(tools=[good])
+
+    action = ScheduledAction(
+        type=ScheduledActionType.SEQUENCE,
+        steps=[
+            ActionStep(tool=""),
+            ActionStep(tool="good"),
+        ],
+    )
+    await svc._dispatch_action(
+        "malformed", action, owner="u1", event_type="alarm.fired"
+    )
+    assert len(good.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_with_steps_end_to_end() -> None:
+    """Full path: set_alarm → _build_action_from_args → registered job
+    with SEQUENCE action → manually triggered callback runs all steps."""
+    svc = SchedulerService()
+    music = _FakeTool(tool_name="music_play")
+    stopper = _FakeTool(tool_name="music_stop")
+    announcer = _FakeTool(tool_name="audio_output")
+    svc._resolver = _resolver_with(
+        tools=[music, stopper, announcer], acl=_FakeACL()
+    )
+
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "wake-up-chain",
+            "type": "interval",
+            "interval_seconds": 99999,
+            "steps": [
+                {"tool": "music_play",
+                 "tool_arguments": {"query": "random", "speakers": ["Bedroom"]}},
+                {"tool": "music_stop",
+                 "tool_arguments": {"speakers": ["Bedroom"]}},
+                {"tool": "audio_output",
+                 "tool_arguments": {
+                     "text": "wake up",
+                     "destination": "speakers",
+                     "speaker_names": ["Bedroom"],
+                 }},
+            ],
+        },
+    )
+    parsed = json.loads(result)
+    assert parsed["status"] == "set"
+    assert parsed["action_type"] == "sequence"
+
+    job = svc._jobs.get("wake-up-chain")
+    assert job is not None
+    assert job.info.action.type == ScheduledActionType.SEQUENCE
+    assert len(job.info.action.steps) == 3
+
+    await job.callback()
+    assert len(music.calls) == 1
+    assert len(stopper.calls) == 1
+    assert len(announcer.calls) == 1
+
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_tool_plus_steps() -> None:
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "bad",
+            "type": "interval",
+            "interval_seconds": 60,
+            "tool": "test_tool",
+            "steps": [{"tool": "test_tool"}],
+        },
+    )
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "only one of" in parsed["error"].lower()
+    assert "bad" not in svc._jobs
+
+
+@pytest.mark.asyncio
+async def test_list_timers_exposes_sequence_action() -> None:
+    """list_timers serializes the full sequence so the web UI can show
+    what each step will do."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(
+        tools=[_FakeTool(tool_name="tool_a"), _FakeTool(tool_name="tool_b")],
+        acl=_FakeACL(),
+    )
+    await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "seq-list",
+            "type": "interval",
+            "interval_seconds": 99999,
+            "steps": [
+                {"tool": "tool_a", "tool_arguments": {"x": 1}},
+                {"tool": "tool_b", "delay_before_seconds": 2},
+            ],
+        },
+    )
+    result = await svc.execute_tool("list_timers", {})
+    parsed = json.loads(result)
+    entry = next(j for j in parsed if j["name"] == "seq-list")
+    assert entry["action"]["type"] == "sequence"
+    assert len(entry["action"]["steps"]) == 2
+    assert entry["action"]["steps"][0]["tool"] == "tool_a"
+    assert entry["action"]["steps"][1]["delay_before_seconds"] == 2.0
+
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_sequence_persistence_round_trip() -> None:
+    """A SEQUENCE alarm survives a scheduler restart with all steps intact."""
+    stored: dict[str, dict[str, Any]] = {}
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data  # type: ignore[assignment]
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)  # type: ignore[call-overload]
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    fake_storage = _FakeStorage()
+
+    svc1 = SchedulerService()
+    svc1._resolver = _resolver_with(
+        tools=[_FakeTool(tool_name="tool_a"), _FakeTool(tool_name="tool_b")],
+        acl=_FakeACL(),
+    )
+    svc1._storage = fake_storage  # type: ignore[assignment]
+    await svc1.execute_tool(
+        "set_alarm",
+        {
+            "name": "persisted-seq",
+            "type": "interval",
+            "interval_seconds": 99999,
+            "steps": [
+                {"tool": "tool_a", "tool_arguments": {"n": 1}},
+                {"tool": "tool_b", "delay_before_seconds": 7},
+            ],
+        },
+    )
+    await svc1.stop()
+    assert "persisted-seq" in stored["scheduler_jobs"]
+
+    svc2 = SchedulerService()
+    svc2._storage = fake_storage  # type: ignore[assignment]
+    await svc2._load_persisted_jobs()
+    restored = svc2._jobs.get("persisted-seq")
+    assert restored is not None
+    assert restored.info.action.type == ScheduledActionType.SEQUENCE
+    assert len(restored.info.action.steps) == 2
+    assert restored.info.action.steps[0].tool == "tool_a"
+    assert restored.info.action.steps[0].tool_arguments == {"n": 1}
+    assert restored.info.action.steps[1].tool == "tool_b"
+    assert restored.info.action.steps[1].delay_before_seconds == 7.0
+    await svc2.stop()
+
+
 # --- set_timer / set_alarm integration with actions ---
 
 
@@ -699,7 +1148,7 @@ async def test_set_alarm_rejects_both_tool_and_ai_prompt() -> None:
     )
     parsed = json.loads(result)
     assert "error" in parsed
-    assert "either" in parsed["error"].lower()
+    assert "only one of" in parsed["error"].lower()
     # Nothing got registered
     assert "bad" not in svc._jobs
 
