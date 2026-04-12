@@ -172,6 +172,10 @@ class Gilbert:
         self.service_manager.register(SpeakerService())
         self.service_manager.register(MusicService())
 
+        from gilbert.core.services.audio_output import AudioOutputService
+
+        self.service_manager.register(AudioOutputService())
+
         from gilbert.core.services.knowledge import KnowledgeService
 
         self.service_manager.register(KnowledgeService())

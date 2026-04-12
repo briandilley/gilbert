@@ -178,3 +178,20 @@ class SpeakerProvider(Protocol):
     def backend(self) -> SpeakerBackend:
         """Access the speaker backend."""
         ...
+
+    async def announce(
+        self,
+        text: str,
+        speaker_names: list[str] | None = None,
+        volume: int | None = None,
+    ) -> str:
+        """Announce ``text`` over speakers via text-to-speech.
+
+        If ``speaker_names`` is ``None``, the service's configured
+        default speakers are used. If ``volume`` is ``None``, the
+        service's configured default announce volume is used.
+
+        Returns an implementation-defined confirmation string (typically
+        the path or URL of the generated audio file).
+        """
+        ...
