@@ -218,3 +218,233 @@ async def test_get_voice_not_found(backend: ElevenLabsTTS) -> None:
 
     assert voice is None
     await backend.close()
+
+
+# --- Synthesis cache ---
+
+
+def _make_mock_response(content: bytes = b"audio-bytes") -> AsyncMock:
+    r = AsyncMock()
+    r.content = content
+    r.raise_for_status = lambda: None
+    return r
+
+
+async def test_cache_hit_skips_api_call(backend: ElevenLabsTTS) -> None:
+    """A second identical request is served from the cache."""
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(b"cached-audio"),
+    ) as mock_post:
+        request = SynthesisRequest(text="Hello", voice_id="v1")
+        first = await backend.synthesize(request)
+        second = await backend.synthesize(request)
+
+        assert mock_post.call_count == 1
+        assert first.audio == b"cached-audio"
+        assert second.audio == b"cached-audio"
+
+    stats = backend.cache_stats()
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+    assert stats["size"] == 1
+    await backend.close()
+
+
+async def test_cache_keys_differ_by_text(backend: ElevenLabsTTS) -> None:
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(SynthesisRequest(text="One", voice_id="v1"))
+        await backend.synthesize(SynthesisRequest(text="Two", voice_id="v1"))
+        assert mock_post.call_count == 2
+
+    assert backend.cache_stats()["size"] == 2
+    await backend.close()
+
+
+async def test_cache_keys_differ_by_voice(backend: ElevenLabsTTS) -> None:
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(SynthesisRequest(text="Hi", voice_id="v1"))
+        await backend.synthesize(SynthesisRequest(text="Hi", voice_id="v2"))
+        assert mock_post.call_count == 2
+
+    await backend.close()
+
+
+async def test_cache_keys_differ_by_format(backend: ElevenLabsTTS) -> None:
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(
+            SynthesisRequest(
+                text="Hi", voice_id="v1", output_format=AudioFormat.MP3,
+            )
+        )
+        await backend.synthesize(
+            SynthesisRequest(
+                text="Hi", voice_id="v1", output_format=AudioFormat.WAV,
+            )
+        )
+        assert mock_post.call_count == 2
+
+    await backend.close()
+
+
+async def test_cache_keys_differ_by_voice_settings(
+    backend: ElevenLabsTTS,
+) -> None:
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(
+            SynthesisRequest(text="Hi", voice_id="v1", stability=0.5)
+        )
+        await backend.synthesize(
+            SynthesisRequest(text="Hi", voice_id="v1", stability=0.9)
+        )
+        assert mock_post.call_count == 2
+
+    await backend.close()
+
+
+async def test_cache_lru_eviction(backend: ElevenLabsTTS) -> None:
+    """Inserting past cache_max_entries evicts the least-recently-used."""
+    await backend.initialize({"api_key": "sk-test", "cache_max_entries": 2})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ):
+        await backend.synthesize(SynthesisRequest(text="one", voice_id="v1"))
+        await backend.synthesize(SynthesisRequest(text="two", voice_id="v1"))
+        # Touch "one" so it's most-recently-used
+        await backend.synthesize(SynthesisRequest(text="one", voice_id="v1"))
+        # Inserting a third entry evicts the LRU ("two")
+        await backend.synthesize(SynthesisRequest(text="three", voice_id="v1"))
+
+    stats = backend.cache_stats()
+    assert stats["size"] == 2
+    assert stats["evictions"] >= 1
+    # "two" should be gone — synthesizing it again triggers a fresh miss
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(SynthesisRequest(text="two", voice_id="v1"))
+        assert mock_post.call_count == 1
+
+    await backend.close()
+
+
+async def test_cache_disabled_by_zero_max_entries(
+    backend: ElevenLabsTTS,
+) -> None:
+    await backend.initialize({"api_key": "sk-test", "cache_max_entries": 0})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        await backend.synthesize(SynthesisRequest(text="Hi", voice_id="v1"))
+        await backend.synthesize(SynthesisRequest(text="Hi", voice_id="v1"))
+        assert mock_post.call_count == 2
+
+    assert backend.cache_stats()["size"] == 0
+    await backend.close()
+
+
+async def test_cache_ttl_expires_old_entries(backend: ElevenLabsTTS) -> None:
+    """Entries older than ttl_seconds are evicted on access."""
+    import time as time_mod
+
+    await backend.initialize(
+        {"api_key": "sk-test", "cache_ttl_seconds": 0.05}
+    )
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        request = SynthesisRequest(text="Hi", voice_id="v1")
+        await backend.synthesize(request)
+        # Wait past the TTL
+        time_mod.sleep(0.1)
+        await backend.synthesize(request)
+        # Second call was NOT a cache hit — the entry expired
+        assert mock_post.call_count == 2
+
+    stats = backend.cache_stats()
+    assert stats["evictions"] >= 1
+    assert stats["misses"] == 2
+    await backend.close()
+
+
+async def test_cache_ttl_zero_disables_expiry(backend: ElevenLabsTTS) -> None:
+    """ttl=0 means entries live until LRU evicts them."""
+    await backend.initialize(
+        {"api_key": "sk-test", "cache_ttl_seconds": 0}
+    )
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ) as mock_post:
+        request = SynthesisRequest(text="Hi", voice_id="v1")
+        await backend.synthesize(request)
+        await backend.synthesize(request)
+        assert mock_post.call_count == 1
+
+    assert backend.cache_stats()["hits"] == 1
+    await backend.close()
+
+
+async def test_close_clears_cache(backend: ElevenLabsTTS) -> None:
+    await backend.initialize({"api_key": "sk-test"})
+
+    with patch.object(
+        backend._client,  # type: ignore[union-attr]
+        "post",
+        return_value=_make_mock_response(),
+    ):
+        await backend.synthesize(SynthesisRequest(text="Hi", voice_id="v1"))
+
+    assert backend.cache_stats()["size"] == 1
+    await backend.close()
+    assert backend.cache_stats()["size"] == 0
+
+
+async def test_config_cache_defaults() -> None:
+    """Missing cache config keys fall back to the documented defaults."""
+    backend = ElevenLabsTTS()
+    await backend.initialize({"api_key": "sk-test"})
+    stats = backend.cache_stats()
+    assert stats["max_entries"] == 256
+    assert stats["ttl_seconds"] == 1800.0
+    await backend.close()

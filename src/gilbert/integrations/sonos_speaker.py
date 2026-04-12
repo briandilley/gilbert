@@ -38,9 +38,19 @@ def _speaker_id(device: SoCo) -> str:
 
 
 def _speaker_info(device: SoCo) -> SpeakerInfo:
-    """Build a SpeakerInfo from a SoCo device."""
+    """Build a SpeakerInfo from a SoCo device.
+
+    During Sonos topology changes (e.g. just after an ``unjoin``), a
+    device's ``group`` can exist while its ``coordinator`` is
+    temporarily ``None``. Treat those devices as their own coordinator
+    until the group state settles — otherwise ``coordinator.uid``
+    raises ``AttributeError`` on a ``None`` object.
+    """
     group = device.group
-    coordinator = group.coordinator if group else device
+    if group is not None and group.coordinator is not None:
+        coordinator = group.coordinator
+    else:
+        coordinator = device
     transport = device.get_current_transport_info()
     state_str = transport.get("current_transport_state", "STOPPED")
 
