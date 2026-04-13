@@ -50,4 +50,11 @@ htmlcov/
 # Frontend build
 frontend/node_modules/
 frontend/dist/
-src/gilbert/web/spa/
+# Built SPA — index.html and the woff2 fonts are tracked so the Python
+# server can ship them; the hashed JS/CSS bundles are build output and
+# stay ignored.
+src/gilbert/web/spa/*
+!src/gilbert/web/spa/index.html
+!src/gilbert/web/spa/assets/
+src/gilbert/web/spa/assets/*
+!src/gilbert/web/spa/assets/*.woff2
