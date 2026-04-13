@@ -178,6 +178,22 @@ Plugins are loaded from:
 
 Configuration follows the same layering as core: plugin defaults in `plugin.yaml`, overrides in `.gilbert/config.yaml` under `plugins.config.<name>`.
 
+### Community plugins
+
+A collection of first-party and community plugins lives in a separate
+repository: **[briandilley/gilbert-plugins](https://github.com/briandilley/gilbert-plugins)**.
+Clone it into your `plugins/` directory and restart Gilbert to pick
+them up — each plugin is self-contained and opt-in from the Settings
+UI.
+
+New integrations belong there rather than in this repo. If you've
+built a plugin for a service, device, or workflow that might be
+useful to others, please open a pull request against
+`gilbert-plugins`. Plugin PRs should include a README documenting
+configuration, commands, and any external prerequisites, plus tests
+where practical — see the existing plugins in that repo for a
+pattern to follow.
+
 ## Getting Started
 
 ### Prerequisites
