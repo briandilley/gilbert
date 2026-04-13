@@ -239,3 +239,84 @@ class TestMemoryHelper:
     async def test_get_user_summaries_empty(self, started_helper: _MemoryHelper) -> None:
         result = await started_helper.get_user_summaries("nobody@example.com")
         assert result == ""
+
+
+# ── Tool dispatcher tests ───────────────────────────────────
+#
+# These exercise ``AIService._tool_memory_action``, which is the entry
+# point invoked by the AI tool executor and the slash-command dispatcher.
+# Those executors pass caller identity via an injected ``_user_id`` key
+# in the arguments dict (see ``_execute_tool_calls`` and
+# ``_invoke_slash_command``) — they do **not** set the ``get_current_user``
+# contextvar. The handler must honor the injected value or every
+# ``/memory`` invocation fails with "Memory requires an authenticated user".
+
+
+@pytest.fixture
+def ai_service_with_memory(fake_storage: FakeStorageBackend) -> AIService:
+    svc = AIService()
+    svc._storage = fake_storage  # type: ignore[assignment]
+    svc._memory = _MemoryHelper(fake_storage)
+    return svc
+
+
+class TestToolMemoryAction:
+    @pytest.mark.asyncio
+    async def test_remember_uses_injected_user_id(
+        self, ai_service_with_memory: AIService,
+    ) -> None:
+        # Ensure contextvar is the SYSTEM default — i.e. nothing has set
+        # it for this call. This mirrors the real chat flow, where the
+        # WS handler does not populate the contextvar before dispatching
+        # tool calls.
+        from gilbert.core.context import set_current_user
+        set_current_user(UserContext.SYSTEM)
+
+        result = await ai_service_with_memory._tool_memory_action({
+            "action": "remember",
+            "summary": "Brian's EIN for Current Electric Vehicles",
+            "content": "EIN 87-4708791",
+            "source": "user",
+            "_user_id": "brian@example.com",
+            "_user_name": "Brian",
+            "_user_roles": ["user"],
+        })
+        assert "remember" in result.lower()
+        assert "authenticated user" not in result.lower()
+
+        list_result = await ai_service_with_memory._tool_memory_action({
+            "action": "list",
+            "_user_id": "brian@example.com",
+        })
+        assert "Brian's EIN" in list_result
+
+    @pytest.mark.asyncio
+    async def test_rejects_system_user_when_no_injected_id(
+        self, ai_service_with_memory: AIService,
+    ) -> None:
+        from gilbert.core.context import set_current_user
+        set_current_user(UserContext.SYSTEM)
+
+        result = await ai_service_with_memory._tool_memory_action({
+            "action": "list",
+        })
+        assert "authenticated user" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_contextvar(
+        self, ai_service_with_memory: AIService,
+    ) -> None:
+        # Direct callers (tests, future non-tool entry points) that set
+        # the contextvar should still work without having to supply
+        # ``_user_id`` in the arguments dict.
+        _set_user("brian@example.com")
+        try:
+            result = await ai_service_with_memory._tool_memory_action({
+                "action": "remember",
+                "summary": "Likes pour-over",
+                "content": "Brian prefers pour-over coffee",
+            })
+            assert "remember" in result.lower()
+        finally:
+            from gilbert.core.context import set_current_user
+            set_current_user(UserContext.SYSTEM)

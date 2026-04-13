@@ -30,7 +30,7 @@ export interface ConversationMember {
 export interface ConversationDetail {
   conversation_id: string;
   title: string;
-  messages: ChatMessage[];
+  messages: ChatMessageWithMeta[];
   ui_blocks: UIBlock[];
   updated_at: string;
   shared: boolean;
@@ -42,6 +42,8 @@ export interface ConversationDetail {
 export interface ToolUsageEntry {
   tool_name: string;
   is_error: boolean;
+  arguments?: Record<string, unknown>;
+  result?: string;
 }
 
 export interface ChatResponse {

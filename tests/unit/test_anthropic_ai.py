@@ -7,6 +7,7 @@ import pytest
 
 from gilbert.integrations.anthropic_ai import AnthropicAI
 from gilbert.interfaces.ai import (
+    AIBackendError,
     AIRequest,
     Message,
     MessageRole,
@@ -277,6 +278,7 @@ async def test_generate_calls_api(backend: AnthropicAI) -> None:
     await backend.initialize({"api_key": "sk-test"})
 
     mock_response = MagicMock()
+    mock_response.is_error = False
     mock_response.json.return_value = {
         "content": [{"type": "text", "text": "API response"}],
         "model": "claude-test",
@@ -298,6 +300,156 @@ async def test_generate_calls_api(backend: AnthropicAI) -> None:
     backend._client.post.assert_called_once()
     call_kwargs = backend._client.post.call_args
     assert call_kwargs[0][0] == "/messages"
+
+    await backend.close()
+
+
+async def test_generate_raises_ai_backend_error_on_http_error(
+    backend: AnthropicAI,
+) -> None:
+    """A 4xx response should surface Anthropic's error.message, not opaque HTTP text."""
+    await backend.initialize({"api_key": "sk-test"})
+
+    mock_response = MagicMock()
+    mock_response.is_error = True
+    mock_response.status_code = 400
+    mock_response.json.return_value = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "messages.49: all messages must have non-empty content",
+        },
+    }
+
+    assert backend._client is not None
+    backend._client.post = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
+
+    request = AIRequest(
+        messages=[Message(role=MessageRole.USER, content="Test")],
+    )
+
+    with pytest.raises(AIBackendError) as exc_info:
+        await backend.generate(request)
+
+    assert exc_info.value.status == 400
+    assert "messages.49: all messages must have non-empty content" in str(exc_info.value)
+    assert "400" in str(exc_info.value)
+
+    await backend.close()
+
+
+def test_build_messages_splits_slash_command_combined_row(backend: AnthropicAI) -> None:
+    """Assistant rows carrying both tool_calls and tool_results must be split.
+
+    Slash-command turns are persisted as a single assistant row with both a
+    ``ToolCall`` and a ``ToolResult`` attached. Anthropic requires the
+    ``tool_result`` to live on a user-role message immediately after the
+    ``tool_use``, so the request builder must emit three Anthropic messages
+    (assistant tool_use → user tool_result → assistant text) for each such
+    row. Regression for the 400 "tool_use ids were found without tool_result
+    blocks" error that broke every conversation containing a slash command.
+    """
+    messages = [
+        Message(role=MessageRole.USER, content="/recap 7d"),
+        Message(
+            role=MessageRole.ASSISTANT,
+            content="Here's your recap...",
+            tool_calls=[ToolCall(
+                tool_call_id="slash-abc123",
+                tool_name="time_logs_recap",
+                arguments={"days": 7},
+            )],
+            tool_results=[ToolResult(
+                tool_call_id="slash-abc123",
+                content="Recap: 7 days...",
+                is_error=False,
+            )],
+        ),
+        Message(role=MessageRole.USER, content="show me more"),
+    ]
+
+    built = backend._build_messages(messages)
+
+    # Expected: user → assistant(tool_use) → user(tool_result) → assistant(text) → user
+    assert len(built) == 5
+    assert built[0] == {"role": "user", "content": "/recap 7d"}
+
+    # Split row 1: assistant with only the tool_use block
+    assert built[1]["role"] == "assistant"
+    assert len(built[1]["content"]) == 1
+    assert built[1]["content"][0]["type"] == "tool_use"
+    assert built[1]["content"][0]["id"] == "slash-abc123"
+    assert built[1]["content"][0]["name"] == "time_logs_recap"
+
+    # Split row 2: user with the matching tool_result
+    assert built[2]["role"] == "user"
+    assert len(built[2]["content"]) == 1
+    assert built[2]["content"][0]["type"] == "tool_result"
+    assert built[2]["content"][0]["tool_use_id"] == "slash-abc123"
+    assert built[2]["content"][0]["content"] == "Recap: 7 days..."
+    assert "is_error" not in built[2]["content"][0]  # not set when False
+
+    # Split row 3: assistant text for alternation
+    assert built[3]["role"] == "assistant"
+    assert built[3]["content"] == [{"type": "text", "text": "Here's your recap..."}]
+
+    # The user's follow-up must still come after the split
+    assert built[4] == {"role": "user", "content": "show me more"}
+
+
+def test_build_messages_splits_slash_command_error_row(backend: AnthropicAI) -> None:
+    """Errored slash-command rows must propagate is_error and fall back on empty text."""
+    messages = [
+        Message(role=MessageRole.USER, content="/bad"),
+        Message(
+            role=MessageRole.ASSISTANT,
+            content="",  # tool returned no text
+            tool_calls=[ToolCall(
+                tool_call_id="slash-deadbeef",
+                tool_name="bad_tool",
+                arguments={},
+            )],
+            tool_results=[ToolResult(
+                tool_call_id="slash-deadbeef",
+                content="boom",
+                is_error=True,
+            )],
+        ),
+    ]
+
+    built = backend._build_messages(messages)
+
+    assert len(built) == 4
+    # tool_result carries is_error
+    assert built[2]["content"][0]["is_error"] is True
+    # Empty content falls back to placeholder so we don't ship an empty array
+    assert built[3]["content"][0]["text"] == "(done)"
+
+
+async def test_generate_raises_ai_backend_error_on_non_json_error(
+    backend: AnthropicAI,
+) -> None:
+    """A 5xx with a non-JSON body should still produce a non-empty error message."""
+    await backend.initialize({"api_key": "sk-test"})
+
+    mock_response = MagicMock()
+    mock_response.is_error = True
+    mock_response.status_code = 502
+    mock_response.json.side_effect = ValueError("not json")
+    mock_response.text = "<html>Bad Gateway</html>"
+
+    assert backend._client is not None
+    backend._client.post = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
+
+    request = AIRequest(
+        messages=[Message(role=MessageRole.USER, content="Test")],
+    )
+
+    with pytest.raises(AIBackendError) as exc_info:
+        await backend.generate(request)
+
+    assert exc_info.value.status == 502
+    assert "Bad Gateway" in str(exc_info.value)
 
     await backend.close()
 

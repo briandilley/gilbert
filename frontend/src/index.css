@@ -275,6 +275,14 @@
 
 /* ── highlight.js token colors (dark code blocks) ─────────────────── */
 
+/* Base style for standalone .hljs blocks (tool-usage previews, etc.).
+   Code blocks inside .markdown-content are styled separately above. */
+.hljs {
+  background: oklch(0.18 0 0);
+  color: oklch(0.88 0 0);
+  display: block;
+}
+
 .hljs-comment,
 .hljs-quote { color: oklch(0.55 0 0); font-style: italic; }
 

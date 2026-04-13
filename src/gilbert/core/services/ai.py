@@ -1,16 +1,14 @@
 """AI service — orchestrates AI conversations, tool execution, and persistence.
 
-Also includes internal helpers for persona, user memory, and tool memory
-(previously separate services, now merged into AIService).
+Also includes internal helpers for persona and user memory (previously
+separate services, now merged into AIService).
 """
 
-import hashlib
 import json as _json
 import logging
 import uuid
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from gilbert.core.context import get_current_user
@@ -276,117 +274,6 @@ class _MemoryHelper:
         return "\n".join(lines)
 
 
-# ── Tool memory helper ────────────────────────────────────────
-
-_TOOL_MEMORY_COLLECTION = "tool_memories"
-
-
-def _tool_memory_entity_id(user_id: str, namespace: str, key: str) -> str:
-    """Deterministic entity ID from (user_id, namespace, key)."""
-    raw = f"{user_id}:{namespace}:{key}"
-    return f"tm_{hashlib.sha256(raw.encode()).hexdigest()[:16]}"
-
-
-class _ToolMemoryHelper:
-    """Internal helper — per-user key-value store for tools and skills."""
-
-    def __init__(self, storage: StorageBackend) -> None:
-        self._storage = storage
-
-    async def setup_indexes(self) -> None:
-        await self._storage.ensure_index(IndexDefinition(
-            collection=_TOOL_MEMORY_COLLECTION,
-            fields=["user_id", "namespace"],
-        ))
-        await self._storage.ensure_index(IndexDefinition(
-            collection=_TOOL_MEMORY_COLLECTION,
-            fields=["user_id"],
-        ))
-
-    async def get(self, user_id: str, namespace: str, key: str) -> Any | None:
-        eid = _tool_memory_entity_id(user_id, namespace, key)
-        record = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
-        if record is None:
-            return None
-        if record.get("user_id") != user_id:
-            return None
-        return record.get("value")
-
-    async def put(
-        self, user_id: str, namespace: str, key: str, value: Any,
-    ) -> None:
-        eid = _tool_memory_entity_id(user_id, namespace, key)
-        now = datetime.now(UTC).isoformat()
-        existing = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
-        created_at = existing.get("created_at", now) if existing else now
-        await self._storage.put(_TOOL_MEMORY_COLLECTION, eid, {
-            "user_id": user_id,
-            "namespace": namespace,
-            "key": key,
-            "value": value,
-            "created_at": created_at,
-            "updated_at": now,
-        })
-
-    async def delete(self, user_id: str, namespace: str, key: str) -> bool:
-        eid = _tool_memory_entity_id(user_id, namespace, key)
-        record = await self._storage.get(_TOOL_MEMORY_COLLECTION, eid)
-        if record is None or record.get("user_id") != user_id:
-            return False
-        await self._storage.delete(_TOOL_MEMORY_COLLECTION, eid)
-        return True
-
-    async def list_keys(self, user_id: str, namespace: str) -> list[str]:
-        records = await self._query_namespace(user_id, namespace)
-        return [r.get("key", "") for r in records]
-
-    async def get_all(self, user_id: str, namespace: str) -> dict[str, Any]:
-        records = await self._query_namespace(user_id, namespace)
-        return {r.get("key", ""): r.get("value") for r in records}
-
-    async def delete_all(self, user_id: str, namespace: str) -> int:
-        records = await self._query_namespace(user_id, namespace)
-        for r in records:
-            eid = r.get("_id", "")
-            if eid:
-                await self._storage.delete(_TOOL_MEMORY_COLLECTION, eid)
-        return len(records)
-
-    async def get_user_summaries(self, user_id: str) -> str:
-        records = await self._storage.query(Query(
-            collection=_TOOL_MEMORY_COLLECTION,
-            filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
-        ))
-        if not records:
-            return ""
-        by_ns: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for r in records:
-            by_ns[r.get("namespace", "unknown")].append(r)
-        lines = [f"## Tool Memories for this user ({len(records)} stored)"]
-        for ns in sorted(by_ns):
-            lines.append(f"### {ns}")
-            for r in by_ns[ns]:
-                key = r.get("key", "")
-                value = r.get("value")
-                try:
-                    val_str = _json.dumps(value) if not isinstance(value, str) else value
-                except (TypeError, ValueError):
-                    val_str = str(value)
-                lines.append(f"- {key}: {val_str}")
-        return "\n".join(lines)
-
-    async def _query_namespace(
-        self, user_id: str, namespace: str,
-    ) -> list[dict[str, Any]]:
-        return await self._storage.query(Query(
-            collection=_TOOL_MEMORY_COLLECTION,
-            filters=[
-                Filter(field="user_id", op=FilterOp.EQ, value=user_id),
-                Filter(field="namespace", op=FilterOp.EQ, value=namespace),
-            ],
-        ))
-
-
 # Built-in profiles seeded on first start
 _BUILTIN_PROFILES = [
     AIContextProfile(
@@ -444,13 +331,12 @@ class AIService(Service):
         # Internal helpers (initialized in start())
         self._persona: _PersonaHelper | None = None
         self._memory: _MemoryHelper | None = None
-        self._tool_memory: _ToolMemoryHelper | None = None
         self._memory_enabled: bool = True
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="ai",
-            capabilities=frozenset({"ai_chat", "ai_tools", "ws_handlers", "persona", "user_memory", "tool_memory"}),
+            capabilities=frozenset({"ai_chat", "ai_tools", "ws_handlers", "persona", "user_memory"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"ai_tools", "configuration", "access_control"}),
             events=frozenset({"chat.conversation.renamed"}),
@@ -514,9 +400,6 @@ class AIService(Service):
 
         self._memory = _MemoryHelper(self._storage)
         await self._memory.setup_indexes()
-
-        self._tool_memory = _ToolMemoryHelper(self._storage)
-        await self._tool_memory.setup_indexes()
 
         # Resolve access control (optional — if missing, no filtering)
         self._acl_svc = resolver.get_capability("access_control")
@@ -920,11 +803,15 @@ class AIService(Service):
             all_ui_blocks.extend(round_ui_blocks)
             messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
 
-            # Track tool usage for the response metadata
+            # Track tool usage for the response metadata. Arguments are
+            # sanitized to drop injected ``_user_id`` / ``_room_members``
+            # keys before the payload is sent to the frontend.
             for tc, tr in zip(response.message.tool_calls, tool_results):
                 tool_usage.append({
                     "tool_name": tc.tool_name,
                     "is_error": tr.is_error,
+                    "arguments": self._sanitize_tool_args(tc.arguments),
+                    "result": tr.content,
                 })
         else:
             logger.warning(
@@ -1007,17 +894,6 @@ class AIService(Service):
                         parts.append(summaries)
                 except Exception:
                     pass  # Memory unavailable — not critical
-
-            # Inject tool memory summaries if available
-            if self._tool_memory is not None:
-                try:
-                    summaries = await self._tool_memory.get_user_summaries(
-                        user_ctx.user_id,
-                    )
-                    if summaries:
-                        parts.append(summaries)
-                except Exception:
-                    pass  # Tool memory unavailable — not critical
 
         # Inject skill system awareness and active skill instructions
         if self._resolver:
@@ -1419,7 +1295,12 @@ class AIService(Service):
                 error_text,
                 conversation_id,
                 [],
-                [{"tool_name": tool_def.name, "is_error": True}],
+                [{
+                    "tool_name": tool_def.name,
+                    "is_error": True,
+                    "arguments": {},
+                    "result": error_text,
+                }],
             )
 
         # Inject caller identity so tools can see who invoked them,
@@ -1519,7 +1400,12 @@ class AIService(Service):
             ui_blocks=ui_block_dicts,
         )
 
-        tool_usage = [{"tool_name": tool_def.name, "is_error": is_error}]
+        tool_usage = [{
+            "tool_name": tool_def.name,
+            "is_error": is_error,
+            "arguments": sanitized_args,
+            "result": result_text,
+        }]
         return result_text, conversation_id, ui_block_dicts, tool_usage
 
     # --- Tool Event Publishing ---
@@ -2070,8 +1956,11 @@ class AIService(Service):
         if self._memory is None:
             return "Memory system not initialized."
         action = arguments.get("action", "")
-        user = get_current_user()
-        user_id = user.user_id
+        # Caller identity is injected into ``arguments`` by the tool executor
+        # (both the AI-driven path in ``_execute_tool_calls`` and the slash
+        # command path in ``_invoke_slash_command``). Fall back to the
+        # contextvar for any callers that invoke this handler directly.
+        user_id = arguments.get("_user_id") or get_current_user().user_id
         if user_id in ("system", "guest"):
             return "Memory requires an authenticated user."
         match action:
@@ -2087,52 +1976,6 @@ class AIService(Service):
                 return await self._memory.list_memories(user_id)
             case _:
                 return f"Unknown memory action: {action}"
-
-    # --- Public tool memory API ---
-
-    async def get_tool_memory(self, user_id: str, namespace: str, key: str) -> Any | None:
-        """Get a tool memory value."""
-        if self._tool_memory is None:
-            return None
-        return await self._tool_memory.get(user_id, namespace, key)
-
-    async def put_tool_memory(
-        self, user_id: str, namespace: str, key: str, value: Any,
-    ) -> None:
-        """Store a tool memory value (upsert)."""
-        if self._tool_memory is None:
-            return
-        await self._tool_memory.put(user_id, namespace, key, value)
-
-    async def delete_tool_memory(self, user_id: str, namespace: str, key: str) -> bool:
-        """Delete a single tool memory entry."""
-        if self._tool_memory is None:
-            return False
-        return await self._tool_memory.delete(user_id, namespace, key)
-
-    async def list_tool_memory_keys(self, user_id: str, namespace: str) -> list[str]:
-        """List all keys in a tool memory namespace for a user."""
-        if self._tool_memory is None:
-            return []
-        return await self._tool_memory.list_keys(user_id, namespace)
-
-    async def get_all_tool_memory(self, user_id: str, namespace: str) -> dict[str, Any]:
-        """Get all key-value pairs in a tool memory namespace for a user."""
-        if self._tool_memory is None:
-            return {}
-        return await self._tool_memory.get_all(user_id, namespace)
-
-    async def delete_all_tool_memory(self, user_id: str, namespace: str) -> int:
-        """Delete all entries in a tool memory namespace for a user."""
-        if self._tool_memory is None:
-            return 0
-        return await self._tool_memory.delete_all(user_id, namespace)
-
-    async def get_tool_memory_user_summaries(self, user_id: str) -> str:
-        """Get formatted tool memory summaries for a user."""
-        if self._tool_memory is None:
-            return ""
-        return await self._tool_memory.get_user_summaries(user_id)
 
     async def _tool_rename_conversation(self, arguments: dict[str, Any]) -> str:
         title = arguments.get("title", "").strip()
@@ -2476,22 +2319,125 @@ class AIService(Service):
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "Conversation not found", "code": 404}
 
         is_shared = data.get("shared", False)
-        display_messages = []
+        # Walk persisted messages and build display messages. Assistant
+        # turns may span multiple persisted rows — intermediate rounds
+        # hold tool_calls with empty content, followed by tool_result
+        # rows, then a final assistant row with the answer text. We fold
+        # every tool_call/tool_result pair since the previous user message
+        # into a single ``tool_usage`` list on the first displayable
+        # assistant message that follows them, so the frontend sees one
+        # assistant bubble per turn annotated with the tools it used.
+        display_messages: list[dict[str, Any]] = []
+        # Pairs collected for the next user-visible assistant message:
+        # {tool_name, is_error, arguments, result}.
+        pending_tool_usage: list[dict[str, Any]] = []
+        # Tool calls seen but not yet paired with a result: call_id -> dict.
+        pending_calls: dict[str, dict[str, Any]] = {}
+
+        def _flush_unpaired_calls() -> None:
+            """Turn any unpaired tool_calls into usage entries (no result)."""
+            for call in pending_calls.values():
+                pending_tool_usage.append({
+                    "tool_name": call.get("tool_name", ""),
+                    "is_error": False,
+                    "arguments": self._sanitize_tool_args(
+                        call.get("arguments", {}) or {},
+                    ),
+                    "result": "",
+                })
+            pending_calls.clear()
+
         for m in data.get("messages", []):
             role = m.get("role")
-            if role not in ("user", "assistant"):
-                continue
             visible_to = m.get("visible_to")
             if visible_to is not None and conn.user_id not in visible_to:
                 continue
-            content = m.get("content", "")
-            # Skip empty assistant messages (tool-use-only turns)
-            if role == "assistant" and not content:
+
+            if role == "tool_result":
+                # Match results back to their calls and emit usage entries.
+                for tr in m.get("tool_results", []) or []:
+                    call_id = tr.get("tool_call_id", "")
+                    call = pending_calls.pop(call_id, None)
+                    if call is None:
+                        # Result without a matching call — still surface it.
+                        pending_tool_usage.append({
+                            "tool_name": "",
+                            "is_error": bool(tr.get("is_error", False)),
+                            "arguments": {},
+                            "result": tr.get("content", ""),
+                        })
+                        continue
+                    pending_tool_usage.append({
+                        "tool_name": call.get("tool_name", ""),
+                        "is_error": bool(tr.get("is_error", False)),
+                        "arguments": self._sanitize_tool_args(
+                            call.get("arguments", {}) or {},
+                        ),
+                        "result": tr.get("content", ""),
+                    })
                 continue
+
+            if role not in ("user", "assistant"):
+                continue
+
+            content = m.get("content", "")
+
+            if role == "assistant":
+                # Stash any tool_calls on this row for later pairing.
+                for tc in m.get("tool_calls", []) or []:
+                    call_id = tc.get("tool_call_id", "")
+                    if call_id:
+                        pending_calls[call_id] = tc
+
+                # Slash-command rows carry their tool_results inline on the
+                # same assistant row (rather than on a separate tool_result
+                # row). Pair them here so the reloaded bubble shows the
+                # actual tool output in its tool_usage panel instead of an
+                # empty string. This mirrors the ``_build_messages`` heal
+                # in ``AnthropicAI`` for replay — here we heal display.
+                for tr in m.get("tool_results", []) or []:
+                    call_id = tr.get("tool_call_id", "")
+                    call = pending_calls.pop(call_id, None)
+                    if call is None:
+                        pending_tool_usage.append({
+                            "tool_name": "",
+                            "is_error": bool(tr.get("is_error", False)),
+                            "arguments": {},
+                            "result": tr.get("content", ""),
+                        })
+                        continue
+                    pending_tool_usage.append({
+                        "tool_name": call.get("tool_name", ""),
+                        "is_error": bool(tr.get("is_error", False)),
+                        "arguments": self._sanitize_tool_args(
+                            call.get("arguments", {}) or {},
+                        ),
+                        "result": tr.get("content", ""),
+                    })
+
+                # Empty-content assistant rows are intermediate tool-use
+                # rounds; don't emit them as their own bubble.
+                if not content:
+                    continue
+
+            if role == "user":
+                # New user turn — any unpaired calls from a prior turn
+                # are orphans, surface them before moving on.
+                _flush_unpaired_calls()
+                # Reset pending usage; user messages never carry it.
+                pending_tool_usage = []
+
             msg: dict[str, Any] = {"role": role, "content": content}
             if is_shared:
                 msg["author_id"] = m.get("author_id", "")
                 msg["author_name"] = m.get("author_name", "")
+
+            if role == "assistant":
+                _flush_unpaired_calls()
+                if pending_tool_usage:
+                    msg["tool_usage"] = pending_tool_usage
+                    pending_tool_usage = []
+
             display_messages.append(msg)
 
         ui_blocks = self._filter_blocks_for_user(

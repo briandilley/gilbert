@@ -133,12 +133,14 @@ export function ChatPage() {
         }
 
         refetchConversations();
-      } catch {
+      } catch (exc) {
+        const detail =
+          exc instanceof Error && exc.message ? exc.message : String(exc);
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: "Sorry, something went wrong. Please try again.",
+            content: `Sorry, something went wrong. Please try again.\n\n\`${detail}\``,
           },
         ]);
       } finally {

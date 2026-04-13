@@ -1,18 +1,18 @@
 # AI Service
 
 ## Summary
-Central AI service that orchestrates conversations with tool use. Uses the AIBackend ABC + backend registry pattern. Currently uses Anthropic Claude via direct httpx calls. Includes internal helpers for persona, user memory, and tool memory (previously separate services).
+Central AI service that orchestrates conversations with tool use. Uses the AIBackend ABC + backend registry pattern. Currently uses Anthropic Claude via direct httpx calls. Includes internal helpers for persona and user memory (previously separate services).
 
 ## Details
 
 ### Architecture Layers
 - **`interfaces/tools.py`** — `ToolProvider` protocol (runtime_checkable), `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolParameterType`
 - **`interfaces/ai.py`** — `AIBackend` ABC (with registry pattern), `Message`, `MessageRole`, `AIRequest`, `AIResponse`, `StopReason`, `TokenUsage`
-- **`core/services/ai.py`** — `AIService(Service)` — the orchestrator, plus `_PersonaHelper`, `_MemoryHelper`, `_ToolMemoryHelper`
+- **`core/services/ai.py`** — `AIService(Service)` — the orchestrator, plus `_PersonaHelper` and `_MemoryHelper`
 - **`integrations/anthropic_ai.py`** — `AnthropicAI(AIBackend)` — Claude via httpx
 
 ### AIService
-- **Capabilities:** `ai_chat`, `ai_tools`, `ws_handlers`, `persona`, `user_memory`, `tool_memory`
+- **Capabilities:** `ai_chat`, `ai_tools`, `ws_handlers`, `persona`, `user_memory`
 - **Requires:** `entity_storage`
 - **Optional:** `ai_tools`, `configuration`, `access_control`
 - **Main method:** `chat(user_message, conversation_id=None) -> (response_text, conversation_id, ui_blocks, tool_usage)`
@@ -23,8 +23,7 @@ Central AI service that orchestrates conversations with tool use. Uses the AIBac
 
 ### Internal Helpers (merged services)
 - **`_PersonaHelper`** — manages AI persona text in `persona` collection. Exposes tools: `get_persona`, `update_persona`, `reset_persona`
-- **`_MemoryHelper`** — per-user persistent memories in `user_memories` collection. Exposes tool: `memory` (actions: remember, recall, update, forget, list)
-- **`_ToolMemoryHelper`** — per-user key-value store in `tool_memories` collection. No AI tools, but public API via AIService methods (`get_tool_memory`, `put_tool_memory`, etc.)
+- **`_MemoryHelper`** — per-user persistent memories in `user_memories` collection. Exposes tool: `memory` (actions: remember, recall, update, forget, list). The tool handler (`_tool_memory_action`) reads caller identity from the injected `_user_id` argument — the WS chat path does not set the `get_current_user` contextvar before dispatching tool calls.
 
 ### ToolProvider Protocol
 Any service declaring `ai_tools` capability that implements `tool_provider_name`, `get_tools()`, and `execute_tool()` is auto-discovered.

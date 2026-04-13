@@ -10,6 +10,19 @@ from typing import Any
 from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolResult
 
 
+class AIBackendError(RuntimeError):
+    """Raised by an ``AIBackend`` when the upstream provider rejects a request.
+
+    Backends should raise this with a user-legible ``message`` (ideally the
+    upstream error reason) so that callers like the chat handler can surface
+    it to the end user instead of opaque HTTP status text.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class MessageRole(StrEnum):
     """Roles in a conversation."""
 

@@ -750,3 +750,180 @@ def test_format_state_empty() -> None:
     """Formatting empty state still produces a header."""
     result = AIService._format_state_for_context({})
     assert "## Active Conversation State" in result
+
+
+# --- History load: tool_usage reconstruction ---
+
+
+class _FakeConn:
+    def __init__(self, user_id: str = "u1") -> None:
+        self.user_id = user_id
+        self.user_ctx = None  # unused by _ws_history_load
+
+
+async def _run_history_load(
+    ai_service: AIService,
+    storage_backend: Any,
+    stored_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Stub storage with a stored conversation and invoke _ws_history_load."""
+    from gilbert.core.services.ai import _COLLECTION
+
+    async def _get(collection: str, key: str) -> Any:
+        if collection == _COLLECTION and key == "conv-1":
+            return {
+                "messages": stored_messages,
+                "ui_blocks": [],
+                "title": "Test",
+                "shared": False,
+            }
+        return None
+
+    storage_backend.get = AsyncMock(side_effect=_get)
+    ai_service._storage = storage_backend
+    conn = _FakeConn()
+    return await ai_service._ws_history_load(
+        conn, {"conversation_id": "conv-1", "id": "req-1"},
+    )
+
+
+async def test_history_load_attaches_tool_usage_to_final_assistant(
+    ai_service: AIService, storage_backend: Any,
+) -> None:
+    """Intermediate tool-use rounds fold into the final assistant bubble."""
+    stored = [
+        {"role": "user", "content": "What's the weather?"},
+        # Round 1: AI calls get_weather, empty content.
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "tool_call_id": "call-1",
+                "tool_name": "get_weather",
+                "arguments": {"city": "Portland", "_user_id": "u1"},
+            }],
+        },
+        # Tool result row.
+        {
+            "role": "tool_result",
+            "content": "",
+            "tool_results": [{
+                "tool_call_id": "call-1",
+                "content": "72F and sunny",
+                "is_error": False,
+            }],
+        },
+        # Final assistant message with the answer.
+        {"role": "assistant", "content": "It's 72F and sunny in Portland."},
+    ]
+    result = await _run_history_load(ai_service, storage_backend, stored)
+
+    msgs = result["messages"]
+    # user + one assistant bubble (the intermediate tool-use row is hidden)
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    final = msgs[1]
+    assert final["content"] == "It's 72F and sunny in Portland."
+    usage = final["tool_usage"]
+    assert len(usage) == 1
+    assert usage[0]["tool_name"] == "get_weather"
+    assert usage[0]["result"] == "72F and sunny"
+    assert usage[0]["is_error"] is False
+    # Injected identity keys are stripped before frontend delivery.
+    assert usage[0]["arguments"] == {"city": "Portland"}
+
+
+async def test_history_load_multiple_tool_rounds_collected(
+    ai_service: AIService, storage_backend: Any,
+) -> None:
+    """Two tool-use rounds in one turn both fold under the final bubble."""
+    stored = [
+        {"role": "user", "content": "Plan my evening."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "tool_call_id": "c1",
+                "tool_name": "get_weather",
+                "arguments": {"city": "SF"},
+            }],
+        },
+        {
+            "role": "tool_result",
+            "tool_results": [{
+                "tool_call_id": "c1", "content": "Rainy", "is_error": False,
+            }],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "tool_call_id": "c2",
+                "tool_name": "find_restaurants",
+                "arguments": {"cuisine": "thai"},
+            }],
+        },
+        {
+            "role": "tool_result",
+            "tool_results": [{
+                "tool_call_id": "c2",
+                "content": "Kin Khao, Lers Ros",
+                "is_error": False,
+            }],
+        },
+        {"role": "assistant", "content": "Try Kin Khao — bring an umbrella."},
+    ]
+    result = await _run_history_load(ai_service, storage_backend, stored)
+
+    msgs = result["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    usage = msgs[1]["tool_usage"]
+    assert [u["tool_name"] for u in usage] == ["get_weather", "find_restaurants"]
+    assert usage[0]["result"] == "Rainy"
+    assert usage[1]["result"] == "Kin Khao, Lers Ros"
+
+
+async def test_history_load_turn_boundary_resets_usage(
+    ai_service: AIService, storage_backend: Any,
+) -> None:
+    """Tool usage from turn N must not leak onto the assistant reply in turn N+1."""
+    stored = [
+        {"role": "user", "content": "Weather?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "tool_call_id": "c1",
+                "tool_name": "get_weather",
+                "arguments": {"city": "LA"},
+            }],
+        },
+        {
+            "role": "tool_result",
+            "tool_results": [{"tool_call_id": "c1", "content": "Hot"}],
+        },
+        {"role": "assistant", "content": "Hot in LA."},
+        # Next turn — no tools.
+        {"role": "user", "content": "Thanks."},
+        {"role": "assistant", "content": "You're welcome."},
+    ]
+    result = await _run_history_load(ai_service, storage_backend, stored)
+
+    msgs = result["messages"]
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assert msgs[1]["tool_usage"][0]["tool_name"] == "get_weather"
+    assert "tool_usage" not in msgs[3]
+
+
+async def test_history_load_plain_reply_has_no_tool_usage(
+    ai_service: AIService, storage_backend: Any,
+) -> None:
+    """Assistant replies that called no tools carry no tool_usage field."""
+    stored = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello."},
+    ]
+    result = await _run_history_load(ai_service, storage_backend, stored)
+
+    msgs = result["messages"]
+    assert "tool_usage" not in msgs[1]

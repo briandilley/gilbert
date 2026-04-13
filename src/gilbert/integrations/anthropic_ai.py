@@ -8,6 +8,7 @@ import httpx
 
 from gilbert.interfaces.ai import (
     AIBackend,
+    AIBackendError,
     AIRequest,
     AIResponse,
     Message,
@@ -98,7 +99,34 @@ class AnthropicAI(AIBackend):
         ai_logger.debug("Anthropic request: model=%s messages=%d", self._model, len(body["messages"]))
 
         resp = await self._client.post("/messages", json=body)
-        resp.raise_for_status()
+        if resp.is_error:
+            # Surface Anthropic's actual error body — raise_for_status() hides it.
+            err_body: Any
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = resp.text
+            ai_logger.warning(
+                "Anthropic API error: status=%d body=%s request=%s",
+                resp.status_code,
+                err_body,
+                json.dumps(body)[:2000],
+            )
+            # Pull the human-readable reason out of Anthropic's error envelope:
+            # {"type": "error", "error": {"type": "...", "message": "..."}}
+            reason = ""
+            if isinstance(err_body, dict):
+                err_obj = err_body.get("error")
+                if isinstance(err_obj, dict):
+                    reason = str(err_obj.get("message") or "").strip()
+                if not reason:
+                    reason = str(err_body.get("message") or "").strip()
+            if not reason:
+                reason = str(err_body)[:500]
+            raise AIBackendError(
+                f"Anthropic API rejected request ({resp.status_code}): {reason}",
+                status=resp.status_code,
+            )
         data = resp.json()
 
         ai_logger.debug(
@@ -141,6 +169,50 @@ class AnthropicAI(AIBackend):
                 result.append({"role": "user", "content": msg.content})
 
             elif msg.role == MessageRole.ASSISTANT:
+                # Slash-command turns are persisted as a single assistant row
+                # carrying both ``tool_calls`` and ``tool_results`` (see
+                # AIService._slash_command_chat). Anthropic requires the
+                # ``tool_result`` to appear on a user-role message *immediately
+                # after* the ``tool_use``, so we split such rows into the
+                # canonical 3-message sequence here. This also heals any
+                # historical conversations stored in the pre-fix shape.
+                if msg.tool_calls and msg.tool_results:
+                    result.append({
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tc.tool_call_id,
+                                "name": tc.tool_name,
+                                "input": tc.arguments,
+                            }
+                            for tc in msg.tool_calls
+                        ],
+                    })
+                    tool_result_blocks: list[dict[str, Any]] = []
+                    for tr in msg.tool_results:
+                        tr_block: dict[str, Any] = {
+                            "type": "tool_result",
+                            "tool_use_id": tr.tool_call_id,
+                            "content": tr.content,
+                        }
+                        if tr.is_error:
+                            tr_block["is_error"] = True
+                        tool_result_blocks.append(tr_block)
+                    result.append({"role": "user", "content": tool_result_blocks})
+                    # Preserve the assistant's narration of the result as a
+                    # final assistant text turn so the next user message
+                    # alternates correctly. Fall back to a short placeholder
+                    # when the tool produced no text output (e.g. UI-block
+                    # only) — an empty content array would be rejected.
+                    result.append({
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": msg.content or "(done)"},
+                        ],
+                    })
+                    continue
+
                 content: list[dict[str, Any]] = []
                 if msg.content:
                     content.append({"type": "text", "text": msg.content})
