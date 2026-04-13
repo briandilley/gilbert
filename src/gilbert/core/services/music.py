@@ -374,6 +374,7 @@ class MusicService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
         ]
         return tools

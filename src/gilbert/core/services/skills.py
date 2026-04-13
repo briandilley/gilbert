@@ -222,6 +222,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             ),
             ToolDefinition(
                 name="read_skill_file",
+                slash_group="skill",
+                slash_command="read",
+                slash_help=(
+                    "Read a file from an active skill's directory: "
+                    "/skill read <skill_name> <path>"
+                ),
                 description=(
                     "Read a file from an active skill's directory "
                     "(references, assets, scripts, etc.)."
@@ -242,6 +248,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             ),
             ToolDefinition(
                 name="run_skill_script",
+                slash_group="skill",
+                slash_command="run",
+                slash_help=(
+                    "Run a script bundled with a skill: "
+                    "/skill run <skill_name> <script> [args]"
+                ),
                 description=(
                     "Execute a script bundled with an active skill. "
                     "Scripts run in the user's workspace directory. "
@@ -269,6 +281,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             ),
             ToolDefinition(
                 name="browse_skill_workspace",
+                slash_group="skill",
+                slash_command="ws",
+                slash_help=(
+                    "List files in your skill workspace: "
+                    "/skill ws <skill_name>"
+                ),
                 description="List files in your workspace for a skill (created by script runs).",
                 parameters=[
                     ToolParameter(
@@ -281,6 +299,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             ),
             ToolDefinition(
                 name="read_skill_workspace_file",
+                slash_group="skill",
+                slash_command="wsread",
+                slash_help=(
+                    "Read a file from your skill workspace: "
+                    "/skill wsread <skill_name> <path>"
+                ),
                 description="Read a text file from your skill workspace.",
                 parameters=[
                     ToolParameter(

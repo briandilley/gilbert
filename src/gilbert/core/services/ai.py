@@ -1723,6 +1723,9 @@ class AIService(Service):
             ),
             ToolDefinition(
                 name="list_ai_profiles",
+                slash_group="profile",
+                slash_command="list",
+                slash_help="List AI profiles and call assignments: /profile list",
                 description="List all AI context profiles and their call assignments.",
                 required_role="admin",
             ),
@@ -1741,9 +1744,16 @@ class AIService(Service):
                     ToolParameter(name="tool_roles", type=ToolParameterType.OBJECT, description="Per-tool role overrides: {tool_name: role_name}.", required=False),
                 ],
                 required_role="admin",
+                # No slash_command: the nested ARRAY + OBJECT params
+                # (tools, tool_roles) don't translate cleanly to positional
+                # shell form. Manage profiles via /roles/profiles in the UI
+                # or let the AI call this tool directly.
             ),
             ToolDefinition(
                 name="delete_ai_profile",
+                slash_group="profile",
+                slash_command="delete",
+                slash_help="Delete an AI profile: /profile delete <name>",
                 description="Delete an AI context profile. The 'default' profile cannot be deleted.",
                 parameters=[
                     ToolParameter(name="name", type=ToolParameterType.STRING, description="Profile name to delete."),
@@ -1752,6 +1762,12 @@ class AIService(Service):
             ),
             ToolDefinition(
                 name="assign_ai_profile",
+                slash_group="profile",
+                slash_command="assign",
+                slash_help=(
+                    "Assign a profile to an AI call name: "
+                    "/profile assign <call_name> <profile>"
+                ),
                 description="Assign an AI context profile to a named AI call (e.g., 'human_chat', 'sales_initial_email').",
                 parameters=[
                     ToolParameter(name="call_name", type=ToolParameterType.STRING, description="The AI call name."),
@@ -1761,6 +1777,12 @@ class AIService(Service):
             ),
             ToolDefinition(
                 name="clear_ai_assignment",
+                slash_group="profile",
+                slash_command="unassign",
+                slash_help=(
+                    "Revert a call to the 'default' profile: "
+                    "/profile unassign <call_name>"
+                ),
                 description="Remove a call's profile assignment, reverting it to the 'default' profile.",
                 parameters=[
                     ToolParameter(name="call_name", type=ToolParameterType.STRING, description="The AI call name."),
@@ -1770,6 +1792,9 @@ class AIService(Service):
             # Persona tools
             ToolDefinition(
                 name="get_persona",
+                slash_group="persona",
+                slash_command="show",
+                slash_help="Show the current AI persona: /persona show",
                 description="Get the current AI persona (personality, tone, and behavioral instructions).",
                 required_role="everyone",
             ),
@@ -1787,9 +1812,15 @@ class AIService(Service):
                     ),
                 ],
                 required_role="admin",
+                # No slash_command: persona text is typically multi-line
+                # (paragraphs of behavioral instructions); inline shell
+                # quoting is impractical. Use /roles/persona in the UI.
             ),
             ToolDefinition(
                 name="reset_persona",
+                slash_group="persona",
+                slash_command="reset",
+                slash_help="Reset persona to the default: /persona reset",
                 description="Reset the AI persona to the default.",
                 required_role="admin",
             ),

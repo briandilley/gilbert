@@ -585,6 +585,7 @@ class SpeakerService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="stop_audio",
@@ -600,6 +601,7 @@ class SpeakerService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="set_volume",
@@ -619,6 +621,7 @@ class SpeakerService(Service):
                         description="Volume level (0-100).",
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="get_volume",
@@ -672,6 +675,12 @@ class SpeakerService(Service):
             ),
             ToolDefinition(
                 name="announce",
+                slash_group="speaker",
+                slash_command="announce",
+                slash_help=(
+                    "Speak text on speakers via TTS: "
+                    "/speaker announce \"<text>\" [speakers] [volume]"
+                ),
                 description=(
                     "Announce a message over speakers using text-to-speech. "
                     "This is the primary tool for speaking text out loud — it handles everything: "
@@ -698,6 +707,7 @@ class SpeakerService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
         ]
 
@@ -710,6 +720,7 @@ class SpeakerService(Service):
                     slash_command="groups",
                     slash_help="List speaker groups: /speaker groups",
                     description="List current speaker groups.",
+                    required_role="user",
                 ),
                 ToolDefinition(
                     name="group_speakers",
@@ -724,6 +735,7 @@ class SpeakerService(Service):
                             description="Speaker names or aliases to group together (at least 2).",
                         ),
                     ],
+                    required_role="user",
                 ),
                 ToolDefinition(
                     name="ungroup_speakers",
@@ -738,6 +750,7 @@ class SpeakerService(Service):
                             description="Speaker names or aliases to ungroup.",
                         ),
                     ],
+                    required_role="user",
                 ),
             ])
 

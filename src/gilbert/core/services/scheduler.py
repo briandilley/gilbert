@@ -1097,6 +1097,7 @@ class SchedulerService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="set_alarm",
@@ -1215,6 +1216,7 @@ class SchedulerService(Service):
                         required=False,
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="cancel_timer",
@@ -1229,6 +1231,7 @@ class SchedulerService(Service):
                         description="Name of the timer/alarm to cancel.",
                     ),
                 ],
+                required_role="user",
             ),
             ToolDefinition(
                 name="pause_timer",

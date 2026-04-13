@@ -512,6 +512,12 @@ class InboxService(Service):
         return [
             ToolDefinition(
                 name="inbox_search",
+                slash_group="inbox",
+                slash_command="search",
+                slash_help=(
+                    "Search the inbox by sender/subject: "
+                    "/inbox search sender=... subject=... [limit=20]"
+                ),
                 description=(
                     "Search the email inbox. Returns a list of messages "
                     "matching the given criteria, sorted by date (newest first)."
@@ -541,6 +547,12 @@ class InboxService(Service):
             ),
             ToolDefinition(
                 name="inbox_read",
+                slash_group="inbox",
+                slash_command="read",
+                slash_help=(
+                    "Read a message by ID (IDs come from /inbox search): "
+                    "/inbox read <message_id>"
+                ),
                 description="Read the full content of an email message by its ID.",
                 parameters=[
                     ToolParameter(

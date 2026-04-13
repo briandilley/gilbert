@@ -205,6 +205,13 @@ class TTSService(Service):
         return [
             ToolDefinition(
                 name="synthesize",
+                slash_group="tts",
+                slash_command="synthesize",
+                slash_help=(
+                    "Synthesize speech to an MP3 file (does NOT play on "
+                    "speakers — use /speaker announce for that): "
+                    "/tts synthesize \"<text>\""
+                ),
                 description=(
                     "Synthesize speech from text and save as an MP3 file. "
                     "This only generates an audio file — it does NOT play it on speakers. "
@@ -221,6 +228,9 @@ class TTSService(Service):
             ),
             ToolDefinition(
                 name="list_voices",
+                slash_group="tts",
+                slash_command="voices",
+                slash_help="List available TTS voices: /tts voices",
                 description="List all available TTS voices from the provider.",
                 required_role="everyone",
             ),
