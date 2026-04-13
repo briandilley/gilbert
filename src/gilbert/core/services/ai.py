@@ -845,8 +845,18 @@ class AIService(Service):
                 conversation_id,
             )
 
-        # Count assistant messages to determine response_index for UI blocks
-        assistant_count = sum(1 for m in messages if m.role == MessageRole.ASSISTANT)
+        # Count *visible* assistant messages to determine response_index
+        # for UI blocks. The agentic loop appends one assistant row per
+        # round — intermediate rounds carry tool_calls but no content and
+        # are collapsed into the final answer by ``_ws_history_load``
+        # (and never shown in the live frontend state). Counting them
+        # here would push response_index past the frontend's index space
+        # and leave blocks unanchored. Match the history loader by
+        # counting only non-empty assistant rows.
+        assistant_count = sum(
+            1 for m in messages
+            if m.role == MessageRole.ASSISTANT and m.content
+        )
         response_index = max(0, assistant_count - 1)
 
         # Serialize UI blocks with position and submission state
@@ -1408,8 +1418,13 @@ class AIService(Service):
 
         # Serialize UI blocks with position + submission state, matching
         # the chat() agentic loop so downstream rendering is uniform.
+        # Count only visible assistant rows (non-empty content) so the
+        # index aligns with what the frontend and history loader show;
+        # intermediate tool-use rounds are invisible and would offset
+        # the anchor otherwise.
         assistant_count = sum(
-            1 for m in messages if m.role == MessageRole.ASSISTANT
+            1 for m in messages
+            if m.role == MessageRole.ASSISTANT and m.content
         )
         response_index = max(0, assistant_count - 1)
         ui_block_dicts: list[dict[str, Any]] = []

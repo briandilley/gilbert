@@ -111,8 +111,28 @@ function UIElementRenderer({
   switch (element.type) {
     case "label":
       return (
-        <p className="text-sm text-muted-foreground">{element.label}</p>
+        <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+          {element.label}
+        </p>
       );
+
+    case "image": {
+      // Thumbnail-scale image for form previews (posters, etc.).
+      // Width defaults to 96 px; callers can override via max_width.
+      const width = element.max_width && element.max_width > 0
+        ? element.max_width
+        : 96;
+      if (!element.url) return null;
+      return (
+        <img
+          src={element.url}
+          alt={element.label || ""}
+          style={{ maxWidth: `${width}px`, width: "100%", height: "auto" }}
+          className="rounded-sm shadow-sm"
+          loading="lazy"
+        />
+      );
+    }
 
     case "separator":
       return <Separator />;

@@ -14,6 +14,7 @@ export interface UIElement {
     | "range"
     | "buttons"
     | "label"
+    | "image"
     | "separator";
   name?: string;
   label?: string;
@@ -25,6 +26,8 @@ export interface UIElement {
   max?: number;
   step?: number;
   rows?: number;
+  url?: string;
+  max_width?: number;
 }
 
 export interface UIBlock {

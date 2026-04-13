@@ -89,6 +89,39 @@ class StubToolProviderService(Service):
         return self._results[name]
 
 
+class UIBlockToolProviderService(Service):
+    """Tool provider whose execute_tool returns a ToolOutput with UI blocks."""
+
+    def __init__(self, tool_def: ToolDefinition) -> None:
+        self._tool_def = tool_def
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(
+            name="ui_tool", capabilities=frozenset({"ai_tools"}),
+        )
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "ui_tool"
+
+    def get_tools(self) -> list[ToolDefinition]:
+        return [self._tool_def]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        from gilbert.interfaces.ui import ToolOutput, UIBlock, UIElement
+        return ToolOutput(
+            text="tool picked something",
+            ui_blocks=[
+                UIBlock(
+                    title="Pick one",
+                    elements=[
+                        UIElement(type="label", name="info", label="choose"),
+                    ],
+                ),
+            ],
+        )
+
+
 class ErrorToolProviderService(Service):
     """Tool provider that raises on execution."""
 
@@ -342,6 +375,150 @@ async def test_chat_with_tool_calls(
     assert len(tool_result_msg.tool_results) == 1
     assert tool_result_msg.tool_results[0].tool_call_id == "tc_1"
     assert "sunny" in tool_result_msg.tool_results[0].content
+
+
+async def test_chat_ui_block_response_index_skips_empty_assistant_rows(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+    storage_backend: StorageBackend,
+) -> None:
+    """Regression: response_index must reflect visible assistant rows only.
+
+    When a chat turn goes through an agentic round (empty-content assistant
+    with tool_calls, then tool_result, then final assistant with content),
+    the frontend only ever sees the final row. If the backend counted every
+    assistant row the response_index would be too high, leaving blocks
+    unanchored at the bottom of the chat. This test pins the correct count.
+    """
+    tool_def = ToolDefinition(name="picker", description="pick")
+    tool_provider = UIBlockToolProviderService(tool_def)
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [tool_provider] if cap == "ai_tools" else []
+
+    # Round 1: AI requests the tool (empty content, tool_calls set).
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(
+                tool_call_id="tc_pick",
+                tool_name="picker",
+                arguments={},
+            )],
+        ),
+        model="stub",
+        stop_reason=StopReason.TOOL_USE,
+    ))
+    # Round 2: AI gives final answer (non-empty content).
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT,
+            content="Here's what I found.",
+        ),
+        model="stub",
+    ))
+
+    await ai_service.start(resolver)
+    _text, _cid, ui_blocks, _tu = await ai_service.chat("pick something")
+
+    # The call produced one visible assistant bubble, so the block must
+    # anchor at response_index=0 — not 1, which would be the result of
+    # counting the intermediate empty tool-use row.
+    assert len(ui_blocks) == 1
+    assert ui_blocks[0]["response_index"] == 0
+
+
+async def test_chat_ui_block_response_index_across_multiple_turns(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """A second chat turn that calls a UI-block tool should anchor to its
+    own assistant bubble, not the one from the previous turn.
+    """
+    tool_def = ToolDefinition(name="picker", description="pick")
+    tool_provider = UIBlockToolProviderService(tool_def)
+
+    # In-memory storage so the second chat() call sees the first's history.
+    _store: dict[str, dict[str, Any]] = {}
+
+    async def _get(collection: str, key: str) -> Any:
+        return _store.get(f"{collection}:{key}")
+
+    async def _put(collection: str, key: str, data: dict[str, Any]) -> None:
+        _store[f"{collection}:{key}"] = data
+
+    storage_backend = AsyncMock(spec=StorageBackend)
+    storage_backend.get = AsyncMock(side_effect=_get)
+    storage_backend.put = AsyncMock(side_effect=_put)
+    storage_service = StorageService(storage_backend)
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [tool_provider] if cap == "ai_tools" else []
+
+    # Turn 1: tool call → final answer (2 assistant rows, 1 visible)
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT, content="",
+            tool_calls=[ToolCall(
+                tool_call_id="tc1", tool_name="picker", arguments={},
+            )],
+        ),
+        model="stub", stop_reason=StopReason.TOOL_USE,
+    ))
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT, content="first answer",
+        ),
+        model="stub",
+    ))
+    # Turn 2: same shape again — another 2 assistant rows, 1 visible
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT, content="",
+            tool_calls=[ToolCall(
+                tool_call_id="tc2", tool_name="picker", arguments={},
+            )],
+        ),
+        model="stub", stop_reason=StopReason.TOOL_USE,
+    ))
+    stub_backend.queue_response(AIResponse(
+        message=Message(
+            role=MessageRole.ASSISTANT, content="second answer",
+        ),
+        model="stub",
+    ))
+
+    await ai_service.start(resolver)
+    _, conv_id, ui_blocks_1, _ = await ai_service.chat("first")
+    _, _, ui_blocks_2, _ = await ai_service.chat(
+        "second", conversation_id=conv_id,
+    )
+
+    # First turn's block → first visible assistant (index 0)
+    assert len(ui_blocks_1) == 1
+    assert ui_blocks_1[0]["response_index"] == 0
+    # Second turn's block → second visible assistant (index 1), NOT 3 or
+    # 4 (which would happen if empty rows were counted).
+    assert len(ui_blocks_2) == 1
+    assert ui_blocks_2[0]["response_index"] == 1
 
 
 async def test_chat_max_tool_rounds(

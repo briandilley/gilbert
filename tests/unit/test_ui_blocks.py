@@ -58,6 +58,36 @@ class TestUIElementSerialization:
         d = el.to_dict()
         assert d == {"type": "separator"}
 
+    def test_image_element_round_trip(self) -> None:
+        el = UIElement(
+            type="image", name="poster",
+            url="https://img.example/poster.jpg",
+            label="Inception poster",
+            max_width=96,
+        )
+        d = el.to_dict()
+        assert d["type"] == "image"
+        assert d["url"] == "https://img.example/poster.jpg"
+        assert d["max_width"] == 96
+        assert d["label"] == "Inception poster"
+
+        restored = UIElement.from_dict(d)
+        assert restored.type == "image"
+        assert restored.url == "https://img.example/poster.jpg"
+        assert restored.max_width == 96
+        assert restored.label == "Inception poster"
+
+    def test_image_element_without_url_and_max_width_omits_keys(self) -> None:
+        """Unset url / max_width should not appear in the serialized dict.
+
+        Keeps on-wire payloads small and matches the other optional fields'
+        behavior.
+        """
+        el = UIElement(type="label", label="just a label")
+        d = el.to_dict()
+        assert "url" not in d
+        assert "max_width" not in d
+
 
 class TestUIBlockSerialization:
     def test_form_block_round_trip(self) -> None:

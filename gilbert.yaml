@@ -20,3 +20,10 @@ logging:
 web:
   host: "0.0.0.0"
   port: 8000
+
+plugins:
+  # Directories scanned for local plugins at startup. Each subdirectory
+  # with a plugin.yaml is loaded. The path is relative to the repo root
+  # (the working directory when gilbert is launched).
+  directories:
+    - plugins

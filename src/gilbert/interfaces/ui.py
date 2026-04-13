@@ -30,6 +30,7 @@ class UIElement:
     - ``range``: slider (uses ``min_val``, ``max_val``, ``step``)
     - ``buttons``: row of buttons — clicking one submits the form with that value
     - ``label``: display-only text
+    - ``image``: display-only image (uses ``url``, ``label`` as alt text, ``max_width``)
     - ``separator``: horizontal rule
     """
 
@@ -44,6 +45,12 @@ class UIElement:
     max_val: float | None = None
     step: float | None = None
     rows: int = 4
+    url: str = ""
+    """Image URL for ``image`` elements. Ignored by other types."""
+    max_width: int = 0
+    """Maximum rendered width in pixels for ``image`` elements.
+    ``0`` lets the renderer pick a default (currently 96 px for
+    thumbnails)."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON transport to frontend."""
@@ -71,6 +78,10 @@ class UIElement:
             d["step"] = self.step
         if self.type == "textarea":
             d["rows"] = self.rows
+        if self.url:
+            d["url"] = self.url
+        if self.max_width:
+            d["max_width"] = self.max_width
         return d
 
     @classmethod
@@ -90,6 +101,8 @@ class UIElement:
             max_val=data.get("max"),
             step=data.get("step"),
             rows=data.get("rows", 4),
+            url=data.get("url", ""),
+            max_width=data.get("max_width", 0),
         )
 
 
