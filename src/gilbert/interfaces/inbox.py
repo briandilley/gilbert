@@ -316,6 +316,23 @@ class InboxProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class CachedMailboxLister(Protocol):
+    """Protocol for anything that can report the currently-cached mailboxes.
+
+    Used by ``ConfigurationService._resolve_dynamic_choices`` to
+    populate ``inbox_mailboxes`` dropdowns on settings pages without
+    duck-typing the service instance. The cache is refreshed at boot
+    and on every mailbox CRUD operation so this property is cheap and
+    synchronous.
+    """
+
+    @property
+    def cached_mailboxes(self) -> list[Mailbox]:
+        """Return the last-known mailbox list from the service cache."""
+        ...
+
+
 # ── Attachment helpers (re-exported for convenience) ─────────────────
 # Plugins that build drafts need to construct EmailAttachment; rather
 # than make them import from interfaces.email directly, re-export.
@@ -327,6 +344,7 @@ __all__ = [
     "OutboxDraft",
     "OutboxEntry",
     "InboxProvider",
+    "CachedMailboxLister",
     "can_access_mailbox",
     "can_admin_mailbox",
     "determine_access",

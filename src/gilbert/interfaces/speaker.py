@@ -234,3 +234,19 @@ class SpeakerProvider(Protocol):
         the path or URL of the generated audio file).
         """
         ...
+
+
+@runtime_checkable
+class CachedSpeakerLister(Protocol):
+    """Protocol for anything that can report the currently-cached speakers.
+
+    Used by ``ConfigurationService._resolve_dynamic_choices`` to
+    populate ``speakers`` dropdowns on settings pages without
+    duck-typing the service instance. Cache is refreshed on service
+    start; consumers read it synchronously.
+    """
+
+    @property
+    def cached_speakers(self) -> list[SpeakerInfo]:
+        """Return the last-known speaker list from the service cache."""
+        ...

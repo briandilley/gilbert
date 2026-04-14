@@ -464,19 +464,23 @@ class ConfigurationService(Service):
         if self._resolver is None:
             return None
         if source == "speakers":
+            from gilbert.interfaces.speaker import CachedSpeakerLister
+
             svc = self._resolver.get_capability("speaker_control")
-            if svc is not None:
+            if isinstance(svc, CachedSpeakerLister):
                 try:
                     return [s.name for s in svc.cached_speakers]
                 except Exception:
-                    pass
+                    logger.debug("speakers dynamic choices failed", exc_info=True)
         elif source == "doorbells":
+            from gilbert.interfaces.doorbell import AvailableDoorbellLister
+
             svc = self._resolver.get_capability("doorbell")
-            if svc is not None:
+            if isinstance(svc, AvailableDoorbellLister):
                 try:
-                    return svc.available_doorbells
+                    return list(svc.available_doorbells)
                 except Exception:
-                    pass
+                    logger.debug("doorbells dynamic choices failed", exc_info=True)
         elif source == "music_services":
             from gilbert.interfaces.music import LinkedMusicServiceLister
 
@@ -493,12 +497,11 @@ class ConfigurationService(Service):
             # name + email but stores the bare mailbox id as the value.
             # InboxService maintains a sync-readable ``cached_mailboxes``
             # property that's refreshed at boot and on every CRUD op.
+            from gilbert.interfaces.inbox import CachedMailboxLister
+
             svc = self._resolver.get_capability("inbox")
-            if svc is not None:
+            if isinstance(svc, CachedMailboxLister):
                 try:
-                    cached = getattr(svc, "cached_mailboxes", None)
-                    if cached is None:
-                        return None
                     return [
                         {
                             "value": m.id,
@@ -507,7 +510,7 @@ class ConfigurationService(Service):
                                 if m.email_address else m.name
                             ),
                         }
-                        for m in cached
+                        for m in svc.cached_mailboxes
                     ]
                 except Exception:
                     logger.debug("inbox_mailboxes dynamic choices failed", exc_info=True)

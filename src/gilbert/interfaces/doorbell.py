@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
 
@@ -51,4 +52,18 @@ class DoorbellBackend(ABC):
     @abstractmethod
     async def get_ring_events(self, lookback_seconds: int = 10) -> list[RingEvent]:
         """Return ring events within the lookback window."""
+        ...
+
+
+@runtime_checkable
+class AvailableDoorbellLister(Protocol):
+    """Protocol for anything that can report the currently-known
+    doorbell names. Used by ``ConfigurationService._resolve_dynamic_choices``
+    to populate the ``doorbell`` dropdown on settings pages without
+    duck-typing the service instance.
+    """
+
+    @property
+    def available_doorbells(self) -> list[str]:
+        """Names of doorbells currently known to the service."""
         ...

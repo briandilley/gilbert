@@ -22,6 +22,7 @@ from gilbert.interfaces.speaker import (
     PlaybackState,
     PlayRequest,
     SpeakerBackend,
+    SpeakerInfo,
 )
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -53,7 +54,7 @@ class SpeakerService(Service):
         # Announcement queue lock — prevents announcements from stepping
         # on each other by serializing TTS + playback.
         self._announce_lock = asyncio.Lock()
-        self._speaker_cache: list[Any] = []
+        self._speaker_cache: list[SpeakerInfo] = []
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -70,7 +71,7 @@ class SpeakerService(Service):
         return self._backend
 
     @property
-    def cached_speakers(self) -> list[Any]:
+    def cached_speakers(self) -> list[SpeakerInfo]:
         """Last-known speaker list (populated after start)."""
         return list(self._speaker_cache)
 
