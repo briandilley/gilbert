@@ -4,7 +4,6 @@ Adds backend-agnostic silence padding to synthesized audio so speakers
 don't cut off the last word.
 """
 
-import contextlib
 import json
 import logging
 import uuid
@@ -32,36 +31,10 @@ from gilbert.interfaces.tts import (
     SynthesisResult,
     TTSBackend,
     Voice,
+    append_silence,
 )
 
 logger = logging.getLogger(__name__)
-
-_PCM_SAMPLE_RATE = 44100
-
-
-def _generate_pcm_silence(seconds: float) -> bytes:
-    """Generate raw 16-bit PCM silence at 44100 Hz."""
-    return b"\x00\x00" * int(_PCM_SAMPLE_RATE * seconds)
-
-
-def _generate_mp3_silence(seconds: float) -> bytes:
-    """Generate minimal valid MP3 silence frames (MPEG1 Layer 3, 128kbps, 44100 Hz)."""
-    frame_samples = 1152
-    frames_needed = int((_PCM_SAMPLE_RATE * seconds) / frame_samples) + 1
-    header = b"\xff\xfb\x90\xc0"
-    frame = header + b"\x00" * 413  # 417-byte frame: 4 header + 413 payload
-    return frame * frames_needed
-
-
-def _append_silence(audio: bytes, fmt: AudioFormat, seconds: float) -> bytes:
-    """Append silence padding to audio data."""
-    if seconds <= 0:
-        return audio
-    if fmt == AudioFormat.MP3:
-        return audio + _generate_mp3_silence(seconds)
-    if fmt in (AudioFormat.PCM, AudioFormat.WAV):
-        return audio + _generate_pcm_silence(seconds)
-    return audio
 
 
 class TTSService(Service):
@@ -114,13 +87,6 @@ class TTSService(Service):
         backend_name = section.get("backend", "elevenlabs")
         self._backend_name = backend_name
         backends = TTSBackend.registered_backends()
-        if backend_name not in backends:
-            # Import known backends to trigger registration
-            try:
-                import gilbert.integrations.elevenlabs_tts  # noqa: F401
-            except ImportError:
-                pass
-            backends = TTSBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
             raise ValueError(f"Unknown TTS backend: {backend_name}")
@@ -140,12 +106,6 @@ class TTSService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.elevenlabs_tts  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="silence_padding", type=ToolParameterType.NUMBER,
@@ -156,7 +116,7 @@ class TTSService(Service):
                 key="backend", type=ToolParameterType.STRING,
                 description="TTS backend provider.",
                 default="elevenlabs", restart_required=True,
-                choices=tuple(TTSBackend.registered_backends().keys()) or ("elevenlabs",),
+                choices=tuple(TTSBackend.registered_backends().keys()),
             ),
         ]
         backends = TTSBackend.registered_backends()
@@ -180,8 +140,6 @@ class TTSService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.elevenlabs_tts  # noqa: F401
         return all_backend_actions(
             registry=TTSBackend.registered_backends(),
             current_backend=self._backend,
@@ -202,7 +160,7 @@ class TTSService(Service):
             raise RuntimeError("TTS service is not enabled")
         result = await self._backend.synthesize(request)
         if self._silence_padding > 0:
-            padded = _append_silence(result.audio, result.format, self._silence_padding)
+            padded = append_silence(result.audio, result.format, self._silence_padding)
             return SynthesisResult(
                 audio=padded,
                 format=result.format,

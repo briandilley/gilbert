@@ -1,6 +1,7 @@
 """Application bootstrap — wires everything together and manages lifecycle."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,18 @@ class Gilbert:
         self.registry = ServiceRegistry()
         self.service_manager = ServiceManager()
         self._plugins: list[LoadedPlugin] = []
+        # Set to True when a service (typically the plugin manager) has
+        # asked the host to exit with the restart-requested exit code so
+        # ``gilbert.sh``'s supervisor loop re-runs ``uv sync`` and
+        # relaunches Gilbert. Checked by ``__main__.py`` after the web
+        # server stops.
+        self._restart_requested: bool = False
+        # Wired by ``__main__.py`` to flip uvicorn's ``should_exit`` so
+        # ``request_restart()`` can actually initiate a graceful
+        # shutdown. Without the callback, ``request_restart()`` still
+        # sets the flag — the next clean stop will still exit 75 — but
+        # nothing triggers the shutdown itself.
+        self._shutdown_callback: Callable[[], None] | None = None
 
     @classmethod
     def create(cls, config_path: str | Path | None = None) -> "Gilbert":
@@ -229,10 +242,6 @@ class Gilbert:
 
         self.service_manager.register(InboxAIChatService())
 
-        from gilbert.integrations.slack import SlackService
-
-        self.service_manager.register(SlackService())
-
         # Web search service
         from gilbert.core.services.websearch import WebSearchService
 
@@ -274,6 +283,19 @@ class Gilbert:
 
         # 11. Start all services (dependency resolution happens here)
         await self.service_manager.start_all()
+
+        # 12. Let the plugin manager reconcile any runtime-installed
+        # plugins that were deferred with ``needs_restart=True`` — if
+        # they successfully loaded on this boot (deps are now in the
+        # venv), clear the flag so the UI stops nagging about restart.
+        plugin_mgr_svc = self.service_manager.list_services().get("plugin_manager")
+        if plugin_mgr_svc is not None and hasattr(
+            plugin_mgr_svc, "reconcile_loaded_plugins",
+        ):
+            try:
+                await plugin_mgr_svc.reconcile_loaded_plugins(self)
+            except Exception:
+                logger.exception("Plugin manager reconciliation failed")
 
         started = len(self.service_manager.started_services)
         failed = len(self.service_manager.failed_services)
@@ -335,6 +357,41 @@ class Gilbert:
     def add_loaded_plugin(self, entry: LoadedPlugin) -> None:
         """Record a plugin loaded at runtime so the manager can track it."""
         self._plugins.append(entry)
+
+    def set_shutdown_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback that triggers a graceful host shutdown.
+
+        Called once from ``__main__.py`` with a closure that flips
+        uvicorn's ``should_exit`` flag. ``request_restart`` invokes this
+        to actually stop the server.
+        """
+        self._shutdown_callback = callback
+
+    def request_restart(self) -> None:
+        """Ask the host process to exit with the restart-requested exit code.
+
+        Sets ``restart_requested`` so ``__main__.py`` can pick the right
+        exit code, then calls the shutdown callback (wired at boot) to
+        actually initiate a graceful stop. The ``gilbert.sh`` supervisor
+        loop catches the exit code, re-runs ``uv sync`` (so any newly
+        installed plugin's deps land in the venv), and relaunches
+        Gilbert. Safe to call more than once — the second call is a
+        no-op.
+        """
+        if self._restart_requested:
+            return
+        self._restart_requested = True
+        logger.info("Restart requested — initiating graceful shutdown")
+        if self._shutdown_callback is not None:
+            try:
+                self._shutdown_callback()
+            except Exception:
+                logger.exception("Shutdown callback raised during request_restart")
+
+    @property
+    def restart_requested(self) -> bool:
+        """Whether a service has asked the host to exit-and-restart."""
+        return self._restart_requested
 
     def remove_loaded_plugin(self, name: str) -> LoadedPlugin | None:
         """Drop a runtime-installed plugin from the loaded list."""

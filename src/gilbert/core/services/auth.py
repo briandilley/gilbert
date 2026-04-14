@@ -4,7 +4,6 @@ Discovers all ``authentication_provider`` services and delegates
 authentication to them. Manages sessions centrally.
 """
 
-import contextlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -82,13 +81,10 @@ class AuthService(Service):
                 if not isinstance(google_oauth_config, dict):
                     google_oauth_config = {}
 
-        # Register known auth backends (side-effect imports for __init_subclass__)
+        # Register local auth backend (bundled with core).
+        # Google/other auth backends register themselves via plugins.
         try:
             import gilbert.integrations.local_auth  # noqa: F401
-        except ImportError:
-            pass
-        try:
-            import gilbert.integrations.google_auth  # noqa: F401
         except ImportError:
             pass
 
@@ -190,8 +186,6 @@ class AuthService(Service):
     # class so the action still appears on the settings page.
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.google_auth  # noqa: F401
         google_backend = self._backends.get("google")
         fallback_cls = AuthBackend.registered_backends().get("google")
         return merge_backend_actions(google_backend, fallback_cls)

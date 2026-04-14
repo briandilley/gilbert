@@ -1,6 +1,5 @@
 """User service — manages local user accounts with external provider sync."""
 
-import contextlib
 import json
 import logging
 import time
@@ -111,10 +110,6 @@ class UserService(Service):
                 section = config_svc.get_section("users")
                 gdir = section.get("google_directory", {})
                 if isinstance(gdir, dict) and gdir.get("enabled"):
-                    try:
-                        import gilbert.integrations.google_directory  # noqa: F401
-                    except ImportError:
-                        pass
                     provider_cls = UserProviderBackend.registered_backends().get("google_directory")
                     if provider_cls:
                         provider = provider_cls()
@@ -378,8 +373,6 @@ class UserService(Service):
     # when the provider isn't live yet.
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.google_directory  # noqa: F401
         live: Any = None
         for provider in getattr(self, "_provider_backends", []):
             if getattr(provider, "provider_type", "") == "google":

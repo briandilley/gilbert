@@ -1,7 +1,6 @@
 """Speaker service — wraps a SpeakerBackend as a discoverable service with announce support."""
 
 import asyncio
-import contextlib
 import json
 import logging
 import uuid
@@ -105,10 +104,6 @@ class SpeakerService(Service):
 
         backend_name = section.get("backend", "sonos")
         self._backend_name = backend_name
-        try:
-            import gilbert.integrations.sonos_speaker  # noqa: F401
-        except ImportError:
-            pass
         backends = SpeakerBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
@@ -173,18 +168,12 @@ class SpeakerService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.speaker import SpeakerBackend
 
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.sonos_speaker  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Speaker backend type.",
                 default="sonos", restart_required=True,
-                choices=tuple(SpeakerBackend.registered_backends().keys()) or ("sonos",),
+                choices=tuple(SpeakerBackend.registered_backends().keys()),
             ),
             ConfigParam(
                 key="default_announce_volume", type=ToolParameterType.INTEGER,
@@ -219,8 +208,6 @@ class SpeakerService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.sonos_speaker  # noqa: F401
         return all_backend_actions(
             registry=SpeakerBackend.registered_backends(),
             current_backend=self._backend,
@@ -322,7 +309,6 @@ class SpeakerService(Service):
         We discover the LAN IP by connecting a UDP socket to an external address
         (no actual traffic is sent) which reveals the local interface IP.
         """
-        import socket
         from pathlib import Path
 
         from gilbert.core.output import OUTPUT_DIR

@@ -161,7 +161,6 @@ class KnowledgeService(Service):
             if backend_cls is None:
                 # Try importing known backends
                 import gilbert.integrations.local_documents  # noqa: F401
-                import gilbert.integrations.gdrive_documents  # noqa: F401
                 backend_cls = DocumentBackend.registered_backends().get(backend_type)
 
             if backend_cls is None:
@@ -226,9 +225,10 @@ class KnowledgeService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.knowledge import DocumentBackend
 
-        # Ensure backend modules are imported so they register
+        # Ensure the bundled local backend is imported so it registers.
+        # Additional document backends (e.g., Google Drive) register
+        # themselves via plugins.
         import gilbert.integrations.local_documents  # noqa: F401
-        import gilbert.integrations.gdrive_documents  # noqa: F401
 
         params = [
             ConfigParam(
@@ -291,9 +291,8 @@ class KnowledgeService(Service):
 
         configs: list[dict[str, Any]] = []
 
-        # Ensure backend modules are imported so they register
+        # Ensure the bundled local backend is imported so it registers.
         import gilbert.integrations.local_documents  # noqa: F401
-        import gilbert.integrations.gdrive_documents  # noqa: F401
 
         # New format: per-type sub-sections (e.g., local: {enabled: true, path: ...})
         for backend_name in DocumentBackend.registered_backends():

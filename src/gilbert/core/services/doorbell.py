@@ -4,7 +4,6 @@ Uses a DoorbellBackend to poll for ring events. When a new ring is detected,
 publishes a ``doorbell.ring`` event on the event bus and announces over speakers.
 """
 
-import contextlib
 import logging
 import time
 from datetime import datetime, timezone
@@ -97,12 +96,6 @@ class DoorbellService(Service):
         backend_name = full_section.get("backend", "unifi")
         self._backend_name = backend_name
         backends = DoorbellBackend.registered_backends()
-        if backend_name not in backends:
-            try:
-                import gilbert.integrations.unifi.doorbell  # noqa: F401
-            except ImportError:
-                pass
-            backends = DoorbellBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
             raise ValueError(f"Unknown doorbell backend: {backend_name}")
@@ -161,12 +154,6 @@ class DoorbellService(Service):
         return "Monitoring"
 
     def config_params(self) -> list[ConfigParam]:
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.unifi.doorbell  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="poll_interval_seconds", type=ToolParameterType.NUMBER,
@@ -205,8 +192,6 @@ class DoorbellService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.unifi.doorbell  # noqa: F401
         return all_backend_actions(
             registry=DoorbellBackend.registered_backends(),
             current_backend=self._backend,

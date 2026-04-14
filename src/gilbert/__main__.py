@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 
 import uvicorn
 
@@ -14,6 +15,15 @@ from gilbert.web import create_app
 logger = logging.getLogger(__name__)
 
 PID_FILE = DATA_DIR / "gilbert.pid"
+
+# Exit code used to signal "please restart me so ``uv sync`` can install
+# deps a runtime-installed plugin brought with it." Picked to match
+# ``EX_TEMPFAIL`` from ``sysexits.h`` — semantically "temporary failure,
+# try again" — and to avoid colliding with 0 (clean), 1 (generic
+# failure), 130 (SIGINT), or 143 (SIGTERM). ``gilbert.sh`` catches this
+# exit code in its supervisor loop and re-runs ``uv sync`` before
+# relaunching Gilbert.
+RESTART_EXIT_CODE = 75
 
 # Track signal count for force-exit
 _signal_count = 0
@@ -52,6 +62,12 @@ async def main() -> None:
     # Disable uvicorn's own signal handling — we manage it ourselves
     server.install_signal_handlers = lambda: None
 
+    # Wire the shutdown hook so ``Gilbert.request_restart()`` can
+    # actually stop the server. Setting ``should_exit`` is the same
+    # lever the SIGINT handler uses below — this lets services request
+    # a clean exit through the normal uvicorn path.
+    gilbert.set_shutdown_callback(lambda: setattr(server, "should_exit", True))
+
     def _handle_signal(signum: int, frame: object) -> None:
         global _signal_count
         _signal_count += 1
@@ -71,6 +87,20 @@ async def main() -> None:
         await gilbert.stop()
         _remove_pid()
 
+    # If a service asked us to restart (via ``Gilbert.request_restart()``),
+    # exit with the sentinel code so ``gilbert.sh``'s supervisor loop
+    # re-runs ``uv sync`` and relaunches us. Raised as ``SystemExit`` so
+    # it propagates out of ``asyncio.run``.
+    if gilbert.restart_requested:
+        logger.info("Exiting with code %d to trigger supervised restart", RESTART_EXIT_CODE)
+        raise SystemExit(RESTART_EXIT_CODE)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except SystemExit as exc:
+        # Preserve the specific exit code (notably ``RESTART_EXIT_CODE``)
+        # so the ``gilbert.sh`` supervisor sees it instead of whatever
+        # asyncio's default cleanup would propagate.
+        sys.exit(exc.code)

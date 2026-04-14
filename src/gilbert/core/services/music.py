@@ -15,7 +15,6 @@ playlists, then play by title or index.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 from typing import Any, cast
@@ -141,8 +140,6 @@ class MusicService(Service):
 
         backend_name = section.get("backend", "sonos")
         self._backend_name = backend_name
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.sonos_music  # noqa: F401
         backends = MusicBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
@@ -163,15 +160,12 @@ class MusicService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.sonos_music  # noqa: F401
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Music backend type.",
                 default="sonos", restart_required=True,
-                choices=tuple(MusicBackend.registered_backends().keys()) or ("sonos",),
+                choices=tuple(MusicBackend.registered_backends().keys()),
             ),
         ]
         backends = MusicBackend.registered_backends()
@@ -206,8 +200,6 @@ class MusicService(Service):
     # just empty and no buttons render.
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.sonos_music  # noqa: F401
         return all_backend_actions(
             registry=MusicBackend.registered_backends(),
             current_backend=self._backend,

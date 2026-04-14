@@ -1,0 +1,3 @@
+[submodule "std-plugins"]
+	path = std-plugins
+	url = https://github.com/briandilley/gilbert-plugins.git

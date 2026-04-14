@@ -4,11 +4,9 @@ Also includes internal helpers for persona and user memory (previously
 separate services, now merged into AIService).
 """
 
-import contextlib
 import json as _json
 import logging
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -384,11 +382,6 @@ class AIService(Service):
         if self._backend is None:
             backend_name = section.get("backend", "anthropic")
             self._backend_name = backend_name
-            # Import to trigger registration
-            try:
-                import gilbert.integrations.anthropic_ai  # noqa: F401
-            except ImportError:
-                pass
             backends = AIBackend.registered_backends()
             backend_cls = backends.get(backend_name)
             if backend_cls is None:
@@ -453,12 +446,6 @@ class AIService(Service):
         return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.anthropic_ai  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="max_history_messages", type=ToolParameterType.INTEGER,
@@ -513,8 +500,6 @@ class AIService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.anthropic_ai  # noqa: F401
         return all_backend_actions(
             registry=AIBackend.registered_backends(),
             current_backend=self._backend,

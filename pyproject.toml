@@ -15,10 +15,6 @@ dependencies = [
     "fastapi>=0.135.3",
     "uvicorn[standard]>=0.43.0",
     "argon2-cffi>=23.1",
-    "google-auth>=2.49.1",
-    "google-api-python-client>=2.193.0",
-    "pyngrok>=8.0.0",
-    "soco>=0.30.15",
     "python-multipart>=0.0.22",
     "chromadb>=1.5.5",
     "pypdf>=6.9.2",
@@ -26,14 +22,40 @@ dependencies = [
     "openpyxl>=3.1.5",
     "python-pptx>=1.0.2",
     "pymupdf>=1.27.2.2",
-    "pytesseract>=0.3.13",
     "pillow>=12.2.0",
-    "anthropic>=0.89.0",
     "markdown>=3.5",
-    "slack-bolt>=1.18",
     "pyjwt[crypto]>=2.12.1",
     "aiohttp>=3.13.5",
+    # Std-plugin workspace members — each is a uv workspace member with
+    # its own ``pyproject.toml`` declaring its third-party Python deps.
+    # Listing them here (with ``{ workspace = true }`` sources below)
+    # means a plain ``uv sync`` resolves every plugin's deps into the
+    # shared venv, so users don't have to remember ``--all-packages``.
+    "gilbert-plugin-anthropic",
+    "gilbert-plugin-arr",
+    "gilbert-plugin-elevenlabs",
+    "gilbert-plugin-google",
+    "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-ngrok",
+    "gilbert-plugin-slack",
+    "gilbert-plugin-sonos",
+    "gilbert-plugin-tavily",
+    "gilbert-plugin-tesseract",
+    "gilbert-plugin-unifi",
 ]
+
+[tool.uv.sources]
+gilbert-plugin-anthropic = { workspace = true }
+gilbert-plugin-arr = { workspace = true }
+gilbert-plugin-elevenlabs = { workspace = true }
+gilbert-plugin-google = { workspace = true }
+gilbert-plugin-guess-that-song = { workspace = true }
+gilbert-plugin-ngrok = { workspace = true }
+gilbert-plugin-slack = { workspace = true }
+gilbert-plugin-sonos = { workspace = true }
+gilbert-plugin-tavily = { workspace = true }
+gilbert-plugin-tesseract = { workspace = true }
+gilbert-plugin-unifi = { workspace = true }
 
 [project.optional-dependencies]
 dev = [
@@ -46,6 +68,25 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gilbert"]
+
+# ── Plugin workspace ─────────────────────────────────────────────────
+#
+# Every plugin directory with its own ``pyproject.toml`` is treated as a
+# uv workspace member. Running ``uv sync`` from the repo root pulls in
+# the plugin's declared third-party dependencies into the shared venv,
+# keeping plugin-specific deps (``pytesseract``, ``soco``, ``anthropic``,
+# ...) out of the core Gilbert ``pyproject.toml`` while still making
+# them install with a single command.
+#
+# Directories that don't contain a ``pyproject.toml`` are ignored, so
+# plugins with zero third-party deps (or empty placeholder directories
+# under ``local-plugins`` / ``installed-plugins``) incur no cost.
+[tool.uv.workspace]
+members = [
+    "std-plugins/*",
+    "local-plugins/*",
+    "installed-plugins/*",
+]
 
 [tool.pytest.ini_options]
 # Include every plugin directory so plugin-specific tests (which live

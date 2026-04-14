@@ -7,10 +7,8 @@ Publishes events on the event bus:
 - ``presence.departed`` — user disappeared from poll (record deleted)
 """
 
-import contextlib
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from gilbert.core.services._backend_actions import (
@@ -115,11 +113,6 @@ class PresenceService(Service):
                 backend_name = section.get("backend", "unifi")
         self._backend_name = backend_name
 
-        try:
-            import gilbert.integrations.unifi.presence  # noqa: F401
-        except ImportError:
-            pass
-
         backends = PresenceBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
@@ -178,18 +171,12 @@ class PresenceService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.presence import PresenceBackend
 
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.unifi.presence  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Presence backend type.",
                 default="unifi", restart_required=True,
-                choices=tuple(PresenceBackend.registered_backends().keys()) or ("unifi",),
+                choices=tuple(PresenceBackend.registered_backends().keys()),
             ),
             ConfigParam(
                 key="poll_interval_seconds", type=ToolParameterType.NUMBER,
@@ -216,8 +203,6 @@ class PresenceService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.unifi.presence  # noqa: F401
         return all_backend_actions(
             registry=PresenceBackend.registered_backends(),
             current_backend=self._backend,

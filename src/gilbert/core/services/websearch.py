@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re
@@ -122,11 +121,6 @@ class WebSearchService(Service, ToolProvider):
         self._enabled = True
         self._backend_name = backend_name
 
-        try:
-            import gilbert.integrations.tavily_search  # noqa: F401
-        except ImportError:
-            pass
-
         backends = WebSearchBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
@@ -164,18 +158,12 @@ class WebSearchService(Service, ToolProvider):
     def config_params(self) -> list["ConfigParam"]:
         from gilbert.interfaces.configuration import ConfigParam
 
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.tavily_search  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Web search backend provider.",
                 default="tavily", restart_required=True,
-                choices=tuple(WebSearchBackend.registered_backends().keys()) or ("tavily",),
+                choices=tuple(WebSearchBackend.registered_backends().keys()),
             ),
         ]
         backends = WebSearchBackend.registered_backends()
@@ -197,8 +185,6 @@ class WebSearchService(Service, ToolProvider):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.tavily_search  # noqa: F401
         return all_backend_actions(
             registry=WebSearchBackend.registered_backends(),
             current_backend=self._backend,

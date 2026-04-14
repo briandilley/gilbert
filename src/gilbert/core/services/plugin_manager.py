@@ -66,6 +66,13 @@ class _RuntimeRecord:
     install_path: Path
     installed_at: str
     registered_services: list[str] = field(default_factory=list)
+    # Set when a plugin declares third-party Python deps in its own
+    # ``pyproject.toml``. Such plugins cannot be hot-loaded because the
+    # new deps aren't in the running venv yet — they need a restart so
+    # ``gilbert.sh start`` re-runs ``uv sync`` first. The record is
+    # still persisted so the UI can surface the pending state, and the
+    # boot-time loader picks the plugin up normally on the next start.
+    needs_restart: bool = False
 
 
 class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
@@ -108,6 +115,34 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             self._install_dir,
             len(self._records),
         )
+
+    async def reconcile_loaded_plugins(self, gilbert: Any) -> None:
+        """Clear ``needs_restart`` flags for plugins that loaded successfully.
+
+        Called after boot-time plugin loading has finished. If a plugin
+        that was previously marked ``needs_restart=True`` now appears in
+        the app's loaded plugin list, the deferred-load worked and we
+        should persist the cleared flag plus the newly-registered
+        services so the UI stops showing the restart warning.
+        """
+        loaded_names = {
+            entry.plugin.metadata().name for entry in gilbert.list_loaded_plugins()
+        }
+        for name, record in list(self._records.items()):
+            if not record.needs_restart:
+                continue
+            if name not in loaded_names:
+                continue
+            entry = gilbert.find_loaded_plugin(name)
+            if entry is None:
+                continue
+            record.needs_restart = False
+            record.registered_services = list(entry.registered_services)
+            await self._persist_record(record)
+            logger.info(
+                "Plugin %s finished deferred load (registered: %s)",
+                name, record.registered_services,
+            )
 
     async def stop(self) -> None:
         # Plugin lifecycle is managed by the Gilbert app, not by this
@@ -155,6 +190,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 install_path=install_path,
                 installed_at=str(row.get("installed_at") or ""),
                 registered_services=list(row.get("registered_services") or []),
+                needs_restart=bool(row.get("needs_restart", False)),
             )
 
     async def _persist_record(self, record: _RuntimeRecord) -> None:
@@ -172,6 +208,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 "install_path": str(record.install_path),
                 "installed_at": record.installed_at,
                 "registered_services": list(record.registered_services),
+                "needs_restart": record.needs_restart,
             },
         )
 
@@ -205,6 +242,32 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             source_url, self._install_dir, force=force,
         )
         installed_at = datetime.now(UTC).isoformat()
+
+        # If the plugin declares third-party Python deps in its own
+        # ``pyproject.toml``, we can't hot-load it — the new deps aren't
+        # in the running venv yet. Record the install so the UI can show
+        # "restart required" and ``gilbert.sh start`` picks it up on the
+        # next boot (via ``uv sync`` re-resolving the workspace).
+        if _plugin_declares_python_deps(info.install_path):
+            logger.info(
+                "Plugin %s declares Python dependencies — deferring load "
+                "until next restart so ``uv sync`` can install them.",
+                info.name,
+            )
+            record = _RuntimeRecord(
+                name=info.name,
+                version=info.version,
+                description=info.description,
+                source_url=source_url,
+                install_path=info.install_path,
+                installed_at=installed_at,
+                registered_services=[],
+                needs_restart=True,
+            )
+            await self._persist_record(record)
+            self._records[info.name] = record
+            return record
+
         registered: list[str] = []
         plugin: Plugin | None = None
         sm = gilbert.service_manager
@@ -364,10 +427,12 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 "registered_services": list(entry.registered_services),
                 "running": True,
                 "uninstallable": meta.name in self._records,
+                "needs_restart": bool(record and record.needs_restart),
             })
 
         # Registry rows whose plugins didn't actually load (e.g. a previous
-        # boot-time load failed). Surface them so the user can clean up.
+        # boot-time load failed, or a deferred install waiting for restart).
+        # Surface them so the user can clean up or restart.
         for name, record in self._records.items():
             if name in loaded_names:
                 continue
@@ -382,6 +447,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 "registered_services": list(record.registered_services),
                 "running": False,
                 "uninstallable": True,
+                "needs_restart": record.needs_restart,
             })
 
         results.sort(key=lambda r: r["name"])
@@ -494,6 +560,24 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 ),
                 required_role="admin",
             ),
+            ToolDefinition(
+                name="plugin_restart_host",
+                slash_group="plugin",
+                slash_command="restart",
+                slash_help="Restart Gilbert to finish a deferred install: /plugin restart",
+                description=(
+                    "Gracefully stop Gilbert so the ``gilbert.sh`` "
+                    "supervisor loop re-runs ``uv sync`` and relaunches "
+                    "it. Use this after ``/plugin install`` reports "
+                    "``needs_restart`` — the newly installed plugin's "
+                    "Python dependencies will be installed during the "
+                    "restart cycle and the plugin will load on the next "
+                    "boot. Only works when Gilbert is running under "
+                    "``./gilbert.sh start``; running ``python -m "
+                    "gilbert`` directly will just exit."
+                ),
+                required_role="admin",
+            ),
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -509,11 +593,26 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 except PluginError as exc:
                     return json.dumps({"status": "error", "error": str(exc)})
                 return json.dumps({
-                    "status": "installed",
+                    "status": (
+                        "installed_restart_required"
+                        if record.needs_restart
+                        else "installed"
+                    ),
                     "name": record.name,
                     "version": record.version,
                     "source_url": record.source_url,
                     "registered_services": record.registered_services,
+                    "needs_restart": record.needs_restart,
+                    "message": (
+                        f"Plugin {record.name} v{record.version} installed. "
+                        "It declares third-party Python dependencies, so a "
+                        "restart is required to finish loading it — run "
+                        "``/plugin restart`` to trigger the supervised "
+                        "restart (``gilbert.sh`` will re-run ``uv sync`` "
+                        "and relaunch automatically)."
+                        if record.needs_restart
+                        else f"Plugin {record.name} v{record.version} installed and loaded."
+                    ),
                 })
             case "plugin_uninstall":
                 target = str(arguments.get("name") or "").strip()
@@ -527,6 +626,25 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             case "plugin_list":
                 rows = self.list_installed(gilbert)
                 return json.dumps({"plugins": rows})
+            case "plugin_restart_host":
+                pending = [
+                    r.name for r in self._records.values() if r.needs_restart
+                ]
+                gilbert.request_restart()
+                return json.dumps({
+                    "status": "restart_requested",
+                    "pending_plugins": pending,
+                    "message": (
+                        "Gilbert is shutting down. The supervisor loop "
+                        "in gilbert.sh will re-run ``uv sync`` and "
+                        "relaunch automatically. "
+                        + (
+                            f"Deferred plugins waiting to load: {', '.join(pending)}."
+                            if pending
+                            else "No deferred plugins are waiting."
+                        )
+                    ),
+                })
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -557,6 +675,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             "plugins.list": self._ws_plugins_list,
             "plugins.install": self._ws_plugins_install,
             "plugins.uninstall": self._ws_plugins_uninstall,
+            "plugins.restart_host": self._ws_plugins_restart_host,
         }
 
     async def _ws_plugins_list(
@@ -600,9 +719,32 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 "installed_at": record.installed_at,
                 "registered_services": record.registered_services,
                 "source": "installed",
-                "running": True,
+                "running": not record.needs_restart,
                 "uninstallable": True,
+                "needs_restart": record.needs_restart,
             },
+        }
+
+    async def _ws_plugins_restart_host(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Ask the host process to exit with the restart exit code.
+
+        The ``gilbert.sh`` supervisor loop catches the exit code, re-
+        runs ``uv sync`` (installing any newly pulled plugin deps into
+        the venv), and relaunches Gilbert. UIs call this after a
+        ``plugins.install`` that returned ``needs_restart: true``.
+        """
+        gilbert = conn.manager.gilbert
+        if gilbert is None:
+            return _ws_error(frame, "Gilbert app not available", code=503)
+        pending = [r.name for r in self._records.values() if r.needs_restart]
+        gilbert.request_restart()
+        return {
+            "type": "plugins.restart_host.result",
+            "ref": frame.get("id"),
+            "status": "restart_requested",
+            "pending_plugins": pending,
         }
 
     async def _ws_plugins_uninstall(
@@ -639,6 +781,35 @@ def _ws_error(frame: dict[str, Any], error: str, *, code: int = 400) -> dict[str
         "error": error,
         "code": code,
     }
+
+
+def _plugin_declares_python_deps(plugin_dir: Path) -> bool:
+    """Return True if the plugin ships a ``pyproject.toml`` with a
+    non-empty ``[project].dependencies`` list.
+
+    Used to decide whether a runtime-installed plugin can be hot-loaded
+    (no third-party deps → safe to load into the running venv) or has
+    to wait for the next ``gilbert.sh start`` to re-run ``uv sync``
+    against the workspace.
+    """
+    pyproject = plugin_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        import tomllib
+
+        with open(pyproject, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        logger.debug(
+            "Failed to parse %s — assuming no deps", pyproject, exc_info=True,
+        )
+        return False
+    project = data.get("project", {})
+    if not isinstance(project, dict):
+        return False
+    deps = project.get("dependencies", [])
+    return bool(deps)
 
 
 def _bucket_for(path: Path, bucket_dirs: dict[str, Path]) -> str:

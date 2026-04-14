@@ -2,47 +2,54 @@
 
 An AI-powered assistant for home and business automation. Gilbert combines a modular, interface-driven architecture with an agentic AI core — giving it the ability to control speakers, greet people at the door, manage email, spin up a radio DJ, and much more, all orchestrated through natural conversation or automated event-driven workflows.
 
-Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. Add entirely new capabilities through plugins loaded from local directories or GitHub URLs.
+Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local documents); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
 
 ## What Can It Do?
 
-Out of the box, Gilbert ships with integrations and services for:
+Out of the box — once the `std-plugins` submodule is initialized — Gilbert provides:
 
-- **AI chat** with tool use — ask Gilbert to play music, check who's home, search your documents, compose an email, or push content to a wall-mounted display
-- **Presence detection** — know who's home (and where) via WiFi clients, cameras with facial recognition, and zone-based tracking
-- **Doorbell monitoring** — detect ring events and announce visitors over your speakers with a custom TTS voice
-- **Music and radio** — search and play tracks via Spotify on Sonos speakers, or let the Radio DJ pick genres based on who's in the room
-- **Text-to-speech** — generate speech with ElevenLabs voices for announcements, greetings, and roasts
-- **Email inbox** — poll Gmail, search threads, compose and send replies — or let the AI handle incoming messages autonomously
-- **Knowledge base** — index local files and Google Drive folders into a vector store (ChromaDB) for semantic search
-- **Remote screens** — push content (PDFs, images, HTML) to browser-based displays via SSE
-- **Personalized greetings** — welcome people by name when they arrive, with a voice and personality you define
-- **Scheduled jobs** — cron-style recurring tasks, one-shot timers, and system maintenance jobs
-- **Role-based access control** — per-tool and per-collection permissions with a role hierarchy
-- **Interactive tool forms** — tools can push structured forms (inputs, selects, sliders, buttons) into the chat for user interaction
-- **Plugin system** — extend Gilbert with new services, tools, and integrations without modifying core code
+- **AI chat** with tool use — ask Gilbert to play music, check who's home, search your documents, compose an email, or push content to a wall-mounted display. Claude is the default AI via the `anthropic` plugin; swap it for any other backend that implements `AIBackend`.
+- **Presence detection** — know who's home (and where) via WiFi clients, cameras with facial recognition, and badge readers. The `unifi` plugin aggregates UniFi Network, UniFi Protect, and UniFi Access signals into a single presence stream.
+- **Doorbell monitoring** — detect ring events from UniFi Protect cameras and announce visitors over your speakers with a custom TTS voice.
+- **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and exposes the Sonos-linked music services (Spotify, Apple Music, etc.) as playable backends for the Music service and Radio DJ.
+- **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, Radio DJ narration, and any AI-generated spoken output.
+- **Email inbox** — the `google` plugin's Gmail backend polls messages, tracks threads, composes drafts, and sends replies — or lets the AI handle incoming email autonomously via the Inbox AI Chat service.
+- **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
+- **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
+- **OCR** — the `tesseract` plugin extracts text from images locally (no network, no API key) for document indexing and vision workflows.
+- **Public tunnel** — the `ngrok` plugin provides a public HTTPS URL so OAuth callbacks (Google login, Slack Socket Mode) work behind NAT.
+- **Slack bridge** — the `slack` plugin connects a Socket Mode bot so users can chat with Gilbert from Slack DMs and mentions, with the same tool access as the web UI.
+- **Remote screens** — push content (PDFs, images, HTML) to browser-based displays via SSE (core).
+- **Personalized greetings, Radio DJ, roasts, scheduled jobs, RBAC, interactive tool forms** — all core services.
+- **Plugin system** — add runtime integrations from any GitHub URL via `/plugin install`, with automatic dependency resolution through the uv workspace. Plugins that need new Python packages trigger a supervised restart; plugins without extra deps hot-load immediately.
 
 ## Architecture
 
 ### Interface-First Design
 
-Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface.
+Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface. All vendor-specific implementations live in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) submodule; core ships only with vendor-free backends (local auth, local filesystem documents).
 
 ```
-AIBackend           →  AnthropicAI (Claude)
-SpeakerBackend      →  SonosSpeaker
-MusicBackend        →  SpotifyMusic
-TTSBackend          →  ElevenLabsTTS
-PresenceBackend     →  UniFi (Network + Protect)
-DoorbellBackend     →  UniFi Protect
-EmailBackend        →  Gmail
-DocumentBackend     →  Local filesystem, Google Drive
-AuthProvider        →  Local passwords, Google OAuth
-StorageBackend      →  SQLite
-UserProviderService →  Google Workspace Directory
+Interface (core)     →  Implementation (plugin)
+────────────────────────────────────────────────
+AIBackend            →  anthropic plugin → AnthropicAI (Claude)
+VisionBackend        →  anthropic plugin → AnthropicVision
+TTSBackend           →  elevenlabs plugin → ElevenLabsTTS
+SpeakerBackend       →  sonos plugin → SonosSpeaker
+MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
+PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
+DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend
+EmailBackend         →  google plugin → GmailBackend
+DocumentBackend      →  core (LocalDocuments) + google plugin (GDriveDocuments)
+AuthBackend          →  core (LocalAuth) + google plugin (GoogleAuthBackend)
+UserProviderBackend  →  google plugin → GoogleDirectoryBackend
+WebSearchBackend     →  tavily plugin → TavilySearch
+OCRBackend           →  tesseract plugin → TesseractOCR
+TunnelBackend        →  ngrok plugin → NgrokTunnel
+StorageBackend       →  core → SQLiteStorage
 ```
 
-Want to add support for a different speaker system, AI provider, or presence detector? Implement the interface and register it. Callers don't change.
+Want to add support for a different speaker system, AI provider, or presence detector? Implement the interface in a new plugin (or an existing one) and Gilbert picks it up through the backend registry on the next boot. Callers never change.
 
 ### Service Manager
 
@@ -118,148 +125,135 @@ Gilbert uses a generic entity store — not raw SQL tables. Entities are stored 
 
 ## Integrations
 
-### Anthropic (Claude)
+Every third-party integration is a plugin in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repository, included as a git submodule at `std-plugins/`. The full inventory — with each plugin's backend names, third-party deps, configuration keys, and slash commands — lives in [`std-plugins/README.md`](std-plugins/README.md). At a glance:
 
-The AI backend. Powers all natural language interactions, tool orchestration, email processing, greeting generation, music selection, and more. Supports streaming responses and automatic token tracking.
+| Plugin | What it adds |
+|---|---|
+| **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
+| **arr** | Radarr + Sonarr services for movie/TV library management from chat |
+| **elevenlabs** | High-quality TTS for announcements, greetings, Radio DJ narration |
+| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents |
+| **guess-that-song** | Multiplayer music guessing game managed by the AI |
+| **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
+| **slack** | Socket Mode bot bridging Slack DMs/mentions to the AI service |
+| **sonos** | Sonos speaker control and Sonos-linked music service access |
+| **tavily** | Web search backend with AI-generated summaries |
+| **tesseract** | Local OCR (offline, no API key) for document indexing |
+| **unifi** | UniFi Network + Protect + Access aggregated into presence and doorbell backends |
 
-### UniFi
-
-Two integrations in one:
-
-- **UniFi Network** — polls WiFi client lists to detect which devices (and therefore which people) are on the network, enabling zone-based presence tracking
-- **UniFi Protect** — monitors camera feeds for doorbell ring events and facial recognition, feeding into the presence and doorbell services
-
-### Sonos
-
-Discovers speakers on the local network via UPnP. Supports playback, volume control, and speaker grouping for synchronized multi-room audio. Used by the music service, Radio DJ, TTS announcements, and doorbell notifications.
-
-### Spotify
-
-Music search, track/album/playlist metadata, and playable URIs. The Radio DJ uses it to build context-aware playlists, and the music service exposes search and playback as AI tools.
-
-### ElevenLabs
-
-High-quality text-to-speech synthesis with multiple configurable voices. Used for arrival greetings, doorbell announcements, roasts, and any AI-generated spoken output.
-
-### Google Workspace
-
-Multiple Google integrations:
-
-- **Gmail** — email polling, thread tracking, compose and send with domain-wide delegation
-- **Google Drive** — document sync and export for the knowledge base
-- **Google Directory** — user and group sync from Workspace for the user provider system
-- **Google OAuth** — authentication provider for the login system
-
-### Slack
-
-Socket Mode bot integration that routes DMs and channel mentions to the AI service. Users can chat with Gilbert directly in Slack with the same tool access as the web UI.
+Configuration for every plugin is done through the Gilbert Settings UI at `/settings` — no file editing needed. The Settings UI reads each plugin's `config_params()`, renders type-appropriate inputs (with sensitive values masked), and persists changes to entity storage. See [`std-plugins/README.md`](std-plugins/README.md) for each plugin's configuration keys.
 
 ### ChromaDB
 
-Vector database for the knowledge base. Documents from local files and Google Drive are chunked, embedded, and indexed for semantic search. The AI uses this to answer questions grounded in your actual documents.
+Vector database for the knowledge base (core dependency). Documents from local files and Google Drive are chunked, embedded, and indexed for semantic search. The AI uses this to answer questions grounded in your actual documents. ChromaDB runs in-process via the `chromadb` Python package — no external service required.
 
 ## Plugins
 
-Plugins extend Gilbert without modifying core code. A plugin is a Python package that implements the `Plugin` interface and exposes a `create_plugin()` factory function.
+Plugins extend Gilbert without modifying core code. A plugin is a directory containing a `plugin.yaml` manifest, a `plugin.py` entry point with a `create_plugin()` factory, its own `pyproject.toml` declaring third-party Python deps, and the actual integration source. Gilbert loads every plugin discovered under the configured plugin directories at startup.
 
-```
-std-plugins/
-  my-plugin/
-    plugin.yaml       # metadata and default config
-    __init__.py        # makes the directory a Python package
-    plugin.py          # create_plugin() entry point
-    service.py         # your service implementation
-```
-
-Plugins receive a `PluginContext` with access to the service manager, configuration, a data directory, and namespaced storage (automatically prefixed to avoid collisions). They can register new services, subscribe to events, expose AI tools, and add web routes.
+See [`std-plugins/README.md`](std-plugins/README.md) for the full template and a walkthrough of adding a new plugin.
 
 ### Plugin directories
 
 Gilbert scans three directories at startup, each with a distinct role:
 
-| Directory | Purpose | Tracked in git? |
+| Directory | Purpose | Tracked in gilbert? |
 |---|---|---|
-| `std-plugins/` | First-party plugins from [`briandilley/gilbert-plugins`](https://github.com/briandilley/gilbert-plugins). Cloned into place. | Separate repo |
+| `std-plugins/` | First-party plugins from [`briandilley/gilbert-plugins`](https://github.com/briandilley/gilbert-plugins). Included as a **git submodule**. | Submodule pointer |
 | `local-plugins/` | Plugins you write yourself for this installation. | No (gitignored) |
-| `installed-plugins/` | Plugins installed at runtime from external sources (GitHub URLs, etc.). | No (gitignored) |
+| `installed-plugins/` | Plugins installed at runtime via `/plugin install <url>`. | No (gitignored) |
 
-Every subdirectory of each of these that contains a `plugin.yaml` is loaded at startup. Configuration follows the same layering as core: plugin defaults in `plugin.yaml`, overrides in `.gilbert/config.yaml` under `plugins.config.<name>`.
+Every subdirectory of each of these that contains a `plugin.yaml` is loaded at startup. Every plugin also must carry its own `pyproject.toml` — those are all uv workspace members of the root Gilbert project, so a single `uv sync` resolves and installs every plugin's third-party Python deps into the shared venv.
 
-### Community plugins
+### `std-plugins` as a submodule
 
-A collection of first-party and community plugins lives in a separate
-repository: **[briandilley/gilbert-plugins](https://github.com/briandilley/gilbert-plugins)**.
-Clone it into `std-plugins/` and restart Gilbert to pick them up —
-each plugin is self-contained and opt-in from the Settings UI:
+First-party plugins live in a separate repository so they can be versioned, reviewed, and released independently of Gilbert's core. Cloning Gilbert fresh:
 
 ```bash
-git clone git@github.com:briandilley/gilbert-plugins.git std-plugins
+git clone https://github.com/briandilley/gilbert.git
+cd gilbert
+git submodule update --init --recursive   # populates std-plugins/
+uv sync                                    # installs core + every plugin's deps
 ```
 
-New integrations belong there rather than in this repo. If you've
-built a plugin for a service, device, or workflow that might be
-useful to others, please open a pull request against
-`gilbert-plugins`. Plugin PRs should include a README documenting
-configuration, commands, and any external prerequisites, plus tests
-where practical — see the existing plugins in that repo for a
-pattern to follow.
+Or just run `./gilbert.sh start` — the launcher script auto-runs `git submodule update --init --recursive` if `std-plugins/` is empty, then `uv sync`, then boots Gilbert.
+
+New integrations should be opened as pull requests against the `gilbert-plugins` repo, not this one. Plugin PRs should include the plugin directory complete with `plugin.yaml`, `plugin.py`, `pyproject.toml`, backend source, and tests, plus an updated entry in `std-plugins/README.md` so the plugin inventory stays accurate — see the existing plugins for the pattern.
+
+### Runtime plugin install
+
+Admins can install plugins at runtime from any GitHub URL via the `/plugin install <url>` slash command (or the `plugins.install` WebSocket RPC). Gilbert fetches the plugin into `installed-plugins/<name>/`, validates it, and either:
+
+- **Hot-loads it immediately** if the plugin's `pyproject.toml` declares no third-party Python dependencies (nothing new for the venv to resolve), or
+- **Defers loading until restart** if it has deps. In that case, run `/plugin restart` to trigger Gilbert's supervised restart loop — `gilbert.sh` re-runs `uv sync` (which picks up the new workspace member), relaunches Gilbert, and the boot-time loader imports the plugin with its deps now available.
+
+Uninstall with `/plugin uninstall <name>`; list with `/plugin list`.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- Docker (optional, for dependent services like ChromaDB)
+- [uv](https://docs.astral.sh/uv/) (Python package and project manager)
+- Git (with submodule support — any recent version)
+- Node.js + npm (only if you want to rebuild the frontend; prebuilt assets ship under `src/gilbert/web/spa/`)
+
+Some plugins have additional OS-level prerequisites — e.g. the `tesseract` plugin needs the Tesseract binary (`apt install tesseract-ocr` or `brew install tesseract`). Check [`std-plugins/README.md`](std-plugins/README.md) for per-plugin requirements.
 
 ### Clone and Install
 
 ```bash
 git clone https://github.com/briandilley/gilbert.git
 cd gilbert
+
+# Either let gilbert.sh init the submodule for you...
+./gilbert.sh start
+
+# ...or do it manually:
+git submodule update --init --recursive
 uv sync
 ```
 
+`uv sync` resolves the entire workspace — Gilbert core plus every plugin's third-party deps — into a single venv. If you add or update a plugin later, re-running `uv sync` picks up the changes.
+
 ### Configure
 
-Gilbert ships with sensible defaults in `gilbert.yaml`. To customize for your installation, create a local override file:
+Gilbert ships with sensible bootstrap defaults in `gilbert.yaml`. Only a small handful of settings live in YAML — storage, logging, web server binding, and the plugin directory list — because those are needed before entity storage is available. **Everything else is configured at runtime through the Settings UI** at `http://localhost:8000/settings`.
+
+On first run, non-bootstrap sections from `gilbert.yaml` (AI config, plugin config, etc.) are seeded into the entity store. After that, the Settings UI is the source of truth — changes there persist to `.gilbert/gilbert.db` and take effect immediately (or on restart for params marked `restart_required`).
+
+If you need to override bootstrap values for this specific installation, create a local override file:
 
 ```bash
 mkdir -p .gilbert
-cp gilbert.yaml .gilbert/config.yaml
-# Edit .gilbert/config.yaml with your credentials and settings
+cat > .gilbert/config.yaml <<'EOF'
+# Only include values you're changing. Deep-merged on top of gilbert.yaml.
+web:
+  port: 9000
+EOF
 ```
 
-The `.gilbert/` directory is gitignored — your API keys, database, and logs stay local. Overrides are deep-merged on top of defaults, so you only need to include the values you're changing.
+The `.gilbert/` directory is gitignored — your API keys, database, and logs stay local. Runtime config (AI backend selection, TTS API keys, plugin settings, etc.) is managed through the Settings UI, not this file.
 
-At minimum, you'll want to configure:
+At minimum, before Gilbert is useful, open the Settings UI and configure:
 
-```yaml
-# .gilbert/config.yaml
-ai:
-  enabled: true
-  credential: my-anthropic-key
-
-credentials:
-  my-anthropic-key:
-    type: api_key
-    api_key: sk-ant-...
-```
-
-See `gilbert.yaml` for the full set of configurable services and their options.
+- **AI** → select the `anthropic` backend and enter your API key (`sk-ant-…`).
+- **Whatever plugins you care about** — e.g. Sonos speakers (discovery is automatic), Google Workspace (OAuth flow), UniFi presence (host + credentials), and so on. Each plugin's settings page has a **Test connection** button to verify credentials before you commit to them.
 
 ### Run
 
 ```bash
-# Start infrastructure (Docker services like ChromaDB, if needed)
-./gilbert.sh infra
-
-# Start Gilbert
+# Start Gilbert (auto-inits the std-plugins submodule if empty, then uv sync, then launches)
 ./gilbert.sh start
 
-# Stop Gilbert
+# Dev mode (same as start, with verbose logging suitable for iteration)
+./gilbert.sh dev
+
+# Stop Gilbert (sends SIGTERM to the running PID)
 ./gilbert.sh stop
 ```
+
+`gilbert.sh start` runs Gilbert under a supervisor loop that distinguishes normal stops from "please restart me" exits — when a runtime-installed plugin needs `uv sync` to pick up new Python deps, it sets an internal flag, Gilbert exits with code `75` (`EX_TEMPFAIL`), and the supervisor loop re-syncs and relaunches automatically. Ctrl+C and `./gilbert.sh stop` propagate cleanly and do **not** trigger a restart.
 
 On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000`.
 
@@ -270,11 +264,17 @@ Gilbert includes a React SPA with pages for chat, documents, inbox, screens, sys
 ## Development
 
 ```bash
-# Run tests
+# Install dev tools (ruff, mypy, pytest-cov)
+uv sync --extra dev
+
+# Run all tests — includes every std-plugin's tests via pyproject.toml testpaths
 uv run pytest
 
 # Run tests with coverage
 uv run pytest --cov=gilbert
+
+# Run tests for a single plugin
+uv run pytest std-plugins/tesseract/tests/ -v
 
 # Type checking
 uv run mypy src/
@@ -286,7 +286,9 @@ uv run ruff check src/ tests/
 uv run ruff format src/ tests/
 ```
 
-See [CLAUDE.md](CLAUDE.md) for full architecture documentation, design decisions, and development guidelines.
+Plugin tests live inside each plugin's `tests/` directory and are collected automatically because `pyproject.toml` lists `std-plugins`, `local-plugins`, and `installed-plugins` in `testpaths`. When adding a new plugin, put its tests under `<plugin>/tests/` and create a `conftest.py` that registers the plugin directory as a Python package for pytest — see `std-plugins/tesseract/tests/conftest.py` for the single-module case or `std-plugins/unifi/tests/conftest.py` for a multi-module plugin with relative imports.
+
+See [CLAUDE.md](CLAUDE.md) for full architecture documentation, design decisions, and development guidelines. See [`std-plugins/CLAUDE.md`](std-plugins/CLAUDE.md) for plugin-specific conventions.
 
 ## License
 

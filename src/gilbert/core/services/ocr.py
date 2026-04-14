@@ -4,7 +4,6 @@ Provides optical character recognition for document indexing.
 Backend-agnostic — the Tesseract implementation is one option.
 """
 
-import contextlib
 import logging
 from typing import Any
 
@@ -65,11 +64,6 @@ class OCRService(Service):
         backend_name = str(section.get("backend", "tesseract"))
         self._backend_name = backend_name
 
-        try:
-            import gilbert.integrations.tesseract_ocr  # noqa: F401
-        except ImportError:
-            pass
-
         backends = OCRBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
@@ -100,18 +94,12 @@ class OCRService(Service):
         return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.tesseract_ocr  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="OCR backend provider.",
                 default="tesseract", restart_required=True,
-                choices=tuple(OCRBackend.registered_backends().keys()) or ("tesseract",),
+                choices=tuple(OCRBackend.registered_backends().keys()),
             ),
         ]
         backends = OCRBackend.registered_backends()
@@ -133,8 +121,6 @@ class OCRService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.tesseract_ocr  # noqa: F401
         return all_backend_actions(
             registry=OCRBackend.registered_backends(),
             current_backend=self._backend,

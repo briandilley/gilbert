@@ -4,7 +4,6 @@ Wraps a TunnelBackend (ngrok, etc.) as a discoverable service so external
 services (Google OAuth, webhooks) can reach Gilbert over HTTPS.
 """
 
-import contextlib
 import logging
 from typing import Any
 
@@ -69,13 +68,6 @@ class TunnelService(Service):
         backend_name = section.get("backend", "ngrok")
         self._backend_name = backend_name
         backends = TunnelBackend.registered_backends()
-        if backend_name not in backends:
-            # Import known backends to trigger registration
-            try:
-                import gilbert.integrations.ngrok_tunnel  # noqa: F401
-            except ImportError:
-                pass
-            backends = TunnelBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
             raise ValueError(f"Unknown tunnel backend: {backend_name}")
@@ -100,18 +92,12 @@ class TunnelService(Service):
         return "Infrastructure"
 
     def config_params(self) -> list[ConfigParam]:
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.ngrok_tunnel  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,
                 description="Tunnel backend provider.",
                 default="ngrok", restart_required=True,
-                choices=tuple(TunnelBackend.registered_backends().keys()) or ("ngrok",),
+                choices=tuple(TunnelBackend.registered_backends().keys()),
             ),
         ]
         backends = TunnelBackend.registered_backends()
@@ -133,8 +119,6 @@ class TunnelService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.ngrok_tunnel  # noqa: F401
         return all_backend_actions(
             registry=TunnelBackend.registered_backends(),
             current_backend=self._backend,

@@ -3,17 +3,16 @@
 
 # Plugin directories
 #
-# std-plugins/ — the first-party gilbert-plugins repository. Users
-#   clone briandilley/gilbert-plugins into this directory; it has its
-#   own git history and isn't tracked by the main gilbert repo.
+# std-plugins/ — the first-party gilbert-plugins repository. Tracked as
+#   a git submodule (.gitmodules + gitlink). Do NOT gitignore it — the
+#   submodule pointer lives in gilbert's tree.
 # local-plugins/ — plugins the user writes locally. Never tracked.
 # installed-plugins/ — plugins fetched at runtime from external sources
 #   (GitHub URLs, etc.). Managed by the plugin loader.
 #
-# We keep the empty directory scaffolds around (via .gitkeep) so
-# gilbert.yaml's ``plugins.directories`` works out of the box on a
-# fresh clone without the user having to mkdir anything.
-std-plugins/
+# We keep the empty scaffolds for local-plugins/ and installed-plugins/
+# around (via README.md) so gilbert.yaml's ``plugins.directories`` works
+# out of the box on a fresh clone without the user having to mkdir.
 local-plugins/*
 !local-plugins/README.md
 installed-plugins/*

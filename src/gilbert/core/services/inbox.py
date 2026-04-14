@@ -7,7 +7,6 @@ reply to, and compose email.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -95,13 +94,6 @@ class InboxService(Service):
         backend_name = section.get("backend", "gmail")
         self._backend_name = backend_name
         backends = EmailBackend.registered_backends()
-        if backend_name not in backends:
-            # Import known backends to trigger registration
-            try:
-                import gilbert.integrations.gmail  # noqa: F401
-            except ImportError:
-                pass
-            backends = EmailBackend.registered_backends()
         backend_cls = backends.get(backend_name)
         if backend_cls is None:
             raise ValueError(f"Unknown email backend: {backend_name}")
@@ -175,12 +167,6 @@ class InboxService(Service):
     def config_params(self) -> list[ConfigParam]:
         from gilbert.interfaces.email import EmailBackend
 
-        # Import known backends so they register before we query the registry
-        try:
-            import gilbert.integrations.gmail  # noqa: F401
-        except ImportError:
-            pass
-
         params = [
             ConfigParam(
                 key="poll_interval", type=ToolParameterType.INTEGER,
@@ -219,8 +205,6 @@ class InboxService(Service):
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        with contextlib.suppress(ImportError):
-            import gilbert.integrations.gmail  # noqa: F401
         return all_backend_actions(
             registry=EmailBackend.registered_backends(),
             current_backend=self._backend,

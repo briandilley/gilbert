@@ -7,8 +7,8 @@ AI assistant for home and business automation. Extensible, plugin-driven archite
 - **Language:** Python (3.12+), managed via uv (always use `uv run` to execute commands, `uv add` for dependencies — never use pip directly)
 - **Database:** SQLite (local store), interface-abstracted for swappable backends
 - **Storage API:** Generic entity store with query interface (not SQL-shaped). New entity types require no migrations.
-- **Infrastructure:** Docker for dependent services
-- **Testing:** pytest with mocks; database tests use a real test SQLite database
+- **Plugins:** `std-plugins/` is a **git submodule** of [`briandilley/gilbert-plugins`](https://github.com/briandilley/gilbert-plugins). Every plugin is a uv workspace member with its own `pyproject.toml` declaring third-party deps, resolved by the root `uv sync`.
+- **Testing:** pytest with mocks; database tests use a real test SQLite database. Plugin tests are discovered automatically via `testpaths = ["tests", "std-plugins", "local-plugins", "installed-plugins"]`.
 - **Logging:** Python logging framework throughout. Colored console output (stderr), file logging, and separate AI API call log.
 
 ## Architecture
@@ -18,7 +18,7 @@ AI assistant for home and business automation. Extensible, plugin-driven archite
 Everything is designed as an abstract interface (Python ABCs) with concrete implementations. This applies to:
 
 - **Data layer** — e.g., `StorageBackend` ABC with `SQLiteStorage` implementation (swappable to PostgreSQL, etc.)
-- **Backend abstractions** — e.g., `TTSBackend` ABC with `ElevenLabsTTS`, `AIBackend` ABC with `AnthropicAI`, `AuthBackend` with `LocalAuth`/`GoogleAuth`, `VisionBackend` with `AnthropicVision`, `TunnelBackend` with `NgrokTunnel`, etc.
+- **Backend abstractions** — e.g., `TTSBackend` ABC (`ElevenLabsTTS` implementation ships in the `elevenlabs` plugin), `AIBackend` ABC (`AnthropicAI` in the `anthropic` plugin), `AuthBackend` with `LocalAuth` in core and `GoogleAuth` in the `google` plugin, `VisionBackend` with `AnthropicVision` in the `anthropic` plugin, `TunnelBackend` with `NgrokTunnel` in the `ngrok` plugin, etc. Only vendor-free backends (`LocalAuth`, `LocalDocuments`) live in `src/gilbert/integrations/`; every third-party integration is a std-plugin under `std-plugins/`.
 - **Service-level protocols** — e.g., `Configurable` for runtime config, `ToolProvider` for AI tool registration
 - **Capability protocols** — e.g., `ConfigurationReader` for config access, `SchedulerProvider` for job scheduling, `EventBusProvider` for event pub/sub, `StorageProvider` for entity storage, `AccessControlProvider` for RBAC queries
 
@@ -27,11 +27,43 @@ New integrations are added by implementing the relevant backend ABC. The `__init
 ### Plugin System
 
 Plugins are loaded from:
-- **GitHub URLs** — fetched and installed at runtime
+- **GitHub URLs** — fetched and installed at runtime via `/plugin install <url>`
 - **Local file paths** — for development or private plugins
-- **Plugin directories** — scanned for subdirectories containing `plugin.yaml`
+- **Plugin directories** — `std-plugins/` (git submodule), `local-plugins/`, `installed-plugins/`; every subdirectory containing a `plugin.yaml` is loaded at startup
+
+`std-plugins/` is a git submodule pointing at [`briandilley/gilbert-plugins`](https://github.com/briandilley/gilbert-plugins). `gilbert.sh start` runs `git submodule update --init --recursive` if the directory is empty, then `uv sync`, then boots Gilbert. First-party plugins are developed in that separate repo and updated in Gilbert via the submodule pointer.
 
 Plugins implement published interfaces to extend Gilbert with new integrations or capabilities. Plugins that need configuration implement `Configurable` and read their config via the `ConfigurationReader` protocol (resolved from the `"configuration"` capability), not from `context.config` (which only contains the initial config snapshot at load time).
+
+**Plugin layout.** Every plugin directory contains:
+
+- `plugin.yaml` — manifest (name, version, provides, requires, depends_on)
+- `plugin.py` — defines `create_plugin()` returning a `Plugin` instance; its `setup()` method imports backend modules (`from . import sonos_speaker  # noqa: F401`) which triggers `__init_subclass__` registration on the relevant ABC
+- `pyproject.toml` — **required** for every std-plugin; declares the plugin's own third-party Python dependencies. See the *Plugin Dependencies* section below.
+- `__init__.py` — empty (makes the directory a Python package)
+- `tests/conftest.py` — registers the plugin as `gilbert_plugin_<name>` in `sys.modules` for pytest collection. When a plugin has multiple internal modules with relative imports between them (`from .client import Foo` inside `presence.py`), the conftest must **omit** `submodule_search_locations` in its `spec_from_file_location` calls — see `std-plugins/unifi/tests/conftest.py` for the detailed comment on why.
+- backend source files — the actual integration code
+
+**Plugin Dependencies (uv workspace).** Each plugin lists its own third-party Python deps in its own `std-plugins/<name>/pyproject.toml`:
+
+```toml
+[project]
+name = "gilbert-plugin-sonos"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["soco>=0.30.15"]
+
+[tool.uv]
+package = false
+```
+
+The root `pyproject.toml` treats all plugin directories (`std-plugins/*`, `local-plugins/*`, `installed-plugins/*`) as uv workspace members via `[tool.uv.workspace]`, and declares each std-plugin as a root dependency via `[tool.uv.sources] … { workspace = true }`. Result: a plain `uv sync` installs every plugin's declared deps into the shared venv without any per-plugin commands.
+
+Plugins with no third-party deps beyond what's already in core (`httpx`, `aiohttp`, `pillow`, etc.) still need a `pyproject.toml` with `dependencies = []` — uv errors if a workspace member matched by the glob lacks one.
+
+**Runtime plugin install and deps (Option C: restart required).** When `PluginManagerService.install()` fetches a plugin that declares non-empty `[project].dependencies` in its `pyproject.toml`, it **cannot** hot-load it — the new deps aren't in the running venv. The install is persisted with `needs_restart=True` and surfaced in the UI. The user then triggers a restart via `/plugin restart` (or the equivalent `plugins.restart_host` WS handler); Gilbert calls `request_restart()` which flips uvicorn's `should_exit` and sets a flag so `__main__.py` exits the process with `RESTART_EXIT_CODE = 75` once uvicorn's serve loop returns. The `gilbert.sh` supervisor loop catches that exit code, re-runs `uv sync` (installing the new workspace member's deps), and relaunches Gilbert; the boot-time loader imports the plugin normally and `PluginManagerService.reconcile_loaded_plugins()` clears the `needs_restart` flag. Plugins that declare zero third-party deps still hot-load as before without any restart.
+
+**Supervised restart pattern.** `gilbert.sh start` / `gilbert.sh dev` run Gilbert under a supervisor loop that distinguishes "exit and restart" (exit code `75`, `EX_TEMPFAIL`) from "exit and stop" (exit code `0`, `130` from Ctrl+C, `143` from SIGTERM, or anything else from a crash). The loop re-runs `uv sync` on each iteration so any plugin dep changes land in the venv before the next boot. A SIGINT/SIGTERM trap in the supervisor sets a stop flag so Ctrl+C during a `uv sync` or between Gilbert runs still exits cleanly instead of looping back. The restart is triggered from inside Gilbert via `Gilbert.request_restart()` (set a flag + call a shutdown callback wired from `__main__.py` that flips uvicorn's `server.should_exit`). Services should never call `sys.exit()` directly — they should call `request_restart()` and let `__main__.py` return the exit code on the way out.
 
 ### Installation Data Directory (`.gilbert/`)
 
@@ -406,14 +438,31 @@ These are the most critical. Scan imports in each layer:
 - **Non-identifier `slash_command` or `slash_group` values** — both must match `[a-zA-Z][a-zA-Z0-9_\-]*`. Dots are reserved for plugin namespacing and spaces are reserved for group/subcommand composition; both are applied automatically at discovery time. `tests/unit/test_slash_command_uniqueness.py` enforces this.
 - **Duplicate `(slash_group, slash_command)` pairs across core tools** — two tools claiming the same slash in the same group is a collision. The uniqueness test catches this. The same leaf name CAN appear under different groups (`/radio stop` vs `/speaker stop`) — that's by design.
 
+### Documentation Freshness
+
+The following README files are considered part of the product and must stay in sync with reality. Drift is a regression to be fixed in the same change that caused it, not deferred.
+
+- **`README.md` (Gilbert root)** — overview, integration table, plugin system summary, getting started, configuration instructions, development commands. When you change how the system is configured, how it starts up, what integrations it bundles, or the plugin directory structure, update this file.
+- **`std-plugins/README.md`** — canonical inventory of every plugin (table + per-plugin detail section with config keys, deps, slash commands). When you add/remove/rename a plugin or change its `config_params()`, update this file in the same commit.
+- **`std-plugins/CLAUDE.md`** — plugin development conventions. Update when plugin layout rules, test conventions, or workspace wiring changes.
+- **`CLAUDE.md` (this file)** — the architecture reference Claude reads on every session. Update when layer rules, capability protocols, or the plugin contract change.
+
+The `README.md` freshness pass runs as part of the verification sweep: after making changes, grep the README(s) for any strings that the change might have invalidated (plugin names, config key names, commands, paths) and update them. "Refactor touched X, README still talks about X the old way" is a regression.
+
 ### How to Run
 
-The user can ask to check these rules at any time by saying "check the rules," "check for violations," "audit the architecture," or similar. Run the full checklist across `src/` and `plugins/`, report all findings, and fix them.
+The user can ask to check these rules at any time by saying "check the rules," "check for violations," "audit the architecture," or similar. Run the full checklist across `src/` and `std-plugins/`, report all findings, and fix them. The checklist now includes README.md freshness for both the Gilbert root and `std-plugins/` — don't just flag stale docs, fix them.
 
 ## Commands
 
 ```bash
-# Run tests
+# Install Gilbert core + every std-plugin's deps (uv resolves the whole workspace)
+uv sync
+
+# Install with dev tooling (ruff, mypy, pytest-cov)
+uv sync --extra dev
+
+# Run all tests (includes every std-plugin's tests via pyproject.toml testpaths)
 uv run pytest
 
 # Run tests with coverage
@@ -428,6 +477,6 @@ uv run ruff check src/ tests/
 # Formatting
 uv run ruff format src/ tests/
 
-# Install/sync dependencies
-uv sync
+# Initialize/update the std-plugins submodule (normally ./gilbert.sh start handles this)
+git submodule update --init --recursive
 ```
