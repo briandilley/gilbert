@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 @dataclass(frozen=True)
 class RingEvent:
@@ -28,7 +30,7 @@ class DoorbellBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

@@ -1,6 +1,6 @@
 """Tests for UI blocks system — ToolOutput handling, serialization, and AI service integration."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -171,7 +171,7 @@ class TestToolOutputInAgenticLoop:
 
     async def test_plain_string_result(self, ai_service: MagicMock) -> None:
         """Backward compat: plain str returns work as before."""
-        from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolParameter
+        from gilbert.interfaces.tools import ToolCall, ToolDefinition
 
         provider = MagicMock()
         provider.execute_tool = AsyncMock(return_value="plain text result")

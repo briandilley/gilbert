@@ -12,6 +12,7 @@ from gilbert.interfaces.storage import (
     IndexDefinition,
     OnDelete,
     Query,
+    SortField,
     StorageBackend,
 )
 
@@ -428,7 +429,7 @@ class SQLiteStorage(StorageBackend):
 
         return " AND ".join(clauses), params
 
-    def _build_order(self, sort: list["SortField"]) -> str:
+    def _build_order(self, sort: list[SortField]) -> str:
         if not sort:
             return ""
         parts = []

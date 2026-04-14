@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolResult
 
 
@@ -125,7 +126,7 @@ class AIBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters.
 
         Returned params are included in the owning service's config under

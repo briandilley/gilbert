@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from gilbert.interfaces.configuration import ConfigParam
+
 # ── Shared audio-silence helpers ─────────────────────────────────────
 #
 # These sit in ``interfaces/`` because both the core TTS service and
@@ -102,7 +104,7 @@ class TTSBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

@@ -23,7 +23,6 @@ class StubStorageService(Service):
         )
 
     def create_namespaced(self, namespace: str) -> Any:
-        from gilbert.interfaces.storage import NamespacedStorageBackend
         return NamespacedStorageBackend(self.backend, namespace)
 
 

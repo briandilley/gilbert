@@ -48,6 +48,7 @@ from gilbert.interfaces.tools import (
     ToolProvider,
     ToolResult,
 )
+from gilbert.interfaces.ui import ToolOutput, UIBlock
 
 logger = logging.getLogger(__name__)
 ai_logger = logging.getLogger("gilbert.ai")
@@ -769,8 +770,6 @@ class AIService(Service):
             )
 
         # Agentic loop
-        from gilbert.interfaces.ui import UIBlock
-
         response: AIResponse | None = None
         all_ui_blocks: list[UIBlock] = []
         tool_usage: list[dict[str, Any]] = []
@@ -1052,10 +1051,8 @@ class AIService(Service):
         tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
-    ) -> tuple[list[ToolResult], list["UIBlock"]]:
+    ) -> tuple[list[ToolResult], list[UIBlock]]:
         """Execute a batch of tool calls and return results + any UI blocks."""
-        from gilbert.interfaces.ui import ToolOutput, UIBlock
-
         results: list[ToolResult] = []
         ui_blocks: list[UIBlock] = []
         tool_roles = profile.tool_roles if profile else {}
@@ -1282,8 +1279,6 @@ class AIService(Service):
         Returns the same tuple shape as ``chat()`` so callers can't tell
         the difference between a slash command and an AI turn.
         """
-        from gilbert.interfaces.ui import ToolOutput, UIBlock
-
         provider, tool_def = entry
 
         # Record the user's command as a user message (with author fields

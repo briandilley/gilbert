@@ -1,6 +1,5 @@
 """Integration tests for SQLiteStorage — hits a real test database."""
 
-import pytest
 
 from gilbert.interfaces.storage import Filter, FilterOp, IndexDefinition, Query, SortField
 from gilbert.storage.sqlite import SQLiteStorage

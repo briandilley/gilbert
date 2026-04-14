@@ -20,7 +20,6 @@ from gilbert.config import (
     GilbertConfig,
     OVERRIDE_CONFIG_PATH,
     YAML_ONLY_SECTIONS,
-    _deep_merge,
 )
 from gilbert.interfaces.configuration import (
     ConfigAction,

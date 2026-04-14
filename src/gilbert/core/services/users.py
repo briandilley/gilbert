@@ -10,7 +10,11 @@ from gilbert.core.services._backend_actions import (
     invoke_backend_action,
     merge_backend_actions,
 )
-from gilbert.interfaces.configuration import ConfigAction, ConfigActionResult
+from gilbert.interfaces.configuration import (
+    ConfigAction,
+    ConfigActionResult,
+    ConfigParam,
+)
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend, StorageProvider
 from gilbert.interfaces.tools import (
@@ -329,9 +333,7 @@ class UserService(Service):
     def config_category(self) -> str:
         return "Security"
 
-    def config_params(self) -> list["ConfigParam"]:
-        from gilbert.interfaces.configuration import ConfigParam
-
+    def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(
                 key="sync_ttl_seconds", type=ToolParameterType.INTEGER,

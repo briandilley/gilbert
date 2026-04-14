@@ -257,7 +257,6 @@ async def inbox_service(
     svc._email_address = "gilbert@example.com"
     svc._poll_interval = 60
     # Skip start() entirely — call only the parts we need (storage, scheduler, etc.)
-    from gilbert.interfaces.storage import IndexDefinition
 
     from gilbert.interfaces.events import EventBusProvider
     from gilbert.interfaces.storage import StorageProvider

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 class PlaybackState(StrEnum):
     """Current playback state of a speaker."""
@@ -94,7 +96,7 @@ class SpeakerBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

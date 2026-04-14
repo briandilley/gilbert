@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from gilbert.interfaces.service import ServiceEnumerator, ServiceResolver
+    from gilbert.interfaces.service import ServiceEnumerator
     from gilbert.interfaces.storage import StorageBackend
 
 

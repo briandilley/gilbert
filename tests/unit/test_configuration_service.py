@@ -9,8 +9,8 @@ import pytest
 from gilbert.config import GilbertConfig
 from gilbert.core.service_manager import ServiceManager
 from gilbert.core.services.configuration import ConfigurationService
-from gilbert.interfaces.configuration import ConfigParam, Configurable
-from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.service import Service, ServiceInfo
 from gilbert.interfaces.tools import ToolParameterType
 
 
@@ -137,7 +137,7 @@ async def test_set_invalid_config_rejected(config_svc: ConfigurationService) -> 
     # Setting storage.backend to a non-string should fail validation
     # Actually, Pydantic coerces most types. Let's try something that truly fails.
     # Set a nested path that would create invalid structure
-    result = await config_svc.set("ai.enabled", "not-a-bool")
+    await config_svc.set("ai.enabled", "not-a-bool")
     # Pydantic will likely coerce this or reject it
     # Just verify no crash
 

@@ -5,7 +5,7 @@ from typing import Any
 
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus
-from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.service import Service, ServiceInfo
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,

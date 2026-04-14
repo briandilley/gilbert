@@ -15,7 +15,11 @@ from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
 )
-from gilbert.interfaces.configuration import ConfigAction, ConfigActionResult
+from gilbert.interfaces.configuration import (
+    ConfigAction,
+    ConfigActionResult,
+    ConfigParam,
+)
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -155,9 +159,7 @@ class WebSearchService(Service, ToolProvider):
     def config_category(self) -> str:
         return "Intelligence"
 
-    def config_params(self) -> list["ConfigParam"]:
-        from gilbert.interfaces.configuration import ConfigParam
-
+    def config_params(self) -> list[ConfigParam]:
         params = [
             ConfigParam(
                 key="backend", type=ToolParameterType.STRING,

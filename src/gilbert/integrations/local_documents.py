@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.knowledge import (
     EXT_TO_DOCUMENT_TYPE,
     DocumentBackend,
@@ -13,6 +14,7 @@ from gilbert.interfaces.knowledge import (
     DocumentMeta,
     DocumentType,
 )
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,7 @@ class LocalDocumentBackend(DocumentBackend):
     backend_name = "local"
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
-        from gilbert.interfaces.configuration import ConfigParam
-        from gilbert.interfaces.tools import ToolParameterType
-
+    def backend_config_params(cls) -> list[ConfigParam]:
         return [
             ConfigParam(
                 key="path", type=ToolParameterType.STRING,

@@ -252,7 +252,7 @@ def _extract_word(
                                 if total_chars > max_chars:
                                     break
                         except Exception:
-                            stats.warnings.append(f"OCR failed on Word image")
+                            stats.warnings.append("OCR failed on Word image")
             except Exception:
                 pass
 

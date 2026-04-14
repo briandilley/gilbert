@@ -14,7 +14,6 @@ from gilbert.interfaces.ai import (
     Message,
     MessageRole,
     StopReason,
-    TokenUsage,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend

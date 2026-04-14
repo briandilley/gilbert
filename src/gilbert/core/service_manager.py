@@ -1,7 +1,6 @@
 """Service manager — registration, dependency resolution, and lifecycle management."""
 
 import logging
-from typing import Any
 
 from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver

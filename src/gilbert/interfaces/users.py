@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 @dataclass
 class ExternalUser:
@@ -42,7 +44,7 @@ class UserProviderBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

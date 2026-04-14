@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Protocol, runtime_checkable
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 class TunnelBackend(ABC):
     """Abstract tunnel backend. Implementation-agnostic."""
@@ -20,7 +22,7 @@ class TunnelBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

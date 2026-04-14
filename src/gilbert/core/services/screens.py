@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
@@ -186,10 +187,7 @@ class ScreenService(Service):
     def config_category(self) -> str:
         return "Infrastructure"
 
-    def config_params(self) -> list["ConfigParam"]:
-        from gilbert.interfaces.configuration import ConfigParam
-        from gilbert.interfaces.tools import ToolParameterType
-
+    def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(
                 key="tmp_ttl_seconds", type=ToolParameterType.INTEGER,

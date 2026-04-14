@@ -6,14 +6,12 @@ import io
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gilbert.config import SkillsConfig
 from gilbert.core.services.skills import SkillService
-from gilbert.interfaces.skills import SkillCatalogEntry, SkillContent
 
 
 def _make_skill_service(

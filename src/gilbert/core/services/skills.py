@@ -12,7 +12,6 @@ import re
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +29,7 @@ async def _to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
     return await loop.run_in_executor(None, func, *args)
 
 from gilbert.interfaces.auth import AccessControlProvider
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.skills import SkillCatalogEntry, SkillContent
 from gilbert.interfaces.storage import IndexDefinition, Query
@@ -134,9 +134,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
     def config_category(self) -> str:
         return "Intelligence"
 
-    def config_params(self) -> list["ConfigParam"]:
-        from gilbert.interfaces.configuration import ConfigParam
-
+    def config_params(self) -> list[ConfigParam]:
         return [
             ConfigParam(
                 key="directories", type=ToolParameterType.ARRAY,

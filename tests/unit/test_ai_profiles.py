@@ -15,7 +15,6 @@ from gilbert.interfaces.ai import (
     AIResponse,
     Message,
     MessageRole,
-    StopReason,
 )
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -23,9 +22,6 @@ from gilbert.interfaces.storage import StorageBackend
 from gilbert.interfaces.tools import (
     ToolCall,
     ToolDefinition,
-    ToolParameter,
-    ToolParameterType,
-    ToolResult,
 )
 
 
@@ -464,7 +460,6 @@ class TestDefenseInDepth:
     ) -> None:
         """If RBAC would block the tool, execution returns permission denied."""
         # Build tools dict with an admin tool
-        from gilbert.interfaces.tools import ToolProvider
         tools_by_name: dict[str, tuple[Any, ToolDefinition]] = {
             "admin_tool": (None, TOOL_ADMIN),
         }

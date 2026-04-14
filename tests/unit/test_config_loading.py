@@ -1,13 +1,11 @@
 """Tests for configuration loading — layered merging with plugin defaults."""
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
-import pytest
 import yaml
 
-from gilbert.config import GilbertConfig, PluginsConfig, _deep_merge, load_config
+from gilbert.config import PluginsConfig, _deep_merge, load_config
 
 
 class TestDeepMerge:

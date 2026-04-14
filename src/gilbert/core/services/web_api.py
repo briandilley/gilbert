@@ -214,7 +214,6 @@ class WebApiService(Service):
         fk_map: dict[str, Any] = {}
 
         # Build display columns: _id + indexed fields + FK fields
-        from gilbert.interfaces.storage import IndexDefinition
 
         display_columns: list[str] = ["_id"]
         try:

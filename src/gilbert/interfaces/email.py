@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 @dataclass(frozen=True)
 class EmailAddress:
@@ -76,7 +78,7 @@ class EmailBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

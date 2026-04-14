@@ -1,6 +1,5 @@
 """Integration tests — AI conversation persistence with real SQLite."""
 
-import pytest
 
 from gilbert.core.services.ai import AIService
 from gilbert.interfaces.ai import Message, MessageRole

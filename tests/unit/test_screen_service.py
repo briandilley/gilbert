@@ -1,18 +1,13 @@
 """Tests for ScreenService — screen registry, SSE, temp files, name resolution, and tools."""
 
-import asyncio
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gilbert.core.services.screens import (
-    ConnectedScreen,
     ScreenService,
-    TempFile,
     _normalize,
     _sse_event,
     _strip_screen_suffix,
@@ -135,7 +130,9 @@ class TestScreenRegistry:
 
     def test_disconnect_ignores_stale(self, service: ScreenService) -> None:
         old = service.connect("Test")
-        new = service.connect("Test")
+        # Connect a second client to the same screen — its presence is what
+        # we're guarding against the stale-disconnect call below.
+        service.connect("Test")
         # Disconnecting old should NOT remove new
         service.disconnect("test", old)
         assert len(service.list_screens()) == 1
@@ -410,7 +407,8 @@ class TestToolDefinitions:
 
     @pytest.mark.asyncio
     async def test_tool_show_images(self, service: ScreenService) -> None:
-        screen = service.connect("test screen")
+        # Establish a screen with the test name so the tool resolves it.
+        service.connect("test screen")
         result = await service.execute_tool("display", {
             "action": "show_images",
             "screen_name": "test screen",
@@ -434,7 +432,6 @@ class TestToolDefinitions:
 
 def _make_test_pdf(page_texts: list[str]) -> bytes:
     """Create a minimal PDF with the given text on each page."""
-    from pypdf import PdfWriter
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas as rl_canvas
     import io as _io

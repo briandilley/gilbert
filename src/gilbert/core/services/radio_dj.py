@@ -19,7 +19,7 @@ from gilbert.interfaces.music import (
     MusicSearchUnavailableError,
     Playable,
 )
-from gilbert.interfaces.presence import PresenceProvider, PresenceState, UserPresence
+from gilbert.interfaces.presence import PresenceProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import NowPlaying, PlaybackState
 from gilbert.interfaces.storage import StorageProvider

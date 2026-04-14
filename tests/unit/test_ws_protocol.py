@@ -1,8 +1,7 @@
 """Tests for WebSocket protocol — visibility, subscriptions, frame dispatch."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
 
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.events import Event

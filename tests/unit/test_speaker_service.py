@@ -19,7 +19,7 @@ from gilbert.interfaces.speaker import (
     SpeakerInfo,
 )
 from gilbert.interfaces.storage import StorageBackend
-from gilbert.interfaces.tts import AudioFormat, SynthesisRequest, SynthesisResult, TTSBackend
+from gilbert.interfaces.tts import AudioFormat, SynthesisResult
 
 
 class StubSpeakerBackend(SpeakerBackend):

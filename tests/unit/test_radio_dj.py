@@ -2,14 +2,13 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gilbert.core.services.radio_dj import RadioDJService
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.music import MusicItem, MusicItemKind, Playable
-from gilbert.interfaces.speaker import PlayRequest
 
 
 # --- Fakes ---
@@ -844,7 +843,7 @@ class TestVeto:
     ) -> None:
         await started_dj.start_radio(genre="country")
         speaker_svc.play_on_speakers.reset_mock()
-        result = await started_dj.veto_genre("alice", "country")
+        await started_dj.veto_genre("alice", "country")
         # Should have switched to a different genre
         speaker_svc.play_on_speakers.assert_called()
 

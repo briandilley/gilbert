@@ -1,15 +1,11 @@
 """Tests for _MemoryHelper — per-user persistent memories (via AIService)."""
 
-import json
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from gilbert.core.services.ai import AIService, _MemoryHelper
-from gilbert.core.services.storage import StorageService
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.service import ServiceResolver
 
 
 # ── Fake storage ────────────────────────────────────────────

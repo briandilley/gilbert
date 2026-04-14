@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 class OCRBackend(ABC):
     """Abstract OCR backend. Implementation-agnostic."""
@@ -20,7 +22,7 @@ class OCRBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

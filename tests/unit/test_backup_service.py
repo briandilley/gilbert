@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from gilbert.core.services.backup import BackupService, _BACKUPS_DIR
+from gilbert.core.services.backup import BackupService
 
 
 from gilbert.core.services.scheduler import SchedulerService

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from gilbert.interfaces.configuration import ConfigParam
+
 
 class PresenceState(StrEnum):
     """Where a user is relative to the monitored location."""
@@ -41,7 +43,7 @@ class PresenceBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
-    def backend_config_params(cls) -> list["ConfigParam"]:
+    def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []
 

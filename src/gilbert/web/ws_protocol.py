@@ -19,7 +19,7 @@ from gilbert.interfaces.acl import (
 )
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.events import Event, EventBusProvider
-from gilbert.interfaces.ws import RpcHandler, WsConnectionBase
+from gilbert.interfaces.ws import RpcHandler
 
 logger = logging.getLogger(__name__)
 
