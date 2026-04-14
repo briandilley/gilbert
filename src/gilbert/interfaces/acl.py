@@ -31,8 +31,14 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "presence.": 100,
     "timer.": 100,
     "knowledge.": 100,
+    # Inbox events are user-level — any user can have a shared mailbox.
+    # The WS layer applies a per-event mailbox-access filter on top of
+    # this, so a user only sees events for mailboxes they can access.
+    "inbox.": 100,
+    # auth.user.roles.changed fires on role mutation. The WS layer
+    # restricts delivery to admins + the affected user themselves.
+    "auth.": 100,
     # admin (0)
-    "inbox.": 0,
     "service.": 0,
     "config.": 0,
     "acl.": 0,
@@ -73,10 +79,12 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "scheduler.job.enable": 0,
     "scheduler.job.disable": 0,
     "scheduler.job.run_now": 0,
+    # Inbox RPCs are user-level; handlers enforce per-mailbox access
+    # via can_access_mailbox / can_admin_mailbox on top of the level.
+    "inbox.": 100,
     # admin (0)
     "config.": 0,
     "roles.": 0,
-    "inbox.": 0,
     "system.": 0,
     "entities.": 0,
     "plugins.": 0,

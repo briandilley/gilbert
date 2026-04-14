@@ -1,293 +1,264 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import type { MessageDetail, InboxMessage } from "@/types/inbox";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { useAuth } from "@/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
-import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { MailboxSidebar } from "./MailboxSidebar";
+import { MailboxEditor } from "./MailboxEditor";
+import { MessageList } from "./MessageList";
+import { MessageDetailDialog } from "./MessageDetailDialog";
+import { OutboxPanel } from "./OutboxPanel";
+import type { InboxMailbox, InboxMessage } from "@/types/inbox";
+import { SettingsIcon } from "lucide-react";
 
+/** Multi-mailbox inbox page.
+ *
+ * Layout:
+ *   ┌──────────┬────────────────────────────────┐
+ *   │ Sidebar  │ Header (name · email · edit)    │
+ *   │ Mine     │ Outbox panel (if active drafts) │
+ *   │ Shared   │ Search + message list           │
+ *   │ All      │                                 │
+ *   └──────────┴────────────────────────────────┘
+ *
+ * URL state:
+ *   ?mbx=<id>     — selected mailbox (persisted so reloads land in the same place)
+ *   ?msg=<id>     — opened message dialog
+ *   ?sender=...   — sender filter
+ *   ?subject=...  — subject filter
+ *
+ * Event subscriptions:
+ *   inbox.mailbox.*          → refetch mailboxes
+ *   inbox.mailbox.shares.changed → refetch (access set may change)
+ *   auth.user.roles.changed  → refetch if the event targets the current user
+ *     (role membership changes can open/close access to role-shared mailboxes)
+ *   inbox.message.received   → refetch messages + stats for the affected mailbox
+ *   inbox.outbox.*           → refetch outbox for the affected mailbox
+ */
 export function InboxPage() {
-  const queryClient = useQueryClient();
   const api = useWsApi();
-  const { connected } = useWebSocket();
+  const { connected, subscribe } = useWebSocket();
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorMailbox, setEditorMailbox] = useState<InboxMailbox | null>(null);
 
+  const isAdmin = useMemo(
+    () => Boolean(user?.roles?.includes("admin")),
+    [user],
+  );
+
+  // URL state
+  const selectedId = searchParams.get("mbx");
+  const selectedMessageId = searchParams.get("msg");
   const sender = searchParams.get("sender") || "";
   const subject = searchParams.get("subject") || "";
-  const messageId = searchParams.get("msg") || "";
 
-  const setSender = (v: string) => {
-    const p = new URLSearchParams(searchParams);
-    if (v) p.set("sender", v); else p.delete("sender");
-    p.delete("msg");
-    setSearchParams(p);
-  };
-  const setSubject = (v: string) => {
-    const p = new URLSearchParams(searchParams);
-    if (v) p.set("subject", v); else p.delete("subject");
-    p.delete("msg");
-    setSearchParams(p);
-  };
+  const updateParam = useCallback(
+    (key: string, value: string | null) => {
+      const p = new URLSearchParams(searchParams);
+      if (value) p.set(key, value);
+      else p.delete(key);
+      setSearchParams(p, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  // ---- Data ----
+
+  const { data: mailboxes = [] } = useQuery({
+    queryKey: ["inbox-mailboxes"],
+    queryFn: api.listMailboxes,
+    enabled: connected,
+  });
+
+  const selectedMailbox = useMemo(
+    () => mailboxes.find((m) => m.id === selectedId) ?? null,
+    [mailboxes, selectedId],
+  );
+
+  // Default-select the first mailbox if nothing is selected and we have any.
+  useEffect(() => {
+    if (!selectedId && mailboxes.length > 0) {
+      updateParam("mbx", mailboxes[0].id);
+    }
+  }, [mailboxes, selectedId, updateParam]);
 
   const { data: stats } = useQuery({
-    queryKey: ["inbox-stats"],
-    queryFn: api.inboxStats,
+    queryKey: ["inbox-stats", selectedId],
+    queryFn: () => api.inboxStats(selectedId ?? undefined),
     enabled: connected,
   });
 
-  const { data: messages = [], refetch } = useQuery({
-    queryKey: ["inbox-messages", sender, subject],
-    queryFn: () => api.listMessages({ sender: sender || undefined, subject: subject || undefined }),
-    enabled: connected,
-  });
+  // ---- Event subscriptions ----
 
-  const { data: pending = [] } = useQuery({
-    queryKey: ["inbox-pending"],
-    queryFn: api.listPending,
-    enabled: connected,
-  });
+  useEffect(() => {
+    const invalidateMailboxes = () =>
+      queryClient.invalidateQueries({ queryKey: ["inbox-mailboxes"] });
 
-  const cancelMutation = useMutation({
-    mutationFn: api.cancelPending,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inbox-pending"] }),
-  });
+    const invalidateOutbox = () =>
+      queryClient.invalidateQueries({ queryKey: ["inbox-outbox"] });
 
-  // Load message detail when msg param is set
-  const { data: selectedMsg, isLoading: loadingDetail } = useQuery({
-    queryKey: ["inbox-message", messageId],
-    queryFn: () => api.getMessage(messageId),
-    enabled: connected && !!messageId,
-  });
+    const invalidateMessages = () => {
+      queryClient.invalidateQueries({ queryKey: ["inbox-messages"] });
+      queryClient.invalidateQueries({ queryKey: ["inbox-stats"] });
+    };
 
-  // Load thread if the selected message has a thread_id
-  const { data: threadData } = useQuery({
-    queryKey: ["inbox-thread", selectedMsg?.thread_id],
-    queryFn: () => api.getThread(selectedMsg!.thread_id!),
-    enabled: connected && !!selectedMsg?.thread_id,
-  });
+    const unsubs: Array<() => void> = [];
+    unsubs.push(subscribe("inbox.mailbox.created", invalidateMailboxes));
+    unsubs.push(subscribe("inbox.mailbox.updated", invalidateMailboxes));
+    unsubs.push(subscribe("inbox.mailbox.deleted", invalidateMailboxes));
+    unsubs.push(
+      subscribe("inbox.mailbox.shares.changed", invalidateMailboxes),
+    );
+    unsubs.push(
+      subscribe("auth.user.roles.changed", (evt) => {
+        // Role changes can open/close access to role-shared mailboxes.
+        // Only refetch when the affected user is the current user —
+        // other users' role changes don't affect what we can see.
+        if (evt.data?.user_id === user?.user_id) {
+          invalidateMailboxes();
+        }
+      }),
+    );
+    unsubs.push(subscribe("inbox.message.received", invalidateMessages));
+    unsubs.push(subscribe("inbox.outbox.sent", invalidateOutbox));
+    unsubs.push(subscribe("inbox.outbox.failed", invalidateOutbox));
 
-  const threadMsgs = threadData ?? (selectedMsg ? [selectedMsg] : []);
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [subscribe, queryClient, user?.user_id]);
 
-  function handleRowClick(msg: InboxMessage) {
-    const p = new URLSearchParams(searchParams);
-    p.set("msg", msg.message_id);
-    setSearchParams(p);
-  }
+  // ---- Handlers ----
 
-  function closeDetail() {
-    const p = new URLSearchParams(searchParams);
-    p.delete("msg");
-    setSearchParams(p);
-  }
+  const handleSelectMailbox = (id: string) => {
+    updateParam("mbx", id);
+    updateParam("msg", null);
+    updateParam("sender", null);
+    updateParam("subject", null);
+  };
+
+  const handleSelectMessage = (msg: InboxMessage) => {
+    updateParam("msg", msg.message_id);
+  };
+
+  const handleCloseDetail = () => updateParam("msg", null);
+
+  const handleOpenEditor = (mb: InboxMailbox | null) => {
+    setEditorMailbox(mb);
+    setEditorOpen(true);
+  };
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-4xl mx-auto">
-      <div className="flex items-center gap-3 sm:gap-4">
-        <h1 className="text-xl sm:text-2xl font-semibold">Inbox</h1>
-        {stats && (
-          <Badge variant="secondary">
-            {stats.total} messages
-          </Badge>
-        )}
-      </div>
+    <div className="flex h-[calc(100vh-3.5rem)] flex-col sm:flex-row">
+      <MailboxSidebar
+        mailboxes={mailboxes}
+        selectedId={selectedId}
+        onSelect={handleSelectMailbox}
+        onCreate={() => handleOpenEditor(null)}
+        isAdmin={isAdmin}
+      />
 
-      {pending.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">
-              Pending Outgoing ({pending.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {pending.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex flex-wrap items-center gap-2 text-sm border-b pb-2 last:border-0 sm:gap-3"
-                >
-                  <Badge variant="outline">{p.status}</Badge>
-                  <span className="text-muted-foreground text-xs sm:text-sm">{p.send_at}</span>
-                  <span className="min-w-0 flex-1 basis-full truncate sm:basis-auto">
-                    {p.customer_email} — {p.subject}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-auto text-destructive"
-                    onClick={() => cancelMutation.mutate(p.id)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <main className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
+          {mailboxes.length === 0 ? (
+            <EmptyState onCreate={() => handleOpenEditor(null)} />
+          ) : (
+            <>
+              <MailboxHeader
+                mailbox={selectedMailbox}
+                stats={stats ?? null}
+                onEdit={() => handleOpenEditor(selectedMailbox)}
+              />
 
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <Input
-          value={sender}
-          onChange={(e) => setSender(e.target.value)}
-          placeholder="Filter by sender..."
-          className="sm:w-48"
-        />
-        <Input
-          value={subject}
-          onChange={(e) => setSubject(e.target.value)}
-          placeholder="Filter by subject..."
-          className="sm:flex-1 sm:max-w-xs"
-        />
-        <Button variant="outline" onClick={() => refetch()} className="sm:w-auto">
-          Search
-        </Button>
-      </div>
+              <OutboxPanel mailboxId={selectedId} />
 
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b">
-                  <th className="px-3 py-2 text-left font-medium w-8"></th>
-                  <th className="px-3 py-2 text-left font-medium whitespace-nowrap">Date</th>
-                  <th className="px-3 py-2 text-left font-medium">From</th>
-                  <th className="px-3 py-2 text-left font-medium">Subject</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left font-medium">Preview</th>
-                </tr>
-              </thead>
-              <tbody>
-                {messages.map((msg) => (
-                  <tr
-                    key={msg.message_id}
-                    className={`border-b hover:bg-accent/50 cursor-pointer ${msg.message_id === messageId ? "bg-accent/30" : ""}`}
-                    onClick={() => handleRowClick(msg)}
-                  >
-                    <td className="px-3 py-2">
-                      {msg.is_inbound ? "\u2192" : "\u2190"}
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      {new Date(msg.date).toLocaleDateString()}
-                    </td>
-                    <td className="px-3 py-2 truncate max-w-32">{msg.sender_name || msg.sender_email}</td>
-                    <td className="px-3 py-2 truncate max-w-48">{msg.subject}</td>
-                    <td className="hidden md:table-cell px-3 py-2 truncate max-w-64 text-muted-foreground">
-                      {msg.snippet}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Loading overlay for detail fetch */}
-      <Dialog open={loadingDetail} onOpenChange={() => {}}>
-        <DialogContent showCloseButton={false} className="flex items-center justify-center py-8">
-          <LoadingSpinner text="Loading message..." />
-        </DialogContent>
-      </Dialog>
-
-      {/* Message detail modal */}
-      <Dialog open={!!selectedMsg && !loadingDetail} onOpenChange={() => closeDetail()}>
-        <DialogContent className="flex max-h-[95vh] w-[calc(100%-1rem)] flex-col overflow-hidden sm:!max-w-3xl lg:!max-w-5xl">
-          <DialogHeader>
-            <DialogTitle className="pr-8 break-words">{selectedMsg?.subject}</DialogTitle>
-          </DialogHeader>
-          {selectedMsg && (
-            <div className="flex-1 overflow-y-auto text-sm space-y-0 -mx-4 px-4">
-              {threadMsgs.map((msg, i) => (
-                <div key={msg.message_id || i} className={i > 0 ? "border-t pt-4 mt-4" : ""}>
-                  <div className="text-muted-foreground pb-3 break-words">
-                    <div>From: {msg.sender_name || msg.sender_email}</div>
-                    {msg.to?.length > 0 && (
-                      <div>To: {msg.to.map((a: any) => a.name || a.email).join(", ")}</div>
-                    )}
-                    {msg.cc?.length > 0 && (
-                      <div>CC: {msg.cc.map((a: any) => a.name || a.email).join(", ")}</div>
-                    )}
-                    <div>Date: {new Date(msg.date).toLocaleString()}</div>
-                  </div>
-                  {msg.body_html ? (
-                    <EmailFrame html={msg.body_html} />
-                  ) : (
-                    <pre className="whitespace-pre-wrap break-words">{msg.body_text}</pre>
-                  )}
-                </div>
-              ))}
-            </div>
+              <MessageList
+                mailboxId={selectedId}
+                sender={sender}
+                subject={subject}
+                onSenderChange={(v) => updateParam("sender", v || null)}
+                onSubjectChange={(v) => updateParam("subject", v || null)}
+                selectedMessageId={selectedMessageId}
+                onSelectMessage={handleSelectMessage}
+              />
+            </>
           )}
-        </DialogContent>
-      </Dialog>
+        </div>
+      </main>
+
+      <MessageDetailDialog
+        messageId={selectedMessageId}
+        mailboxId={selectedId}
+        onClose={handleCloseDetail}
+      />
+
+      <MailboxEditor
+        mailbox={editorMailbox}
+        open={editorOpen}
+        onOpenChange={setEditorOpen}
+      />
     </div>
   );
 }
 
-/** Sandboxed iframe that auto-sizes to fit its HTML content. */
-function EmailFrame({ html }: { html: string }) {
-  const ref = useRef<HTMLIFrameElement>(null);
-
-  const resize = useCallback(() => {
-    const iframe = ref.current;
-    if (!iframe) return;
-    try {
-      const doc = iframe.contentDocument;
-      if (!doc?.body) return;
-      iframe.style.height = "0";
-      const h = doc.documentElement.scrollHeight || doc.body.scrollHeight;
-      iframe.style.height = h + "px";
-    } catch {
-      // Cross-origin — can't measure
-    }
-  }, []);
-
-  useEffect(() => {
-    const iframe = ref.current;
-    if (!iframe) return;
-    let observer: MutationObserver | null = null;
-
-    const handleLoad = () => {
-      resize();
-      try {
-        const doc = iframe.contentDocument;
-        if (doc?.body) {
-          observer = new MutationObserver(resize);
-          observer.observe(doc.body, { childList: true, subtree: true, attributes: true });
-          doc.querySelectorAll("img").forEach((img) => {
-            if (!img.complete) img.addEventListener("load", resize);
-          });
-        }
-      } catch {
-        // cross-origin
-      }
-    };
-
-    iframe.addEventListener("load", handleLoad);
-    return () => {
-      iframe.removeEventListener("load", handleLoad);
-      observer?.disconnect();
-    };
-  }, [html, resize]);
-
+function MailboxHeader({
+  mailbox, stats, onEdit,
+}: {
+  mailbox: InboxMailbox | null;
+  stats: { total: number; inbound: number } | null;
+  onEdit: () => void;
+}) {
+  if (!mailbox) {
+    return (
+      <div className="flex items-center gap-3">
+        <h1 className="text-xl font-semibold sm:text-2xl">Inbox</h1>
+        <span className="text-xs text-muted-foreground">Select a mailbox</span>
+      </div>
+    );
+  }
   return (
-    <iframe
-      ref={ref}
-      sandbox="allow-same-origin"
-      srcDoc={html}
-      className="w-full border-0 rounded bg-white"
-      style={{ minHeight: "60px" }}
-      title="Email content"
-    />
+    <div className="flex flex-wrap items-center gap-3">
+      <h1 className="text-xl font-semibold sm:text-2xl">{mailbox.name}</h1>
+      <span className="text-sm text-muted-foreground">{mailbox.email_address}</span>
+      {stats && (
+        <Badge variant="secondary">{stats.total} messages</Badge>
+      )}
+      {mailbox.access && mailbox.access !== "owner" && (
+        <Badge variant="outline" className="capitalize">
+          {mailbox.access.replace("_", " ")}
+        </Badge>
+      )}
+      {mailbox.can_admin && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="ml-auto"
+          onClick={onEdit}
+        >
+          <SettingsIcon className="size-3.5 mr-1.5" />
+          Settings
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed py-20 text-center">
+      <h2 className="text-lg font-semibold">No mailboxes yet</h2>
+      <p className="max-w-md text-sm text-muted-foreground">
+        Gilbert's inbox is multi-mailbox — every mailbox is owned by a user and
+        can be shared with others by user or role. Create your first mailbox to
+        start syncing mail.
+      </p>
+      <Button onClick={onCreate}>Create mailbox</Button>
+    </div>
   );
 }

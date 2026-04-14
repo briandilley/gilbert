@@ -1110,6 +1110,12 @@ class AIService(Service):
                 "arguments": self._sanitize_tool_args(tc.arguments),
             })
 
+            # Propagate caller identity through the async context so
+            # tools can resolve it via core.context.get_current_user().
+            if user_ctx is not None:
+                from gilbert.core.context import set_current_user
+                set_current_user(user_ctx)
+
             try:
                 raw_result = await provider.execute_tool(tc.tool_name, tc.arguments)
 
@@ -1346,6 +1352,12 @@ class AIService(Service):
             "tool_call_id": tool_call_id,
             "arguments": sanitized_args,
         })
+
+        # Propagate caller identity through the async context so
+        # tools can resolve it via core.context.get_current_user().
+        if user_ctx is not None:
+            from gilbert.core.context import set_current_user
+            set_current_user(user_ctx)
 
         ui_blocks: list[UIBlock] = []
         is_error = False

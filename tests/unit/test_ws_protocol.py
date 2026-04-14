@@ -33,8 +33,18 @@ class TestEventVisibility:
     def test_chat_is_everyone(self) -> None:
         assert get_event_visibility_level("chat.message.created") == 200
 
-    def test_inbox_is_admin(self) -> None:
-        assert get_event_visibility_level("inbox.message.received") == 0
+    def test_inbox_is_user_level(self) -> None:
+        # Inbox events are user-level because any authenticated user
+        # can own or be shared into a mailbox. The WS dispatch adds a
+        # per-event mailbox-access filter on top of this prefix-level
+        # check so unrelated users still don't see others' mail.
+        assert get_event_visibility_level("inbox.message.received") == 100
+
+    def test_auth_is_user_level(self) -> None:
+        # auth.user.roles.changed is user-level so a user can receive
+        # an event when their own roles change; the WS send_event
+        # filter restricts delivery to the affected user + admins.
+        assert get_event_visibility_level("auth.user.roles.changed") == 100
 
     def test_radio_dj_is_everyone(self) -> None:
         assert get_event_visibility_level("radio_dj.started") == 200

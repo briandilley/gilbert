@@ -1,118 +1,226 @@
 # Inbox Service
 
 ## Summary
-Email inbox service that syncs messages from an email backend into entity storage, publishes events, and exposes AI tools for searching, reading, replying, and composing email.
+Multi-mailbox email service. Every mailbox is owned by a user and can be
+shared with individual users and/or roles; the service runs one
+`EmailBackend` runtime per `poll_enabled` mailbox, persists messages in
+`inbox_messages` (tagged by `mailbox_id`), and flushes queued outbound
+drafts from an `inbox_outbox` collection via a shared outbox tick.
+Authorization is centralized in `interfaces/inbox.py`.
 
 ## Details
 
-### Interface
-- **EmailBackend ABC** (`interfaces/email.py`) — sync source and send transport only. Methods: `list_message_ids`, `get_message`, `mark_read`, `send`.
-- **Data models**: `EmailAddress` (email + name), `EmailMessage` (message_id, thread_id, subject, sender, to, cc, body_text, body_html, date, in_reply_to, headers).
-- The backend is never consulted for reads — all reads come from entity storage.
+### Data model
 
-### Service
-- **InboxService** (`core/services/inbox.py`) — capabilities: `email`, `ai_tools`, `ws_handlers`. Requires: `entity_storage`, `scheduler`. Optional: `event_bus`, `knowledge`, `configuration`.
-- Polls via scheduler system job (`inbox-poll`). Lists message IDs (up to 500, paginated), walks newest-first, stops at first known message. Only fetches full content for new messages.
-- After syncing a message, marks it as read in the remote provider.
-- Detects own outbound messages by comparing sender to configured `email_address`.
-- No read/unread concept locally — if we have it, it's "read". No `inbox_mark` tool.
-- Truncates bodies exceeding `max_body_length`.
+Three entity collections, all owned by `InboxService`:
 
-### Sync Flow
-1. `list_message_ids()` — one cheap API call per page (query: `in:inbox OR in:sent`)
-2. Walk IDs newest-first, `exists()` check against entity store, stop at first known
-3. For each new ID: `get_message()` → persist → `mark_read()` in backend → publish event
-4. On steady-state: typically 0-2 new messages per poll. On fresh store: backfills everything.
+| Collection | Key fields |
+|---|---|
+| `inbox_mailboxes` | `id`, `name`, `email_address`, `backend_name`, `backend_config`, `owner_user_id`, `shared_with_users`, `shared_with_roles`, `poll_enabled`, `poll_interval_sec`, `created_at` |
+| `inbox_messages` | `mailbox_id` (required), `message_id`, `thread_id`, `sender_email`, `subject`, `body_text`, `body_html`, `date`, `is_inbound`, `in_reply_to` |
+| `inbox_outbox` | `id`, `mailbox_id`, `status`, `send_at`, `draft`, `created_by_user_id`, `sent_at`, `error`, `retry_count` |
 
-### AI Tools
-- `inbox_search` — search by sender, subject, limit
-- `inbox_read` — full message content by ID
-- `inbox_reply` — threaded reply (auto-sets In-Reply-To, References, threadId); supports `attach_documents` param with knowledge store document IDs
-- `inbox_send` — compose and send a new email; supports `attach_documents` param with knowledge store document IDs
+Indexes: `inbox_mailboxes(owner_user_id)`, compound
+`inbox_messages(mailbox_id, thread_id/date/sender_email)`,
+`inbox_outbox(mailbox_id, status, send_at)` and
+`inbox_outbox(created_by_user_id, status)`. Thread IDs are only unique
+per-mailbox (Gmail thread ids aren't globally unique), so every thread
+query must be scoped to a mailbox.
 
-### Events Published
-- `inbox.message.received` — new message persisted (includes `is_inbound` flag)
-- `inbox.message.sent` — new outbound email
-- `inbox.message.replied` — reply sent in existing thread
+### Authorization
 
-### Gmail Backend
-- **GmailBackend** (`integrations/gmail.py`) — self-contained backend using google-api-python-client with its own `service_account_json` config param.
-- No external GoogleService dependency. Backend builds its own Gmail API client from the service account JSON during `initialize()`.
-- Requires domain-wide delegation with `gmail.modify` + `gmail.send` scopes.
-- `list_message_ids` paginates internally via `nextPageToken`.
-- Threading: Gmail's `threadId` groups conversations. Stored on each message. `in_reply_to` field stores the message's RFC822 `Message-ID` header (used as `In-Reply-To` when replying).
+Single rule, in `interfaces/inbox.py`:
 
-### Configuration
-```yaml
-inbox:
-  enabled: false
-  backend: gmail
-  email_address: ""     # mailbox to impersonate
-  poll_interval: 60     # seconds
-  max_body_length: 50000
-  settings:
-    service_account_json: ""  # inline service account JSON
-```
+- `can_access_mailbox(user_ctx, mailbox, *, is_admin)` — admin OR owner
+  OR user in `shared_with_users` OR any role overlap with
+  `shared_with_roles`. Grants read + send-as + outbox management.
+- `can_admin_mailbox(user_ctx, mailbox, *, is_admin)` — admin OR owner
+  only. Gates mailbox settings, share edits, delete.
+- `determine_access(user_ctx, mailbox, *, is_admin)` — returns the
+  `MailboxAccess` tag (`owner`/`admin`/`shared_user`/`shared_role`) for
+  UI grouping. Owner precedence wins over admin.
 
-### Design Decisions
-- No auto-processing — InboxService only syncs, persists, publishes. Plugins/services subscribe to `inbox.message.received` events.
-- No subject filtering or domain gating in core — plugins apply their own filtering.
-- No read/unread tracking — presence in the store means it's been synced. Simplifies the model.
-- Backend is fully abstracted — Gmail today, IMAP or others can be added by implementing EmailBackend.
+Callers resolve `is_admin` via `AccessControlProvider.get_effective_level`
+and pass it in — the helpers are pure and never touch the capability
+resolver.
 
-### Web UI
-- Admin-only inbox browser at `/inbox` (route: `web/routes/inbox.py`, template: `web/templates/inbox.html`)
-- Dashboard card with envelope icon, nav link in header (admin only)
-- API endpoints: `GET /inbox/api/stats`, `GET /inbox/api/messages`, `GET /inbox/api/messages/{id}`, `GET /inbox/api/threads/{thread_id}`
-- Client-side filtering by sender, subject; auto-refresh every 30s; live updates via GilbertEvents WebSocket (debounced)
-- Message detail modal with headers, body, and "View Thread" button for multi-message threads
-- List view uses `include_body=False` for performance (returns snippets, strips body)
-- Stats loaded async via JS (non-blocking page render)
-- All JS deferred to `DOMContentLoaded` to avoid race with `GilbertEvents` defined in base.html
+**Outbox cancellation**: any user with `can_access_mailbox` can cancel
+any draft in that mailbox, not just the creator. Rationale: full access
+means full control over outbound.
 
-### Service Methods
-- `search_messages(sender, subject, limit, include_body)` — query entity store
-- `get_message(message_id)` — single message from entity store
-- `get_thread(thread_id)` — all messages in a thread, date ascending
-- `get_stats()` — returns `{total, inbound}` counts
-- `reply_to_message(message_id, body_html, body_text, cc, attachments, reply_to, from_name)` — reply via backend, persist outbound. `reply_to` sets the Reply-To header (e.g., route replies to a shared group alias); `from_name` sets a friendly display name on the From header.
-- `send_message(to, subject, body_html, body_text, cc, attachments, reply_to, from_name)` — send via backend, persist outbound. Same `reply_to` / `from_name` semantics as above.
+**Sharing semantics** (decided in this PR): shared = full access.
+Shared users read, send, and reply through the mailbox — only owner/
+admin can edit settings and sharing. If a finer split becomes necessary
+later (viewer vs member), `shared_with_users` can become a list of
+objects instead of strings.
 
-### InboxAIChatService (`core/services/inbox_ai_chat.py`)
-- Subscribes to `inbox.message.received`, checks sender allowlist, runs AI chat, replies via email
-- Capabilities: `email_ai_chat`, `ai_tools`. Requires: `email`, `ai_chat`, `entity_storage`. Optional: `event_bus`, `users`, `knowledge`.
-- Thread → conversation mapping persisted in `inbox_ai_chat_threads` collection
-- Resolves sender to UserContext via UserService for RBAC
-- Strips quoted reply text (Gmail/Outlook/Apple Mail patterns)
-- Converts markdown responses to styled HTML via `markdown` library
-- Implements ToolProvider with `email_attach` tool so the AI can queue document attachments for the reply
-- Injects `[EMAIL CONTEXT]` prefix telling the AI not to use `inbox_send`/`inbox_reply` tools (those create separate emails); the service handles the reply automatically
-- Queued attachments are collected after `chat()` and passed to `reply_to_message()`
-- Uses `asyncio.Lock` to prevent concurrent message processing from mixing pending attachments
-- Config: `inbox_ai_chat.enabled`, `allowed_emails`, `allowed_domains`
+### Runtime lifecycle
 
-### Email Attachments
-- `EmailAttachment` dataclass (`interfaces/email.py`): filename, data (bytes), mime_type
-- `EmailBackend.send()` accepts `attachments: list[EmailAttachment]`
-- Gmail backend encodes as MIME multipart/mixed with multipart/alternative body
-- InboxService `reply_to_message()` and `send_message()` pass through attachments
-- AI tools accept `attach_documents` array of knowledge store document IDs (e.g., `local:docs/report.pdf`)
-- Documents resolved via KnowledgeService backends at send time
+`InboxService` holds a `dict[mailbox_id, _MailboxRuntime]` registry.
+Each runtime owns one `EmailBackend` instance and one scheduler job
+`inbox-poll-{mailbox_id}`. On `start()`:
 
-### Reply-To and From Display Name
-- `EmailBackend.send()` accepts `reply_to: EmailAddress | None` and `from_name: str`
-- When `from_name` is set, the Gmail backend formats the From header as `"Name" <email>` via `str(EmailAddress(...))`
-- When `reply_to` is set, the Gmail backend adds a `Reply-To` header. Useful for routing customer replies to a shared group alias (e.g. `sales@company.com`) so the whole team sees the thread even though the mailbox sender is a single assistant account.
-- These parameters are pass-through only — InboxService does not persist them on the stored outbound record (the stored record still uses `sender_email` = the configured inbox address)
+1. Schedule a one-shot `inbox-boot` job that calls `_boot_runtimes`
+   (non-blocking per CLAUDE.md — backend `initialize()` can hit the network).
+2. Register a recurring `inbox-outbox-tick` job (every 10 seconds).
+
+`_boot_runtimes` loads every `poll_enabled` mailbox row and calls
+`_start_runtime(mailbox)` for each. Create/update/delete of a mailbox
+start/stop/restart the relevant runtime in place — no Gilbert restart
+needed.
+
+`update_mailbox` restarts the runtime only when a runtime-affecting
+field changes (`backend_name`, `backend_config`, `poll_enabled`,
+`poll_interval_sec`, `email_address`). Share edits don't trigger a
+restart.
+
+### Outbox
+
+Drafts are persisted as `inbox_outbox` rows with a `status` state machine
+`pending → sending → sent/failed/cancelled`. The shared tick runs every
+10s, queries for pending rows with `send_at <= now`, transitions each to
+`sending`, resolves knowledge-store attachments just in time, calls
+`backend.send()`, and transitions to `sent` (persisting a row in
+`inbox_messages` too) or `failed`. Events `inbox.outbox.sent` and
+`inbox.outbox.failed` carry `mailbox_id` and `outbox_id`.
+
+`send_message()` and `reply_to_message()` are **synchronous bypass paths**
+that call `backend.send()` directly — used for "send now" flows like the
+AI `inbox_send` tool. The outbox is for *delayed* or *crash-resilient*
+queuing, used by plugins (e.g. the sales assistant).
+
+### UserContext threading
+
+- **Reads** (`search_messages`, `get_message`, `get_thread`, `get_stats`,
+  `list_outbox`) use `gilbert.core.context.get_current_user()` — no
+  explicit parameter. The WS frame dispatch and the AI tool dispatch
+  both call `set_current_user(conn.user_ctx)` / `set_current_user(user_ctx)`
+  before invoking handlers.
+- **Mutations** (`schedule_send`, `send_message`, `reply_to_message`,
+  mailbox CRUD, sharing) take `user_ctx: UserContext` as an explicit
+  parameter so the actor is unambiguous at the call site and unit tests
+  can pass it directly.
+
+### Events published
+
+All events carry `mailbox_id` in their data.
+
+- `inbox.message.received` — new inbound/outbound message persisted during polling
+- `inbox.message.replied` — direct reply-to-message sent
+- `inbox.message.sent` — direct new-compose sent
+- `inbox.outbox.sent` — outbox tick successfully flushed a draft
+- `inbox.outbox.failed` — outbox tick send raised; row transitioned to FAILED
+- `inbox.mailbox.created`, `inbox.mailbox.updated`, `inbox.mailbox.deleted`
+- `inbox.mailbox.shares.changed` — fires on any share_user/unshare_user/share_role/unshare_role
+
+Event visibility: `interfaces/acl.py` sets the `inbox.` prefix to level
+100 (user). The WS fanout filter adds a per-event mailbox-access check
+on top of this by having the frontend maintain a cache of accessible
+mailbox ids and invalidating on `inbox.mailbox.shares.changed` and
+`auth.user.roles.changed`. The auth event is dispatched via a dedicated
+`can_see_auth_event` filter in `ws_protocol.py` that restricts delivery
+to the affected user plus admins.
+
+### InboxProvider protocol
+
+`interfaces/inbox.py::InboxProvider` is a `@runtime_checkable` Protocol
+that plugins use via `resolver.get_capability("inbox")` +
+`isinstance`. Covers:
+
+- `schedule_send`, `cancel_outbox`, `list_outbox`
+- `get_message`, `get_thread`, `search_messages`
+- `get_mailbox`, `list_accessible_mailboxes`
+
+Plugins must never import `gilbert.core.services.inbox.InboxService`
+directly.
+
+### AI tools
+
+All inbox tools now take a required `mailbox_id` first parameter (no
+default mailbox concept). The AI calls `inbox_mailboxes` first to
+discover accessible mailbox ids when the user's intent doesn't already
+name one.
+
+- `inbox_mailboxes` — list mailboxes the caller can access, with
+  access-type tag. Slash: `/inbox mailboxes`
+- `inbox_search` — search persisted messages in one mailbox
+- `inbox_read` — full content of one message
+- `inbox_reply` — threaded reply (body_html required — no slash command)
+- `inbox_send` — new compose (body_html required — no slash command)
+
+Forbidden or missing `mailbox_id` calls return a clear error telling
+the AI/user to call `/inbox mailboxes` first.
+
+### WS RPCs
+
+Messages / stats / outbox (all optionally filtered by `mailbox_id`;
+aggregated over caller's accessible mailboxes when omitted):
+
+- `inbox.stats.get`, `inbox.message.list`, `inbox.message.get`,
+  `inbox.thread.get`
+- `inbox.outbox.list`, `inbox.outbox.cancel`
+
+Mailbox CRUD + sharing (all gated by `can_admin_mailbox`):
+
+- `inbox.mailboxes.list`, `get`, `create`, `update`, `delete`,
+  `test_connection`
+- `inbox.mailboxes.share_user`, `unshare_user`, `share_role`, `unshare_role`
+
+Backend discovery for the UI:
+
+- `inbox.backends.list` — returns registered `EmailBackend`s and their
+  `backend_config_params()` schemas so the mailbox editor can render
+  backend-specific credential fields dynamically.
+
+### Frontend
+
+`/inbox` page has a mailbox sidebar (grouped Mine / Shared with me /
+All-for-admins), a mailbox header with inline "Settings" button for
+admins, an outbox panel that shows non-terminal drafts for the selected
+mailbox with cancel buttons, and the message list / thread dialog from
+the old UI. The mailbox edit drawer uses the shared `ConfigField`
+component to render backend-specific credential fields dynamically from
+the `inbox.backends.list` schema.
+
+The page subscribes to `inbox.mailbox.*`, `inbox.mailbox.shares.changed`,
+`auth.user.roles.changed` (filtered to the current user), `inbox.message.received`,
+`inbox.outbox.sent`, and `inbox.outbox.failed` to invalidate the relevant
+react-query caches.
+
+### Bootstrap YAML
+
+None. The `inbox` section was removed from `gilbert.yaml` entirely —
+all inbox configuration lives in entity storage. The service's
+`config_params()` exposes only `max_body_length` as a global setting;
+everything else lives on individual mailbox records.
+
+### Design decisions
+
+- **No default mailbox anywhere.** Plugins that need to send mail
+  configure an explicit `mailbox_id` in their own config. AI tools
+  require `mailbox_id` on every call. Avoids ambiguity about "which
+  inbox am I operating on right now."
+- **Core outbox replaces per-plugin scheduling hacks.** Previously the
+  sales assistant plugin reimplemented persistence + delayed send + crash
+  recovery in its own `pending_replies` collection with `asyncio.sleep`
+  tasks. That's now one outbox row correlated to a `outbox_links` entry
+  in the plugin, with post-send bookkeeping triggered by the
+  `inbox.outbox.sent` event.
+- **`email_address` is on the mailbox row, not resolved from the
+  backend.** Each backend could expose a `whoami()` but for v1 users
+  just enter the address on mailbox create. A future optimization can
+  auto-populate from backend if available.
 
 ## Related
 - [Event System](memory-event-system.md) — events published by inbox
-- [Scheduler Service](memory-scheduler-service.md) — polling job
-- [Storage Backend](memory-storage-backend.md) — message persistence (SQLite with WAL mode)
-- `src/gilbert/interfaces/email.py` — EmailBackend ABC
-- `src/gilbert/core/services/inbox.py` — InboxService
-- `src/gilbert/integrations/gmail.py` — GmailBackend (self-contained, owns service_account_json)
-- `src/gilbert/web/routes/inbox.py` — Web routes (admin only)
-- `src/gilbert/web/templates/inbox.html` — Inbox UI template
-- `tests/unit/test_inbox_service.py` — InboxService unit tests
-- `tests/unit/test_gmail_backend.py` — Gmail backend MIME construction (From, Reply-To, etc.)
+- [Scheduler Service](memory-scheduler-service.md) — per-mailbox poll jobs + outbox tick
+- [Storage Backend](memory-storage-backend.md) — message/outbox/mailbox persistence
+- [User & Auth System](memory-user-auth-system.md) — UserContext source
+- [Access Control](memory-access-control.md) — admin level resolution
+- `src/gilbert/interfaces/inbox.py` — Mailbox, OutboxDraft, auth helpers, InboxProvider
+- `src/gilbert/interfaces/email.py` — EmailBackend ABC (unchanged)
+- `src/gilbert/core/services/inbox.py` — InboxService with per-mailbox runtime registry
+- `std-plugins/gmail/*` — GmailBackend
+- `frontend/src/components/inbox/*` — multi-mailbox UI
+- `tests/unit/test_inbox_service.py` — unit tests covering auth matrix, outbox lifecycle, polling isolation
+- `local-plugins/current-sales-assistant/sales_service.py` — example plugin that queues via `InboxProvider.schedule_send`

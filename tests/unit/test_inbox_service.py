@@ -1,32 +1,56 @@
-"""Tests for InboxService — email polling, persistence, and AI tools."""
+"""Tests for multi-mailbox InboxService — mailbox CRUD, authorization, outbox, polling.
 
-import json
+These tests bypass the real ``start()`` boot path (which schedules a
+one-shot job to spin up runtimes). They construct an ``InboxService``,
+attach fakes for storage / scheduler / event bus / access control,
+register one or more mailboxes directly, and then call the public API.
+"""
+
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from gilbert.core.services.inbox import InboxService
+from gilbert.core.context import set_current_user
+from gilbert.core.services.inbox import InboxService, _MailboxRuntime
+from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.email import EmailAddress, EmailBackend, EmailMessage
+from gilbert.interfaces.inbox import (
+    InboxProvider,
+    Mailbox,
+    MailboxAccess,
+    OutboxDraft,
+    OutboxStatus,
+    can_access_mailbox,
+    can_admin_mailbox,
+    determine_access,
+)
+from gilbert.interfaces.storage import FilterOp
 
 
-# ── Fakes ──────────────────────────────────────────────────────
+# ── Fakes ─────────────────────────────────────────────────────────
 
 
 class FakeEmailBackend(EmailBackend):
     """In-memory email backend for testing."""
 
+    backend_name = "fake"
+
     def __init__(self) -> None:
         self.messages: list[EmailMessage] = []
         self.sent: list[dict[str, Any]] = []
         self.read_marks: list[str] = []
+        self.initialized_with: dict[str, Any] | None = None
+        self.closed = False
         self._next_send_id = "sent_001"
 
     async def initialize(self, config: dict | None = None) -> None:
-        pass
+        self.initialized_with = dict(config or {})
 
     async def close(self) -> None:
-        pass
+        self.closed = True
 
     async def list_message_ids(self, query: str = "", max_results: int = 50) -> list[str]:
         return [m.message_id for m in self.messages[:max_results]]
@@ -50,34 +74,35 @@ class FakeEmailBackend(EmailBackend):
         reply_to: EmailAddress | None = None,
         from_name: str = "",
     ) -> str:
+        sent_id = self._next_send_id
         self.sent.append({
-            "to": to, "subject": subject, "body_html": body_html,
+            "id": sent_id, "to": to, "subject": subject, "body_html": body_html,
             "body_text": body_text, "cc": cc,
             "in_reply_to": in_reply_to, "thread_id": thread_id,
             "attachments": attachments,
             "reply_to": reply_to, "from_name": from_name,
         })
-        return self._next_send_id
+        return sent_id
 
     async def mark_read(self, message_id: str) -> None:
         self.read_marks.append(message_id)
 
 
 class FakeStorageBackend:
-    """In-memory storage backend for testing."""
+    """In-memory storage backend supporting EQ / IN / CONTAINS / LTE / GTE / EXISTS."""
 
     def __init__(self) -> None:
         self._data: dict[str, dict[str, dict[str, Any]]] = {}
-        self._indexes: list[Any] = []
 
     async def get(self, collection: str, key: str) -> dict[str, Any] | None:
         record = self._data.get(collection, {}).get(key)
-        if record is not None:
-            return {**record, "_id": key}
-        return None
+        if record is None:
+            return None
+        return {**record, "_id": key}
 
     async def put(self, collection: str, key: str, data: dict[str, Any]) -> None:
-        self._data.setdefault(collection, {})[key] = data
+        clean = {k: v for k, v in data.items() if k != "_id"}
+        self._data.setdefault(collection, {})[key] = clean
 
     async def delete(self, collection: str, key: str) -> None:
         self._data.get(collection, {}).pop(key, None)
@@ -85,46 +110,54 @@ class FakeStorageBackend:
     async def exists(self, collection: str, key: str) -> bool:
         return key in self._data.get(collection, {})
 
+    def _match(self, record: dict[str, Any], filters: list[Any]) -> bool:
+        for f in filters:
+            val = record.get(f.field)
+            if f.op == FilterOp.EQ and val != f.value:
+                return False
+            if f.op == FilterOp.NEQ and val == f.value:
+                return False
+            if f.op == FilterOp.IN:
+                if val not in f.value:
+                    return False
+            if f.op == FilterOp.CONTAINS:
+                if val is None or str(f.value).lower() not in str(val).lower():
+                    return False
+            if f.op == FilterOp.LTE:
+                if val is None or str(val) > str(f.value):
+                    return False
+            if f.op == FilterOp.GTE:
+                if val is None or str(val) < str(f.value):
+                    return False
+            if f.op == FilterOp.EXISTS and (val is None) == bool(f.value):
+                return False
+        return True
+
     async def count(self, query: Any) -> int:
-        collection = query.collection
-        results = []
-        for key, data in self._data.get(collection, {}).items():
+        coll = query.collection
+        count = 0
+        for key, data in self._data.get(coll, {}).items():
             record = {**data, "_id": key}
-            match = True
-            for f in (query.filters or []):
-                val = record.get(f.field)
-                from gilbert.interfaces.storage import FilterOp
-                if f.op == FilterOp.EQ and val != f.value:
-                    match = False
-            if match:
-                results.append(record)
-        return len(results)
+            if self._match(record, query.filters or []):
+                count += 1
+        return count
 
     async def query(self, query: Any) -> list[dict[str, Any]]:
-        collection = query.collection
+        coll = query.collection
         results = []
-        for key, data in self._data.get(collection, {}).items():
+        for key, data in self._data.get(coll, {}).items():
             record = {**data, "_id": key}
-            match = True
-            for f in (query.filters or []):
-                val = record.get(f.field)
-                from gilbert.interfaces.storage import FilterOp
-                if f.op == FilterOp.EQ and val != f.value:
-                    match = False
-                elif f.op == FilterOp.CONTAINS and (val is None or str(f.value).lower() not in str(val).lower()):
-                    match = False
-            if match:
+            if self._match(record, query.filters or []):
                 results.append(record)
-        # Sort by date descending if requested
         if query.sort:
             for s in reversed(query.sort):
                 results.sort(key=lambda r: r.get(s.field, ""), reverse=s.descending)
         if query.limit:
-            results = results[:query.limit]
+            results = results[: query.limit]
         return results
 
     async def ensure_index(self, index_def: Any) -> None:
-        self._indexes.append(index_def)
+        pass
 
 
 class FakeStorageService:
@@ -171,6 +204,41 @@ class FakeSchedulerService:
     def add_job(self, **kwargs: Any) -> Any:
         self.jobs[kwargs["name"]] = kwargs
 
+    def remove_job(self, name: str, requester_id: str = "") -> None:
+        self.jobs.pop(name, None)
+
+    def enable_job(self, name: str) -> None:
+        pass
+
+    def disable_job(self, name: str) -> None:
+        pass
+
+    def list_jobs(self, include_system: bool = True) -> list[Any]:
+        return list(self.jobs.values())
+
+    def get_job(self, name: str) -> Any:
+        return self.jobs.get(name)
+
+    async def run_now(self, name: str) -> None:
+        pass
+
+
+class FakeAclService:
+    """Treats user_id 'admin' as admin, everyone else as non-admin."""
+
+    def get_role_level(self, role_name: str) -> int:
+        return 0 if role_name == "admin" else 100
+
+    def get_effective_level(self, user_ctx: UserContext) -> int:
+        return 0 if "admin" in user_ctx.roles else 100
+
+    def resolve_rpc_level(self, frame_type: str) -> int:
+        return 100
+
+    def service_info(self) -> Any:
+        from gilbert.interfaces.service import ServiceInfo
+        return ServiceInfo(name="access_control", capabilities=frozenset({"access_control"}))
+
 
 class FakeResolver:
     def __init__(self) -> None:
@@ -190,7 +258,7 @@ class FakeResolver:
         return [svc] if svc else []
 
 
-# ── Helpers ────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────
 
 
 def _make_message(
@@ -206,16 +274,75 @@ def _make_message(
         thread_id=thread_id,
         subject=subject,
         sender=EmailAddress(email=sender_email, name=sender_name),
-        to=[EmailAddress(email="gilbert@example.com")],
+        to=[EmailAddress(email="owner@example.com")],
         cc=[],
         body_text=body_text,
         date=datetime(2026, 4, 5, 12, 0, tzinfo=timezone.utc),
     )
 
 
+def _make_mailbox(
+    mailbox_id: str = "mbx_a",
+    name: str = "Work",
+    email_address: str = "owner@example.com",
+    owner_user_id: str = "owner",
+    shared_with_users: list[str] | None = None,
+    shared_with_roles: list[str] | None = None,
+    backend_name: str = "fake",
+) -> Mailbox:
+    return Mailbox(
+        id=mailbox_id,
+        name=name,
+        email_address=email_address,
+        backend_name=backend_name,
+        backend_config={},
+        owner_user_id=owner_user_id,
+        shared_with_users=shared_with_users or [],
+        shared_with_roles=shared_with_roles or [],
+        poll_enabled=True,
+        poll_interval_sec=60,
+        created_at="2026-04-05T00:00:00+00:00",
+    )
+
+
+def _owner() -> UserContext:
+    return UserContext(
+        user_id="owner", email="owner@example.com",
+        display_name="Owner", roles=frozenset({"user"}),
+    )
+
+
+def _shared_user() -> UserContext:
+    return UserContext(
+        user_id="alice", email="alice@example.com",
+        display_name="Alice", roles=frozenset({"user"}),
+    )
+
+
+def _role_user() -> UserContext:
+    return UserContext(
+        user_id="bob", email="bob@example.com",
+        display_name="Bob", roles=frozenset({"user", "sales"}),
+    )
+
+
+def _unrelated_user() -> UserContext:
+    return UserContext(
+        user_id="carol", email="carol@example.com",
+        display_name="Carol", roles=frozenset({"user"}),
+    )
+
+
+def _admin_user() -> UserContext:
+    return UserContext(
+        user_id="admin", email="admin@example.com",
+        display_name="Admin", roles=frozenset({"admin"}),
+    )
+
+
 @pytest.fixture
-def backend() -> FakeEmailBackend:
-    return FakeEmailBackend()
+def storage_svc() -> FakeStorageService:
+    return FakeStorageService()
 
 
 @pytest.fixture
@@ -223,392 +350,548 @@ def event_bus_svc() -> FakeEventBusService:
     return FakeEventBusService()
 
 
-class FakeConfigurationService:
-    """Minimal stub for ConfigurationService used by InboxService.start()."""
-
-    def __init__(self, section: dict[str, Any] | None = None) -> None:
-        self._section = section or {}
-
-    def get_section(self, namespace: str) -> dict[str, Any]:
-        return self._section
-
-    def get(self, key: str) -> Any:
-        return None
+@pytest.fixture
+def scheduler_svc() -> FakeSchedulerService:
+    return FakeSchedulerService()
 
 
 @pytest.fixture
-def resolver(backend: FakeEmailBackend, event_bus_svc: FakeEventBusService) -> FakeResolver:
+def resolver(
+    storage_svc: FakeStorageService,
+    event_bus_svc: FakeEventBusService,
+    scheduler_svc: FakeSchedulerService,
+) -> FakeResolver:
     r = FakeResolver()
-    r.caps["entity_storage"] = FakeStorageService()
+    r.caps["entity_storage"] = storage_svc
     r.caps["event_bus"] = event_bus_svc
-    r.caps["scheduler"] = FakeSchedulerService()
+    r.caps["scheduler"] = scheduler_svc
+    r.caps["access_control"] = FakeAclService()
     return r
 
 
 @pytest.fixture
-async def inbox_service(
-    backend: FakeEmailBackend, resolver: FakeResolver,
+def inbox_service(
+    resolver: FakeResolver,
+    storage_svc: FakeStorageService,
+    event_bus_svc: FakeEventBusService,
+    scheduler_svc: FakeSchedulerService,
 ) -> InboxService:
     svc = InboxService()
-    # Directly set enabled state and backend for tests, bypassing
-    # the config-driven backend creation in start().
     svc._enabled = True
-    svc._backend = backend
-    svc._email_address = "gilbert@example.com"
-    svc._poll_interval = 60
-    # Skip start() entirely — call only the parts we need (storage, scheduler, etc.)
-
-    from gilbert.interfaces.events import EventBusProvider
-    from gilbert.interfaces.storage import StorageProvider
-
-    storage_svc = resolver.require_capability("entity_storage")
-    if isinstance(storage_svc, StorageProvider):
-        svc._storage = storage_svc.backend
-    event_bus_svc = resolver.get_capability("event_bus")
-    if isinstance(event_bus_svc, EventBusProvider):
-        svc._event_bus = event_bus_svc.bus
-    svc._knowledge = resolver.get_capability("knowledge")
+    svc._storage = storage_svc.backend
+    svc._event_bus = event_bus_svc.bus
+    svc._scheduler = scheduler_svc
+    svc._access_control = resolver.caps["access_control"]
     return svc
 
 
-# ── Tests ──────────────────────────────────────────────────────
+async def _attach_runtime(
+    svc: InboxService, mailbox: Mailbox, backend: FakeEmailBackend,
+) -> None:
+    """Persist a mailbox and wire up a backend runtime without hitting the real
+    backend registry / scheduler code path."""
+    assert svc._storage is not None
+    await svc._storage.put(
+        "inbox_mailboxes", mailbox.id, mailbox.to_dict(),
+    )
+    svc._runtimes[mailbox.id] = _MailboxRuntime(
+        mailbox=mailbox,
+        backend=backend,
+        poll_job_name=f"inbox-poll-{mailbox.id}",
+    )
+
+
+# ── Service metadata ──────────────────────────────────────────────
 
 
 class TestServiceInfo:
-    def test_service_info(self) -> None:
+    def test_implements_inbox_provider(self) -> None:
         svc = InboxService()
-        info = svc.service_info()
+        assert isinstance(svc, InboxProvider)
+
+    def test_service_info(self) -> None:
+        info = InboxService().service_info()
         assert info.name == "inbox"
         assert "email" in info.capabilities
+        assert "inbox" in info.capabilities
         assert "ai_tools" in info.capabilities
-        assert "entity_storage" in info.requires
-        assert "scheduler" in info.requires
+        assert "ws_handlers" in info.capabilities
+        assert {"entity_storage", "scheduler"} <= info.requires
+        assert "inbox.outbox.sent" in info.events
+        assert "inbox.mailbox.shares.changed" in info.events
         assert info.toggleable is True
 
-    def test_tool_definitions(self) -> None:
+    def test_tool_names(self) -> None:
         svc = InboxService()
         svc._enabled = True
-        tools = svc.get_tools()
-        names = {t.name for t in tools}
-        assert names == {"inbox_search", "inbox_read", "inbox_reply", "inbox_send"}
-        for t in tools:
-            assert t.required_role == "user"
+        names = {t.name for t in svc.get_tools()}
+        assert names == {
+            "inbox_mailboxes", "inbox_search", "inbox_read",
+            "inbox_reply", "inbox_send",
+        }
 
     def test_tools_empty_when_disabled(self) -> None:
         svc = InboxService()
-        tools = svc.get_tools()
-        assert tools == []
+        svc._enabled = False
+        assert svc.get_tools() == []
+
+
+# ── Authorization primitives ──────────────────────────────────────
+
+
+class TestAuthorizationHelpers:
+    def test_owner_has_access(self) -> None:
+        m = _make_mailbox()
+        assert can_access_mailbox(_owner(), m) is True
+        assert can_admin_mailbox(_owner(), m) is True
+
+    def test_shared_user_has_access_but_no_admin(self) -> None:
+        m = _make_mailbox(shared_with_users=["alice"])
+        assert can_access_mailbox(_shared_user(), m) is True
+        assert can_admin_mailbox(_shared_user(), m) is False
+
+    def test_shared_role_has_access_but_no_admin(self) -> None:
+        m = _make_mailbox(shared_with_roles=["sales"])
+        assert can_access_mailbox(_role_user(), m) is True
+        assert can_admin_mailbox(_role_user(), m) is False
+
+    def test_unrelated_user_denied(self) -> None:
+        m = _make_mailbox()
+        assert can_access_mailbox(_unrelated_user(), m) is False
+        assert can_admin_mailbox(_unrelated_user(), m) is False
+
+    def test_admin_has_full_access(self) -> None:
+        m = _make_mailbox()
+        assert can_access_mailbox(_admin_user(), m, is_admin=True) is True
+        assert can_admin_mailbox(_admin_user(), m, is_admin=True) is True
+
+    def test_determine_access_precedence(self) -> None:
+        m = _make_mailbox(shared_with_users=["alice"], shared_with_roles=["sales"])
+        # Owner tag wins over everything
+        assert determine_access(_owner(), m, is_admin=True) == MailboxAccess.OWNER
+        # Admin tag when not owner and no share
+        assert (
+            determine_access(_admin_user(), m, is_admin=True) == MailboxAccess.ADMIN
+        )
+        # Share-user tag
+        assert determine_access(_shared_user(), m) == MailboxAccess.SHARED_USER
+        # Share-role tag
+        assert determine_access(_role_user(), m) == MailboxAccess.SHARED_ROLE
+        # None
+        assert determine_access(_unrelated_user(), m) is None
+
+
+# ── Mailbox CRUD ──────────────────────────────────────────────────
+
+
+class TestMailboxCrud:
+    @pytest.mark.asyncio
+    async def test_create_sets_owner_and_emits_event(
+        self, inbox_service: InboxService, event_bus_svc: FakeEventBusService,
+    ) -> None:
+        mb = _make_mailbox(mailbox_id="", owner_user_id="")
+        created = await inbox_service.create_mailbox(mb, _owner())
+        assert created.owner_user_id == "owner"
+        assert created.id  # got assigned
+        assert any(
+            e.event_type == "inbox.mailbox.created"
+            for e in event_bus_svc.bus.published
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_by_owner_allowed(
+        self, inbox_service: InboxService,
+    ) -> None:
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        updated = await inbox_service.update_mailbox(
+            mb.id, {"name": "New Name"}, _owner(),
+        )
+        assert updated.name == "New Name"
+
+    @pytest.mark.asyncio
+    async def test_update_by_shared_user_forbidden(
+        self, inbox_service: InboxService,
+    ) -> None:
+        from gilbert.core.services.inbox import InboxPermissionError
+
+        mb = _make_mailbox(shared_with_users=["alice"])
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        with pytest.raises(InboxPermissionError):
+            await inbox_service.update_mailbox(
+                mb.id, {"name": "Hacked"}, _shared_user(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_share_user_roundtrip(
+        self,
+        inbox_service: InboxService,
+        event_bus_svc: FakeEventBusService,
+    ) -> None:
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        await inbox_service.share_user(mb.id, "alice", _owner())
+        refreshed = await inbox_service.get_mailbox(mb.id)
+        assert refreshed is not None
+        assert "alice" in refreshed.shared_with_users
+        assert any(
+            e.event_type == "inbox.mailbox.shares.changed"
+            for e in event_bus_svc.bus.published
+        )
+
+        await inbox_service.unshare_user(mb.id, "alice", _owner())
+        refreshed = await inbox_service.get_mailbox(mb.id)
+        assert refreshed is not None
+        assert "alice" not in refreshed.shared_with_users
+
+    @pytest.mark.asyncio
+    async def test_share_role_roundtrip(
+        self, inbox_service: InboxService,
+    ) -> None:
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        await inbox_service.share_role(mb.id, "sales", _owner())
+        refreshed = await inbox_service.get_mailbox(mb.id)
+        assert refreshed is not None
+        assert "sales" in refreshed.shared_with_roles
+
+    @pytest.mark.asyncio
+    async def test_delete_refuses_with_pending_outbox(
+        self, inbox_service: InboxService,
+    ) -> None:
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        # Queue a draft so the mailbox has non-terminal outbox rows.
+        draft = OutboxDraft(
+            to=[EmailAddress(email="alice@example.com")],
+            subject="hi", body_html="<p>hi</p>",
+        )
+        await inbox_service.schedule_send(mb.id, draft, _owner())
+
+        with pytest.raises(ValueError, match="pending/failed outbox entries"):
+            await inbox_service.delete_mailbox(mb.id, _owner())
+
+    @pytest.mark.asyncio
+    async def test_delete_cascades_messages(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
+    ) -> None:
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        await storage_svc.backend.put(
+            "inbox_messages", "m1",
+            {"mailbox_id": mb.id, "subject": "x", "body_text": "y",
+             "date": "2026-04-05T00:00:00+00:00", "is_inbound": True,
+             "thread_id": "t1", "sender_email": "a@b.c"},
+        )
+        await inbox_service.delete_mailbox(mb.id, _owner())
+        assert await storage_svc.backend.get("inbox_messages", "m1") is None
+        assert await storage_svc.backend.get("inbox_mailboxes", mb.id) is None
+
+
+# ── Polling ───────────────────────────────────────────────────────
 
 
 class TestPolling:
     @pytest.mark.asyncio
-    async def test_poll_persists_new_messages(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_poll_persists_with_mailbox_id(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
     ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
+        backend = FakeEmailBackend()
+        backend.messages = [_make_message(message_id="m1", sender_email="alice@example.com")]
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, backend)
 
-        record = await inbox_service.get_message("msg_001")
-        assert record is not None
-        assert record["subject"] == "Test Subject"
-        assert record["sender_email"] == "alice@example.com"
-        assert record["is_inbound"] is True
+        runtime = inbox_service._runtimes[mb.id]
+        await inbox_service._poll_runtime(runtime)
+
+        row = await storage_svc.backend.get("inbox_messages", "m1")
+        assert row is not None
+        assert row["mailbox_id"] == mb.id
+        assert row["is_inbound"] is True
 
     @pytest.mark.asyncio
-    async def test_poll_skips_already_persisted(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-        event_bus_svc: FakeEventBusService,
+    async def test_poll_detects_own_messages_per_mailbox(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
     ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-        await inbox_service._poll()  # second poll, same message
+        backend = FakeEmailBackend()
+        backend.messages = [
+            _make_message(message_id="m_self", sender_email="owner@example.com"),
+        ]
+        mb = _make_mailbox()  # email_address owner@example.com
+        await _attach_runtime(inbox_service, mb, backend)
 
-        # Only one event published
-        events = event_bus_svc.bus.published
-        received = [e for e in events if e.event_type == "inbox.message.received"]
+        await inbox_service._poll_runtime(inbox_service._runtimes[mb.id])
+        row = await storage_svc.backend.get("inbox_messages", "m_self")
+        assert row is not None
+        assert row["is_inbound"] is False
+
+    @pytest.mark.asyncio
+    async def test_poll_publishes_event_with_mailbox_id(
+        self, inbox_service: InboxService, event_bus_svc: FakeEventBusService,
+    ) -> None:
+        backend = FakeEmailBackend()
+        backend.messages = [_make_message(message_id="m1")]
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, backend)
+
+        await inbox_service._poll_runtime(inbox_service._runtimes[mb.id])
+        received = [
+            e for e in event_bus_svc.bus.published
+            if e.event_type == "inbox.message.received"
+        ]
         assert len(received) == 1
+        assert received[0].data["mailbox_id"] == mb.id
 
     @pytest.mark.asyncio
-    async def test_poll_detects_own_messages(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_poll_isolation_between_mailboxes(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
     ) -> None:
-        backend.messages = [_make_message(
-            message_id="msg_own",
-            sender_email="gilbert@example.com",
-            sender_name="Gilbert",
-        )]
-        await inbox_service._poll()
+        backend_a = FakeEmailBackend()
+        backend_a.messages = [_make_message(message_id="a1", thread_id="tx")]
+        backend_b = FakeEmailBackend()
+        backend_b.messages = [_make_message(message_id="b1", thread_id="tx")]  # same thread_id
+        mb_a = _make_mailbox(mailbox_id="mbx_a", email_address="a@example.com")
+        mb_b = _make_mailbox(mailbox_id="mbx_b", email_address="b@example.com")
+        await _attach_runtime(inbox_service, mb_a, backend_a)
+        await _attach_runtime(inbox_service, mb_b, backend_b)
 
-        record = await inbox_service.get_message("msg_own")
-        assert record is not None
-        assert record["is_inbound"] is False
+        await inbox_service._poll_runtime(inbox_service._runtimes[mb_a.id])
+        await inbox_service._poll_runtime(inbox_service._runtimes[mb_b.id])
 
+        set_current_user(_admin_user())
+        # Even though both messages share thread_id, each is tagged to its
+        # own mailbox — querying a mailbox's thread must not pull the other.
+        thread_a = await inbox_service.get_thread("tx", mailbox_id="mbx_a")
+        thread_b = await inbox_service.get_thread("tx", mailbox_id="mbx_b")
+
+        # An admin bypasses mailbox membership, but the query itself is
+        # still scoped to a single mailbox_id — no leakage.
+        assert {m["_id"] for m in thread_a} == {"a1"}
+        assert {m["_id"] for m in thread_b} == {"b1"}
+
+
+# ── Message visibility ────────────────────────────────────────────
+
+
+class TestMessageVisibility:
     @pytest.mark.asyncio
-    async def test_poll_publishes_events(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-        event_bus_svc: FakeEventBusService,
+    async def test_search_scoped_to_accessible_mailboxes(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
     ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
+        mb_owned = _make_mailbox(mailbox_id="mbx_owned")
+        mb_other = _make_mailbox(mailbox_id="mbx_other", owner_user_id="someone_else")
+        await _attach_runtime(inbox_service, mb_owned, FakeEmailBackend())
+        await _attach_runtime(inbox_service, mb_other, FakeEmailBackend())
 
-        events = event_bus_svc.bus.published
-        assert len(events) == 1
-        assert events[0].event_type == "inbox.message.received"
-        assert events[0].data["message_id"] == "msg_001"
-        assert events[0].data["sender_email"] == "alice@example.com"
-        assert events[0].data["is_inbound"] is True
-
-    @pytest.mark.asyncio
-    async def test_poll_picks_up_all_messages(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        """All messages from the backend should be persisted."""
-        backend.messages = [
-            _make_message(message_id="msg_a"),
-            _make_message(message_id="msg_b"),
-        ]
-        await inbox_service._poll()
-
-        assert await inbox_service.get_message("msg_a") is not None
-        assert await inbox_service.get_message("msg_b") is not None
-
-    @pytest.mark.asyncio
-    async def test_poll_marks_read_in_backend(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        """Syncing a new message should mark it read in the remote backend."""
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-        assert "msg_001" in backend.read_marks
-
-
-class TestTools:
-    @pytest.mark.asyncio
-    async def test_search_empty(self, inbox_service: InboxService) -> None:
-        result = await inbox_service.execute_tool("inbox_search", {})
-        assert "No messages" in result
-
-    @pytest.mark.asyncio
-    async def test_search_after_poll(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [
-            _make_message(message_id="msg_a", subject="Invoice"),
-            _make_message(message_id="msg_b", subject="Meeting"),
-        ]
-        await inbox_service._poll()
-
-        result = await inbox_service.execute_tool("inbox_search", {})
-        assert "2 message(s)" in result
-        assert "msg_a" in result
-        assert "msg_b" in result
-
-    @pytest.mark.asyncio
-    async def test_search_by_sender(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [
-            _make_message(message_id="m1", sender_email="alice@example.com"),
-            _make_message(message_id="m2", sender_email="bob@example.com"),
-        ]
-        await inbox_service._poll()
-
-        result = await inbox_service.execute_tool("inbox_search", {"sender": "bob"})
-        assert "m2" in result
-        assert "m1" not in result
-
-    @pytest.mark.asyncio
-    async def test_read_message(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [_make_message(body_text="Important content")]
-        await inbox_service._poll()
-
-        result = await inbox_service.execute_tool("inbox_read", {"message_id": "msg_001"})
-        data = json.loads(result)
-        assert data["subject"] == "Test Subject"
-        assert "Important content" in data["body"]
-
-    @pytest.mark.asyncio
-    async def test_read_not_found(self, inbox_service: InboxService) -> None:
-        result = await inbox_service.execute_tool("inbox_read", {"message_id": "nope"})
-        assert "not found" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_reply(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-
-        result = await inbox_service.execute_tool("inbox_reply", {
-            "message_id": "msg_001",
-            "body_html": "<p>Thanks!</p>",
+        await storage_svc.backend.put("inbox_messages", "m_owned", {
+            "mailbox_id": "mbx_owned", "subject": "A", "body_text": "x",
+            "sender_email": "a@b.c", "date": "2026-04-05T00:00:00+00:00",
+            "is_inbound": True, "thread_id": "t1",
         })
-        assert "sent" in result.lower()
-        assert len(backend.sent) == 1
-        assert backend.sent[0]["to"][0].email == "alice@example.com"
-        assert backend.sent[0]["thread_id"] == "thread_001"
-
-    @pytest.mark.asyncio
-    async def test_reply_persists_outbound(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-
-        await inbox_service.execute_tool("inbox_reply", {
-            "message_id": "msg_001",
-            "body_html": "<p>Reply</p>",
+        await storage_svc.backend.put("inbox_messages", "m_other", {
+            "mailbox_id": "mbx_other", "subject": "B", "body_text": "y",
+            "sender_email": "c@d.e", "date": "2026-04-05T01:00:00+00:00",
+            "is_inbound": True, "thread_id": "t2",
         })
 
-        record = await inbox_service.get_message("sent_001")
-        assert record is not None
-        assert record["is_inbound"] is False
-        assert record["sender_email"] == "gilbert@example.com"
+        set_current_user(_owner())
+        results = await inbox_service.search_messages()
+        ids = {r["_id"] for r in results}
+        assert ids == {"m_owned"}  # m_other belongs to a mailbox owner can't see
 
     @pytest.mark.asyncio
-    async def test_send_new(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_search_forbidden_mailbox_raises(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
     ) -> None:
-        result = await inbox_service.execute_tool("inbox_send", {
-            "to": ["bob@example.com"],
-            "subject": "Hello Bob",
-            "body_html": "<p>Hi</p>",
-        })
-        assert "sent" in result.lower()
-        assert len(backend.sent) == 1
-        assert backend.sent[0]["subject"] == "Hello Bob"
+        from gilbert.core.services.inbox import InboxPermissionError
+
+        mb = _make_mailbox(owner_user_id="someone_else")
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        set_current_user(_unrelated_user())
+        with pytest.raises(InboxPermissionError):
+            await inbox_service.search_messages(mailbox_id=mb.id)
 
     @pytest.mark.asyncio
-    async def test_send_validates_required_fields(
+    async def test_shared_user_can_read(
+        self, inbox_service: InboxService, storage_svc: FakeStorageService,
+    ) -> None:
+        mb = _make_mailbox(shared_with_users=["alice"])
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        await storage_svc.backend.put("inbox_messages", "m1", {
+            "mailbox_id": mb.id, "subject": "x", "body_text": "y",
+            "sender_email": "a@b.c", "date": "2026-04-05T00:00:00+00:00",
+            "is_inbound": True, "thread_id": "t1",
+        })
+        set_current_user(_shared_user())
+        results = await inbox_service.search_messages(mailbox_id=mb.id)
+        assert len(results) == 1
+
+
+# ── Outbox ────────────────────────────────────────────────────────
+
+
+class TestOutbox:
+    @pytest.mark.asyncio
+    async def test_schedule_send_persists_pending(
         self, inbox_service: InboxService,
     ) -> None:
-        result = await inbox_service.execute_tool("inbox_send", {
-            "subject": "No recipient",
-            "body_html": "<p>Hi</p>",
-        })
-        assert "to is required" in result.lower()
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        draft = OutboxDraft(
+            to=[EmailAddress(email="x@y.z")], subject="s", body_html="<p>h</p>",
+        )
+        outbox_id = await inbox_service.schedule_send(mb.id, draft, _owner())
+
+        set_current_user(_owner())
+        entries = await inbox_service.list_outbox(mailbox_id=mb.id)
+        assert len(entries) == 1
+        assert entries[0].id == outbox_id
+        assert entries[0].status == OutboxStatus.PENDING
+        assert entries[0].created_by_user_id == "owner"
 
     @pytest.mark.asyncio
-    async def test_unknown_tool(self, inbox_service: InboxService) -> None:
-        with pytest.raises(KeyError):
-            await inbox_service.execute_tool("inbox_nope", {})
+    async def test_shared_user_can_cancel_owners_draft(
+        self, inbox_service: InboxService,
+    ) -> None:
+        mb = _make_mailbox(shared_with_users=["alice"])
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
 
+        draft = OutboxDraft(
+            to=[EmailAddress(email="x@y.z")], subject="s", body_html="<p>h</p>",
+        )
+        outbox_id = await inbox_service.schedule_send(mb.id, draft, _owner())
 
-class TestPublicAPI:
+        # Alice has full access to the mailbox — by design she can cancel
+        # drafts that the owner created.
+        ok = await inbox_service.cancel_outbox(outbox_id, _shared_user())
+        assert ok is True
+
+        set_current_user(_owner())
+        entries = await inbox_service.list_outbox(mailbox_id=mb.id)
+        assert entries[0].status == OutboxStatus.CANCELLED
+
     @pytest.mark.asyncio
-    async def test_send_publishes_event(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_unrelated_user_cannot_cancel(
+        self, inbox_service: InboxService,
+    ) -> None:
+        from gilbert.core.services.inbox import InboxPermissionError
+
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        draft = OutboxDraft(
+            to=[EmailAddress(email="x@y.z")], subject="s", body_html="<p>h</p>",
+        )
+        outbox_id = await inbox_service.schedule_send(mb.id, draft, _owner())
+        with pytest.raises(InboxPermissionError):
+            await inbox_service.cancel_outbox(outbox_id, _unrelated_user())
+
+    @pytest.mark.asyncio
+    async def test_outbox_tick_sends_and_emits(
+        self,
+        inbox_service: InboxService,
         event_bus_svc: FakeEventBusService,
     ) -> None:
-        await inbox_service.send_message(
-            to=[EmailAddress(email="bob@example.com")],
-            subject="Hello",
-            body_html="<p>Hi</p>",
-        )
-        sent_events = [
-            e for e in event_bus_svc.bus.published
-            if e.event_type == "inbox.message.sent"
-        ]
-        assert len(sent_events) == 1
-        assert sent_events[0].data["subject"] == "Hello"
+        backend = FakeEmailBackend()
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, backend)
 
-    @pytest.mark.asyncio
-    async def test_send_passes_reply_to_and_from_name(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        """Reply-To and From display name should reach the backend."""
-        await inbox_service.send_message(
-            to=[EmailAddress(email="customer@example.com")],
-            subject="Hello",
-            body_html="<p>Hi</p>",
-            reply_to=EmailAddress(email="sales@example.com"),
-            from_name="Example Co",
+        draft = OutboxDraft(
+            to=[EmailAddress(email="x@y.z")], subject="hello",
+            body_html="<p>hi</p>", body_text="hi",
         )
+        await inbox_service.schedule_send(mb.id, draft, _owner())
+        await inbox_service._outbox_tick()
+
         assert len(backend.sent) == 1
-        sent = backend.sent[0]
-        assert sent["reply_to"] == EmailAddress(email="sales@example.com")
-        assert sent["from_name"] == "Example Co"
-
-    @pytest.mark.asyncio
-    async def test_reply_passes_reply_to_and_from_name(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        """Reply-To and From display name should reach the backend on replies."""
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-
-        await inbox_service.reply_to_message(
-            message_id="msg_001",
-            body_html="<p>Reply</p>",
-            reply_to=EmailAddress(email="sales@example.com"),
-            from_name="Example Co",
+        assert backend.sent[0]["subject"] == "hello"
+        assert any(
+            e.event_type == "inbox.outbox.sent"
+            and e.data["mailbox_id"] == mb.id
+            for e in event_bus_svc.bus.published
         )
-        # First entry was a synthetic send (if any); the reply is the last.
-        sent = backend.sent[-1]
-        assert sent["reply_to"] == EmailAddress(email="sales@example.com")
-        assert sent["from_name"] == "Example Co"
+
+        set_current_user(_owner())
+        entries = await inbox_service.list_outbox(mailbox_id=mb.id)
+        assert entries[0].status == OutboxStatus.SENT
 
     @pytest.mark.asyncio
-    async def test_reply_publishes_event(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_outbox_tick_marks_failure(
+        self,
+        inbox_service: InboxService,
         event_bus_svc: FakeEventBusService,
     ) -> None:
-        backend.messages = [_make_message()]
-        await inbox_service._poll()
-        event_bus_svc.bus.published.clear()
+        class BoomBackend(FakeEmailBackend):
+            async def send(self, *args: Any, **kwargs: Any) -> str:
+                raise RuntimeError("smtp down")
 
-        await inbox_service.reply_to_message(
-            message_id="msg_001",
-            body_html="<p>Reply</p>",
+        backend = BoomBackend()
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, backend)
+
+        draft = OutboxDraft(
+            to=[EmailAddress(email="x@y.z")], subject="x", body_html="<p>x</p>",
         )
-        replied_events = [
-            e for e in event_bus_svc.bus.published
-            if e.event_type == "inbox.message.replied"
-        ]
-        assert len(replied_events) == 1
-        assert replied_events[0].data["in_reply_to_message"] == "msg_001"
+        await inbox_service.schedule_send(mb.id, draft, _owner())
+        await inbox_service._outbox_tick()
+
+        set_current_user(_owner())
+        entries = await inbox_service.list_outbox(mailbox_id=mb.id)
+        assert entries[0].status == OutboxStatus.FAILED
+        assert "smtp down" in (entries[0].error or "")
+        assert any(
+            e.event_type == "inbox.outbox.failed"
+            for e in event_bus_svc.bus.published
+        )
+
+
+# ── AI tool shape ─────────────────────────────────────────────────
+
+
+class TestAiTools:
+    @pytest.mark.asyncio
+    async def test_inbox_mailboxes_lists_accessible(
+        self, inbox_service: InboxService,
+    ) -> None:
+        mb_owned = _make_mailbox(mailbox_id="mbx_owned")
+        mb_shared = _make_mailbox(
+            mailbox_id="mbx_shared", owner_user_id="someone",
+            shared_with_users=["owner"],
+        )
+        mb_hidden = _make_mailbox(mailbox_id="mbx_hidden", owner_user_id="someone")
+        await _attach_runtime(inbox_service, mb_owned, FakeEmailBackend())
+        await _attach_runtime(inbox_service, mb_shared, FakeEmailBackend())
+        await _attach_runtime(inbox_service, mb_hidden, FakeEmailBackend())
+
+        set_current_user(_owner())
+        result = await inbox_service.execute_tool("inbox_mailboxes", {})
+        assert "mbx_owned" in result
+        assert "mbx_shared" in result
+        assert "mbx_hidden" not in result
 
     @pytest.mark.asyncio
-    async def test_truncates_long_body(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_search_requires_mailbox_id(
+        self, inbox_service: InboxService,
     ) -> None:
-        inbox_service._max_body_length = 100
-        long_body = "x" * 200
-        backend.messages = [_make_message(body_text=long_body)]
-        await inbox_service._poll()
-
-        record = await inbox_service.get_message("msg_001")
-        assert record is not None
-        assert len(record["body_text"]) < 200
-        assert "[truncated]" in record["body_text"]
+        set_current_user(_owner())
+        result = await inbox_service.execute_tool("inbox_search", {})
+        assert "mailbox_id is required" in result
+        assert "/inbox mailboxes" in result
 
     @pytest.mark.asyncio
-    async def test_get_thread(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
+    async def test_search_forbidden_mailbox_gives_helpful_error(
+        self, inbox_service: InboxService,
     ) -> None:
-        backend.messages = [
-            _make_message(message_id="m1", thread_id="t1"),
-            _make_message(message_id="m2", thread_id="t1"),
-            _make_message(message_id="m3", thread_id="t2"),
-        ]
-        await inbox_service._poll()
-
-        thread = await inbox_service.get_thread("t1")
-        assert len(thread) == 2
-        assert all(m["thread_id"] == "t1" for m in thread)
-
-    @pytest.mark.asyncio
-    async def test_get_stats(
-        self, inbox_service: InboxService, backend: FakeEmailBackend,
-    ) -> None:
-        backend.messages = [
-            _make_message(message_id="m1"),
-            _make_message(message_id="m2", sender_email="gilbert@example.com"),
-        ]
-        await inbox_service._poll()
-
-        stats = await inbox_service.get_stats()
-        assert stats["total"] == 2
-        assert stats["inbound"] == 1
+        mb = _make_mailbox(owner_user_id="someone_else")
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        set_current_user(_unrelated_user())
+        result = await inbox_service.execute_tool(
+            "inbox_search", {"mailbox_id": mb.id},
+        )
+        assert "don't have access" in result
+        assert "/inbox mailboxes" in result

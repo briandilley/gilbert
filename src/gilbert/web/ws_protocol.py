@@ -93,6 +93,20 @@ class WsConnection:
         """Check role-based visibility for an event type."""
         return can_see_event(self.user_level, event_type)
 
+    def can_see_auth_event(self, event: Event) -> bool:
+        """Content-level filter for auth events.
+
+        ``auth.user.roles.changed`` is user-level in the prefix map,
+        but we additionally restrict delivery so a non-admin only sees
+        events for their own user_id. Admins see all.
+        """
+        if event.event_type != "auth.user.roles.changed":
+            return True
+        # Admin (level 0 or below — negative levels are system) sees all.
+        if self.user_level <= 0:
+            return True
+        return event.data.get("user_id") == self.user_id
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -236,6 +250,8 @@ class WsConnectionManager:
                 continue
             if not conn.can_see_chat_event(event):
                 continue
+            if not conn.can_see_auth_event(event):
+                continue
             conn.send_event(event)
 
 
@@ -336,6 +352,12 @@ async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str,
                 "code": 403,
             }
 
+    # Propagate the current user through the async context so services
+    # can read it via gilbert.core.context.get_current_user() without
+    # explicit threading on every read method.
+    from gilbert.core.context import set_current_user
+
+    set_current_user(conn.user_ctx)
     return await handler(conn, frame)
 
 

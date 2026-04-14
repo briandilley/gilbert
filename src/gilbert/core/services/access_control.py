@@ -49,6 +49,7 @@ class AccessControlService(Service):
 
     def __init__(self) -> None:
         self._storage: StorageBackend | None = None
+        self._event_bus: Any = None  # EventBus — resolved in start()
         # In-memory cache: role name → level
         self._role_levels: dict[str, int] = {r["name"]: r["level"] for r in _BUILTIN_ROLES}
         # Override cache: tool name → required role name
@@ -65,6 +66,8 @@ class AccessControlService(Service):
             name="access_control",
             capabilities=frozenset({"access_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
+            optional=frozenset({"event_bus"}),
+            events=frozenset({"auth.user.roles.changed"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -74,6 +77,13 @@ class AccessControlService(Service):
         if not isinstance(storage_svc, StorageProvider):
             raise TypeError("Expected StorageProvider for entity_storage")
         self._storage = storage_svc.backend
+
+        # Event bus (optional) — used to publish auth.user.roles.changed
+        from gilbert.interfaces.events import EventBusProvider
+
+        event_bus_svc = resolver.get_capability("event_bus")
+        if isinstance(event_bus_svc, EventBusProvider):
+            self._event_bus = event_bus_svc.bus
 
         # Seed built-in roles (idempotent)
         for role in _BUILTIN_ROLES:
@@ -933,7 +943,28 @@ class AccessControlService(Service):
         roles = frame.get("roles", [])
         if not isinstance(user_svc, UserManagementProvider):
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": "User service not available", "code": 503}
-        await user_svc.backend.update_user(user_id, {"roles": roles})
+
+        # Read existing roles so we can emit an add/remove diff in the event.
+        existing = await user_svc.backend.get_user(user_id)
+        old_roles = set(existing.get("roles", []) if existing else [])
+        new_roles = set(roles)
+
+        await user_svc.backend.update_user(user_id, {"roles": sorted(new_roles)})
+
+        if self._event_bus is not None and old_roles != new_roles:
+            from gilbert.interfaces.events import Event
+
+            await self._event_bus.publish(Event(
+                event_type="auth.user.roles.changed",
+                data={
+                    "user_id": user_id,
+                    "added": sorted(new_roles - old_roles),
+                    "removed": sorted(old_roles - new_roles),
+                    "roles": sorted(new_roles),
+                },
+                source="access_control",
+            ))
+
         return {"type": "roles.user.set.result", "ref": frame.get("id"), "status": "ok"}
 
     async def _ws_collection_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:

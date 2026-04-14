@@ -14,7 +14,15 @@ import type { DocumentNode, SearchResult } from "@/types/documents";
 import type { DashboardCard } from "@/types/dashboard";
 import type { ServiceInfo } from "@/types/system";
 import type { CollectionGroup, CollectionData, EntityData } from "@/types/entities";
-import type { InboxStats, InboxMessage, MessageDetail, PendingReply } from "@/types/inbox";
+import type {
+  InboxStats,
+  InboxMessage,
+  MessageDetail,
+  InboxMailbox,
+  OutboxEntry,
+  OutboxStatus,
+  EmailBackendInfo,
+} from "@/types/inbox";
 import type { UIBlock } from "@/types/ui";
 import type { SkillInfo } from "@/types/skills";
 import type {
@@ -181,28 +189,98 @@ export function useWsApi() {
     clearRpcPermission: (framePrefix: string) =>
       rpc<{ status: string }>({ type: "roles.rpc_permissions.clear", frame_prefix: framePrefix }),
 
-    // ── Inbox ─────────────────────────────────────────────────────
+    // ── Inbox: messages / stats ───────────────────────────────────
 
-    inboxStats: () =>
-      rpc<InboxStats>({ type: "inbox.stats.get" }),
+    inboxStats: (mailboxId?: string) =>
+      rpc<InboxStats>({
+        type: "inbox.stats.get",
+        ...(mailboxId ? { mailbox_id: mailboxId } : {}),
+      }),
 
-    listMessages: (params?: { sender?: string; subject?: string; limit?: number }) =>
-      rpc<{ messages: InboxMessage[]; total: number }>({ type: "inbox.message.list", ...params })
-        .then((r) => r.messages),
+    listMessages: (params?: {
+      mailbox_id?: string; sender?: string; subject?: string; limit?: number;
+    }) =>
+      rpc<{ messages: InboxMessage[]; total: number }>({
+        type: "inbox.message.list", ...params,
+      }).then((r) => r.messages),
 
     getMessage: (messageId: string) =>
       rpc<MessageDetail>({ type: "inbox.message.get", message_id: messageId }),
 
-    getThread: (threadId: string) =>
-      rpc<{ messages: MessageDetail[] }>({ type: "inbox.thread.get", thread_id: threadId })
-        .then((r) => r.messages),
+    getThread: (threadId: string, mailboxId?: string) =>
+      rpc<{ messages: MessageDetail[] }>({
+        type: "inbox.thread.get",
+        thread_id: threadId,
+        ...(mailboxId ? { mailbox_id: mailboxId } : {}),
+      }).then((r) => r.messages),
 
-    listPending: () =>
-      rpc<{ pending: PendingReply[] }>({ type: "inbox.pending.list" })
-        .then((r) => r.pending),
+    // ── Inbox: outbox ─────────────────────────────────────────────
 
-    cancelPending: (replyId: string) =>
-      rpc<{ status: string }>({ type: "inbox.pending.cancel", reply_id: replyId }),
+    listOutbox: (params?: { mailbox_id?: string; status?: OutboxStatus }) =>
+      rpc<{ entries: OutboxEntry[] }>({
+        type: "inbox.outbox.list", ...params,
+      }).then((r) => r.entries),
+
+    cancelOutbox: (outboxId: string) =>
+      rpc<{ status: string }>({ type: "inbox.outbox.cancel", outbox_id: outboxId }),
+
+    // ── Inbox: mailboxes ──────────────────────────────────────────
+
+    listMailboxes: () =>
+      rpc<{ mailboxes: InboxMailbox[] }>({ type: "inbox.mailboxes.list" })
+        .then((r) => r.mailboxes),
+
+    getMailbox: (mailboxId: string) =>
+      rpc<{ mailbox: InboxMailbox }>({ type: "inbox.mailboxes.get", mailbox_id: mailboxId })
+        .then((r) => r.mailbox),
+
+    createMailbox: (mailbox: {
+      name: string;
+      email_address: string;
+      backend_name: string;
+      backend_config: Record<string, unknown>;
+      poll_enabled?: boolean;
+      poll_interval_sec?: number;
+    }) =>
+      rpc<{ mailbox: InboxMailbox }>({ type: "inbox.mailboxes.create", ...mailbox })
+        .then((r) => r.mailbox),
+
+    updateMailbox: (mailboxId: string, updates: Record<string, unknown>) =>
+      rpc<{ mailbox: InboxMailbox }>({
+        type: "inbox.mailboxes.update", mailbox_id: mailboxId, updates,
+      }).then((r) => r.mailbox),
+
+    deleteMailbox: (mailboxId: string) =>
+      rpc<{ status: string }>({ type: "inbox.mailboxes.delete", mailbox_id: mailboxId }),
+
+    testMailboxConnection: (mailboxId: string) =>
+      rpc<{ ok: boolean; error: string }>({
+        type: "inbox.mailboxes.test_connection", mailbox_id: mailboxId,
+      }),
+
+    shareMailboxUser: (mailboxId: string, userId: string) =>
+      rpc<{ mailbox: InboxMailbox }>({
+        type: "inbox.mailboxes.share_user", mailbox_id: mailboxId, user_id: userId,
+      }).then((r) => r.mailbox),
+
+    unshareMailboxUser: (mailboxId: string, userId: string) =>
+      rpc<{ mailbox: InboxMailbox }>({
+        type: "inbox.mailboxes.unshare_user", mailbox_id: mailboxId, user_id: userId,
+      }).then((r) => r.mailbox),
+
+    shareMailboxRole: (mailboxId: string, role: string) =>
+      rpc<{ mailbox: InboxMailbox }>({
+        type: "inbox.mailboxes.share_role", mailbox_id: mailboxId, role,
+      }).then((r) => r.mailbox),
+
+    unshareMailboxRole: (mailboxId: string, role: string) =>
+      rpc<{ mailbox: InboxMailbox }>({
+        type: "inbox.mailboxes.unshare_role", mailbox_id: mailboxId, role,
+      }).then((r) => r.mailbox),
+
+    listEmailBackends: () =>
+      rpc<{ backends: EmailBackendInfo[] }>({ type: "inbox.backends.list" })
+        .then((r) => r.backends),
 
     // ── Documents ─────────────────────────────────────────────────
 
