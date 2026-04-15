@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from gilbert.interfaces.attachments import FileAttachment
+
 if TYPE_CHECKING:
     from gilbert.interfaces.auth import UserContext
 
@@ -88,11 +90,21 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ToolResult:
-    """The result of executing a tool call."""
+    """The result of executing a tool call.
+
+    ``attachments`` lets a tool hand files back to the assistant message.
+    The AIService collects attachments from every tool call in the turn
+    and lands them on the final assistant ``Message`` so the frontend can
+    render downloadable chips next to the reply. Workspace-reference
+    attachments (``workspace_skill`` + ``workspace_path``) are the common
+    case — inline bytes are allowed but cost conversation-row bloat, so
+    prefer the reference form for anything larger than a few KB.
+    """
 
     tool_call_id: str
     content: str
     is_error: bool = False
+    attachments: tuple[FileAttachment, ...] = ()
 
 
 @runtime_checkable

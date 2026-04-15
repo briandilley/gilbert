@@ -287,7 +287,7 @@ class InboxAIChatService(Service):
         )
 
         # Run through AI
-        response_text, conv_id, _ui, _tu = await self._ai.chat(
+        response_text, conv_id, _ui, _tu, *_ = await self._ai.chat(
             user_message=context_prefix + body,
             conversation_id=conversation_id,
             user_ctx=user_ctx,

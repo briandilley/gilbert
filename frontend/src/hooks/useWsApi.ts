@@ -371,11 +371,26 @@ export function useWsApi() {
         skill_name: skillName,
       }),
 
-    downloadSkillWorkspaceFile: (skillName: string, path: string) =>
-      rpc<{ filename: string; size: number; content_base64: string }>({
+    downloadSkillWorkspaceFile: (
+      skillName: string,
+      path: string,
+      conversationId?: string,
+    ) =>
+      rpc<{
+        filename: string;
+        size: number;
+        content_base64: string;
+        media_type?: string;
+      }>({
         type: "skills.workspace.download",
         skill_name: skillName,
         path,
+        // The backend resolver tries the per-conversation workspace
+        // first when this is set, then falls back to the legacy
+        // per-(user, skill) path. Old attachments persisted before
+        // per-conversation workspaces leave conversation_id undefined
+        // and resolve via the legacy fallback.
+        ...(conversationId ? { conversation_id: conversationId } : {}),
       }),
 
     // ── Config ─────────────────────────────────────────────────────

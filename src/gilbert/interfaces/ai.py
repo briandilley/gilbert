@@ -3,15 +3,37 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
+from gilbert.interfaces.attachments import FileAttachment
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolResult
 
 if TYPE_CHECKING:
     from gilbert.interfaces.auth import UserContext
+
+# Re-export so existing ``from gilbert.interfaces.ai import FileAttachment``
+# imports keep working after the move to ``interfaces/attachments.py``.
+__all__ = [
+    "AIBackend",
+    "AIBackendCapabilities",
+    "AIBackendError",
+    "AIContextProfile",
+    "AIProvider",
+    "AIRequest",
+    "AIResponse",
+    "ChatTurnResult",
+    "FileAttachment",
+    "Message",
+    "MessageRole",
+    "StopReason",
+    "StreamEvent",
+    "StreamEventType",
+    "TokenUsage",
+]
 
 
 class AIBackendError(RuntimeError):
@@ -50,36 +72,6 @@ class TokenUsage:
 
     input_tokens: int
     output_tokens: int
-
-
-@dataclass(frozen=True)
-class FileAttachment:
-    """A file attached to a user message.
-
-    ``kind`` is the discriminator — it controls how backends translate the
-    attachment to a provider-specific content block:
-
-    - ``"image"``: ``data`` is raw base64 image bytes
-      (``image/png`` / ``image/jpeg`` / ``image/gif`` / ``image/webp``)
-      and ``media_type`` is the MIME type. Anthropic emits an ``image``
-      block.
-    - ``"document"``: ``data`` is raw base64 document bytes (currently
-      ``application/pdf``) with ``media_type`` set. Anthropic emits a
-      ``document`` block.
-    - ``"text"``: ``text`` is decoded UTF-8 content (no base64);
-      ``media_type`` is a hint like ``text/markdown``. Text attachments
-      are inlined into the prompt as ``## <name>\\n\\n<body>`` so the
-      model can reference them by filename.
-
-    ``name`` is the user-visible filename, always set for documents and
-    text kinds; for images it's optional (historical images have none).
-    """
-
-    kind: str
-    name: str = ""
-    media_type: str = ""
-    data: str = ""
-    text: str = ""
 
 
 @dataclass
@@ -124,6 +116,84 @@ class AIResponse:
     model: str
     stop_reason: StopReason = StopReason.END_TURN
     usage: TokenUsage | None = None
+
+
+class StreamEventType(StrEnum):
+    """Kinds of incremental events a streaming backend can emit.
+
+    A single ``generate_stream()`` call produces a sequence of these
+    ending in exactly one ``MESSAGE_COMPLETE``. Text and tool_use events
+    are fine-grained — backends that can't do true streaming inherit the
+    default fallback in ``AIBackend.generate_stream`` which yields a
+    single ``MESSAGE_COMPLETE`` and nothing else.
+    """
+
+    TEXT_DELTA = "text_delta"
+    """A chunk of assistant text arrived. Append ``StreamEvent.text`` to
+    the live buffer; do not treat as a full message."""
+
+    TOOL_CALL_START = "tool_call_start"
+    """The model began emitting a tool_use block. Carries the tool's
+    ``tool_call_id`` and ``tool_name``; arguments arrive via subsequent
+    ``TOOL_CALL_DELTA`` events and are final at ``TOOL_CALL_END``."""
+
+    TOOL_CALL_DELTA = "tool_call_delta"
+    """An incremental slice of a tool_use block's JSON input. Concatenate
+    ``partial_json`` onto the running buffer for the matching
+    ``tool_call_id``."""
+
+    TOOL_CALL_END = "tool_call_end"
+    """A tool_use block finished. The accumulated JSON is ready to parse
+    into final ``ToolCall.arguments`` — handled inside the backend."""
+
+    MESSAGE_COMPLETE = "message_complete"
+    """The turn's full response is ready. ``StreamEvent.response`` carries
+    a fully-populated ``AIResponse`` (text, tool_calls, stop_reason,
+    usage). This is always the last event a stream emits, even for
+    backends that don't implement true streaming."""
+
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """One event in a provider-neutral streaming response.
+
+    See ``StreamEventType`` for the event vocabulary. Not every field is
+    meaningful for every event — e.g. ``text`` is set for ``TEXT_DELTA``
+    and empty otherwise, ``response`` is set for ``MESSAGE_COMPLETE`` and
+    ``None`` otherwise. The frozen dataclass lets backends construct
+    these cheaply and pass them through without defensive copies.
+    """
+
+    type: StreamEventType
+    text: str = ""
+    tool_call_id: str = ""
+    tool_name: str = ""
+    partial_json: str = ""
+    response: AIResponse | None = None
+
+
+@dataclass(frozen=True)
+class AIBackendCapabilities:
+    """Feature flags a backend advertises so core code can branch cleanly.
+
+    Defaults are conservative: a backend that doesn't override
+    ``AIBackend.capabilities()`` is assumed to support neither streaming
+    nor multimodal user-side attachments. The ``AIService`` agentic loop
+    reads this to decide whether to iterate ``generate_stream()`` (which
+    still works on non-streaming backends via the default fallback, but
+    there's no point publishing text_delta events from a fallback that
+    only emits ``MESSAGE_COMPLETE``).
+    """
+
+    streaming: bool = False
+    """Backend emits real incremental ``TEXT_DELTA`` / ``TOOL_CALL_*``
+    events from ``generate_stream``. When ``False``, the fallback
+    implementation yields a single ``MESSAGE_COMPLETE`` event after
+    ``generate()`` finishes."""
+
+    attachments_user: bool = False
+    """Backend can consume user-side multimodal ``FileAttachment`` blocks
+    (images, documents, text) in ``AIRequest.messages``."""
 
 
 @dataclass
@@ -183,6 +253,86 @@ class AIBackend(ABC):
         """Send a request and return the model's response (single round)."""
         ...
 
+    def capabilities(self) -> AIBackendCapabilities:
+        """Describe what this backend can do.
+
+        Override in subclasses that implement true streaming, multimodal
+        user attachments, etc. The default returns a capabilities object
+        with every flag ``False``, which is the safe assumption for any
+        backend that hasn't opted in.
+        """
+        return AIBackendCapabilities()
+
+    async def generate_stream(
+        self,
+        request: AIRequest,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream incremental events for one model round.
+
+        The default implementation is a **synchronous-equivalent** fallback
+        that calls ``generate()`` and yields a single ``MESSAGE_COMPLETE``
+        event once the full response is in hand. Backends that support
+        real streaming (SSE, websockets, etc.) should override this to
+        emit ``TEXT_DELTA`` / ``TOOL_CALL_*`` events as chunks arrive, and
+        still finish with exactly one ``MESSAGE_COMPLETE`` whose
+        ``response`` field carries the fully-assembled ``AIResponse``.
+
+        The ``AIService`` agentic loop is driven by this method
+        unconditionally — it iterates events, forwards text deltas to
+        the event bus for live frontend rendering, and reads the final
+        ``response`` from ``MESSAGE_COMPLETE`` to decide whether to
+        execute tools or break the loop. Non-streaming backends therefore
+        cost nothing more than a single ``generate()`` call plus one
+        event yield.
+        """
+        response = await self.generate(request)
+        yield StreamEvent(
+            type=StreamEventType.MESSAGE_COMPLETE,
+            response=response,
+        )
+
+
+class ChatTurnResult(NamedTuple):
+    """Result of a full AI chat turn.
+
+    Returned by ``AIService.chat()`` and described on the ``AIProvider``
+    protocol. It's a ``NamedTuple`` (and not a frozen dataclass) so callers
+    can still do ``text, conv_id, ui, tu, atts, rounds = await ai.chat(...)``
+    the way they always have, while new callers can use attribute access
+    (``result.attachments``) for clarity.
+
+    Fields:
+
+    - ``response_text``: the assistant's final textual reply, already
+      collapsed across any max_tokens continuation rounds.
+    - ``conversation_id``: the persistent conversation ID (UUID string).
+    - ``ui_blocks``: serialized ``UIBlock`` dicts produced by tool calls
+      during this turn, already tagged with ``response_index``.
+    - ``tool_usage``: per-tool-call summaries for the UI's "what did it
+      do" strip. Entries with ``is_error=True`` include the error reason.
+    - ``attachments``: files the assistant wants the user to see on this
+      turn (tool-produced PDFs, images, spreadsheets, …). May be empty.
+      Inline mode carries the bytes; workspace-reference mode carries
+      ``(workspace_skill, workspace_path)`` pointing at a file on disk
+      that the frontend fetches via ``skills.workspace.download`` when
+      the user clicks download.
+    - ``rounds``: structured per-round breakdown of the AI's intermediate
+      thinking, used by the frontend's turn-bubble UI to render every
+      round's reasoning + tool calls in one cohesive card. Each entry
+      is ``{reasoning: str, tools: [{tool_call_id, tool_name, arguments,
+      result, is_error}, ...]}``. The final end-turn response is NOT
+      included here — it's the ``response_text`` + ``attachments`` fields
+      above. May be empty for turns that answered in a single round with
+      no tool use.
+    """
+
+    response_text: str
+    conversation_id: str
+    ui_blocks: list[dict[str, Any]]
+    tool_usage: list[dict[str, Any]]
+    attachments: list[FileAttachment]
+    rounds: list[dict[str, Any]]
+
 
 @runtime_checkable
 class AIProvider(Protocol):
@@ -204,7 +354,6 @@ class AIProvider(Protocol):
         system_prompt: str | None = None,
         ai_call: str | None = None,
         attachments: list[FileAttachment] | None = None,
-    ) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
-        """Run a full AI chat turn. Returns
-        ``(response_text, conversation_id, ui_blocks, tool_usage)``."""
+    ) -> ChatTurnResult:
+        """Run a full AI chat turn. See ``ChatTurnResult`` for the shape."""
         ...

@@ -794,17 +794,20 @@ function SlashHelp({
   );
 }
 
-/** Secondary label shown under a chip — e.g. "PDF · 1.2 MB" or "Text · 4 KB". */
+/** Secondary label shown under a chip — e.g. "PDF · 1.2 MB" or "Text · 4 KB".
+ *  Pending attachments in the input bar are always inline (the frontend just
+ *  base64-encoded them from the user's file), so ``data`` / ``text`` are
+ *  present; the defensive fallbacks cover the unified type's optional fields. */
 function attachmentLabel(att: FileAttachment): string {
   if (att.kind === "image") {
     return att.media_type.replace(/^image\//, "").toUpperCase();
   }
   if (att.kind === "document") {
-    const bytes = Math.floor((att.data.length * 3) / 4);
+    const bytes = Math.floor(((att.data ?? "").length * 3) / 4);
     const label = att.media_type === XLSX_MIME ? "XLSX" : "PDF";
     return `${label} · ${formatBytes(bytes)}`;
   }
-  return `Text · ${formatBytes(new Blob([att.text]).size)}`;
+  return `Text · ${formatBytes(new Blob([att.text ?? ""]).size)}`;
 }
 
 function formatBytes(n: number): string {

@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from gilbert.interfaces.attachments import FileAttachment
+
 
 @dataclass(frozen=True)
 class UIOption:
@@ -163,8 +165,12 @@ class ToolOutput:
     Tools can return either a plain ``str`` (backward compatible) or a
     ``ToolOutput`` instance. The AI service normalizes both: ``text``
     goes into the AI conversation as the tool result, ``ui_blocks`` are
-    collected and delivered to the frontend.
+    collected and delivered to the frontend, and ``attachments`` ride
+    back on the final assistant ``Message`` so the user can download
+    tool-produced files (PDFs, images, spreadsheets, …) straight from
+    the chat bubble.
     """
 
     text: str
     ui_blocks: list[UIBlock] = field(default_factory=list)
+    attachments: tuple[FileAttachment, ...] = ()

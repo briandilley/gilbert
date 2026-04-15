@@ -320,3 +320,15 @@
 .hljs-symbol,
 .hljs-bullet,
 .hljs-link { color: oklch(0.75 0.1 180); }
+
+/* ── Streaming ghost bubble caret ─────────────────────────────────── */
+/* Blinking caret inside the transient assistant ghost bubble while a
+ * turn is streaming. Used by MessageBubble when the ``ghost`` prop is
+ * set. */
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+.animate-caret-blink {
+  animation: caret-blink 1s step-end infinite;
+}

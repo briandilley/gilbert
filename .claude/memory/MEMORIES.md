@@ -25,6 +25,7 @@
 - [UI Blocks](memory-ui-blocks.md) — tools push interactive forms (inputs, selects, sliders, buttons) into chat via ToolOutput
 - [WebSocket Protocol](memory-websocket-protocol.md) — bidirectional WS with typed frames, role-filtered events, chat RPC, peer publishing
 - [Skills System](memory-skills-system.md) — Agent Skills standard support, per-conversation skill activation via SKILL.md files
+- [Skill Workspaces & Activation Gate](memory-skill-workspaces.md) — per-conv workspace dirs, AI-vs-slash gate, cleanup-on-delete, legacy fallback
 - [Web Search Service](memory-websearch-service.md) — web search AI tool with Tavily backend
 - [Slash Commands](memory-slash-commands.md) — direct tool invocation from chat via /command syntax, bypassing the AI
 - [Config Actions](memory-config-actions.md) — action buttons on service settings pages (test_connection, link flows), with two-phase followup support

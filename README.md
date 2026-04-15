@@ -213,7 +213,7 @@ gilbert.ping/pong    — heartbeat (30s interval)
 gilbert.peer.publish — peer instances publish events to the local bus
 chat.message.send    — send a chat message (RPC with .result response)
 chat.form.submit    — submit a UI form
-chat.history.load    — load conversation messages
+chat.history.load    — load conversation as turn-grouped history
 ```
 
 Events are filtered server-side through three layers: pattern matching (client subscribes to what it cares about), role-based visibility (admin/user/everyone tiers), and content filtering (chat membership and message visibility).

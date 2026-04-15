@@ -27,6 +27,13 @@ interface PendingRpc {
   resolve: (data: unknown) => void;
   reject: (error: ApiError) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Original timeout in ms — used when a keepalive event resets the
+   *  deadline so we push it out by the same budget we started with. */
+  timeoutMs: number;
+  /** Conversation this RPC is acting on, if any. Keepalive events
+   *  only reset timers whose ``conversationId`` matches the event's
+   *  ``conversation_id``. */
+  conversationId?: string;
 }
 
 interface WebSocketContextValue {
@@ -58,12 +65,27 @@ function nextFrameId(): string {
 }
 
 const DEFAULT_TIMEOUT = 15_000;
-const LONG_TIMEOUT = 120_000; // for AI operations
+// Ceiling for an AI-driven RPC when there's no observable progress. The
+// effective deadline usually doesn't get hit because any ``chat.stream.*``
+// or ``chat.tool.*`` event for an in-flight chat-send RPC resets its
+// timer (see KEEPALIVE_EVENT_TYPES below). This is the "is the backend
+// actually dead" backstop.
+const LONG_TIMEOUT = 600_000; // 10 minutes
 
 /** Frame types that need a longer timeout (AI thinking). */
 const LONG_TIMEOUT_TYPES = new Set([
   "chat.message.send",
   "chat.form.submit",
+]);
+
+/** Bus events whose arrival means an AI turn is still progressing.
+ *  Any pending long-timeout RPC on the same conversation gets its
+ *  deadline pushed back when one of these fires. */
+const KEEPALIVE_EVENT_TYPES = new Set([
+  "chat.stream.text_delta",
+  "chat.stream.round_complete",
+  "chat.tool.started",
+  "chat.tool.completed",
 ]);
 
 const defaultValue: WebSocketContextValue = {
@@ -118,15 +140,25 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         const ms =
           timeout ?? (LONG_TIMEOUT_TYPES.has(frame.type as string) ? LONG_TIMEOUT : DEFAULT_TIMEOUT);
 
-        const timer = setTimeout(() => {
-          pendingRef.current.delete(id);
-          reject(new ApiError(408, "RPC timeout"));
-        }, ms);
+        const makeTimer = (): ReturnType<typeof setTimeout> =>
+          setTimeout(() => {
+            pendingRef.current.delete(id);
+            reject(new ApiError(408, "RPC timeout"));
+          }, ms);
+
+        // Extract conversation_id from chat frames so keepalive events
+        // on the same conversation can reset this pending RPC's timer.
+        const convId =
+          typeof (frame as Record<string, unknown>).conversation_id === "string"
+            ? ((frame as Record<string, unknown>).conversation_id as string)
+            : undefined;
 
         pendingRef.current.set(id, {
           resolve: resolve as (data: unknown) => void,
           reject,
-          timer,
+          timer: makeTimer(),
+          timeoutMs: ms,
+          conversationId: convId,
         });
 
         // If WS is open, send immediately. Otherwise the frame will be
@@ -270,6 +302,32 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               source: frame.source || "",
               timestamp: frame.timestamp || "",
             };
+
+            // Keepalive: any stream/tool progress event for a
+            // conversation resets the deadline on any in-flight RPC
+            // for the same conversation. This lets a legitimately
+            // long agentic turn (big code gen + multiple tool rounds)
+            // run past the 10-minute backstop without falsely timing
+            // out, as long as the backend is actively reporting
+            // progress. If progress stops for the full budget, the
+            // backstop kicks in.
+            if (KEEPALIVE_EVENT_TYPES.has(event.event_type)) {
+              const eventConvId =
+                typeof event.data.conversation_id === "string"
+                  ? event.data.conversation_id
+                  : undefined;
+              if (eventConvId) {
+                for (const [pendingId, pending] of pendingRef.current) {
+                  if (pending.conversationId !== eventConvId) continue;
+                  clearTimeout(pending.timer);
+                  pending.timer = setTimeout(() => {
+                    pendingRef.current.delete(pendingId);
+                    pending.reject(new ApiError(408, "RPC timeout"));
+                  }, pending.timeoutMs);
+                }
+              }
+            }
+
             handlersRef.current
               .get(event.event_type)
               ?.forEach((h) => h(event));

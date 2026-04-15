@@ -254,7 +254,7 @@ async def test_chat_simple_response(
     )
     await ai_service.start(resolver)
 
-    text, conv_id, _ui, _tu = await ai_service.chat("Hi")
+    text, conv_id, _ui, _tu, _atts, _rounds = await ai_service.chat("Hi")
     assert text == "Hello there!"
     assert conv_id  # non-empty UUID string
     assert len(stub_backend.requests) == 1
@@ -288,7 +288,7 @@ async def test_chat_continues_conversation(
     await ai_service.start(resolver)
 
     # First message
-    _, conv_id, _ui, _tu = await ai_service.chat("Hello")
+    _, conv_id, _ui, _tu, _atts, _rounds = await ai_service.chat("Hello")
 
     # Simulate storage returning the saved conversation
     saved_call = storage_backend.put.call_args  # type: ignore[union-attr]
@@ -296,7 +296,7 @@ async def test_chat_continues_conversation(
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
 
     # Second message in same conversation
-    text, same_id, _ui, _tu = await ai_service.chat("Follow up", conversation_id=conv_id)
+    text, same_id, _ui, _tu, _atts, _rounds = await ai_service.chat("Follow up", conversation_id=conv_id)
     assert same_id == conv_id
     assert text == "Second reply"
 
@@ -371,7 +371,7 @@ async def test_chat_with_tool_calls(
     )
 
     await ai_service.start(resolver)
-    text, _, _ui, _tu = await ai_service.chat("What's the weather in Portland?")
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("What's the weather in Portland?")
 
     assert text == "It's 72F and sunny in Portland!"
     assert len(stub_backend.requests) == 2
@@ -447,7 +447,7 @@ async def test_chat_ui_block_response_index_skips_empty_assistant_rows(
     )
 
     await ai_service.start(resolver)
-    _text, _cid, ui_blocks, _tu = await ai_service.chat("pick something")
+    _text, _cid, ui_blocks, _tu, _atts, _rounds = await ai_service.chat("pick something")
 
     # The call produced one visible assistant bubble, so the block must
     # anchor at response_index=0 — not 1, which would be the result of
@@ -547,8 +547,8 @@ async def test_chat_ui_block_response_index_across_multiple_turns(
     )
 
     await ai_service.start(resolver)
-    _, conv_id, ui_blocks_1, _ = await ai_service.chat("first")
-    _, _, ui_blocks_2, _ = await ai_service.chat(
+    _, conv_id, ui_blocks_1, _, _atts, _rounds = await ai_service.chat("first")
+    _, _, ui_blocks_2, _, _atts, _rounds = await ai_service.chat(
         "second",
         conversation_id=conv_id,
     )
@@ -588,10 +588,369 @@ async def test_chat_max_tool_rounds(
         )
 
     await ai_service.start(resolver)
-    text, _, _ui, _tu = await ai_service.chat("loop forever")
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("loop forever")
 
     # max_tool_rounds=5, so at most 5 backend calls
     assert len(stub_backend.requests) == 5
+
+
+# --- Max-Tokens Recovery ---
+
+
+async def test_max_tokens_text_continues(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """A text-only MAX_TOKENS response is followed by a continuation turn."""
+    ai_service._max_continuation_rounds = 2
+    # Round 1: partial text, cut at max_tokens
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="Part one of the answer",
+            ),
+            model="stub",
+            stop_reason=StopReason.MAX_TOKENS,
+        )
+    )
+    # Round 2: the continuation finishes the reply
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="and part two of the answer.",
+            ),
+            model="stub",
+            stop_reason=StopReason.END_TURN,
+        )
+    )
+
+    await ai_service.start(resolver)
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("Give me a long answer")
+
+    # Both chunks should appear in the returned text
+    assert "Part one of the answer" in text
+    assert "and part two of the answer." in text
+    # The service made two backend calls
+    assert len(stub_backend.requests) == 2
+    # The second request carries the synthetic "please continue" user message
+    second_req = stub_backend.requests[1]
+    last_msg = second_req.messages[-1]
+    assert last_msg.role == MessageRole.USER
+    assert "continue" in last_msg.content.lower()
+
+
+async def test_max_tokens_partial_tool_call_surfaces_error(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """A MAX_TOKENS response with tool_calls is treated as unrecoverable."""
+    # A single response that claims a tool_use but got cut off
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        tool_call_id="tc_broken",
+                        tool_name="some_tool",
+                        arguments={"partial": "inpu"},  # pretend cut off
+                    )
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.MAX_TOKENS,
+        )
+    )
+
+    await ai_service.start(resolver)
+    text, _, _ui, tool_usage, _atts, _rounds = await ai_service.chat("do the thing")
+
+    # The loop broke out without executing or retrying
+    assert len(stub_backend.requests) == 1
+    # A surfacing error entry was added to tool_usage so the frontend can tell
+    assert any(tu.get("is_error") for tu in tool_usage)
+    assert any(tu.get("tool_name") == "<max_tokens_truncation>" for tu in tool_usage)
+    # The reply text explains what happened
+    assert "max_tokens" in text.lower() or "cut off" in text.lower()
+
+
+async def test_max_tokens_continuation_cap(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """Continuation stops after _max_continuation_rounds even if the model keeps truncating."""
+    ai_service._max_continuation_rounds = 2
+    # Queue enough MAX_TOKENS responses to exceed the cap
+    for i in range(5):
+        stub_backend.queue_response(
+            AIResponse(
+                message=Message(
+                    role=MessageRole.ASSISTANT,
+                    content=f"chunk {i}",
+                ),
+                model="stub",
+                stop_reason=StopReason.MAX_TOKENS,
+            )
+        )
+
+    await ai_service.start(resolver)
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("keep going")
+
+    # Initial call + 2 continuations = 3 backend calls total
+    assert len(stub_backend.requests) == 3
+    # The final text is annotated that it's still truncated
+    assert "truncated" in text.lower()
+    assert "chunk 0" in text
+    assert "chunk 1" in text
+    assert "chunk 2" in text
+
+
+async def test_chat_emits_text_delta_events_for_streaming_backend(
+    ai_service: AIService,
+    resolver: ServiceResolver,
+) -> None:
+    """A backend that emits TEXT_DELTA stream events causes the AI
+    service to publish ``chat.stream.text_delta`` events on the bus."""
+    from gilbert.interfaces.ai import (
+        AIBackendCapabilities,
+        StreamEvent,
+        StreamEventType,
+    )
+
+    class StreamingBackend(AIBackend):
+        async def initialize(self, config: dict[str, Any]) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+        async def generate(self, request: AIRequest) -> AIResponse:
+            return AIResponse(
+                message=Message(role=MessageRole.ASSISTANT, content="Hello world"),
+                model="stub-stream",
+            )
+
+        def capabilities(self) -> AIBackendCapabilities:
+            return AIBackendCapabilities(streaming=True, attachments_user=False)
+
+        async def generate_stream(self, request: AIRequest):  # type: ignore[override]
+            yield StreamEvent(type=StreamEventType.TEXT_DELTA, text="Hello ")
+            yield StreamEvent(type=StreamEventType.TEXT_DELTA, text="world")
+            yield StreamEvent(
+                type=StreamEventType.MESSAGE_COMPLETE,
+                response=AIResponse(
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content="Hello world",
+                    ),
+                    model="stub-stream",
+                ),
+            )
+
+    ai_service._backend = StreamingBackend()
+
+    # Capture published events.
+    published: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_publish(event_type: str, data: dict[str, Any]) -> None:
+        published.append((event_type, data))
+
+    ai_service._publish_event = fake_publish  # type: ignore[assignment]
+
+    await ai_service.start(resolver)
+    result = await ai_service.chat("Hi", user_ctx=UserContext.SYSTEM)
+
+    text_deltas = [d for t, d in published if t == "chat.stream.text_delta"]
+    assert len(text_deltas) == 2
+    assert text_deltas[0]["text"] == "Hello "
+    assert text_deltas[1]["text"] == "world"
+
+    # A round_complete and turn_complete should also have fired.
+    round_completes = [d for t, d in published if t == "chat.stream.round_complete"]
+    turn_completes = [d for t, d in published if t == "chat.stream.turn_complete"]
+    assert len(round_completes) == 1
+    assert len(turn_completes) == 1
+
+    # And the final text is still what the backend sent.
+    assert result.response_text == "Hello world"
+
+
+async def test_non_streaming_backend_emits_no_stream_events(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """A backend whose capabilities report streaming=False produces no
+    chat.stream.* events, even though chat() still calls generate_stream
+    (via the ABC fallback)."""
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="plain"),
+            model="stub",
+        )
+    )
+
+    published: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_publish(event_type: str, data: dict[str, Any]) -> None:
+        published.append((event_type, data))
+
+    ai_service._publish_event = fake_publish  # type: ignore[assignment]
+
+    await ai_service.start(resolver)
+    text, *_ = await ai_service.chat("hi")
+
+    assert text == "plain"
+    stream_events = [t for t, _ in published if t.startswith("chat.stream.")]
+    assert stream_events == []
+
+
+async def test_tool_attachments_land_on_final_assistant_message(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+    storage_backend: StorageBackend,
+) -> None:
+    """A tool that returns a ToolResult with attachments lands those files
+    on the final assistant Message, and the chat() return carries them."""
+
+    class AttachingProvider(Service):
+        def __init__(self) -> None:
+            self._ref = FileAttachment(
+                kind="document",
+                name="po.pdf",
+                media_type="application/pdf",
+                workspace_skill="pdf",
+                workspace_path="po-00006567.pdf",
+            )
+
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(
+                name="att_tool",
+                capabilities=frozenset({"ai_tools"}),
+            )
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "att_tool"
+
+        def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
+            return [ToolDefinition(name="make_po", description="Make a PO")]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            return ToolResult(
+                tool_call_id="",  # AIService fills this from the ToolCall.
+                content="Built the PO",
+                attachments=(self._ref,),
+            )
+
+    provider = AttachingProvider()
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [provider] if cap == "ai_tools" else []
+
+    # Round 1: AI calls the tool
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="Making the PO.",
+                tool_calls=[
+                    ToolCall(
+                        tool_call_id="tc_make",
+                        tool_name="make_po",
+                        arguments={},
+                    )
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    # Round 2: final answer
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="Here's your PO.",
+            ),
+            model="stub",
+        )
+    )
+
+    await ai_service.start(resolver)
+    result = await ai_service.chat("Make a PO")
+
+    # chat() returns attachments on the ChatTurnResult NamedTuple.
+    assert len(result.attachments) == 1
+    att = result.attachments[0]
+    assert att.name == "po.pdf"
+    assert att.is_reference
+    assert att.workspace_skill == "pdf"
+    assert att.workspace_path == "po-00006567.pdf"
+
+    # And they were persisted onto the final assistant message.
+    put_call = storage_backend.put.call_args  # type: ignore[union-attr]
+    saved = put_call[0][2]
+    final_asst = [m for m in saved["messages"] if m["role"] == "assistant"][-1]
+    assert "attachments" in final_asst
+    assert len(final_asst["attachments"]) == 1
+    assert final_asst["attachments"][0]["workspace_path"] == "po-00006567.pdf"
+
+
+async def test_max_tokens_collapsed_history_drops_synthetic_user(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    resolver: ServiceResolver,
+    storage_backend: StorageBackend,
+) -> None:
+    """After continuation, the persisted history has one user and one merged
+    assistant message — the synthetic 'please continue' is stripped."""
+    ai_service._max_continuation_rounds = 2
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="first"),
+            model="stub",
+            stop_reason=StopReason.MAX_TOKENS,
+        )
+    )
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="second"),
+            model="stub",
+            stop_reason=StopReason.END_TURN,
+        )
+    )
+
+    await ai_service.start(resolver)
+    await ai_service.chat("tell me")
+
+    # Inspect what was persisted
+    put_call = storage_backend.put.call_args  # type: ignore[union-attr]
+    saved = put_call[0][2]
+    roles = [m["role"] for m in saved["messages"]]
+    # Exactly one user row (the original) and one assistant row (merged)
+    assert roles.count("user") == 1
+    assert roles.count("assistant") == 1
+    assistant_msg = next(m for m in saved["messages"] if m["role"] == "assistant")
+    assert "first" in assistant_msg["content"]
+    assert "second" in assistant_msg["content"]
+    # No synthetic continue message survived
+    user_msg = next(m for m in saved["messages"] if m["role"] == "user")
+    assert "continue" not in user_msg["content"].lower()
 
 
 # --- Tool Errors ---
@@ -626,7 +985,7 @@ async def test_unknown_tool_returns_error_result(
     )
 
     await ai_service.start(resolver)
-    text, _, _ui, _tu = await ai_service.chat("Do something impossible")
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("Do something impossible")
 
     # The error result was fed back
     second_req = stub_backend.requests[1]
@@ -676,7 +1035,7 @@ async def test_tool_execution_error_returns_error_result(
     )
 
     await ai_service.start(resolver)
-    text, _, _ui, _tu = await ai_service.chat("Run the bad tool")
+    text, _, _ui, _tu, _atts, _rounds = await ai_service.chat("Run the bad tool")
 
     second_req = stub_backend.requests[1]
     tool_result_msg = second_req.messages[-1]
@@ -700,7 +1059,7 @@ async def test_conversation_saved_to_storage(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _ui, _tu = await ai_service.chat("Save this")
+    _, conv_id, _ui, _tu, _atts, _rounds = await ai_service.chat("Save this")
 
     # Find the conversation save call among all put calls (profiles are also seeded)
     conv_calls = [
@@ -1084,7 +1443,7 @@ async def test_set_and_get_conversation_state(
     )
     await ai_service.start(resolver)
 
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     # Capture the saved conversation and return it on subsequent gets
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
@@ -1118,7 +1477,7 @@ async def test_get_missing_state_returns_none(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
@@ -1141,7 +1500,7 @@ async def test_clear_conversation_state(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
@@ -1178,7 +1537,7 @@ async def test_multiple_state_keys_coexist(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
@@ -1209,7 +1568,7 @@ async def test_state_uses_current_conversation_id(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
     storage_backend.get = AsyncMock(return_value=saved_data)  # type: ignore[union-attr]
@@ -1235,7 +1594,7 @@ async def test_state_injected_into_system_prompt(
         )
     )
     await ai_service.start(resolver)
-    _, conv_id, _, _ = await ai_service.chat("Hi")
+    _, conv_id, _, _, _atts, _rounds = await ai_service.chat("Hi")
 
     # Save state directly in the conversation data
     saved_data = storage_backend.put.call_args[0][2]  # type: ignore[union-attr]
@@ -1317,13 +1676,14 @@ async def test_history_load_attaches_tool_usage_to_final_assistant(
     ai_service: AIService,
     storage_backend: Any,
 ) -> None:
-    """Intermediate tool-use rounds fold into the final assistant bubble."""
+    """Intermediate tool-use rounds fold into the turn's rounds list and
+    the no-tool assistant row becomes the turn's final answer."""
     stored = [
         {"role": "user", "content": "What's the weather?"},
-        # Round 1: AI calls get_weather, empty content.
+        # Round 1: AI calls get_weather, with reasoning.
         {
             "role": "assistant",
-            "content": "",
+            "content": "Let me check.",
             "tool_calls": [
                 {
                     "tool_call_id": "call-1",
@@ -1349,30 +1709,35 @@ async def test_history_load_attaches_tool_usage_to_final_assistant(
     ]
     result = await _run_history_load(ai_service, storage_backend, stored)
 
-    msgs = result["messages"]
-    # user + one assistant bubble (the intermediate tool-use row is hidden)
-    assert [m["role"] for m in msgs] == ["user", "assistant"]
-    final = msgs[1]
-    assert final["content"] == "It's 72F and sunny in Portland."
-    usage = final["tool_usage"]
-    assert len(usage) == 1
-    assert usage[0]["tool_name"] == "get_weather"
-    assert usage[0]["result"] == "72F and sunny"
-    assert usage[0]["is_error"] is False
-    # Injected identity keys are stripped before frontend delivery.
-    assert usage[0]["arguments"] == {"city": "Portland"}
+    turns = result["turns"]
+    assert len(turns) == 1
+    turn = turns[0]
+    assert turn["user_message"]["content"] == "What's the weather?"
+    assert len(turn["rounds"]) == 1
+    rnd = turn["rounds"][0]
+    assert rnd["reasoning"] == "Let me check."
+    assert len(rnd["tools"]) == 1
+    tool = rnd["tools"][0]
+    assert tool["tool_name"] == "get_weather"
+    assert tool["result"] == "72F and sunny"
+    assert tool["is_error"] is False
+    # Injected identity keys stripped before delivery.
+    assert tool["arguments"] == {"city": "Portland"}
+    # The no-tool assistant row becomes the turn's final answer.
+    assert turn["final_content"] == "It's 72F and sunny in Portland."
+    assert turn["incomplete"] is False
 
 
 async def test_history_load_multiple_tool_rounds_collected(
     ai_service: AIService,
     storage_backend: Any,
 ) -> None:
-    """Two tool-use rounds in one turn both fold under the final bubble."""
+    """Two AI rounds in one turn produce two entries in the turn's rounds list."""
     stored = [
         {"role": "user", "content": "Plan my evening."},
         {
             "role": "assistant",
-            "content": "",
+            "content": "First, the weather.",
             "tool_calls": [
                 {
                     "tool_call_id": "c1",
@@ -1393,7 +1758,7 @@ async def test_history_load_multiple_tool_rounds_collected(
         },
         {
             "role": "assistant",
-            "content": "",
+            "content": "Now restaurants.",
             "tool_calls": [
                 {
                     "tool_call_id": "c2",
@@ -1416,19 +1781,24 @@ async def test_history_load_multiple_tool_rounds_collected(
     ]
     result = await _run_history_load(ai_service, storage_backend, stored)
 
-    msgs = result["messages"]
-    assert [m["role"] for m in msgs] == ["user", "assistant"]
-    usage = msgs[1]["tool_usage"]
-    assert [u["tool_name"] for u in usage] == ["get_weather", "find_restaurants"]
-    assert usage[0]["result"] == "Rainy"
-    assert usage[1]["result"] == "Kin Khao, Lers Ros"
+    turns = result["turns"]
+    assert len(turns) == 1
+    rounds = turns[0]["rounds"]
+    assert len(rounds) == 2
+    assert rounds[0]["reasoning"] == "First, the weather."
+    assert rounds[0]["tools"][0]["tool_name"] == "get_weather"
+    assert rounds[0]["tools"][0]["result"] == "Rainy"
+    assert rounds[1]["reasoning"] == "Now restaurants."
+    assert rounds[1]["tools"][0]["tool_name"] == "find_restaurants"
+    assert rounds[1]["tools"][0]["result"] == "Kin Khao, Lers Ros"
+    assert turns[0]["final_content"] == "Try Kin Khao — bring an umbrella."
 
 
 async def test_history_load_turn_boundary_resets_usage(
     ai_service: AIService,
     storage_backend: Any,
 ) -> None:
-    """Tool usage from turn N must not leak onto the assistant reply in turn N+1."""
+    """Tool usage from turn N must not leak into turn N+1."""
     stored = [
         {"role": "user", "content": "Weather?"},
         {
@@ -1453,23 +1823,66 @@ async def test_history_load_turn_boundary_resets_usage(
     ]
     result = await _run_history_load(ai_service, storage_backend, stored)
 
-    msgs = result["messages"]
-    roles = [m["role"] for m in msgs]
-    assert roles == ["user", "assistant", "user", "assistant"]
-    assert msgs[1]["tool_usage"][0]["tool_name"] == "get_weather"
-    assert "tool_usage" not in msgs[3]
+    turns = result["turns"]
+    assert len(turns) == 2
+    # Turn 1 has rounds + final
+    assert len(turns[0]["rounds"]) == 1
+    assert turns[0]["rounds"][0]["tools"][0]["tool_name"] == "get_weather"
+    assert turns[0]["final_content"] == "Hot in LA."
+    # Turn 2 is plain: no rounds, just a final
+    assert len(turns[1]["rounds"]) == 0
+    assert turns[1]["final_content"] == "You're welcome."
 
 
 async def test_history_load_plain_reply_has_no_tool_usage(
     ai_service: AIService,
     storage_backend: Any,
 ) -> None:
-    """Assistant replies that called no tools carry no tool_usage field."""
+    """Assistant replies that called no tools produce a turn with empty rounds."""
     stored = [
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello."},
     ]
     result = await _run_history_load(ai_service, storage_backend, stored)
 
-    msgs = result["messages"]
-    assert "tool_usage" not in msgs[1]
+    turns = result["turns"]
+    assert len(turns) == 1
+    assert turns[0]["rounds"] == []
+    assert turns[0]["final_content"] == "Hello."
+    assert turns[0]["user_message"]["content"] == "Hi"
+
+
+async def test_history_load_incomplete_turn_marked(
+    ai_service: AIService,
+    storage_backend: Any,
+) -> None:
+    """A turn that ends with a tool_result and no closing assistant text
+    is flagged ``incomplete=True`` so the UI can render an indicator."""
+    stored = [
+        {"role": "user", "content": "Run forever"},
+        {
+            "role": "assistant",
+            "content": "Working on it.",
+            "tool_calls": [
+                {
+                    "tool_call_id": "c1",
+                    "tool_name": "run",
+                    "arguments": {},
+                }
+            ],
+        },
+        {
+            "role": "tool_result",
+            "tool_results": [{"tool_call_id": "c1", "content": "ok"}],
+        },
+        # No closing assistant message — loop hit max_tool_rounds or
+        # crashed.
+    ]
+    result = await _run_history_load(ai_service, storage_backend, stored)
+
+    turns = result["turns"]
+    assert len(turns) == 1
+    assert turns[0]["incomplete"] is True
+    assert turns[0]["final_content"] == ""
+    assert len(turns[0]["rounds"]) == 1
+    assert turns[0]["rounds"][0]["tools"][0]["result"] == "ok"

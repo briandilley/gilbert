@@ -4,7 +4,13 @@ import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import type { ChatMessageWithMeta, FileAttachment } from "@/types/chat";
+import type {
+  ChatRound,
+  ChatRoundTool,
+  ChatTurn,
+  FileAttachment,
+} from "@/types/chat";
+import type { GilbertEvent } from "@/types/events";
 import type { UIBlock } from "@/types/ui";
 import { ChatSidebarContent } from "./ChatSidebar";
 import { MessageList } from "./MessageList";
@@ -17,7 +23,6 @@ import {
 import { MemberPanelContent } from "./MemberPanel";
 import { InviteModal } from "./InviteModal";
 import { SkillsModal } from "./SkillsModal";
-import { ThinkingPanel } from "./ThinkingPanel";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,7 +55,7 @@ export function ChatPage() {
   const api = useWsApi();
   const { connected } = useWebSocket();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessageWithMeta[]>([]);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [uiBlocks, setUiBlocks] = useState<UIBlock[]>([]);
   const [sending, setSending] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
@@ -84,6 +89,18 @@ export function ChatPage() {
   const dragDepthRef = useRef(0);
   const pendingCountRef = useRef(0);
   const chatAreaRef = useRef<HTMLDivElement>(null);
+  const activeConvIdRef = useRef<string | null>(null);
+  // Tracks "the next text_delta should open a new round." Set when
+  // chat.stream.round_complete fires for the in-flight turn; cleared
+  // when the next text_delta consumes it. Lives outside React state
+  // because it has to be read+written from event handlers without
+  // racing the setTurns batch.
+  const nextRoundPendingRef = useRef(false);
+  // Keep the ref in sync so streaming event handlers can read the
+  // current conversation id without re-registering on every change.
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId;
+  }, [activeConvId]);
 
   // Keep pendingCountRef in sync so addFiles can read the current count
   // without taking pendingAttachments as a callback dep (that would
@@ -225,7 +242,7 @@ export function ChatPage() {
       try {
         const conv = await api.loadConversation(id);
         setActiveConvId(id);
-        setMessages(conv.messages);
+        setTurns(conv.turns || []);
         setUiBlocks(conv.ui_blocks || []);
         setIsShared(conv.shared);
         setMembers(
@@ -249,12 +266,24 @@ export function ChatPage() {
 
   const handleSend = useCallback(
     async (message: string, attachments: FileAttachment[] = []) => {
-      setMessages((prev) => [
+      // Insert a streaming placeholder turn at the bottom of the list.
+      // Stream events from the server (text_delta, tool.started,
+      // tool.completed) mutate this turn's rounds in place; the
+      // chat.message.send RPC result replaces it with the authoritative
+      // committed shape.
+      nextRoundPendingRef.current = false;
+      setTurns((prev) => [
         ...prev,
         {
-          role: "user",
-          content: message,
-          attachments: attachments.length ? attachments : undefined,
+          user_message: {
+            content: message,
+            attachments,
+          },
+          rounds: [],
+          final_content: "",
+          final_attachments: [],
+          incomplete: false,
+          streaming: true,
         },
       ]);
       setSending(true);
@@ -263,16 +292,25 @@ export function ChatPage() {
         const resp = await api.sendMessage(message, activeConvId, attachments);
         setActiveConvId(resp.conversation_id);
 
-        if (resp.response) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: resp.response,
-              tool_usage: resp.tool_usage,
-            },
-          ]);
-        }
+        // Replace the streaming placeholder with the authoritative
+        // committed turn shape. The server's ``rounds`` is the source
+        // of truth; the live-built rounds we accumulated from stream
+        // events get thrown away in favor of the persisted version.
+        setTurns((prev) => {
+          const next = [...prev];
+          const lastIdx = next.length - 1;
+          if (lastIdx >= 0 && next[lastIdx].streaming) {
+            next[lastIdx] = {
+              user_message: next[lastIdx].user_message,
+              rounds: resp.rounds ?? [],
+              final_content: resp.response ?? "",
+              final_attachments: resp.attachments ?? [],
+              incomplete: false,
+              streaming: false,
+            };
+          }
+          return next;
+        });
 
         if (resp.ui_blocks?.length) {
           setUiBlocks((prev) => [...prev, ...resp.ui_blocks]);
@@ -282,13 +320,24 @@ export function ChatPage() {
       } catch (exc) {
         const detail =
           exc instanceof Error && exc.message ? exc.message : String(exc);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `Sorry, something went wrong. Please try again.\n\n\`${detail}\``,
-          },
-        ]);
+        // Replace the streaming placeholder with an error turn so the
+        // user sees what happened in context, instead of a ghost
+        // bubble that vanishes.
+        setTurns((prev) => {
+          const next = [...prev];
+          const lastIdx = next.length - 1;
+          if (lastIdx >= 0 && next[lastIdx].streaming) {
+            next[lastIdx] = {
+              user_message: next[lastIdx].user_message,
+              rounds: next[lastIdx].rounds,
+              final_content: `Sorry, something went wrong. Please try again.\n\n\`${detail}\``,
+              final_attachments: [],
+              incomplete: false,
+              streaming: false,
+            };
+          }
+          return next;
+        });
       } finally {
         setSending(false);
       }
@@ -311,10 +360,24 @@ export function ChatPage() {
       setSending(true);
       try {
         const resp = await api.submitForm(activeConvId, blockId, values);
-        if (resp.response) {
-          setMessages((prev) => [
+        if (
+          resp.response ||
+          resp.attachments?.length ||
+          resp.rounds?.length
+        ) {
+          // Form submission produces a synthetic user→assistant turn
+          // without a real user message. The user side carries the
+          // form values as a placeholder so the turn renders cleanly.
+          setTurns((prev) => [
             ...prev,
-            { role: "assistant", content: resp.response },
+            {
+              user_message: { content: "", attachments: [] },
+              rounds: resp.rounds ?? [],
+              final_content: resp.response ?? "",
+              final_attachments: resp.attachments ?? [],
+              incomplete: false,
+              streaming: false,
+            },
           ]);
         }
         if (resp.ui_blocks?.length) {
@@ -329,7 +392,7 @@ export function ChatPage() {
 
   const clearChat = useCallback(() => {
     setActiveConvId(null);
-    setMessages([]);
+    setTurns([]);
     setUiBlocks([]);
     setIsShared(false);
     setMembers([]);
@@ -350,7 +413,7 @@ export function ChatPage() {
           const result = await api.createConversation(name.trim() || "New conversation");
           refetchConversations();
           setActiveConvId(result.conversation_id);
-          setMessages([]);
+          setTurns([]);
           setUiBlocks([]);
           setIsShared(false);
           setMembers([]);
@@ -499,22 +562,34 @@ export function ChatPage() {
         case "chat.message.created":
           if (convId === activeConvId) {
             const isOwnMessage = data.author_id === user?.user_id;
-            if (data.user_message && !isOwnMessage) {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: "user",
-                  content: data.user_message as string,
-                  author_id: data.author_id as string,
-                  author_name: data.author_name as string,
-                },
-              ]);
-            }
-            if (data.content && !isOwnMessage) {
-              setMessages((prev) => [
-                ...prev,
-                { role: "assistant", content: data.content as string },
-              ]);
+            if (!isOwnMessage) {
+              // Shared-room broadcast: another user posted a message
+              // and Gilbert may have replied. We don't get structured
+              // rounds in the broadcast payload, so build a single
+              // flat turn with the user message + (optional) assistant
+              // final content + attachments.
+              const userText = (data.user_message as string) || "";
+              const replyText = (data.content as string) || "";
+              const replyAttachments =
+                (data.attachments as FileAttachment[]) || [];
+              if (userText || replyText || replyAttachments.length > 0) {
+                setTurns((prev) => [
+                  ...prev,
+                  {
+                    user_message: {
+                      content: userText,
+                      attachments: [],
+                      author_id: data.author_id as string,
+                      author_name: data.author_name as string,
+                    },
+                    rounds: [],
+                    final_content: replyText,
+                    final_attachments: replyAttachments,
+                    incomplete: false,
+                    streaming: false,
+                  },
+                ]);
+              }
             }
             if ((data.ui_blocks as UIBlock[])?.length && !isOwnMessage) {
               setUiBlocks((prev) => [
@@ -576,6 +651,152 @@ export function ChatPage() {
   useEventBus("chat.conversation.created", handleChatEvent);
   useEventBus("chat.invite.created", handleChatEvent);
   useEventBus("chat.invite.declined", handleChatEvent);
+
+  // Live streaming subscriptions. Mutate the in-flight turn (the last
+  // entry in ``turns`` if it has ``streaming: true``) in place as
+  // events arrive. When the chat.message.send RPC resolves, handleSend
+  // replaces the streaming turn with the authoritative committed
+  // shape from the server.
+  //
+  // Round model: text_delta appends to the LAST round's reasoning.
+  // chat.stream.round_complete is the explicit "this round is done"
+  // signal — when it fires, we set ``nextRoundPendingRef`` and the
+  // next text_delta opens a fresh round. We don't infer round
+  // boundaries from "does the last round have tools" because that
+  // reasoning is racy against React state batching and breaks when
+  // the AI emits a text-only round (no tools at all).
+  //
+  // tool.started adds a pending tool entry to the LAST round —
+  // because tools execute AFTER round_complete fires for the round
+  // that requested them, the last round when tool.started arrives
+  // is exactly the round that wanted the tool. tool.completed
+  // updates the entry by tool_call_id.
+  const updateStreamingTurn = useCallback(
+    (mutator: (turn: ChatTurn) => ChatTurn) => {
+      setTurns((prev) => {
+        const lastIdx = prev.length - 1;
+        if (lastIdx < 0 || !prev[lastIdx].streaming) return prev;
+        const next = [...prev];
+        next[lastIdx] = mutator(next[lastIdx]);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleTextDelta = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== activeConvIdRef.current) return;
+      const chunk = event.data.text;
+      if (typeof chunk !== "string" || !chunk) return;
+      const startNewRound = nextRoundPendingRef.current;
+      if (startNewRound) {
+        nextRoundPendingRef.current = false;
+      }
+      updateStreamingTurn((turn) => {
+        const rounds = [...turn.rounds];
+        if (rounds.length === 0 || startNewRound) {
+          rounds.push({ reasoning: "", tools: [] });
+        }
+        const lastIdx = rounds.length - 1;
+        rounds[lastIdx] = {
+          ...rounds[lastIdx],
+          reasoning: rounds[lastIdx].reasoning + chunk,
+        };
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleToolStarted = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== activeConvIdRef.current) return;
+      const toolName = String(event.data.tool_name || "");
+      const toolCallId = String(event.data.tool_call_id || "");
+      const args = (event.data.arguments as Record<string, unknown>) || {};
+      updateStreamingTurn((turn) => {
+        const rounds = [...turn.rounds];
+        // If the round just ended (round_complete fired) but no text
+        // followed, the next event is the tool that the model
+        // requested. It belongs to the round that just finished, so
+        // we attach it to the existing last round. Only create a new
+        // round if there are no rounds at all yet (rare — a tool
+        // call arriving before any text).
+        if (rounds.length === 0) {
+          rounds.push({ reasoning: "", tools: [] });
+        }
+        const lastIdx = rounds.length - 1;
+        const newTool: ChatRoundTool = {
+          tool_call_id: toolCallId,
+          tool_name: toolName,
+          arguments: args,
+          status: "running",
+          is_error: false,
+        };
+        rounds[lastIdx] = {
+          ...rounds[lastIdx],
+          tools: [...rounds[lastIdx].tools, newTool],
+        };
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleToolCompleted = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== activeConvIdRef.current) return;
+      const toolCallId = String(event.data.tool_call_id || "");
+      const isError = Boolean(event.data.is_error);
+      const resultPreview =
+        typeof event.data.result_preview === "string"
+          ? event.data.result_preview
+          : "";
+      updateStreamingTurn((turn) => {
+        const rounds = turn.rounds.map((round) => {
+          const tools = round.tools.map((tool) =>
+            tool.tool_call_id === toolCallId
+              ? {
+                  ...tool,
+                  status: "done" as const,
+                  is_error: isError,
+                  result: resultPreview,
+                }
+              : tool,
+          );
+          return { ...round, tools };
+        });
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleRoundComplete = useCallback((event: GilbertEvent) => {
+    if (event.data.conversation_id !== activeConvIdRef.current) return;
+    // The current round is done. The next text_delta should start a
+    // fresh round (to display alongside the now-finished one), not
+    // extend the current one. tool events that arrive between now
+    // and the next text_delta still belong to the round that just
+    // ended — handleToolStarted attaches them to the existing last
+    // round, which is correct.
+    nextRoundPendingRef.current = true;
+  }, []);
+
+  const handleTurnComplete = useCallback((event: GilbertEvent) => {
+    if (event.data.conversation_id !== activeConvIdRef.current) return;
+    // Reset the round-transition flag so a subsequent send doesn't
+    // inherit stale state. The RPC resolution is still the
+    // authoritative commit point for the turn shape.
+    nextRoundPendingRef.current = false;
+  }, []);
+
+  useEventBus("chat.stream.text_delta", handleTextDelta);
+  useEventBus("chat.stream.round_complete", handleRoundComplete);
+  useEventBus("chat.stream.turn_complete", handleTurnComplete);
+  useEventBus("chat.tool.started", handleToolStarted);
+  useEventBus("chat.tool.completed", handleToolCompleted);
 
   const sidebarProps = {
     conversations,
@@ -732,7 +953,7 @@ export function ChatPage() {
           <div className="flex flex-1 flex-col items-center justify-center">
             <LoadingSpinner text="Loading conversation..." />
           </div>
-        ) : !activeConvId && messages.length === 0 ? (
+        ) : !activeConvId && turns.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground p-8">
             <MessageSquareIcon className="size-12 opacity-20" />
             <div className="text-center space-y-1">
@@ -754,7 +975,7 @@ export function ChatPage() {
           </div>
         ) : (
           <MessageList
-            messages={messages}
+            turns={turns}
             uiBlocks={uiBlocks}
             isShared={isShared}
             currentUserId={user?.user_id}
@@ -762,17 +983,11 @@ export function ChatPage() {
           />
         )}
 
-        {/* Thinking indicator with real-time tool visibility */}
-        {sending && (
-          <div className="shrink-0 px-4 pb-2">
-            <div className="max-w-3xl mx-auto">
-              <ThinkingPanel conversationId={activeConvId} />
-            </div>
-          </div>
-        )}
+        {/* The sticky thinking-panel footer is gone — tool activity now
+            renders inside each turn bubble's thinking card, in context. */}
 
-        {/* Sticky input — only show when a conversation is active or messages exist */}
-        {(activeConvId || messages.length > 0) && (
+        {/* Sticky input — only show when a conversation is active or turns exist */}
+        {(activeConvId || turns.length > 0) && (
           <ChatInput
             onSend={handleSend}
             disabled={sending}

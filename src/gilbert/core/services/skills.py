@@ -8,6 +8,7 @@ import functools
 import io
 import json
 import logging
+import mimetypes
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from typing import Any
 import httpx
 import yaml
 
+from gilbert.interfaces.attachments import FileAttachment
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -30,6 +32,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
     ToolProvider,
+    ToolResult,
 )
 from gilbert.interfaces.ws import WsHandlerProvider
 
@@ -122,10 +125,80 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
         self._discover_skills()
         await self._load_entity_skills()
+
+        # Subscribe to conversation-destroyed events so we can clean up
+        # the per-conversation workspace tree when a conversation is
+        # deleted. The handler tolerates missing dirs (legacy chats
+        # never had per-conv workspaces) and only touches paths under
+        # this user's conversations subtree.
+        self._unsubscribe_conv_destroyed: Any = None
+        event_bus_svc = resolver.get_capability("event_bus")
+        if event_bus_svc is not None:
+            from gilbert.interfaces.events import EventBusProvider
+
+            if isinstance(event_bus_svc, EventBusProvider):
+                self._unsubscribe_conv_destroyed = event_bus_svc.bus.subscribe(
+                    "chat.conversation.destroyed",
+                    self._on_conversation_destroyed,
+                )
+
         logger.info("Skills service started — %d skills discovered", len(self._catalog))
 
     async def stop(self) -> None:
-        pass
+        if getattr(self, "_unsubscribe_conv_destroyed", None) is not None:
+            try:
+                self._unsubscribe_conv_destroyed()
+            except Exception:
+                pass
+            self._unsubscribe_conv_destroyed = None
+
+    async def _on_conversation_destroyed(self, event: Any) -> None:
+        """Remove the per-conversation workspace tree when a chat is gone.
+
+        ``event.data`` carries ``conversation_id`` and (for personal
+        chats) ``owner_id``. For shared rooms ``owner_id`` may be empty
+        — in that case we walk the per-user roots and delete any
+        ``conversations/<conv>`` matching the destroyed id, since we
+        don't know which user produced files in the room.
+        """
+        data = getattr(event, "data", {}) or {}
+        conv_id = str(data.get("conversation_id") or "").strip()
+        if not conv_id:
+            return
+        owner_id = str(data.get("owner_id") or "").strip()
+
+        targets: list[Path] = []
+        if owner_id:
+            targets.append(self._conversation_workspace_root(owner_id, conv_id))
+        else:
+            # Shared room — find any user's conversations/<conv_id> dir.
+            users_root = self._workspace_root() / "users"
+            if users_root.is_dir():
+                for user_dir in users_root.iterdir():
+                    candidate = user_dir / "conversations" / conv_id
+                    if candidate.is_dir():
+                        targets.append(candidate)
+
+        for target in targets:
+            try:
+                resolved = target.resolve()
+                # Defense in depth: refuse to rm anything outside the
+                # workspace root, in case someone managed to slip a
+                # crafted conv_id through.
+                resolved.relative_to(self._workspace_root().resolve())
+            except (OSError, ValueError):
+                continue
+            try:
+                await _to_thread(shutil.rmtree, resolved, ignore_errors=True)
+                logger.info(
+                    "Removed conversation workspace: %s",
+                    resolved,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to remove conversation workspace: %s",
+                    resolved,
+                )
 
     # --- Configurable protocol ---
 
@@ -322,6 +395,136 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 required_role="user",
             ),
             ToolDefinition(
+                name="write_skill_workspace_file",
+                slash_group="skill",
+                slash_command="wswrite",
+                slash_help=(
+                    "Write a text file to your skill workspace: "
+                    "/skill wswrite <skill_name> <path> <content>"
+                ),
+                description=(
+                    "Write a text file to your personal skill workspace. "
+                    "Creates parent directories as needed. Use this to "
+                    "create new scripts, configs, or data files that your "
+                    "skill's bundled scripts can then read, or to stage "
+                    "a generator script (Python, shell, etc.) that you "
+                    "want to execute via run_workspace_script. Files "
+                    "live under .gilbert/skill-workspaces/<user>/<skill>/ "
+                    "and persist across chat turns. Use this instead of "
+                    "upload_document — upload_document is for the "
+                    "knowledge base, not skill workspaces."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="skill_name",
+                        type=ToolParameterType.STRING,
+                        description="Name of the skill whose workspace the file goes into.",
+                    ),
+                    ToolParameter(
+                        name="path",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Relative path within the workspace "
+                            "(e.g. 'generate_po.py' or 'configs/po.json'). "
+                            "Parent directories are created as needed."
+                        ),
+                    ),
+                    ToolParameter(
+                        name="content",
+                        type=ToolParameterType.STRING,
+                        description="UTF-8 text content of the file.",
+                    ),
+                ],
+                required_role="user",
+            ),
+            ToolDefinition(
+                name="run_workspace_script",
+                slash_group="skill",
+                slash_command="wsrun",
+                slash_help=(
+                    "Run a script from your workspace: "
+                    "/skill wsrun <skill_name> <path> [args...]"
+                ),
+                description=(
+                    "Execute a script you've placed in your personal "
+                    "skill workspace. Python (``.py``) runs via "
+                    "``python3``, shell (``.sh``) via ``bash``, "
+                    "Node (``.ts``/``.js``) via ``node``. Scripts run "
+                    "with the workspace as their working directory, so "
+                    "output files written via relative paths land back "
+                    "in the workspace and can be picked up by "
+                    "``attach_workspace_file`` for download. Use this "
+                    "for one-off generator scripts that don't belong in "
+                    "the skill's bundled script set — write the script "
+                    "with ``write_skill_workspace_file`` first, then "
+                    "execute it here."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="skill_name",
+                        type=ToolParameterType.STRING,
+                        description="Name of the skill whose workspace holds the script.",
+                    ),
+                    ToolParameter(
+                        name="path",
+                        type=ToolParameterType.STRING,
+                        description="Relative path to the script within the workspace.",
+                    ),
+                    ToolParameter(
+                        name="arguments",
+                        type=ToolParameterType.ARRAY,
+                        description="Command-line arguments to pass to the script.",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+            ),
+            ToolDefinition(
+                name="attach_workspace_file",
+                slash_group="skill",
+                slash_command="attach",
+                slash_help=(
+                    "Attach a workspace file to your next chat reply "
+                    "so the user can download it: /skill attach "
+                    "<skill_name> <path> [display_name]"
+                ),
+                description=(
+                    "Attach a file you generated in a skill workspace to "
+                    "your reply, so the user sees a downloadable chip on "
+                    "the assistant message. Use this after a tool/script "
+                    "has written a file (PDF, image, spreadsheet, etc.) "
+                    "to the workspace and you want the user to be able to "
+                    "download it. The file stays on disk — the reference "
+                    "rides on the message and the frontend fetches bytes "
+                    "on click."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="skill_name",
+                        type=ToolParameterType.STRING,
+                        description="Name of the skill whose workspace holds the file.",
+                    ),
+                    ToolParameter(
+                        name="path",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Relative path to the file within the workspace "
+                            "(e.g. 'po-00006567.pdf')."
+                        ),
+                    ),
+                    ToolParameter(
+                        name="display_name",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional user-visible filename. Defaults to "
+                            "the basename of ``path``."
+                        ),
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+            ),
+            ToolDefinition(
                 name="create_skill",
                 description=(
                     "Create or update a text-based skill. The skill_md parameter "
@@ -351,7 +554,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             ),
         ]
 
-    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         match name:
             case "manage_skills":
                 return await self._tool_manage_skills(arguments)
@@ -365,6 +568,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 return await self._tool_browse_workspace(arguments)
             case "read_skill_workspace_file":
                 return await self._tool_read_workspace_file(arguments)
+            case "write_skill_workspace_file":
+                return await self._tool_write_workspace_file(arguments)
+            case "run_workspace_script":
+                return await self._tool_run_workspace_script(arguments)
+            case "attach_workspace_file":
+                return await self._tool_attach_workspace_file(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -416,6 +625,55 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             return value if isinstance(value, list) else []
         except RuntimeError:
             return []
+
+    async def _assert_skill_accessible(
+        self,
+        skill_name: str,
+        arguments: dict[str, Any],
+    ) -> str | None:
+        """Return an error JSON string if the AI shouldn't touch this skill.
+
+        The activation gate keeps Gilbert from auto-discovering or
+        reaching for skills the user hasn't explicitly enabled for the
+        current conversation. The user always retains an escape hatch:
+        slash commands (``/skill read pdf …``) bypass the gate because
+        they're user-initiated, and the system prompt only mentions
+        skills the conversation already activated, so the AI shouldn't
+        try in the first place.
+
+        Returns:
+            ``None`` when the call is allowed (slash invocation, or
+            skill is in the conversation's active list, or no
+            conversation context is available — system callers).
+            Otherwise a JSON-encoded error string the tool should
+            return verbatim so the AI sees the refusal and can ask
+            the user to enable the skill.
+        """
+        # Slash commands always pass — user typed it explicitly.
+        if arguments.get("_invocation_source") != "ai":
+            return None
+        # System callers (no conversation_id) bypass the gate; they're
+        # not user-driven and don't have an active-skills list to
+        # consult.
+        conv_id = arguments.get("_conversation_id")
+        if not conv_id:
+            return None
+        active = await self.get_active_skills(str(conv_id))
+        if skill_name in active:
+            return None
+        return json.dumps(
+            {
+                "error": (
+                    f"The '{skill_name}' skill is not active for this "
+                    "conversation. Tell the user something like \"I'd like to "
+                    f"use the '{skill_name}' skill for this — please enable "
+                    "it from the skills panel and ask me again.\" Do not "
+                    "retry this tool with the same skill_name in this turn."
+                ),
+                "skill_name": skill_name,
+                "active_skills": active,
+            }
+        )
 
     async def set_active_skills(
         self,
@@ -493,9 +751,76 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
     # ── Workspace ────────────────────────────────────────────────────
 
-    def _get_workspace(self, user_id: str, skill_name: str) -> Path:
-        """Get (and create) a user's workspace directory for a skill."""
-        workspace = self._user_skills_dir.parent / "skill-workspaces" / user_id / skill_name
+    def _workspace_root(self) -> Path:
+        """Top-level skill-workspaces directory."""
+        return self._user_skills_dir.parent / "skill-workspaces"
+
+    def _conversation_workspace_root(
+        self,
+        user_id: str,
+        conversation_id: str,
+    ) -> Path:
+        """Per-conversation root that holds every skill's workspace
+        for one user × one conversation. Cleaned up when the
+        conversation is deleted."""
+        return (
+            self._workspace_root()
+            / "users"
+            / user_id
+            / "conversations"
+            / conversation_id
+        )
+
+    def _legacy_workspace_dir(
+        self,
+        user_id: str,
+        skill_name: str,
+    ) -> Path:
+        """The pre-2026-04 path: a single workspace per (user, skill).
+
+        Kept around so old chats whose attachment references were
+        persisted under that shape still resolve. Never written to by
+        new code. Reads still hit it as a fallback when the new
+        conversation-scoped path doesn't have the file.
+        """
+        return self._workspace_root() / user_id / skill_name
+
+    def _get_workspace(
+        self,
+        user_id: str,
+        skill_name: str,
+        conversation_id: str | None = None,
+    ) -> Path:
+        """Resolve (and create) the workspace dir for a tool call.
+
+        With ``conversation_id`` set, returns the per-conversation
+        workspace at::
+
+            .gilbert/skill-workspaces/users/<user>/conversations/<conv>/<skill>/
+
+        This is the new default — files written by tools during a chat
+        live under the conversation that produced them, get isolated
+        from other chats, and get cleaned up when the conversation is
+        deleted.
+
+        Without ``conversation_id`` (system callers, slash commands
+        outside an active turn, code paths that pre-date the refactor),
+        returns the legacy per-user path::
+
+            .gilbert/skill-workspaces/<user>/<skill>/
+
+        Both paths are created on demand. Both can be read back via
+        ``skills.workspace.download`` — the WS handler tries the
+        conversation-scoped path first and falls back to legacy when
+        the attachment doesn't carry a ``workspace_conv``.
+        """
+        if conversation_id:
+            workspace = (
+                self._conversation_workspace_root(user_id, conversation_id)
+                / skill_name
+            )
+        else:
+            workspace = self._legacy_workspace_dir(user_id, skill_name)
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
@@ -995,18 +1320,39 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         action = arguments.get("action", "")
         user_id = arguments.get("_user_id", "system")
         user_roles = arguments.get("_user_roles")
+        invocation_source = arguments.get("_invocation_source", "ai")
+        conv_id = arguments.get("_conversation_id")
 
         if action == "list":
-            entries = [
-                {
-                    "name": e.name,
-                    "description": e.description,
-                    "category": e.category,
-                    "scope": e.scope,
-                }
-                for e in self._catalog.values()
-                if e.scope == "global" or e.owner_id == user_id
-            ]
+            # AI-driven listing is restricted to the conversation's
+            # active skills so Gilbert can't auto-discover skills the
+            # user hasn't explicitly enabled. Slash-command invocations
+            # (the user typing ``/skills list``) see the full catalog
+            # so they can browse what's installable.
+            if invocation_source == "ai" and conv_id:
+                active_names = set(await self.get_active_skills(str(conv_id)))
+                entries = [
+                    {
+                        "name": e.name,
+                        "description": e.description,
+                        "category": e.category,
+                        "scope": e.scope,
+                    }
+                    for e in self._catalog.values()
+                    if e.name in active_names
+                    and (e.scope == "global" or e.owner_id == user_id)
+                ]
+            else:
+                entries = [
+                    {
+                        "name": e.name,
+                        "description": e.description,
+                        "category": e.category,
+                        "scope": e.scope,
+                    }
+                    for e in self._catalog.values()
+                    if e.scope == "global" or e.owner_id == user_id
+                ]
             return json.dumps({"skills": entries, "count": len(entries)})
 
         if action == "install":
@@ -1265,6 +1611,10 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         rel_path = arguments.get("path", "")
         user_id = arguments.get("_user_id", "system")
 
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
+
         entry = self._resolve_skill_entry(skill_name, user_id)
         if entry is None or entry.location is None:
             return json.dumps({"error": f"Skill '{skill_name}' not found"})
@@ -1288,18 +1638,89 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         except (OSError, UnicodeDecodeError) as exc:
             return json.dumps({"error": f"Cannot read file: {exc}"})
 
+    def _resolve_workspace_file(
+        self,
+        user_id: str,
+        skill_name: str,
+        rel_path: str,
+        conversation_id: str | None,
+    ) -> tuple[Path | None, str | None]:
+        """Find a workspace file by trying conv-scoped then legacy paths.
+
+        Read paths use this helper so old chats can still surface files
+        their pre-refactor tool runs left under the legacy path. Write
+        paths intentionally only use ``_get_workspace`` directly so
+        new files always land in the conv-scoped tree.
+
+        Returns ``(target_path, error_message)``. On success, the path
+        is the resolved file and the error is ``None``. On path
+        traversal, returns ``(None, "Path traversal not allowed")``.
+        On missing file, returns ``(None, "File not found: …")``.
+
+        The traversal check fires against every candidate root regardless
+        of whether the directory exists — a malicious ``..`` path must be
+        rejected even when the workspace itself hasn't been created yet.
+        """
+        candidates: list[Path] = []
+        if conversation_id:
+            candidates.append(
+                self._conversation_workspace_root(user_id, conversation_id)
+                / skill_name
+            )
+        candidates.append(self._legacy_workspace_dir(user_id, skill_name))
+
+        # First pass: traversal check against every candidate. Done up
+        # front so a ``..`` path is rejected before any disk lookup.
+        for workspace in candidates:
+            target = (workspace / rel_path).resolve()
+            try:
+                target.relative_to(workspace.resolve())
+            except ValueError:
+                return None, "Path traversal not allowed"
+
+        # Second pass: actually find the file. Only directories that
+        # exist on disk get walked — the path resolution above already
+        # cleared the security check for both shapes.
+        for workspace in candidates:
+            if not workspace.is_dir():
+                continue
+            target = (workspace / rel_path).resolve()
+            if target.is_file():
+                return target, None
+        return None, f"File not found: {rel_path}"
+
+    @staticmethod
+    def _conv_id_from_args(arguments: dict[str, Any]) -> str | None:
+        """Pull the injected ``_conversation_id`` off tool arguments.
+
+        Returns ``None`` for calls that don't have a conversation
+        context (system callers, slash commands invoked outside an
+        active turn). Returning ``None`` makes ``_get_workspace`` fall
+        back to the legacy single-workspace-per-user-skill path.
+        """
+        conv_id = arguments.get("_conversation_id")
+        if isinstance(conv_id, str) and conv_id:
+            return conv_id
+        return None
+
     async def _tool_run_skill_script(self, arguments: dict[str, Any]) -> str:
         skill_name = arguments.get("skill_name", "")
         script_path = arguments.get("script", "")
         script_args = arguments.get("arguments", []) or []
         user_id = arguments.get("_user_id", "system")
 
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
+
         entry = self._resolve_skill_entry(skill_name, user_id)
         if entry is None or entry.location is None:
             return json.dumps({"error": f"Skill '{skill_name}' not found"})
 
         skill_dir = entry.location.parent
-        workspace = self._get_workspace(user_id, skill_name)
+        workspace = self._get_workspace(
+            user_id, skill_name, self._conv_id_from_args(arguments)
+        )
 
         return str(
             await _to_thread(
@@ -1315,25 +1736,50 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         skill_name = arguments.get("skill_name", "")
         user_id = arguments.get("_user_id", "system")
 
-        workspace = self._get_workspace(user_id, skill_name)
-        files = await _to_thread(self._list_workspace_files, workspace)
-        return json.dumps({"workspace": str(workspace), "files": files})
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
+
+        # Browse the conv-scoped workspace primarily; if it has no
+        # files and a legacy workspace exists, surface those too as a
+        # one-shot bridge for chats that pre-date the refactor.
+        conv_id = self._conv_id_from_args(arguments)
+        primary = self._get_workspace(user_id, skill_name, conv_id)
+        primary_files = await _to_thread(self._list_workspace_files, primary)
+        legacy_files: list[dict[str, Any]] = []
+        if conv_id and not primary_files:
+            legacy = self._legacy_workspace_dir(user_id, skill_name)
+            if legacy.is_dir():
+                legacy_files = await _to_thread(
+                    self._list_workspace_files, legacy
+                )
+        files = primary_files or legacy_files
+        return json.dumps(
+            {
+                "workspace": str(primary),
+                "files": files,
+                "legacy_fallback": bool(legacy_files and not primary_files),
+            }
+        )
 
     async def _tool_read_workspace_file(self, arguments: dict[str, Any]) -> str:
         skill_name = arguments.get("skill_name", "")
         rel_path = arguments.get("path", "")
         user_id = arguments.get("_user_id", "system")
 
-        workspace = self._get_workspace(user_id, skill_name)
-        target = (workspace / rel_path).resolve()
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
 
-        try:
-            target.relative_to(workspace.resolve())
-        except ValueError:
-            return json.dumps({"error": "Path traversal not allowed"})
-
-        if not target.is_file():
-            return json.dumps({"error": f"File not found: {rel_path}"})
+        target, err = self._resolve_workspace_file(
+            user_id,
+            skill_name,
+            rel_path,
+            self._conv_id_from_args(arguments),
+        )
+        if err is not None:
+            return json.dumps({"error": err})
+        assert target is not None  # err is None ⇒ target is set
 
         try:
             content = str(await _to_thread(target.read_text, "utf-8"))
@@ -1342,6 +1788,272 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             return content
         except (OSError, UnicodeDecodeError) as exc:
             return json.dumps({"error": f"Cannot read file: {exc}"})
+
+    async def _tool_write_workspace_file(
+        self,
+        arguments: dict[str, Any],
+    ) -> str:
+        """Write a text file to the user's skill workspace.
+
+        Path is resolved against the workspace root and path-traversal
+        guarded. Parent directories are created as needed. Output is
+        size-capped at 512 KB to match the text attachment limit — tools
+        that need to stage larger binary payloads should use a different
+        mechanism (and there currently isn't one; raise this cap or add
+        a binary variant if a plugin needs it).
+        """
+        skill_name = str(arguments.get("skill_name", "")).strip()
+        rel_path = str(arguments.get("path", "")).strip()
+        content = arguments.get("content", "")
+        user_id = arguments.get("_user_id", "system")
+
+        if not skill_name or not rel_path:
+            return json.dumps(
+                {"error": "skill_name and path are required"},
+            )
+        if not isinstance(content, str):
+            return json.dumps(
+                {"error": "content must be a string"},
+            )
+
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
+
+        max_bytes = 512 * 1024
+        byte_len = len(content.encode("utf-8"))
+        if byte_len > max_bytes:
+            return json.dumps(
+                {
+                    "error": (
+                        f"content too large ({byte_len} bytes > {max_bytes} max)"
+                    ),
+                },
+            )
+
+        workspace = self._get_workspace(
+            user_id, skill_name, self._conv_id_from_args(arguments)
+        )
+        target = (workspace / rel_path).resolve()
+
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return json.dumps({"error": "Path traversal not allowed"})
+
+        try:
+            await _to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await _to_thread(target.write_text, content, encoding="utf-8")
+        except OSError as exc:
+            return json.dumps({"error": f"Cannot write file: {exc}"})
+
+        try:
+            stored = target.relative_to(workspace.resolve()).as_posix()
+        except ValueError:
+            stored = rel_path
+
+        return json.dumps(
+            {
+                "status": "written",
+                "skill_name": skill_name,
+                "path": stored,
+                "bytes": byte_len,
+            }
+        )
+
+    async def _tool_run_workspace_script(
+        self,
+        arguments: dict[str, Any],
+    ) -> str:
+        """Execute a script that lives in the user's skill workspace.
+
+        Mirrors ``_tool_run_skill_script``'s subprocess handling but
+        resolves the script path against the workspace rather than the
+        skill directory. The workspace is also the ``cwd`` so any output
+        files land back in the workspace for later ``attach_workspace_file``
+        pickup.
+        """
+        skill_name = str(arguments.get("skill_name", "")).strip()
+        rel_path = str(arguments.get("path", "")).strip()
+        script_args = arguments.get("arguments", []) or []
+        user_id = arguments.get("_user_id", "system")
+
+        if not skill_name or not rel_path:
+            return json.dumps(
+                {"error": "skill_name and path are required"},
+            )
+
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return gate
+
+        workspace = self._get_workspace(
+            user_id, skill_name, self._conv_id_from_args(arguments)
+        )
+
+        return str(
+            await _to_thread(
+                self._do_run_workspace_script,
+                workspace,
+                rel_path,
+                script_args,
+            )
+        )
+
+    def _do_run_workspace_script(
+        self,
+        workspace: Path,
+        script_path: str,
+        script_args: list[Any],
+    ) -> str:
+        """Blocking workspace-script execution. Must run in executor."""
+        target = (workspace / script_path).resolve()
+
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return json.dumps({"error": "Path traversal not allowed"})
+
+        if not target.is_file():
+            return json.dumps({"error": f"Script not found: {script_path}"})
+
+        suffix = target.suffix.lower()
+        if suffix == ".py":
+            cmd = ["python3", str(target)] + [str(a) for a in script_args]
+        elif suffix == ".sh":
+            cmd = ["bash", str(target)] + [str(a) for a in script_args]
+        elif suffix in (".ts", ".js"):
+            cmd = ["node", str(target)] + [str(a) for a in script_args]
+        else:
+            cmd = [str(target)] + [str(a) for a in script_args]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = result.stdout
+            if result.stderr:
+                output += f"\n[stderr]\n{result.stderr}"
+            if result.returncode != 0:
+                output += f"\n[exit code: {result.returncode}]"
+            if len(output) > 30_000:
+                output = output[:30_000] + "\n\n[... truncated at 30,000 characters]"
+            return output if output.strip() else "(no output)"
+        except subprocess.TimeoutExpired:
+            return json.dumps({"error": "Script timed out after 30 seconds"})
+        except OSError as exc:
+            return json.dumps({"error": f"Cannot execute script: {exc}"})
+
+    async def _tool_attach_workspace_file(
+        self, arguments: dict[str, Any]
+    ) -> ToolResult:
+        """Attach a skill-workspace file to the assistant's reply.
+
+        Returns a ``ToolResult`` with a reference-style ``FileAttachment``
+        that the AIService collects and lands on the final assistant
+        ``Message``. The actual bytes stay on disk — the frontend fetches
+        them on click via ``skills.workspace.download``.
+
+        This is the lever that closes the "AI generated a file, user can't
+        download it" gap: the AI runs a script that writes a PDF to its
+        workspace, then calls this tool to hand the file back to the user
+        as a downloadable chip on the reply bubble.
+        """
+        skill_name = str(arguments.get("skill_name", "")).strip()
+        rel_path = str(arguments.get("path", "")).strip()
+        display_name = str(arguments.get("display_name", "")).strip()
+        user_id = arguments.get("_user_id", "system")
+
+        if not skill_name or not rel_path:
+            return ToolResult(
+                tool_call_id="",
+                content=json.dumps(
+                    {"error": "skill_name and path are required"}
+                ),
+                is_error=True,
+            )
+
+        gate = await self._assert_skill_accessible(skill_name, arguments)
+        if gate is not None:
+            return ToolResult(
+                tool_call_id="",
+                content=gate,
+                is_error=True,
+            )
+
+        conv_id = self._conv_id_from_args(arguments)
+        workspace = self._get_workspace(user_id, skill_name, conv_id)
+        target = (workspace / rel_path).resolve()
+
+        # Path-traversal guard — same logic as the download/read handlers.
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return ToolResult(
+                tool_call_id="",
+                content=json.dumps({"error": "Path traversal not allowed"}),
+                is_error=True,
+            )
+
+        if not target.is_file():
+            return ToolResult(
+                tool_call_id="",
+                content=json.dumps({"error": f"File not found: {rel_path}"}),
+                is_error=True,
+            )
+
+        # Store the workspace-relative path with forward slashes so the
+        # download handler on the other side can rebuild the path
+        # identically on every platform.
+        stored_path = target.relative_to(workspace.resolve()).as_posix()
+        name = display_name or target.name
+
+        media_type, _enc = mimetypes.guess_type(target.name)
+        media_type = media_type or "application/octet-stream"
+
+        # Bucket the file into one of the three attachment ``kind`` values
+        # the frontend already knows how to render. Images get inline
+        # previews; documents get file chips; anything else falls back to
+        # a text-kind chip (no preview, just a download link).
+        if media_type.startswith("image/"):
+            kind = "image"
+        elif media_type.startswith("text/") or media_type in (
+            "application/json",
+            "application/xml",
+        ):
+            kind = "text"
+        else:
+            kind = "document"
+
+        # Reference attachments carry the conversation id so the
+        # ``skills.workspace.download`` handler can find the same per-
+        # conversation workspace later. Old attachments persisted
+        # before this refactor have ``workspace_conv == ""`` and the
+        # download handler falls back to the legacy per-(user, skill)
+        # path for them.
+        attachment = FileAttachment(
+            kind=kind,
+            name=name,
+            media_type=media_type,
+            workspace_skill=skill_name,
+            workspace_path=stored_path,
+            workspace_conv=conv_id or "",
+        )
+        size_bytes = target.stat().st_size
+        summary = (
+            f"Attached {name} ({media_type}, {size_bytes} bytes) from "
+            f"workspace '{skill_name}'. The user will see a downloadable "
+            f"chip on your reply."
+        )
+        return ToolResult(
+            tool_call_id="",
+            content=summary,
+            attachments=(attachment,),
+        )
 
     def _resolve_skill_entry(
         self,
@@ -1459,6 +2171,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
     ) -> dict[str, Any]:
         user_id = getattr(conn, "user_id", "system")
         skill_name = frame.get("skill_name", "")
+        conv_id = frame.get("conversation_id") or None
         if not skill_name:
             return {
                 "type": "gilbert.error",
@@ -1466,12 +2179,13 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 "code": 400,
                 "error": "skill_name is required",
             }
-        workspace = self._get_workspace(user_id, skill_name)
+        workspace = self._get_workspace(user_id, skill_name, conv_id)
         files = await _to_thread(self._list_workspace_files, workspace)
         return {
             "type": "skills.workspace.browse.result",
             "ref": frame.get("id"),
             "skill_name": skill_name,
+            "conversation_id": conv_id,
             "files": files,
         }
 
@@ -1483,6 +2197,10 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         user_id = getattr(conn, "user_id", "system")
         skill_name = frame.get("skill_name", "")
         rel_path = frame.get("path", "")
+        # Frame may carry a ``conversation_id`` from the FileAttachment
+        # reference. When it's set, look in the per-conversation
+        # workspace; when it isn't, look in the legacy path.
+        conv_id = frame.get("conversation_id") or None
 
         if not skill_name or not rel_path:
             return {
@@ -1492,20 +2210,36 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 "error": "skill_name and path are required",
             }
 
-        workspace = self._get_workspace(user_id, skill_name)
-        target = (workspace / rel_path).resolve()
+        # Try the conv-scoped workspace first if a conv_id was provided,
+        # then fall back to the legacy per-(user, skill) path so old
+        # attachments persisted before the refactor still resolve. Both
+        # candidates are path-traversal checked individually.
+        candidates: list[Path] = []
+        if conv_id:
+            candidates.append(self._get_workspace(user_id, skill_name, conv_id))
+        candidates.append(self._legacy_workspace_dir(user_id, skill_name))
 
-        try:
-            target.relative_to(workspace.resolve())
-        except ValueError:
-            return {
-                "type": "gilbert.error",
-                "ref": frame.get("id"),
-                "code": 403,
-                "error": "Path traversal not allowed",
-            }
+        target: Path | None = None
+        chosen_workspace: Path | None = None
+        for workspace in candidates:
+            if not workspace.is_dir():
+                continue
+            candidate = (workspace / rel_path).resolve()
+            try:
+                candidate.relative_to(workspace.resolve())
+            except ValueError:
+                return {
+                    "type": "gilbert.error",
+                    "ref": frame.get("id"),
+                    "code": 403,
+                    "error": "Path traversal not allowed",
+                }
+            if candidate.is_file():
+                target = candidate
+                chosen_workspace = workspace
+                break
 
-        if not target.is_file():
+        if target is None or chosen_workspace is None:
             return {
                 "type": "gilbert.error",
                 "ref": frame.get("id"),
@@ -1515,12 +2249,14 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
         try:
             data = await _to_thread(target.read_bytes)
+            media_type, _enc = mimetypes.guess_type(target.name)
             return {
                 "type": "skills.workspace.download.result",
                 "ref": frame.get("id"),
                 "skill_name": skill_name,
                 "path": rel_path,
                 "filename": target.name,
+                "media_type": media_type or "application/octet-stream",
                 "size": len(data),
                 "content_base64": base64.b64encode(data).decode("ascii"),
             }

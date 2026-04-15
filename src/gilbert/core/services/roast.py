@@ -194,7 +194,7 @@ class RoastService(Service):
                     from gilbert.interfaces.auth import UserContext
 
                     prompt = self._ai_prompt.format(name=name)
-                    response, _, _ui, _tu = await ai_svc.chat(
+                    response, *_ = await ai_svc.chat(
                         prompt,
                         user_ctx=UserContext.SYSTEM,
                         ai_call="roast",

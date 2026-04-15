@@ -127,6 +127,19 @@ backend = ElevenLabsTTS()
 
 Backend ABCs following this pattern: `AIBackend`, `TTSBackend`, `AuthBackend`, `UserProviderBackend`, `TunnelBackend`, `VisionBackend`, `DocumentBackend`, `EmailBackend`, `MusicBackend`, `SpeakerBackend`, `DoorbellBackend`, `WebSearchBackend`.
 
+### AI Backend Streaming and Capabilities
+
+`AIBackend` exposes two optional surfaces on top of the base `generate()` contract so core code can branch on backend support without any provider-specific `isinstance` checks:
+
+- **`capabilities() -> AIBackendCapabilities`** — advertises `streaming` and `attachments_user` flags. Default returns both `False`; backends override to opt in.
+- **`generate_stream(request) -> AsyncIterator[StreamEvent]`** — yields provider-neutral `StreamEvent`s (`TEXT_DELTA`, `TOOL_CALL_START`, `TOOL_CALL_DELTA`, `TOOL_CALL_END`, `MESSAGE_COMPLETE`) as tokens arrive. The default implementation calls `generate()` and yields a single `MESSAGE_COMPLETE`, so backends that can't stream still compose with the core loop for free.
+
+`AIService.chat()` drives the backend via `generate_stream()` unconditionally and forwards each `TEXT_DELTA` onto the event bus as `chat.stream.text_delta` (with the conversation's audience in `visible_to`) for live frontend typing. `MESSAGE_COMPLETE` gives it the fully assembled `AIResponse` used for tool-call dispatch / stop-reason handling — identical to what the old non-streaming path returned.
+
+**All Anthropic-specific event names and SSE parsing live in `std-plugins/anthropic/anthropic_ai.py`.** Core never imports from the plugin. Adding a new streaming backend (OpenAI, Gemini, local llama.cpp) means implementing `generate_stream` on its own `AIBackend` subclass — nothing outside that file needs to change.
+
+**Max-tokens recovery.** `AIService` handles `StopReason.MAX_TOKENS` with two sub-cases: text-only cutoffs trigger a bounded "please continue" synthetic turn (configurable via `ai.max_continuation_rounds`, default 2) and adjacent assistant rows are merged at persist time so the user sees a single coherent bubble; a `max_tokens` response carrying truncated `tool_calls` is unrecoverable — the broken tool_call is stripped, an error is annotated onto the assistant message, and an entry is added to `tool_usage` so the UI can surface it. Raising the backend's `max_tokens` setting (default `16384` on Anthropic) is the user-facing fix.
+
 ### Capability Protocols
 
 Services resolve dependencies via `resolver.get_capability("name")`, which returns the abstract `Service` type. To access domain-specific methods without depending on concrete service classes, the codebase defines `@runtime_checkable Protocol` classes in `interfaces/`. Services use `isinstance` checks against these protocols — never against concrete service classes.
@@ -194,6 +207,78 @@ AI interactions use **named profiles** that control which tools are available. T
 - Profiles control *which* tools are available; RBAC controls *who* can use them. Both always apply.
 - Default profiles (`default`, `human_chat`, `text_only`, `sales_agent`) are seeded from built-in constants in `AIService` on first run.
 - New services that call `ai.chat()` should declare their `ai_calls` and pass the call name. The profile assignment can be configured without code changes.
+
+### Tool-Produced Attachments
+
+Tools can hand files back to the assistant message so the user can download them from the chat bubble. A tool returns a `ToolResult` (or `ToolOutput`) with an `attachments` tuple of `FileAttachment` objects; `AIService` collects every turn's tool attachments, lands them on the final assistant `Message`, and surfaces them on `ChatTurnResult.attachments` + the `chat.message.send.result` WS frame.
+
+`FileAttachment` has two modes:
+
+- **Inline** — `data` (base64) or `text` (UTF-8) carries the full payload. Used for user uploads coming in from the chat input.
+- **Workspace reference** — `workspace_skill` + `workspace_path` + `workspace_conv` together name a file on disk. With `workspace_conv` set (the normal case for tool-produced files), the path is `.gilbert/skill-workspaces/users/<user_id>/conversations/<workspace_conv>/<workspace_skill>/<workspace_path>`. With `workspace_conv` empty (legacy attachments persisted before per-conversation workspaces existed), it resolves to the legacy `.gilbert/skill-workspaces/<user_id>/<workspace_skill>/<workspace_path>`. No bytes ride on the message; the frontend fetches them on click via `skills.workspace.download` (which tries the conv-scoped path first, then falls back to legacy). This is the preferred mode for anything tool-generated (PDFs, images, spreadsheets) — keeps the conversation row small.
+
+**`SkillService.attach_workspace_file`** is the tool for this: give it `(skill_name, path, [display_name])` and it returns a reference-style attachment, stamped with the current `_conversation_id`, that the frontend renders as a download chip. The typical flow is "run a script that writes a PDF to the workspace, then call `attach_workspace_file` to hand it back."
+
+### Per-Conversation Skill Workspaces
+
+Every `(user, skill, conversation)` triple gets its own workspace directory:
+
+```
+.gilbert/skill-workspaces/
+    users/
+        <user_id>/
+            conversations/
+                <conversation_id>/
+                    <skill_name>/         ← default for in-chat tool runs
+                        generate_po.py
+                        po.pdf
+                        ...
+    <user_id>/                            ← legacy single-workspace shape
+        <skill_name>/                     (read-only fallback for old chats)
+            ...
+```
+
+This isolation is enforced by `SkillService._get_workspace(user_id, skill_name, conversation_id)`. Tools read the conversation id from the injected `_conversation_id` argument (set by both `AIService._execute_tool_calls` and `_execute_slash_command`) and pass it through. Read-side tools (`read_skill_workspace_file`, `browse_skill_workspace`, the `skills.workspace.download` WS handler) try the conv-scoped path first and fall back to the legacy per-(user, skill) path so attachments persisted before the refactor still resolve. Write-side tools (`write_skill_workspace_file`, `run_workspace_script`, `attach_workspace_file`) only touch the conv-scoped path — new files never land in legacy.
+
+When a personal conversation is deleted via `chat.conversation.delete`, `AIService` publishes `chat.conversation.destroyed` with `{conversation_id, owner_id}`. `SkillService` subscribes at start time and runs `shutil.rmtree` on the matching `users/<owner>/conversations/<conv>/` subtree. Defense-in-depth refuses to rm anything outside `_workspace_root().resolve()`.
+
+### Skill Activation Gate
+
+Skill activation in this codebase has dual semantics:
+
+1. **Soft signal (always was):** activated skills get their `SKILL.md` instructions injected into the system prompt via `SkillService.build_skills_context()`. Activation is per-conversation, stored on the conversation row's `state.active_skills`.
+2. **Hard gate (new):** AI-driven calls to skill tools — `read_skill_file`, `run_skill_script`, `browse_skill_workspace`, `read_skill_workspace_file`, `write_skill_workspace_file`, `run_workspace_script`, `attach_workspace_file` — refuse when the skill isn't on the conversation's active list. The refusal is a JSON error string telling the AI to ask the user to enable the skill instead of retrying.
+
+Slash invocations bypass the gate. The user typing `/skill wsread pdf foo.txt` is an explicit "use this skill in this chat" signal, so it's allowed even when pdf isn't activated. System callers (no `_conversation_id`) also bypass — they don't have an active-skills list to consult.
+
+The mechanism: both `_execute_tool_calls` and `_execute_slash_command` inject two new underscore-prefixed args alongside `_user_id` etc.: `_conversation_id` and `_invocation_source` (`"ai"` or `"slash"`). `_sanitize_tool_args` strips underscore-prefixed keys before they're shown in the UI. `SkillService._assert_skill_accessible(skill_name, arguments)` is the gate helper called at the top of every gated tool.
+
+`manage_skills(action=list)` is also gated for the AI: when invoked via the AI path on a conversation context, it returns only skills active for that conversation. Slash invocations and system callers see the full catalog.
+
+### Chat Turn Grouping
+
+Conversation history is delivered to the frontend as a list of **turns**, not individual messages. A turn is one user→assistant exchange:
+
+```
+ChatTurn = {
+    user_message: { content, attachments, [author_id, author_name] },
+    rounds: [
+        { reasoning: str, tools: [{tool_call_id, tool_name, arguments,
+                                   result, is_error}, ...] },
+        ...
+    ],
+    final_content: str,
+    final_attachments: [...],
+    incomplete: bool,         # true if turn never reached a final answer
+                              # (max_tool_rounds, error, ...)
+}
+```
+
+The `chat.history.load.result` frame returns `turns: list[ChatTurn]` instead of the old flat `messages` list. `chat.message.send.result` returns the same `rounds` field on the just-finished turn so the frontend can commit the authoritative shape after streaming. `AIService.chat()` builds `turn_rounds` alongside `tool_usage` during the agentic loop; the slash-command path emits a zero-rounds turn with the tool result as `final_content`. History replay walks the persisted message rows in `_group_persisted_messages_into_turns` and produces the same shape.
+
+Frontend renders one `TurnBubble` per turn: user message at top, a collapsible "thinking card" showing per-round reasoning + tool calls, and the final answer below. The thinking card shows a live preview of the most recent reasoning + tool name in its collapsed header, updates incrementally from `chat.stream.text_delta` / `chat.tool.started` / `chat.tool.completed` events, and uses `chat.stream.round_complete` as the explicit round-boundary signal so text from the next round goes into a fresh round entry instead of getting concatenated to the previous one.
+
+### Slash Commands — Direct Tool Invocation
 
 ### Slash Commands — Direct Tool Invocation
 

@@ -647,7 +647,7 @@ class SchedulerService(Service):
             return
 
         try:
-            response_text, _, _, _ = await ai_svc.chat(
+            response_text, *_ = await ai_svc.chat(
                 user_message=action.ai_prompt,
                 user_ctx=UserContext.SYSTEM,
                 system_prompt=_SCHEDULED_ACTION_SYSTEM_PROMPT,

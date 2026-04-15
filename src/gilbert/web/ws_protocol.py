@@ -150,6 +150,18 @@ class WsConnection:
             if visible_to is not None and self.user_id not in visible_to:
                 return False
 
+        # Live-streaming events (chat.stream.*) — e.g. ``chat.stream.text_delta``
+        # for incremental assistant-text rendering. These don't go through
+        # shared_conv_ids membership tracking because personal chats aren't
+        # rooms; instead, the publisher sets ``visible_to`` to the explicit
+        # list of user_ids that should see the event (conversation owner
+        # for personal chats, all members for shared rooms). If no
+        # ``visible_to`` is set, the event is treated as broadcast.
+        if event.event_type.startswith("chat.stream."):
+            visible_to = event.data.get("visible_to")
+            if visible_to is not None and self.user_id not in visible_to:
+                return False
+
         return True
 
     def enqueue(self, frame: dict[str, Any]) -> None:

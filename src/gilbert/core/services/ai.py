@@ -26,10 +26,12 @@ from gilbert.interfaces.ai import (
     AIContextProfile,
     AIRequest,
     AIResponse,
+    ChatTurnResult,
     FileAttachment,
     Message,
     MessageRole,
     StopReason,
+    StreamEventType,
 )
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
@@ -295,6 +297,40 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
             )
 
     return result
+
+
+def _serialize_attachments_for_wire(
+    attachments: list[FileAttachment],
+) -> list[dict[str, Any]]:
+    """Shape a list of ``FileAttachment`` for a WebSocket frame payload.
+
+    Inline attachments (``data`` / ``text`` set) round-trip as-is so the
+    frontend can render them immediately. Workspace-reference attachments
+    carry just their coordinates — the frontend calls
+    ``skills.workspace.download`` on click to fetch the bytes, which keeps
+    the chat frame small and keeps large generated files (PDFs, images)
+    on disk instead of round-tripping through the WS for every history
+    load.
+    """
+    out: list[dict[str, Any]] = []
+    for att in attachments:
+        entry: dict[str, Any] = {
+            "kind": att.kind,
+            "name": att.name,
+            "media_type": att.media_type,
+        }
+        if att.data:
+            entry["data"] = att.data
+        if att.text:
+            entry["text"] = att.text
+        if att.workspace_skill:
+            entry["workspace_skill"] = att.workspace_skill
+        if att.workspace_path:
+            entry["workspace_path"] = att.workspace_path
+        if att.workspace_conv:
+            entry["workspace_conv"] = att.workspace_conv
+        out.append(entry)
+    return out
 
 
 # ── Persona constants and helper ──────────────────────────────
@@ -607,7 +643,13 @@ class AIService(Service):
         self._config: dict[str, Any] = {}
         self._system_prompt: str = ""
         self._max_history_messages: int = 50
-        self._max_tool_rounds: int = 10
+        self._max_tool_rounds: int = 15
+        # When a backend reports StopReason.MAX_TOKENS on a text-only response,
+        # the agentic loop can issue a bounded "please continue" turn to let
+        # the model finish its reply. This cap bounds how many such recoveries
+        # happen per chat turn so a pathological stream can't burn tokens
+        # forever. Applies independently of _max_tool_rounds.
+        self._max_continuation_rounds: int = 2
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
@@ -712,6 +754,9 @@ class AIService(Service):
         """Apply tunable config values from a config section."""
         self._max_history_messages = section.get("max_history_messages", self._max_history_messages)
         self._max_tool_rounds = section.get("max_tool_rounds", self._max_tool_rounds)
+        self._max_continuation_rounds = section.get(
+            "max_continuation_rounds", self._max_continuation_rounds
+        )
         self._config = section.get("settings", self._config)
 
     # --- Configurable protocol ---
@@ -736,7 +781,17 @@ class AIService(Service):
                 key="max_tool_rounds",
                 type=ToolParameterType.INTEGER,
                 description="Maximum agentic loop iterations (tool call rounds) per chat.",
-                default=10,
+                default=15,
+            ),
+            ConfigParam(
+                key="max_continuation_rounds",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "When the backend reports a max_tokens cutoff on a text-only "
+                    "response, the loop issues a bounded 'please continue' turn. "
+                    "This caps how many such recoveries happen per chat turn."
+                ),
+                default=2,
             ),
             ConfigParam(
                 key="backend",
@@ -1026,7 +1081,7 @@ class AIService(Service):
         system_prompt: str | None = None,
         ai_call: str | None = None,
         attachments: list[FileAttachment] | None = None,
-    ) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
         Args:
@@ -1044,9 +1099,14 @@ class AIService(Service):
                 text attachments are inlined into the prompt body.
 
         Returns:
-            (response_text, conversation_id, ui_blocks, tool_usage) tuple.
-            ``ui_blocks`` is a list of serialized UI block dicts (possibly empty).
-            ``tool_usage`` is a list of {tool_name, is_error} dicts.
+            A :class:`ChatTurnResult` ``NamedTuple`` carrying
+            ``(response_text, conversation_id, ui_blocks, tool_usage,
+            attachments)``. Old-style tuple unpacking still works for the
+            first four fields via ``text, cid, ui, tu, *_ = ...``; new
+            callers that care about attachments can destructure all five
+            or use attribute access (``result.attachments``).
+            ``attachments`` on the returned value is the list of files
+            tool calls produced for the user to download from this turn.
         """
         if self._backend is None:
             raise RuntimeError("AI service is not enabled")
@@ -1108,11 +1168,13 @@ class AIService(Service):
                 messages,
                 user_ctx=user_ctx,
             )
-            return (
-                error_text,
-                conversation_id,
-                [],
-                [{"tool_name": f"/{first_word}", "is_error": True}],
+            return ChatTurnResult(
+                response_text=error_text,
+                conversation_id=conversation_id,
+                ui_blocks=[],
+                tool_usage=[{"tool_name": f"/{first_word}", "is_error": True}],
+                attachments=[],
+                rounds=[],
             )
 
         # Append user message
@@ -1161,10 +1223,42 @@ class AIService(Service):
                 conversation_id=conversation_id,
             )
 
+        # Resolve the list of user_ids that should receive live streaming
+        # events for this conversation. Personal chats stream to their
+        # owner only; shared rooms stream to every current member. Done
+        # once at the start of the turn so we don't hit storage on every
+        # text-delta chunk inside the loop.
+        stream_visible_to = await self._resolve_stream_audience(
+            conversation_id,
+            user_ctx,
+        )
+
         # Agentic loop
         response: AIResponse | None = None
         all_ui_blocks: list[UIBlock] = []
         tool_usage: list[dict[str, Any]] = []
+        # Structured per-round breakdown used by the frontend's turn
+        # bubble UI. Each entry represents one AI round that went through
+        # tool execution, with the reasoning text the assistant produced
+        # alongside the tool_use blocks and the fully-paired tool entries
+        # (including final result + is_error). The ``final`` round — the
+        # last round of the loop, which produces the user-visible answer
+        # — is NOT emitted here; its content rides on ``final_content``
+        # on the returned ``ChatTurnResult``.
+        turn_rounds: list[dict[str, Any]] = []
+        # Files produced by tool calls during this turn — collected across
+        # every round and then landed on the final assistant ``Message`` so
+        # the frontend can render download chips next to the reply. Both
+        # inline and workspace-reference attachments flow through here.
+        turn_attachments: list[FileAttachment] = []
+        # Indices (into ``messages``) of synthetic "please continue" user
+        # messages injected when a backend reports StopReason.MAX_TOKENS on a
+        # text-only response. These exist purely to let the next request
+        # continue the reply, and are stripped from the persisted history so
+        # the user sees one coherent assistant bubble instead of the internal
+        # recovery mechanics.
+        continuation_indices: set[int] = set()
+        continuation_count = 0
 
         for round_num in range(self._max_tool_rounds):
             truncated = self._truncate_history(messages)
@@ -1183,48 +1277,278 @@ class AIService(Service):
                 tools=tool_defs if tool_defs else [],
             )
 
-            response = await self._backend.generate(request)
+            # Drive the backend via ``generate_stream``. For backends that
+            # implement true streaming (like AnthropicAI), each TEXT_DELTA
+            # chunk gets forwarded onto the event bus as a
+            # ``chat.stream.text_delta`` event so the frontend can type
+            # out the response live. The MESSAGE_COMPLETE event carries
+            # the fully-assembled response that the rest of the agentic
+            # loop uses for stop_reason + tool_call handling — identical
+            # to the old non-streaming ``await self._backend.generate()``
+            # return value.
+            #
+            # Backends that don't implement streaming inherit the default
+            # fallback on the ABC which calls ``generate()`` and yields
+            # exactly one MESSAGE_COMPLETE, so this path is free of cost
+            # for them.
+            response = None
+            async for stream_ev in self._backend.generate_stream(request):
+                if stream_ev.type == StreamEventType.TEXT_DELTA:
+                    if stream_ev.text:
+                        await self._publish_event(
+                            "chat.stream.text_delta",
+                            {
+                                "conversation_id": conversation_id,
+                                "text": stream_ev.text,
+                                "visible_to": stream_visible_to,
+                            },
+                        )
+                elif stream_ev.type == StreamEventType.MESSAGE_COMPLETE:
+                    response = stream_ev.response
+                # TOOL_CALL_START / TOOL_CALL_DELTA / TOOL_CALL_END are
+                # redundant with the chat.tool.started / chat.tool.completed
+                # events that _execute_tool_calls already fires with full
+                # arguments + results. Skip here to avoid double-accounting.
+
+            if response is None:
+                raise RuntimeError(
+                    "AI backend stream ended without MESSAGE_COMPLETE — "
+                    "this is a backend bug, not a recoverable condition"
+                )
             self._log_api_call(request, response, round_num)
+
+            # Tell listeners the incremental text for this round is done
+            # so they can commit their buffer and prepare for the next
+            # round (tool execution, another AI round, or turn end).
+            if self._backend.capabilities().streaming:
+                await self._publish_event(
+                    "chat.stream.round_complete",
+                    {
+                        "conversation_id": conversation_id,
+                        "visible_to": stream_visible_to,
+                    },
+                )
 
             # Append assistant message to history
             messages.append(response.message)
 
-            # If no tool calls, we're done
-            if response.stop_reason != StopReason.TOOL_USE or not response.message.tool_calls:
-                break
+            stop = response.stop_reason
 
-            # Execute tool calls and append results
-            tool_results, round_ui_blocks = await self._execute_tool_calls(
-                response.message.tool_calls,
-                tools_by_name,
-                user_ctx=user_ctx,
-                profile=profile,
-            )
-            all_ui_blocks.extend(round_ui_blocks)
-            messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
+            # Normal tool-use path.
+            if stop == StopReason.TOOL_USE and response.message.tool_calls:
+                tool_results, round_ui_blocks = await self._execute_tool_calls(
+                    response.message.tool_calls,
+                    tools_by_name,
+                    user_ctx=user_ctx,
+                    profile=profile,
+                )
+                all_ui_blocks.extend(round_ui_blocks)
+                messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
 
-            # Track tool usage for the response metadata. Arguments are
-            # sanitized to drop injected ``_user_id`` / ``_room_members``
-            # keys before the payload is sent to the frontend.
-            for tc, tr in zip(
-                response.message.tool_calls,
-                tool_results,
-                strict=False,
-            ):
-                tool_usage.append(
-                    {
+                # Collect any files produced by tool calls — these will
+                # ride back on the final assistant ``Message`` at the end
+                # of the turn.
+                for tr in tool_results:
+                    if tr.attachments:
+                        turn_attachments.extend(tr.attachments)
+
+                # Track tool usage for the response metadata. Arguments are
+                # sanitized to drop injected ``_user_id`` / ``_room_members``
+                # keys before the payload is sent to the frontend.
+                # The assistant may have emitted a reasoning preamble
+                # alongside its tool_use blocks ("Let me check the
+                # workspace first..."). Attach it to every tool_usage
+                # entry from this round so the frontend's "tools used"
+                # panel can render the reasoning as a caption next to
+                # each call. Persisted with the conversation so a reload
+                # reconstructs the same display.
+                round_reasoning = response.message.content or ""
+                round_tools: list[dict[str, Any]] = []
+                for tc, tr in zip(
+                    response.message.tool_calls,
+                    tool_results,
+                    strict=False,
+                ):
+                    entry = {
+                        "tool_call_id": tc.tool_call_id,
                         "tool_name": tc.tool_name,
                         "is_error": tr.is_error,
                         "arguments": self._sanitize_tool_args(tc.arguments),
                         "result": tr.content,
                     }
+                    # Flat tool_usage retains per-entry reasoning so any
+                    # legacy frontend code still works; the new turn UI
+                    # reads reasoning off the round instead.
+                    tool_usage.append({**entry, "reasoning": round_reasoning})
+                    round_tools.append(entry)
+                turn_rounds.append(
+                    {
+                        "reasoning": round_reasoning,
+                        "tools": round_tools,
+                    }
                 )
+                continue
+
+            # Max-tokens recovery. The backend ran up against its output-token
+            # cap before finishing this round. There are two sub-cases:
+            #
+            # 1. The response carries ``tool_calls`` — we can't tell whether
+            #    the tool's JSON input is complete or was cut off mid-field,
+            #    and either way executing a partially-specified tool is
+            #    unsafe. Strip the tool calls, annotate the message, and
+            #    break with an error entry in tool_usage so the frontend can
+            #    surface it. Raising ``ai.settings.max_tokens`` is the user-
+            #    facing fix, so the annotation tells them that.
+            #
+            # 2. Text-only — the model ran out of tokens while writing prose.
+            #    Inject a synthetic user message asking it to continue, loop
+            #    again, and keep doing that up to ``_max_continuation_rounds``
+            #    times. The synthetic messages are tracked in
+            #    ``continuation_indices`` so they can be stripped before
+            #    persistence, and adjacent assistant rows are merged so the
+            #    saved history reads as a single coherent reply.
+            if stop == StopReason.MAX_TOKENS:
+                if response.message.tool_calls:
+                    truncated_names = [tc.tool_name for tc in response.message.tool_calls]
+                    logger.warning(
+                        "max_tokens truncated a tool call mid-input "
+                        "(conversation=%s, tools=%s) — raising "
+                        "ai.settings.max_tokens may help",
+                        conversation_id,
+                        truncated_names,
+                    )
+                    note = (
+                        f"(My previous response was cut off mid tool call "
+                        f"({', '.join(truncated_names)}) because it exceeded "
+                        f"the model's max_tokens limit. Raise the AI service's "
+                        f"max_tokens setting or retry with a smaller request.)"
+                    )
+                    existing_text = response.message.content or ""
+                    combined = (
+                        f"{existing_text}\n\n{note}" if existing_text else note
+                    )
+                    # Rewrite the just-appended assistant row so we don't
+                    # persist a broken tool_call input that would make the
+                    # next turn's request invalid.
+                    messages[-1] = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=combined,
+                        tool_calls=[],
+                        author_id=response.message.author_id,
+                        author_name=response.message.author_name,
+                        visible_to=response.message.visible_to,
+                        attachments=list(response.message.attachments),
+                    )
+                    response = AIResponse(
+                        message=messages[-1],
+                        model=response.model,
+                        stop_reason=StopReason.MAX_TOKENS,
+                        usage=response.usage,
+                    )
+                    tool_usage.append(
+                        {
+                            "tool_name": "<max_tokens_truncation>",
+                            "is_error": True,
+                            "arguments": {},
+                            "result": f"Truncated mid tool_use: {', '.join(truncated_names)}",
+                        }
+                    )
+                    break
+
+                # Text-only truncation — bounded continuation.
+                if continuation_count >= self._max_continuation_rounds:
+                    logger.warning(
+                        "max_tokens recovery exhausted after %d continuations "
+                        "(conversation=%s)",
+                        continuation_count,
+                        conversation_id,
+                    )
+                    existing_text = response.message.content or ""
+                    annotated = (
+                        existing_text
+                        + "\n\n(Note: response still truncated after "
+                        f"{continuation_count} continuation attempts. Raise "
+                        "the AI service's max_tokens and retry for a "
+                        "complete reply.)"
+                    )
+                    messages[-1] = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=annotated,
+                        author_id=response.message.author_id,
+                        author_name=response.message.author_name,
+                        visible_to=response.message.visible_to,
+                        attachments=list(response.message.attachments),
+                    )
+                    response = AIResponse(
+                        message=messages[-1],
+                        model=response.model,
+                        stop_reason=StopReason.MAX_TOKENS,
+                        usage=response.usage,
+                    )
+                    break
+
+                continuation_count += 1
+                continuation_indices.add(len(messages))
+                messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            "Please continue your previous response — it was "
+                            "cut off by a response size limit. Pick up "
+                            "exactly where you left off; do not repeat "
+                            "anything you've already said."
+                        ),
+                    )
+                )
+                continue
+
+            # END_TURN or any other terminal stop — normal completion.
+            break
         else:
             logger.warning(
                 "Agentic loop hit max rounds (%d) for conversation %s",
                 self._max_tool_rounds,
                 conversation_id,
             )
+
+        # Collapse any max_tokens continuations: drop the synthetic
+        # continuation user rows and merge adjacent assistant text rows so
+        # both the persisted history and the returned final_text look like
+        # a single coherent reply instead of leaking the recovery mechanics.
+        if continuation_indices:
+            messages[:] = self._collapse_continuations(
+                messages,
+                continuation_indices,
+            )
+            # The final assistant row after collapse carries the concatenated
+            # text. Rebuild ``response`` so the tuple returned to the caller
+            # reflects that combined content.
+            if messages and messages[-1].role == MessageRole.ASSISTANT and response is not None:
+                response = AIResponse(
+                    message=messages[-1],
+                    model=response.model,
+                    stop_reason=response.stop_reason,
+                    usage=response.usage,
+                )
+
+        # Land any tool-produced attachments on the final assistant
+        # ``Message`` so they get persisted with the conversation and ride
+        # through the WS send result. We mutate the last assistant row in
+        # place — ``Message`` is a mutable dataclass, and its
+        # ``attachments`` field is a list.
+        if turn_attachments:
+            for msg in reversed(messages):
+                if msg.role == MessageRole.ASSISTANT:
+                    msg.attachments.extend(turn_attachments)
+                    # Rebuild ``response`` so the live return carries them too.
+                    if response is not None and response.message is not msg:
+                        response = AIResponse(
+                            message=msg,
+                            model=response.model,
+                            stop_reason=response.stop_reason,
+                            usage=response.usage,
+                        )
+                    break
 
         # Count *visible* assistant messages to determine response_index
         # for UI blocks. The agentic loop appends one assistant row per
@@ -1256,7 +1580,28 @@ class AIService(Service):
 
         # Return final text response
         final_text = response.message.content if response else ""
-        return final_text, conversation_id, ui_block_dicts, tool_usage
+
+        # Signal end-of-turn to streaming listeners so they can drop
+        # any in-flight streaming buffers and fall back to the
+        # authoritative send.result/history paths. No-op when the
+        # backend doesn't support streaming.
+        if self._backend and self._backend.capabilities().streaming:
+            await self._publish_event(
+                "chat.stream.turn_complete",
+                {
+                    "conversation_id": conversation_id,
+                    "visible_to": stream_visible_to,
+                },
+            )
+
+        return ChatTurnResult(
+            response_text=final_text,
+            conversation_id=conversation_id,
+            ui_blocks=ui_block_dicts,
+            tool_usage=tool_usage,
+            attachments=list(turn_attachments),
+            rounds=turn_rounds,
+        )
 
     # --- System Prompt ---
 
@@ -1317,9 +1662,20 @@ class AIService(Service):
                     "This system supports skills — specialized instruction sets that "
                     "users can enable or disable per conversation. Skills may appear or "
                     "disappear between messages as the user toggles them. When skills "
-                    "are active, their instructions will appear below. Follow them when "
-                    "relevant. If a skill you were using disappears, the user disabled "
-                    "it — stop following its instructions.\n\n"
+                    "are active for this conversation, their instructions will appear "
+                    "below. Follow them when relevant. If a skill you were using "
+                    "disappears, the user disabled it — stop following its instructions.\n\n"
+                    "**Important — gated skill access.** Skill tools (read_skill_file, "
+                    "run_skill_script, write_skill_workspace_file, "
+                    "run_workspace_script, attach_workspace_file, "
+                    "browse_skill_workspace, read_skill_workspace_file) only work on "
+                    "skills the user has activated for THIS conversation. If you reach "
+                    "for a skill that isn't active, the tool will refuse with an "
+                    "instruction telling you to ask the user to enable it. Do NOT call "
+                    "those tools speculatively to see what skills exist — only use "
+                    "skills that already appear below. If you need a skill that isn't "
+                    "active, ask the user to enable it from the Skills panel and then "
+                    "ask you again.\n\n"
                     "### Creating Skills\n"
                     "Users can ask you to create custom skills. When they do, guide them "
                     "through the process conversationally — you don't need to explain the "
@@ -1513,8 +1869,17 @@ class AIService(Service):
                 tc.arguments["_user_name"] = user_ctx.display_name
                 tc.arguments["_user_roles"] = list(user_ctx.roles)
 
-            # Inject room members if in a shared conversation
+            # Inject conversation id + invocation source so tools can
+            # gate behavior on the active conversation (e.g. SkillService
+            # refuses inactive skills when called via the AI path but
+            # not when called via slash). Slash-command invocations set
+            # ``_invocation_source = "slash"`` to bypass that gate.
             conv_id = getattr(self, "_current_conversation_id", None)
+            if conv_id:
+                tc.arguments["_conversation_id"] = conv_id
+            tc.arguments["_invocation_source"] = "ai"
+
+            # Inject room members if in a shared conversation
             storage = getattr(self, "_storage", None)
             if conv_id and storage:
                 conv_data = await storage.get(_COLLECTION, conv_id)
@@ -1527,7 +1892,7 @@ class AIService(Service):
                         for m in conv_data.get("members", [])
                     ]
 
-            await self._publish_tool_event(
+            await self._publish_event(
                 "chat.tool.started",
                 {
                     "conversation_id": self._current_conversation_id,
@@ -1547,9 +1912,24 @@ class AIService(Service):
             try:
                 raw_result = await provider.execute_tool(tc.tool_name, tc.arguments)
 
-                # Normalize: tools may return str (backward compat) or ToolOutput
-                if isinstance(raw_result, ToolOutput):
+                # Normalize: tools may return
+                #   - ``str``                 (simple text)
+                #   - ``ToolOutput``          (text + ui_blocks + attachments)
+                #   - ``ToolResult``          (for callers that need full control)
+                # The uniform internal shape is a ``ToolResult`` with an
+                # ``attachments`` tuple that we collect at the turn level.
+                # The tool's own ``tool_call_id`` is ignored — we rebind to
+                # the live ``ToolCall.tool_call_id`` so the model sees a
+                # result that matches its request id.
+                tool_attachments: tuple[FileAttachment, ...] = ()
+                result_is_error = False
+                if isinstance(raw_result, ToolResult):
+                    result_text = raw_result.content
+                    tool_attachments = raw_result.attachments
+                    result_is_error = raw_result.is_error
+                elif isinstance(raw_result, ToolOutput):
                     result_text = raw_result.text
+                    tool_attachments = raw_result.attachments
                     for block in raw_result.ui_blocks:
                         import dataclasses as _dc
 
@@ -1567,10 +1947,12 @@ class AIService(Service):
                     ToolResult(
                         tool_call_id=tc.tool_call_id,
                         content=result_text,
+                        is_error=result_is_error,
+                        attachments=tool_attachments,
                     )
                 )
 
-                await self._publish_tool_event(
+                await self._publish_event(
                     "chat.tool.completed",
                     {
                         "conversation_id": self._current_conversation_id,
@@ -1589,7 +1971,7 @@ class AIService(Service):
                         is_error=True,
                     )
                 )
-                await self._publish_tool_event(
+                await self._publish_event(
                     "chat.tool.completed",
                     {
                         "conversation_id": self._current_conversation_id,
@@ -1602,6 +1984,74 @@ class AIService(Service):
         return results, ui_blocks
 
     # --- Slash-command execution ---
+
+    @staticmethod
+    def _collapse_continuations(
+        messages: list[Message],
+        continuation_indices: set[int],
+    ) -> list[Message]:
+        """Remove synthetic max_tokens continuation user rows and merge the
+        adjacent assistant text rows they used to split.
+
+        After a max_tokens recovery sequence, the in-memory history looks
+        like::
+
+            USER (original)
+            ASSISTANT (first chunk)
+            USER  <-- synthetic "please continue"
+            ASSISTANT (second chunk)
+            USER  <-- synthetic "please continue"
+            ASSISTANT (final chunk)
+
+        which is valid for the backend (strict role alternation) but a
+        bad thing to persist and show the user. After collapse::
+
+            USER (original)
+            ASSISTANT (first chunk\\n\\nsecond chunk\\n\\nfinal chunk)
+
+        Assistant rows that carry ``tool_calls`` are never merged — those
+        are part of the tool-use pairing with a following ``tool_result``
+        row and must stay intact.
+
+        ``continuation_indices`` is the set of positions in ``messages``
+        that were added as synthetic user rows by the loop. Everything
+        else is left alone, so the prior conversation history and any
+        intermediate tool_result rows come through unchanged.
+        """
+        cleaned: list[Message] = [
+            m for i, m in enumerate(messages) if i not in continuation_indices
+        ]
+        merged: list[Message] = []
+        for msg in cleaned:
+            if (
+                merged
+                and msg.role == MessageRole.ASSISTANT
+                and merged[-1].role == MessageRole.ASSISTANT
+                and not msg.tool_calls
+                and not merged[-1].tool_calls
+            ):
+                prev = merged[-1]
+                prev_text = prev.content or ""
+                next_text = msg.content or ""
+                if prev_text and next_text:
+                    combined_content = f"{prev_text}\n\n{next_text}"
+                elif prev_text:
+                    combined_content = prev_text
+                else:
+                    combined_content = next_text
+                merged[-1] = Message(
+                    role=MessageRole.ASSISTANT,
+                    content=combined_content,
+                    tool_calls=[],
+                    tool_results=list(prev.tool_results) + list(msg.tool_results),
+                    author_id=prev.author_id or msg.author_id,
+                    author_name=prev.author_name or msg.author_name,
+                    visible_to=prev.visible_to,
+                    attachments=list(prev.attachments) + list(msg.attachments),
+                )
+            else:
+                merged.append(msg)
+        return merged
 
     @staticmethod
     def _resolve_slash_namespace(provider: ToolProvider) -> str:
@@ -1720,11 +2170,11 @@ class AIService(Service):
         messages: list[Message],
         conversation_id: str,
         user_ctx: UserContext | None,
-    ) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> ChatTurnResult:
         """Parse, execute, and persist a slash command.
 
-        Returns the same tuple shape as ``chat()`` so callers can't tell
-        the difference between a slash command and an AI turn.
+        Returns the same ``ChatTurnResult`` shape as ``chat()`` so callers
+        can't tell the difference between a slash command and an AI turn.
         """
         provider, tool_def = entry
 
@@ -1762,11 +2212,11 @@ class AIService(Service):
                 messages,
                 user_ctx=user_ctx,
             )
-            return (
-                error_text,
-                conversation_id,
-                [],
-                [
+            return ChatTurnResult(
+                response_text=error_text,
+                conversation_id=conversation_id,
+                ui_blocks=[],
+                tool_usage=[
                     {
                         "tool_name": tool_def.name,
                         "is_error": True,
@@ -1774,6 +2224,8 @@ class AIService(Service):
                         "result": error_text,
                     }
                 ],
+                attachments=[],
+                rounds=[],
             )
 
         # Inject caller identity so tools can see who invoked them,
@@ -1782,6 +2234,13 @@ class AIService(Service):
             arguments["_user_id"] = user_ctx.user_id
             arguments["_user_name"] = user_ctx.display_name
             arguments["_user_roles"] = list(user_ctx.roles)
+
+        # Slash-command source tag so SkillService (and any other tool
+        # that wants to gate on activation) can let the call through —
+        # slash commands are user-initiated, so they're a deliberate
+        # "use this for this chat" signal.
+        arguments["_conversation_id"] = conversation_id
+        arguments["_invocation_source"] = "slash"
 
         # Inject shared-room members if this is a room conversation.
         if self._storage is not None:
@@ -1798,7 +2257,7 @@ class AIService(Service):
         tool_call_id = f"slash-{uuid.uuid4().hex[:12]}"
         sanitized_args = self._sanitize_tool_args(arguments)
 
-        await self._publish_tool_event(
+        await self._publish_event(
             "chat.tool.started",
             {
                 "conversation_id": conversation_id,
@@ -1816,11 +2275,16 @@ class AIService(Service):
             set_current_user(user_ctx)
 
         ui_blocks: list[UIBlock] = []
+        slash_attachments: list[FileAttachment] = []
         is_error = False
         try:
             raw_result = await provider.execute_tool(tool_def.name, arguments)
-            if isinstance(raw_result, ToolOutput):
+            if isinstance(raw_result, ToolResult):
+                result_text = raw_result.content
+                slash_attachments.extend(raw_result.attachments)
+            elif isinstance(raw_result, ToolOutput):
                 result_text = raw_result.text
+                slash_attachments.extend(raw_result.attachments)
                 import dataclasses as _dc
 
                 for block in raw_result.ui_blocks:
@@ -1840,7 +2304,7 @@ class AIService(Service):
             result_text = f"Error executing /{cmd_name}: {exc}"
             is_error = True
 
-        await self._publish_tool_event(
+        await self._publish_event(
             "chat.tool.completed",
             {
                 "conversation_id": conversation_id,
@@ -1869,8 +2333,10 @@ class AIService(Service):
                         tool_call_id=tool_call_id,
                         content=result_text,
                         is_error=is_error,
+                        attachments=tuple(slash_attachments),
                     )
                 ],
+                attachments=list(slash_attachments),
             )
         )
 
@@ -1905,16 +2371,80 @@ class AIService(Service):
                 "result": result_text,
             }
         ]
-        return result_text, conversation_id, ui_block_dicts, tool_usage
+        # Slash commands are modeled as a zero-round turn: the tool runs
+        # directly and its result is the turn's "final" content. No AI
+        # round preceded it, so ``rounds`` is empty — the frontend's turn
+        # bubble renders the tool inline alongside the final text via a
+        # simpler layout path.
+        return ChatTurnResult(
+            response_text=result_text,
+            conversation_id=conversation_id,
+            ui_blocks=ui_block_dicts,
+            tool_usage=tool_usage,
+            attachments=list(slash_attachments),
+            rounds=[],
+        )
 
     # --- Tool Event Publishing ---
 
-    async def _publish_tool_event(
+    async def _resolve_stream_audience(
+        self,
+        conversation_id: str,
+        user_ctx: UserContext | None,
+    ) -> list[str]:
+        """List the user_ids that should receive live streaming events.
+
+        Computed once at the start of a chat turn and attached as
+        ``visible_to`` on ``chat.stream.*`` events so the WS layer can
+        deliver them only to the right connections (see the
+        ``chat.stream.`` branch in ``WsConnection.can_see_chat_event``).
+
+        Resolution rules:
+
+        - Personal conversation: owner only. In a clean DB this is just
+          ``[owner_id]``; when the conversation doesn't exist yet
+          (new-turn slash path), fall back to the caller's user_id.
+        - Shared room: every current member's user_id.
+
+        System callers (scheduler, greeting, roast, …) have no browser
+        connection to stream to, so the audience is empty — events are
+        still published but no WS client sees them.
+        """
+        fallback: list[str] = []
+        if user_ctx is not None and user_ctx.user_id not in ("", "system"):
+            fallback = [user_ctx.user_id]
+        if self._storage is None:
+            return fallback
+        conv = await self._storage.get(_COLLECTION, conversation_id)
+        if not isinstance(conv, dict):
+            return fallback
+        if conv.get("shared"):
+            members = conv.get("members") or []
+            ids = [
+                str(m.get("user_id", ""))
+                for m in members
+                if isinstance(m, dict) and m.get("user_id")
+            ]
+            return ids or fallback
+        owner = conv.get("user_id")
+        if owner:
+            return [str(owner)]
+        return fallback
+
+    async def _publish_event(
         self,
         event_type: str,
         data: dict[str, Any],
     ) -> None:
-        """Publish a tool execution event for real-time UI updates."""
+        """Publish an event for real-time UI updates.
+
+        Thin wrapper around the event bus — the ``ai`` source tag lets
+        downstream consumers (telemetry, audit logging, peer forwarding)
+        filter by origin. Used for tool lifecycle events
+        (``chat.tool.started`` / ``chat.tool.completed``) and streaming
+        text deltas (``chat.message.text_delta``). No-op when there is
+        no resolver or no event bus service available.
+        """
         if self._resolver is None:
             return
         event_bus_svc = self._resolver.get_capability("event_bus")
@@ -2068,6 +2598,15 @@ class AIService(Service):
                     entry["data"] = att.data
                 if att.text:
                     entry["text"] = att.text
+                # Reference-mode attachments: persist the workspace
+                # coordinates so the frontend can fetch bytes on click via
+                # ``skills.workspace.download``.
+                if att.workspace_skill:
+                    entry["workspace_skill"] = att.workspace_skill
+                if att.workspace_path:
+                    entry["workspace_path"] = att.workspace_path
+                if att.workspace_conv:
+                    entry["workspace_conv"] = att.workspace_conv
                 serialized_attachments.append(entry)
             d["attachments"] = serialized_attachments
         return d
@@ -2106,6 +2645,9 @@ class AIService(Service):
                         media_type=str(att.get("media_type", "")),
                         data=str(att.get("data", "")),
                         text=str(att.get("text", "")),
+                        workspace_skill=str(att.get("workspace_skill", "")),
+                        workspace_path=str(att.get("workspace_path", "")),
+                        workspace_conv=str(att.get("workspace_conv", "")),
                     )
                 )
         else:
@@ -2797,13 +3339,15 @@ class AIService(Service):
                 response_text = ""
                 ui_blocks: list[dict[str, Any]] = []
                 tool_usage: list[dict[str, Any]] = []
+                reply_attachments: list[FileAttachment] = []
 
+                reply_rounds: list[dict[str, Any]] = []
                 if addressed:
                     # Slash commands need the raw "/cmd ..." text so the
                     # parser recognizes them; the AI-chat path uses the
                     # tagged form so Gilbert knows who said what.
                     chat_message = message if is_slash_command else tagged_message
-                    response_text, conv_id, ui_blocks, tool_usage = await self.chat(
+                    turn_result = await self.chat(
                         user_message=chat_message,
                         conversation_id=conversation_id,
                         user_ctx=conn.user_ctx,
@@ -2811,6 +3355,12 @@ class AIService(Service):
                         ai_call="human_chat",
                         attachments=attachments,
                     )
+                    response_text = turn_result.response_text
+                    conv_id = turn_result.conversation_id
+                    ui_blocks = turn_result.ui_blocks
+                    tool_usage = turn_result.tool_usage
+                    reply_attachments = turn_result.attachments
+                    reply_rounds = turn_result.rounds
                 else:
                     # Store message without invoking AI
                     conv_id = conversation_id
@@ -2839,17 +3389,24 @@ class AIService(Service):
                             "content": response_text,
                             "user_message": message,
                             "ui_blocks": ui_blocks,
+                            "attachments": _serialize_attachments_for_wire(reply_attachments),
                         },
                     )
             else:
                 # Personal chat — normal AI flow
-                response_text, conv_id, ui_blocks, tool_usage = await self.chat(
+                turn_result = await self.chat(
                     user_message=message,
                     conversation_id=conversation_id,
                     user_ctx=conn.user_ctx,
                     ai_call="human_chat",
                     attachments=attachments,
                 )
+                response_text = turn_result.response_text
+                conv_id = turn_result.conversation_id
+                ui_blocks = turn_result.ui_blocks
+                tool_usage = turn_result.tool_usage
+                reply_attachments = turn_result.attachments
+                reply_rounds = turn_result.rounds
         except Exception as exc:
             logger.warning("chat.message.send failed", exc_info=True)
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": str(exc), "code": 500}
@@ -2861,6 +3418,8 @@ class AIService(Service):
             "conversation_id": conv_id,
             "ui_blocks": self._filter_blocks_for_user(ui_blocks, conn.user_id),
             "tool_usage": tool_usage,
+            "attachments": _serialize_attachments_for_wire(reply_attachments),
+            "rounds": reply_rounds,
         }
 
     async def _ws_conversation_create(
@@ -2944,13 +3503,18 @@ class AIService(Service):
 
                 system_prompt = build_room_context(conv_data, conn.user_ctx)
 
-            response_text, conv_id, ui_blocks, _tool_usage = await self.chat(
+            turn_result = await self.chat(
                 user_message=form_message,
                 conversation_id=conversation_id,
                 user_ctx=conn.user_ctx,
                 system_prompt=system_prompt,
                 ai_call="human_chat",
             )
+            response_text = turn_result.response_text
+            conv_id = turn_result.conversation_id
+            ui_blocks = turn_result.ui_blocks
+            reply_attachments = turn_result.attachments
+            reply_rounds = turn_result.rounds
         except Exception as exc:
             logger.warning("chat.form.submit failed", exc_info=True)
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": str(exc), "code": 500}
@@ -2971,6 +3535,7 @@ class AIService(Service):
                         "content": response_text,
                         "user_message": "",
                         "ui_blocks": ui_blocks,
+                        "attachments": _serialize_attachments_for_wire(reply_attachments),
                     },
                 )
 
@@ -2980,6 +3545,8 @@ class AIService(Service):
             "response": response_text,
             "conversation_id": conv_id,
             "ui_blocks": self._filter_blocks_for_user(ui_blocks, conn.user_id),
+            "attachments": _serialize_attachments_for_wire(reply_attachments),
+            "rounds": reply_rounds,
         }
 
     async def _ws_history_load(
@@ -3013,170 +3580,11 @@ class AIService(Service):
             }
 
         is_shared = data.get("shared", False)
-        # Walk persisted messages and build display messages. Assistant
-        # turns may span multiple persisted rows — intermediate rounds
-        # hold tool_calls with empty content, followed by tool_result
-        # rows, then a final assistant row with the answer text. We fold
-        # every tool_call/tool_result pair since the previous user message
-        # into a single ``tool_usage`` list on the first displayable
-        # assistant message that follows them, so the frontend sees one
-        # assistant bubble per turn annotated with the tools it used.
-        display_messages: list[dict[str, Any]] = []
-        # Pairs collected for the next user-visible assistant message:
-        # {tool_name, is_error, arguments, result}.
-        pending_tool_usage: list[dict[str, Any]] = []
-        # Tool calls seen but not yet paired with a result: call_id -> dict.
-        pending_calls: dict[str, dict[str, Any]] = {}
-
-        def _flush_unpaired_calls() -> None:
-            """Turn any unpaired tool_calls into usage entries (no result)."""
-            for call in pending_calls.values():
-                pending_tool_usage.append(
-                    {
-                        "tool_name": call.get("tool_name", ""),
-                        "is_error": False,
-                        "arguments": self._sanitize_tool_args(
-                            call.get("arguments", {}) or {},
-                        ),
-                        "result": "",
-                    }
-                )
-            pending_calls.clear()
-
-        for m in data.get("messages", []):
-            role = m.get("role")
-            visible_to = m.get("visible_to")
-            if visible_to is not None and conn.user_id not in visible_to:
-                continue
-
-            if role == "tool_result":
-                # Match results back to their calls and emit usage entries.
-                for tr in m.get("tool_results", []) or []:
-                    call_id = tr.get("tool_call_id", "")
-                    call = pending_calls.pop(call_id, None)
-                    if call is None:
-                        # Result without a matching call — still surface it.
-                        pending_tool_usage.append(
-                            {
-                                "tool_name": "",
-                                "is_error": bool(tr.get("is_error", False)),
-                                "arguments": {},
-                                "result": tr.get("content", ""),
-                            }
-                        )
-                        continue
-                    pending_tool_usage.append(
-                        {
-                            "tool_name": call.get("tool_name", ""),
-                            "is_error": bool(tr.get("is_error", False)),
-                            "arguments": self._sanitize_tool_args(
-                                call.get("arguments", {}) or {},
-                            ),
-                            "result": tr.get("content", ""),
-                        }
-                    )
-                continue
-
-            if role not in ("user", "assistant"):
-                continue
-
-            content = m.get("content", "")
-
-            if role == "assistant":
-                # Stash any tool_calls on this row for later pairing.
-                for tc in m.get("tool_calls", []) or []:
-                    call_id = tc.get("tool_call_id", "")
-                    if call_id:
-                        pending_calls[call_id] = tc
-
-                # Slash-command rows carry their tool_results inline on the
-                # same assistant row (rather than on a separate tool_result
-                # row). Pair them here so the reloaded bubble shows the
-                # actual tool output in its tool_usage panel instead of an
-                # empty string. This mirrors the ``_build_messages`` heal
-                # in ``AnthropicAI`` for replay — here we heal display.
-                for tr in m.get("tool_results", []) or []:
-                    call_id = tr.get("tool_call_id", "")
-                    call = pending_calls.pop(call_id, None)
-                    if call is None:
-                        pending_tool_usage.append(
-                            {
-                                "tool_name": "",
-                                "is_error": bool(tr.get("is_error", False)),
-                                "arguments": {},
-                                "result": tr.get("content", ""),
-                            }
-                        )
-                        continue
-                    pending_tool_usage.append(
-                        {
-                            "tool_name": call.get("tool_name", ""),
-                            "is_error": bool(tr.get("is_error", False)),
-                            "arguments": self._sanitize_tool_args(
-                                call.get("arguments", {}) or {},
-                            ),
-                            "result": tr.get("content", ""),
-                        }
-                    )
-
-                # Empty-content assistant rows are intermediate tool-use
-                # rounds; don't emit them as their own bubble.
-                if not content:
-                    continue
-
-            if role == "user":
-                # New user turn — any unpaired calls from a prior turn
-                # are orphans, surface them before moving on.
-                _flush_unpaired_calls()
-                # Reset pending usage; user messages never carry it.
-                pending_tool_usage = []
-
-            msg: dict[str, Any] = {"role": role, "content": content}
-            if is_shared:
-                msg["author_id"] = m.get("author_id", "")
-                msg["author_name"] = m.get("author_name", "")
-            if role == "user":
-                persisted_attachments = m.get("attachments")
-                emitted: list[dict[str, Any]] = []
-                if isinstance(persisted_attachments, list):
-                    for att in persisted_attachments:
-                        if not isinstance(att, dict):
-                            continue
-                        kind = str(att.get("kind") or "")
-                        if not kind:
-                            continue
-                        entry: dict[str, Any] = {
-                            "kind": kind,
-                            "name": att.get("name", ""),
-                            "media_type": att.get("media_type", ""),
-                        }
-                        if att.get("data"):
-                            entry["data"] = att.get("data")
-                        if att.get("text"):
-                            entry["text"] = att.get("text")
-                        emitted.append(entry)
-                else:
-                    # Legacy conversations stored images under "images".
-                    for img in m.get("images") or []:
-                        if isinstance(img, dict) and img.get("data"):
-                            emitted.append(
-                                {
-                                    "kind": "image",
-                                    "name": "",
-                                    "media_type": img.get("media_type", ""),
-                                    "data": img.get("data"),
-                                }
-                            )
-                if emitted:
-                    msg["attachments"] = emitted
-
-            if role == "assistant":
-                _flush_unpaired_calls()
-                if pending_tool_usage:
-                    msg["tool_usage"] = pending_tool_usage
-                    pending_tool_usage = []
-
-            display_messages.append(msg)
+        turns = self._group_persisted_messages_into_turns(
+            data.get("messages", []),
+            viewer_user_id=conn.user_id,
+            include_author=is_shared,
+        )
 
         ui_blocks = self._filter_blocks_for_user(
             data.get("ui_blocks", []),
@@ -3186,7 +3594,7 @@ class AIService(Service):
         result: dict[str, Any] = {
             "type": "chat.history.load.result",
             "ref": frame.get("id"),
-            "messages": display_messages,
+            "turns": turns,
             "ui_blocks": ui_blocks,
             "shared": is_shared,
             "title": data.get("title", ""),
@@ -3198,6 +3606,283 @@ class AIService(Service):
                 for inv in data.get("invites", [])
             ]
         return result
+
+    def _group_persisted_messages_into_turns(
+        self,
+        rows: list[dict[str, Any]],
+        viewer_user_id: str,
+        include_author: bool,
+    ) -> list[dict[str, Any]]:
+        """Walk persisted message rows and emit one turn per user→assistant exchange.
+
+        Each turn shape:
+            {
+              "user_message": {role, content, attachments, author_id, author_name},
+              "rounds": [
+                {"reasoning": str, "tools": [{tool_call_id, tool_name,
+                                              arguments, result, is_error}]},
+                ...
+              ],
+              "final_content": str,
+              "final_attachments": [...],
+              "final_author_id": str,        # only if include_author
+              "final_author_name": str,      # only if include_author
+              "incomplete": bool,            # true if turn never produced a
+                                             # final assistant text (e.g. hit
+                                             # max_tool_rounds)
+            }
+
+        The grouping logic mirrors what ``AIService.chat`` builds on the
+        live path, so a refresh of an in-flight or completed conversation
+        produces exactly the same turn structure that the live RPC
+        result returned.
+
+        ``viewer_user_id`` filters out messages targeted at other users via
+        their ``visible_to`` list. ``include_author`` controls whether
+        author fields are emitted on user messages and final assistant
+        messages — only useful for shared rooms.
+        """
+        turns: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        # Per-round building state. ``round_reasoning`` is the assistant
+        # content from the row that emitted the most recent batch of
+        # tool_calls; ``round_tools`` is the list of tool entries for
+        # that round, indexed by tool_call_id so subsequent tool_result
+        # rows can fill in the result/is_error fields.
+        round_reasoning: str = ""
+        round_tools: list[dict[str, Any]] = []
+        round_tools_by_id: dict[str, dict[str, Any]] = {}
+
+        def finalize_round() -> None:
+            """Push the in-progress round (if any) onto the current turn."""
+            nonlocal round_reasoning, round_tools, round_tools_by_id
+            if current is None:
+                return
+            if not round_reasoning and not round_tools:
+                return
+            current["rounds"].append(
+                {
+                    "reasoning": round_reasoning,
+                    "tools": round_tools,
+                }
+            )
+            round_reasoning = ""
+            round_tools = []
+            round_tools_by_id = {}
+
+        def start_turn(user_row: dict[str, Any]) -> None:
+            """Open a new turn keyed on a user message row."""
+            nonlocal current
+            finalize_current_turn()
+            current = {
+                "user_message": self._build_turn_user_message(
+                    user_row, include_author
+                ),
+                "rounds": [],
+                "final_content": "",
+                "final_attachments": [],
+                "incomplete": False,
+            }
+            if include_author:
+                current["final_author_id"] = ""
+                current["final_author_name"] = ""
+
+        def finalize_current_turn() -> None:
+            """Close out the current turn and push it onto ``turns``."""
+            nonlocal current
+            if current is None:
+                return
+            finalize_round()
+            # If we never saw a no-tool-calls assistant row, the turn
+            # didn't reach a clean stopping point — usually because the
+            # agentic loop hit max_tool_rounds or the AI errored. Mark it
+            # so the frontend can render an "incomplete" indicator.
+            if not current["final_content"] and not current["final_attachments"]:
+                if current["rounds"]:
+                    current["incomplete"] = True
+            turns.append(current)
+            current = None
+
+        for row in rows:
+            role = row.get("role")
+            visible_to = row.get("visible_to")
+            if visible_to is not None and viewer_user_id not in visible_to:
+                continue
+
+            if role == "user":
+                start_turn(row)
+                continue
+
+            if role == "tool_result":
+                if current is None:
+                    # Tool result with no preceding user turn — orphan
+                    # data, ignore.
+                    continue
+                for tr in row.get("tool_results", []) or []:
+                    call_id = tr.get("tool_call_id", "")
+                    entry = round_tools_by_id.get(call_id)
+                    if entry is None:
+                        # Result without a matching call — still surface
+                        # it so the user can see something happened.
+                        orphan = {
+                            "tool_call_id": call_id,
+                            "tool_name": "",
+                            "is_error": bool(tr.get("is_error", False)),
+                            "arguments": {},
+                            "result": tr.get("content", ""),
+                        }
+                        round_tools.append(orphan)
+                        round_tools_by_id[call_id] = orphan
+                    else:
+                        entry["result"] = tr.get("content", "")
+                        entry["is_error"] = bool(tr.get("is_error", False))
+                continue
+
+            if role != "assistant":
+                continue
+
+            if current is None:
+                # Assistant content with no preceding user turn — orphan
+                # data, ignore.
+                continue
+
+            content = row.get("content", "") or ""
+            tool_calls = row.get("tool_calls", []) or []
+            inline_results = row.get("tool_results", []) or []
+
+            if tool_calls:
+                # Intermediate AI round (or slash-command row, which
+                # carries tool_calls + tool_results inline). If we
+                # already had a partially-built round, finalize it
+                # before opening this one.
+                if round_reasoning or round_tools:
+                    finalize_round()
+
+                round_reasoning = content
+                for tc in tool_calls:
+                    call_id = tc.get("tool_call_id", "")
+                    entry = {
+                        "tool_call_id": call_id,
+                        "tool_name": tc.get("tool_name", ""),
+                        "is_error": False,
+                        "arguments": self._sanitize_tool_args(
+                            tc.get("arguments", {}) or {},
+                        ),
+                        "result": "",
+                    }
+                    round_tools.append(entry)
+                    if call_id:
+                        round_tools_by_id[call_id] = entry
+
+                # Slash-command rows carry the tool_results on the same
+                # row. Pair them up immediately so the round shows
+                # complete data.
+                for tr in inline_results:
+                    call_id = tr.get("tool_call_id", "")
+                    entry = round_tools_by_id.get(call_id)
+                    if entry is not None:
+                        entry["result"] = tr.get("content", "")
+                        entry["is_error"] = bool(tr.get("is_error", False))
+
+                # Slash-command rows ALSO carry the user-facing answer
+                # text on the same row — the assistant ``content`` is
+                # both the round narration AND the turn's final answer.
+                # Treat such rows as turn-closing: emit the round and
+                # set the final fields, then finalize the turn so the
+                # next iteration starts fresh.
+                if inline_results:
+                    finalize_round()
+                    current["final_content"] = content
+                    current["final_attachments"] = self._serialize_persisted_attachments(
+                        row.get("attachments")
+                    )
+                    if include_author:
+                        current["final_author_id"] = row.get("author_id", "")
+                        current["final_author_name"] = row.get("author_name", "")
+                continue
+
+            # Assistant row WITHOUT tool_calls — this is the final
+            # answer for the current turn. Capture content + attachments
+            # and finalize.
+            finalize_round()
+            current["final_content"] = content
+            current["final_attachments"] = self._serialize_persisted_attachments(
+                row.get("attachments")
+            )
+            if include_author:
+                current["final_author_id"] = row.get("author_id", "")
+                current["final_author_name"] = row.get("author_name", "")
+
+        finalize_current_turn()
+        return turns
+
+    def _build_turn_user_message(
+        self,
+        row: dict[str, Any],
+        include_author: bool,
+    ) -> dict[str, Any]:
+        """Project a persisted user row into the wire shape used by turns."""
+        # Strip the [Name]: prefix from shared room content for display.
+        # The prefix is stored for AI context but isn't user-visible.
+        raw_content = row.get("content", "") or ""
+        msg: dict[str, Any] = {
+            "content": raw_content,
+            "attachments": self._serialize_persisted_attachments(
+                row.get("attachments"),
+            ),
+        }
+        if include_author:
+            msg["author_id"] = row.get("author_id", "")
+            msg["author_name"] = row.get("author_name", "")
+        # Surface legacy ``images`` field for old conversations as
+        # inline image attachments — same behavior as the previous
+        # message-list emit path.
+        if not msg["attachments"]:
+            legacy_images = row.get("images") or []
+            if isinstance(legacy_images, list):
+                for img in legacy_images:
+                    if isinstance(img, dict) and img.get("data"):
+                        msg["attachments"].append(
+                            {
+                                "kind": "image",
+                                "name": "",
+                                "media_type": img.get("media_type", ""),
+                                "data": img.get("data"),
+                            }
+                        )
+        return msg
+
+    @staticmethod
+    def _serialize_persisted_attachments(
+        raw: Any,
+    ) -> list[dict[str, Any]]:
+        """Project the raw persisted attachments list onto the wire shape."""
+        out: list[dict[str, Any]] = []
+        if not isinstance(raw, list):
+            return out
+        for att in raw:
+            if not isinstance(att, dict):
+                continue
+            kind = str(att.get("kind") or "")
+            if not kind:
+                continue
+            entry: dict[str, Any] = {
+                "kind": kind,
+                "name": att.get("name", ""),
+                "media_type": att.get("media_type", ""),
+            }
+            if att.get("data"):
+                entry["data"] = att.get("data")
+            if att.get("text"):
+                entry["text"] = att.get("text")
+            if att.get("workspace_skill"):
+                entry["workspace_skill"] = att.get("workspace_skill")
+            if att.get("workspace_path"):
+                entry["workspace_path"] = att.get("workspace_path")
+            if att.get("workspace_conv"):
+                entry["workspace_conv"] = att.get("workspace_conv")
+            out.append(entry)
+        return out
 
     async def _ws_conversation_list(
         self, conn: WsConnectionBase, frame: dict[str, Any]
@@ -3316,6 +4001,16 @@ class AIService(Service):
             }
 
         await self._storage.delete(_COLLECTION, conversation_id)
+        # Tell subscribers (SkillService for workspace cleanup, etc.)
+        # that this conversation is gone. Same event name as the room
+        # destroy path so subscribers only need one handler.
+        await self._publish_event(
+            "chat.conversation.destroyed",
+            {
+                "conversation_id": conversation_id,
+                "owner_id": conv_owner,
+            },
+        )
         return {"type": "chat.conversation.delete.result", "ref": frame.get("id"), "status": "ok"}
 
     async def _ws_room_create(

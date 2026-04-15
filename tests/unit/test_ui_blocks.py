@@ -185,7 +185,7 @@ class TestToolOutputInAgenticLoop:
         svc = MagicMock(spec=AIService)
         # Use the real methods
         svc._execute_tool_calls = AIService._execute_tool_calls.__get__(svc, AIService)
-        svc._publish_tool_event = AIService._publish_tool_event.__get__(svc, AIService)
+        svc._publish_event = AIService._publish_event.__get__(svc, AIService)
         svc._sanitize_tool_args = AIService._sanitize_tool_args
         svc._acl_svc = None
         svc._resolver = None

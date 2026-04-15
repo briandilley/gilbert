@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -546,6 +548,617 @@ class TestWorkspace:
         )
         assert "traversal" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_attach_workspace_file_returns_reference_attachment(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """attach_workspace_file returns a ToolResult whose attachment
+        references the workspace file without inlining bytes."""
+        from gilbert.interfaces.tools import ToolResult
+
+        workspace = started_service._get_workspace("alice", "test-skill")
+        pdf_path = workspace / "report.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake pdf bytes")
+
+        result = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "report.pdf",
+                "_user_id": "alice",
+            },
+        )
+        assert isinstance(result, ToolResult)
+        assert not result.is_error
+        assert len(result.attachments) == 1
+        att = result.attachments[0]
+        # Reference-mode — no inline data, just coordinates.
+        assert att.is_reference
+        assert att.data == ""
+        assert att.text == ""
+        assert att.workspace_skill == "test-skill"
+        assert att.workspace_path == "report.pdf"
+        assert att.name == "report.pdf"
+        assert att.kind == "document"
+        assert att.media_type == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_attach_workspace_file_path_traversal(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        from gilbert.interfaces.tools import ToolResult
+
+        result = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "../../etc/passwd",
+                "_user_id": "alice",
+            },
+        )
+        assert isinstance(result, ToolResult)
+        assert result.is_error
+        assert len(result.attachments) == 0
+        assert "traversal" in result.content.lower()
+
+    @pytest.mark.asyncio
+    async def test_attach_workspace_file_missing_file(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        from gilbert.interfaces.tools import ToolResult
+
+        result = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "nope.pdf",
+                "_user_id": "alice",
+            },
+        )
+        assert isinstance(result, ToolResult)
+        assert result.is_error
+        assert len(result.attachments) == 0
+
+    @pytest.mark.asyncio
+    async def test_write_workspace_file_creates_file(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """write_skill_workspace_file writes content to the workspace and
+        the file is subsequently readable via read_skill_workspace_file."""
+        result = await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "generate_po.py",
+                "content": "print('hello from generated script')\n",
+                "_user_id": "alice",
+            },
+        )
+        data = json.loads(result)
+        assert data["status"] == "written"
+        assert data["path"] == "generate_po.py"
+        assert data["bytes"] > 0
+
+        # Round-trip: the written file is readable via the existing tool
+        read = await started_service.execute_tool(
+            "read_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "generate_po.py",
+                "_user_id": "alice",
+            },
+        )
+        assert "hello from generated script" in read
+
+    @pytest.mark.asyncio
+    async def test_write_workspace_file_creates_parent_dirs(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """Nested paths get their parent directories created on demand."""
+        result = await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "configs/po/template.json",
+                "content": "{}",
+                "_user_id": "alice",
+            },
+        )
+        data = json.loads(result)
+        assert data["status"] == "written"
+        workspace = started_service._get_workspace("alice", "test-skill")
+        assert (workspace / "configs" / "po" / "template.json").is_file()
+
+    @pytest.mark.asyncio
+    async def test_write_workspace_file_path_traversal(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        result = await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "../../../etc/evil",
+                "content": "pwned",
+                "_user_id": "alice",
+            },
+        )
+        data = json.loads(result)
+        assert "traversal" in data.get("error", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_write_workspace_file_size_cap(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        huge = "x" * (513 * 1024)
+        result = await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "big.txt",
+                "content": huge,
+                "_user_id": "alice",
+            },
+        )
+        data = json.loads(result)
+        assert "too large" in data.get("error", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_run_workspace_script_executes_written_script(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """End-to-end: write a script to the workspace, run it, see output."""
+        await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "echo_args.py",
+                "content": (
+                    "import sys\n"
+                    "print('args:', ' '.join(sys.argv[1:]))\n"
+                ),
+                "_user_id": "alice",
+            },
+        )
+        result = await started_service.execute_tool(
+            "run_workspace_script",
+            {
+                "skill_name": "test-skill",
+                "path": "echo_args.py",
+                "arguments": ["alpha", "beta"],
+                "_user_id": "alice",
+            },
+        )
+        assert "args: alpha beta" in result
+
+    @pytest.mark.asyncio
+    async def test_run_workspace_script_output_landed_in_workspace(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """A script that writes to its cwd lands the output file back in
+        the workspace, where attach_workspace_file can pick it up."""
+        from gilbert.interfaces.tools import ToolResult
+
+        await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "write_file.py",
+                "content": (
+                    "with open('result.txt', 'w') as f:\n"
+                    "    f.write('generated content')\n"
+                ),
+                "_user_id": "alice",
+            },
+        )
+        await started_service.execute_tool(
+            "run_workspace_script",
+            {
+                "skill_name": "test-skill",
+                "path": "write_file.py",
+                "_user_id": "alice",
+            },
+        )
+        workspace = started_service._get_workspace("alice", "test-skill")
+        assert (workspace / "result.txt").is_file()
+        assert (workspace / "result.txt").read_text() == "generated content"
+
+        # And attach_workspace_file can hand it back to the user
+        attached = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "result.txt",
+                "_user_id": "alice",
+            },
+        )
+        assert isinstance(attached, ToolResult)
+        assert len(attached.attachments) == 1
+        assert attached.attachments[0].workspace_path == "result.txt"
+
+    @pytest.mark.asyncio
+    async def test_run_workspace_script_missing_file(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        result = await started_service.execute_tool(
+            "run_workspace_script",
+            {
+                "skill_name": "test-skill",
+                "path": "nope.py",
+                "_user_id": "alice",
+            },
+        )
+        assert "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_run_workspace_script_path_traversal(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        result = await started_service.execute_tool(
+            "run_workspace_script",
+            {
+                "skill_name": "test-skill",
+                "path": "../../etc/evil.py",
+                "_user_id": "alice",
+            },
+        )
+        assert "traversal" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_ai_invocation_gate_blocks_inactive_skill(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """When invoked by the AI on a conversation where the skill
+        isn't active, every skill tool refuses with a friendly error."""
+        # Wire a fake AI service with a settable active_skills state.
+        active: list[str] = []
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        ai_args = {
+            "skill_name": "test-skill",
+            "path": "data.csv",
+            "_user_id": "alice",
+            "_conversation_id": "conv-1",
+            "_invocation_source": "ai",
+        }
+        # Skill not in active list — gate refuses.
+        result = await started_service.execute_tool(
+            "read_skill_workspace_file", ai_args
+        )
+        assert "not active for this conversation" in result
+
+        # Activate the skill — now the call passes through (and hits
+        # the file-not-found path, since we never wrote data.csv).
+        active.append("test-skill")
+        result = await started_service.execute_tool(
+            "read_skill_workspace_file", ai_args
+        )
+        assert "not active" not in result
+        assert "not found" in result.lower() or "error" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_slash_invocation_bypasses_gate(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """Slash commands always pass — they're explicit user input,
+        so the activation gate doesn't apply."""
+        active: list[str] = []  # nothing active
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        # Pre-create a workspace file so the underlying tool succeeds
+        # past the gate.
+        workspace = started_service._get_workspace("alice", "test-skill")
+        (workspace / "via_slash.txt").write_text("ok")
+
+        slash_args = {
+            "skill_name": "test-skill",
+            "path": "via_slash.txt",
+            "_user_id": "alice",
+            "_conversation_id": "conv-1",
+            "_invocation_source": "slash",
+        }
+        result = await started_service.execute_tool(
+            "read_skill_workspace_file", slash_args
+        )
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_per_conversation_workspaces_are_isolated(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """Two conversations with the same user + skill produce two
+        independent workspaces — files written in one don't leak into
+        the other."""
+        # Wire an active-skills mock so the gate lets us through.
+        active = ["test-skill"]
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        # Write to conv-A
+        await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "marker.txt",
+                "content": "from conv A",
+                "_user_id": "alice",
+                "_conversation_id": "conv-A",
+                "_invocation_source": "ai",
+            },
+        )
+        # Write to conv-B
+        await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "marker.txt",
+                "content": "from conv B",
+                "_user_id": "alice",
+                "_conversation_id": "conv-B",
+                "_invocation_source": "ai",
+            },
+        )
+
+        # Read each — each should see ONLY its own write.
+        result_a = await started_service.execute_tool(
+            "read_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "marker.txt",
+                "_user_id": "alice",
+                "_conversation_id": "conv-A",
+                "_invocation_source": "ai",
+            },
+        )
+        result_b = await started_service.execute_tool(
+            "read_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "marker.txt",
+                "_user_id": "alice",
+                "_conversation_id": "conv-B",
+                "_invocation_source": "ai",
+            },
+        )
+        assert result_a == "from conv A"
+        assert result_b == "from conv B"
+
+        # On disk, both conv dirs exist independently.
+        ws_a = started_service._get_workspace("alice", "test-skill", "conv-A")
+        ws_b = started_service._get_workspace("alice", "test-skill", "conv-B")
+        assert ws_a != ws_b
+        assert (ws_a / "marker.txt").is_file()
+        assert (ws_b / "marker.txt").is_file()
+
+    @pytest.mark.asyncio
+    async def test_attach_workspace_file_carries_conversation_id(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """The attachment that ``attach_workspace_file`` returns carries
+        the conversation id so the download handler can find the file
+        under the right per-conv workspace later."""
+        from gilbert.interfaces.tools import ToolResult
+
+        active = ["test-skill"]
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        # Write a file to conv-XYZ's workspace
+        await started_service.execute_tool(
+            "write_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "report.txt",
+                "content": "the report",
+                "_user_id": "alice",
+                "_conversation_id": "conv-XYZ",
+                "_invocation_source": "ai",
+            },
+        )
+        # Attach it
+        result = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "report.txt",
+                "_user_id": "alice",
+                "_conversation_id": "conv-XYZ",
+                "_invocation_source": "ai",
+            },
+        )
+        assert isinstance(result, ToolResult)
+        assert len(result.attachments) == 1
+        att = result.attachments[0]
+        assert att.workspace_conv == "conv-XYZ"
+        assert att.workspace_skill == "test-skill"
+        assert att.workspace_path == "report.txt"
+
+    @pytest.mark.asyncio
+    async def test_legacy_workspace_read_fallback(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """A read against a conversation that has no per-conv file
+        falls back to the legacy per-(user, skill) workspace, so old
+        chats whose attachments reference legacy paths still resolve."""
+        active = ["test-skill"]
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        # Manually create a file under the legacy path (where pre-
+        # refactor tool runs would have written).
+        legacy = started_service._legacy_workspace_dir("alice", "test-skill")
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "ancient.txt").write_text("from before the refactor")
+
+        # Now read via a fresh conv-id — no per-conv file exists, so
+        # the fallback should surface the legacy file.
+        result = await started_service.execute_tool(
+            "read_skill_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "ancient.txt",
+                "_user_id": "alice",
+                "_conversation_id": "fresh-conv",
+                "_invocation_source": "ai",
+            },
+        )
+        assert result == "from before the refactor"
+
+    @pytest.mark.asyncio
+    async def test_conversation_destroyed_cleanup(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """Publishing ``chat.conversation.destroyed`` removes the
+        per-conversation workspace tree for the named owner."""
+        # Create a conv-scoped workspace with a marker file.
+        ws = started_service._get_workspace("alice", "test-skill", "doomed")
+        (ws / "marker.txt").write_text("rm me")
+        assert ws.is_dir()
+
+        # Fire the cleanup directly (the event-bus subscription is just
+        # plumbing; the handler is what we care about).
+        from gilbert.core.services.event_bus import Event
+
+        await started_service._on_conversation_destroyed(
+            Event(
+                event_type="chat.conversation.destroyed",
+                data={"conversation_id": "doomed", "owner_id": "alice"},
+                source="ai",
+            )
+        )
+
+        # The ``conversations/doomed`` subtree is gone.
+        conv_root = started_service._conversation_workspace_root(
+            "alice", "doomed"
+        )
+        assert not conv_root.exists()
+        # But other conversations' workspaces are untouched.
+        ws_other = started_service._get_workspace(
+            "alice", "test-skill", "survivor"
+        )
+        assert ws_other.is_dir()
+
+    @pytest.mark.asyncio
+    async def test_manage_skills_list_filters_inactive_for_ai(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """``manage_skills(action=list)`` only shows active skills when
+        invoked by the AI; a slash invocation sees the full catalog."""
+        active: list[str] = []
+
+        async def get_conversation_state(key: str, conv_id: str) -> Any:
+            return active if key == "active_skills" else None
+
+        fake_ai = MagicMock()
+        fake_ai.get_conversation_state = get_conversation_state
+        started_service._resolver.get_capability = MagicMock(  # type: ignore[union-attr]
+            side_effect=lambda cap: fake_ai if cap == "ai_chat" else None
+        )
+
+        ai_args = {
+            "action": "list",
+            "_user_id": "alice",
+            "_conversation_id": "conv-1",
+            "_invocation_source": "ai",
+        }
+        result = await started_service.execute_tool("manage_skills", ai_args)
+        data = json.loads(result)
+        assert data["count"] == 0  # no skills active → empty list to AI
+
+        # Activate the skill — it shows up.
+        active.append("test-skill")
+        result = await started_service.execute_tool("manage_skills", ai_args)
+        data = json.loads(result)
+        assert data["count"] == 1
+        assert data["skills"][0]["name"] == "test-skill"
+
+        # A slash invocation always sees the full catalog regardless.
+        active.clear()
+        slash_args = {**ai_args, "_invocation_source": "slash"}
+        result = await started_service.execute_tool("manage_skills", slash_args)
+        data = json.loads(result)
+        assert data["count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_attach_workspace_file_image_kind(
+        self,
+        started_service: SkillService,
+    ) -> None:
+        """Image mime types bucket into kind='image' for inline previews."""
+        from gilbert.interfaces.tools import ToolResult
+
+        workspace = started_service._get_workspace("alice", "test-skill")
+        (workspace / "chart.png").write_bytes(b"\x89PNG\r\n")
+
+        result = await started_service.execute_tool(
+            "attach_workspace_file",
+            {
+                "skill_name": "test-skill",
+                "path": "chart.png",
+                "display_name": "Sales Chart.png",
+                "_user_id": "alice",
+            },
+        )
+        assert isinstance(result, ToolResult)
+        assert len(result.attachments) == 1
+        assert result.attachments[0].kind == "image"
+        assert result.attachments[0].media_type == "image/png"
+        assert result.attachments[0].name == "Sales Chart.png"
+
 
 # --- Tool: read_skill_file ---
 
@@ -1022,6 +1635,9 @@ class TestServiceInfo:
             "run_skill_script",
             "browse_skill_workspace",
             "read_skill_workspace_file",
+            "write_skill_workspace_file",
+            "run_workspace_script",
+            "attach_workspace_file",
         }
 
 
