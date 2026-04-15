@@ -12,6 +12,8 @@ members = [
     "gilbert",
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
+    "gilbert-plugin-current-data-sync",
+    "gilbert-plugin-current-sales-assistant",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-google",
     "gilbert-plugin-guess-that-song",
@@ -970,6 +972,16 @@ requires-dist = [{ name = "anthropic", specifier = ">=0.89.0" }]
 name = "gilbert-plugin-arr"
 version = "1.0.0"
 source = { virtual = "std-plugins/arr" }
+
+[[package]]
+name = "gilbert-plugin-current-data-sync"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-data-sync" }
+
+[[package]]
+name = "gilbert-plugin-current-sales-assistant"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-sales-assistant" }
 
 [[package]]
 name = "gilbert-plugin-elevenlabs"
