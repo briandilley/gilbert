@@ -308,7 +308,14 @@ function DesktopNavGroup({
         <span className="hidden lg:inline">{group.label}</span>
         <ChevronDownIcon className="h-3 w-3 opacity-60" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-48">
+      <DropdownMenuContent
+        align="start"
+        // ``w-auto`` overrides the default ``w-(--anchor-width)`` in
+        // DropdownMenuContent so the popover can grow past the trigger
+        // button's width; the max-w cap keeps it from escaping the
+        // viewport on narrow windows with long descriptions.
+        className="w-auto min-w-52 max-w-[min(24rem,calc(100vw-2rem))]"
+      >
         {group.items.map((item) => (
           <DropdownSubItem
             key={item.url ?? `action:${item.action}:${item.label}`}
@@ -343,11 +350,13 @@ function DropdownSubItem({
   return (
     <DropdownMenuItem onClick={handleClick} className="cursor-pointer">
       <div className="flex items-start gap-2">
-        {Icon && <Icon className={`size-4 mt-0.5 ${color}`} />}
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium">{item.label}</div>
+        {Icon && <Icon className={`size-4 mt-0.5 shrink-0 ${color}`} />}
+        <div className="flex-1">
+          <div className="text-sm font-medium whitespace-nowrap">
+            {item.label}
+          </div>
           {item.description && (
-            <div className="text-xs text-muted-foreground truncate">
+            <div className="text-xs text-muted-foreground">
               {item.description}
             </div>
           )}
