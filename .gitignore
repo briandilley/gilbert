@@ -49,11 +49,11 @@ htmlcov/
 # Frontend build
 frontend/node_modules/
 frontend/dist/
-# Built SPA — index.html and the woff2 fonts are tracked so the Python
-# server can ship them; the hashed JS/CSS bundles are build output and
-# stay ignored.
-src/gilbert/web/spa/*
-!src/gilbert/web/spa/index.html
-!src/gilbert/web/spa/assets/
-src/gilbert/web/spa/assets/*
-!src/gilbert/web/spa/assets/*.woff2
+# Built SPA is fully generated from the frontend source every time
+# ``gilbert.sh start`` runs (it ``rm -rf``s this directory and copies
+# a fresh ``frontend/dist`` into it). Tracking anything here just
+# creates commit churn on every build with zero runtime value, so
+# the whole tree is ignored. If you need to run Gilbert without
+# ``gilbert.sh`` (e.g. a stripped-down container), build the frontend
+# separately and copy ``frontend/dist`` into place.
+src/gilbert/web/spa/
