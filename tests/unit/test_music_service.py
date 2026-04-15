@@ -220,13 +220,28 @@ def test_get_tools(service: MusicService) -> None:
         "list_playlists",
         "search_music",
         "play_music",
+        "play_item",
         "now_playing",
     }
 
 
-def test_all_tools_grouped_under_music(service: MusicService) -> None:
+def test_all_user_facing_tools_grouped_under_music(service: MusicService) -> None:
+    """Everything with a slash command lives under ``/music``. ``play_item``
+    is an internal callback fired by the Play button on search results —
+    it intentionally has no slash command because its required argument
+    is a JSON-encoded MusicItem the user can't type by hand."""
     for tool in service.get_tools():
-        assert tool.slash_group == "music"
+        if tool.slash_command:
+            assert tool.slash_group == "music", tool.name
+
+
+def test_play_item_has_no_slash_command(service: MusicService) -> None:
+    """Regression guard: ``play_item`` is button-triggered only. If someone
+    adds a slash command to it, the slash parser will choke on the JSON
+    payload in the ``item`` argument."""
+    tool = next(t for t in service.get_tools() if t.name == "play_item")
+    assert not tool.slash_command
+    assert not tool.slash_group
 
 
 # --- Browse ---
@@ -258,10 +273,15 @@ async def test_tool_list_playlists(service: MusicService) -> None:
 async def test_tool_search(
     service: MusicService, stub_backend: StubMusicBackend,
 ) -> None:
+    from gilbert.interfaces.ui import ToolOutput
+
     result = await service.execute_tool(
         "search_music", {"query": "led zeppelin", "kind": "tracks", "limit": 5},
     )
-    parsed = json.loads(result)
+    # Returns ToolOutput so the AI still sees the JSON via .text AND the
+    # chat frontend gets interactive UI blocks via .ui_blocks.
+    assert isinstance(result, ToolOutput)
+    parsed = json.loads(result.text)
     assert parsed["kind"] == "track"
     assert len(parsed["results"]) == 1
     assert parsed["results"][0]["title"] == "Black Dog"
@@ -274,10 +294,89 @@ async def test_tool_search_unavailable(
     service: MusicService, stub_backend: StubMusicBackend,
 ) -> None:
     stub_backend.search_should_fail = True
+    # Error path still returns a plain JSON string — no UI on failure.
     result = await service.execute_tool("search_music", {"query": "anything"})
+    assert isinstance(result, str)
     parsed = json.loads(result)
     assert "error" in parsed
-    assert "not linked" in parsed["error"]
+
+
+async def test_tool_search_returns_ui_block_per_result(
+    service: MusicService, stub_backend: StubMusicBackend,
+) -> None:
+    """Regression guard for the search-and-play flow.
+
+    Each search result must render as its own UIBlock carrying an
+    inline Play button whose value is a JSON-encoded MusicItem that
+    ``play_item`` can rehydrate without another search round-trip.
+    This is what distinguishes the interactive flow from the old
+    JSON-only response."""
+    from gilbert.interfaces.ui import ToolOutput
+
+    # Extend the stub to return three tracks for this test
+    stub_backend.search_calls.clear()
+    many = [
+        MusicItem(
+            id=f"opaque-{i}",
+            title=f"Song {i}",
+            kind=MusicItemKind.TRACK,
+            subtitle=f"Artist {i}",
+            album_art_url=f"https://art/{i}.jpg" if i % 2 == 0 else "",
+            service="Spotify",
+        )
+        for i in range(3)
+    ]
+
+    async def fake_search(
+        query: str, *, kind: MusicItemKind = MusicItemKind.TRACK, limit: int = 10,
+    ) -> list[MusicItem]:
+        return many
+
+    stub_backend.search = fake_search  # type: ignore[method-assign]
+
+    result = await service.execute_tool("search_music", {"query": "anything"})
+    assert isinstance(result, ToolOutput)
+    assert len(result.ui_blocks) == 3
+
+    for block, item in zip(result.ui_blocks, many, strict=True):
+        # The block routes back to the play_item tool (not the search tool)
+        assert block.tool_name == "play_item"
+        assert block.title == item.title
+
+        # Only even-indexed items had artwork in the fixture
+        has_image = any(el.type == "image" for el in block.elements)
+        assert has_image is bool(item.album_art_url), item.title
+
+        # Buttons element carries a single Play option whose value is
+        # the JSON-encoded item. Decoding it must round-trip to the
+        # original MusicItem shape.
+        button_el = next(el for el in block.elements if el.type == "buttons")
+        assert button_el.name == "item"
+        assert len(button_el.options) == 1
+        assert button_el.options[0].label == "Play"
+        decoded = json.loads(button_el.options[0].value)
+        assert decoded["id"] == item.id
+        assert decoded["title"] == item.title
+        assert decoded["kind"] == item.kind.value
+
+
+async def test_tool_search_empty_results_still_returns_tool_output(
+    service: MusicService, stub_backend: StubMusicBackend,
+) -> None:
+    """No results → no UI blocks, but still a ToolOutput so the chat
+    frontend can tell "found nothing" apart from "search failed"."""
+    from gilbert.interfaces.ui import ToolOutput
+
+    async def fake_search(*args: Any, **kwargs: Any) -> list[MusicItem]:
+        return []
+
+    stub_backend.search = fake_search  # type: ignore[method-assign]
+    result = await service.execute_tool("search_music", {"query": "nothing"})
+    assert isinstance(result, ToolOutput)
+    assert result.ui_blocks == []
+    parsed = json.loads(result.text)
+    assert parsed["results"] == []
+    assert "error" not in parsed  # Empty is not an error — "not found" is a valid result
 
 
 async def test_tool_search_default_kind_is_tracks(
@@ -435,6 +534,116 @@ async def test_tool_play_carries_didl_meta(
     await service.execute_tool("play_music", {"title": "Morning Jazz"})
     call_kwargs = speaker_svc.play_on_speakers.call_args[1]
     assert call_kwargs["didl_meta"] == "<DIDL-Lite>station</DIDL-Lite>"
+
+
+# --- play_item (button-triggered) ---
+
+
+async def test_item_payload_round_trips() -> None:
+    """The payload helper is invertible: encode → decode → same fields.
+
+    Every field that ``resolve_playable`` might need has to survive the
+    round-trip, or the Play button would silently lose information that
+    wasn't captured in the bare ``id``."""
+    from gilbert.core.services.music import _item_from_payload, _item_to_payload
+
+    original = MusicItem(
+        id="opaque-1",
+        title="Blues Rock Mix",
+        kind=MusicItemKind.PLAYLIST,
+        subtitle="Spotify",
+        uri="x-rincon-cpcontainer:foo",
+        didl_meta="<DIDL-Lite>container</DIDL-Lite>",
+        album_art_url="https://art/1.jpg",
+        duration_seconds=279.0,
+        service="Spotify",
+    )
+
+    decoded = _item_from_payload(_item_to_payload(original))
+    assert decoded == original
+
+
+async def test_item_payload_rejects_garbage() -> None:
+    """Bad JSON → ValueError, not a silent miss that eats the click."""
+    from gilbert.core.services.music import _item_from_payload
+
+    with pytest.raises(ValueError, match="Malformed"):
+        _item_from_payload("not json")
+    with pytest.raises(ValueError, match="JSON object"):
+        _item_from_payload("[1, 2, 3]")
+    with pytest.raises(ValueError, match="Unknown music item kind"):
+        _item_from_payload('{"kind": "bogus"}')
+
+
+async def test_tool_play_item_round_trips_from_button_value(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """End-to-end: a search result's Play button payload handed back
+    to ``play_item`` reaches the speaker service with the right URI.
+
+    This is the happy-path for the search-and-click flow — the search
+    tool returns a UI block whose button value is the JSON below, and
+    when the user clicks it the chat frontend submits the form as
+    ``{"item": "<json>"}`` to the ``play_item`` tool."""
+    from gilbert.core.services.music import _item_to_payload
+
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    item = MusicItem(
+        id="opaque-search-result",
+        title="Black Dog",
+        kind=MusicItemKind.TRACK,
+        subtitle="Led Zeppelin",
+        uri="",
+        service="Spotify",
+    )
+    payload = _item_to_payload(item)
+
+    result = await service.execute_tool(
+        "play_item",
+        {"item": payload, "speakers": ["Kitchen"], "volume": 40},
+    )
+    # play_item returns a plain str status dict (no UI blocks on success —
+    # the user already clicked, there's nothing else to show them).
+    assert isinstance(result, str)
+    parsed = json.loads(result)
+    assert parsed["status"] == "playing"
+    assert parsed["title"] == "Black Dog"
+    assert parsed["source"] == "search"
+
+    speaker_svc.play_on_speakers.assert_awaited_once()
+    call_kwargs = speaker_svc.play_on_speakers.call_args[1]
+    # The stub resolver turned the bare id into an x-sonos-spotify URI
+    assert "opaque-search-result" in call_kwargs["uri"]
+    assert call_kwargs["speaker_names"] == ["Kitchen"]
+    assert call_kwargs["volume"] == 40
+
+
+async def test_tool_play_item_missing_payload_returns_error(
+    service: MusicService,
+) -> None:
+    result = await service.execute_tool("play_item", {})
+    assert isinstance(result, str)
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "Missing" in parsed["error"]
+
+
+async def test_tool_play_item_malformed_payload_returns_error(
+    service: MusicService,
+) -> None:
+    """A garbled button value should produce a readable error instead
+    of crashing the tool dispatcher."""
+    result = await service.execute_tool("play_item", {"item": "not json"})
+    assert isinstance(result, str)
+    parsed = json.loads(result)
+    assert "error" in parsed
 
 
 # --- Now playing ---

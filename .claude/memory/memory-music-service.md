@@ -26,8 +26,9 @@ Spotify), and plays resolved URIs through the speaker service.
   services — that was a Spotify-Web-API-shaped assumption.
 
 ### Sonos Backend
-- `src/gilbert/integrations/sonos_music.py` — `SonosMusic`, the only
-  registered backend.
+- `std-plugins/sonos/sonos_music.py` — `SonosMusic`, the only registered
+  music backend. Lives in the `sonos` std-plugin (extracted from core
+  integrations when the plugin split landed).
 - **Favorites** via `device.music_library.get_sonos_favorites()` →
   `MusicItem` (with URI for tracks, DIDL meta for stations/containers).
 - **Playlists** via `device.get_sonos_playlists()` → `MusicItem` with
@@ -35,8 +36,16 @@ Spotify), and plays resolved URIs through the speaker service.
 - **Search** via `soco.music_services.MusicService(preferred_service,
   token_store=..., device=...).search(kind, query, count=limit)`. Needs
   a one-time SMAPI auth token (per-linked-service, not per-user).
-  Results carry an opaque `item_id` — `resolve_playable()` then calls
-  `sonos_uri_from_id()` to get a playable URI.
+  Results carry an opaque `item_id` — `resolve_playable()` then branches
+  on Spotify kind (tracks/episodes/shows go through the
+  `x-sonos-spotify:` fast path; playlists/albums/artists go through
+  `_build_spotify_container_playable` which returns an
+  `x-rincon-cpcontainer:` URI + DIDL envelope for the speaker backend's
+  queue-playback path). Non-Spotify SMAPI services fall back to
+  `sonos_uri_from_id()`. Artwork, artist, and track duration come from
+  `item.metadata` — playlists/albums inline them, tracks nest them in
+  `metadata.track_metadata` (see `_smapi_item_art`,
+  `_smapi_item_subtitle`, `_smapi_item_duration`).
 - **Token persistence** via an in-memory `_InMemoryTokenStore`
   (`TokenStoreBase` subclass) seeded from config on init and re-read
   after `complete_authentication`. Admin triggers the flow from the
@@ -63,10 +72,22 @@ Spotify), and plays resolved URIs through the speaker service.
 - `list_favorites` (`/music favorites`) — list Sonos favorites
 - `list_playlists` (`/music playlists`) — list saved Sonos playlists
 - `search_music` (`/music search <query> [kind=tracks]`) — search the
-  linked service; `kind` supports tracks/albums/playlists/artists/stations
+  linked service; `kind` supports tracks/albums/playlists/artists/stations.
+  Returns a `ToolOutput` with both JSON text (for the AI) and one
+  `UIBlock` per result (for the chat UI). Each block has the artwork
+  (when available, max_width=96), a title/subtitle/service label, and
+  an inline Play button whose value is the full JSON-encoded
+  `MusicItem` — clicking it fires `play_item` without another search.
 - `play_music` (`/music play <title> [speakers=...] [source=...]`) —
-  play by fuzzy title match. Default source order: favorites → playlists
-  → search. `source` restricts lookup to one path.
+  fuzzy-title fallback path: favorites → playlists → search.
+- `play_item` — *no slash command*; button-only callback. Takes
+  `{"item": <json payload>, "speakers": ..., "volume": ...}` and
+  rehydrates the `MusicItem` via `_item_from_payload`. Exists because
+  Sonos/SMAPI can't look search results up by id on a second call
+  (token/index rotation), so the button value has to carry the whole
+  item. Build/parse helpers: `_item_to_payload` / `_item_from_payload`
+  in `music.py`, and the per-row UI block is built by
+  `_build_search_result_block`.
 - `now_playing` (`/music now [speaker]`) — speaker-sourced playback state
 
 ### Settings Actions
@@ -96,4 +117,9 @@ music:
   with `kind=PLAYLIST` to discover genre playlists.
 - [Config Actions](memory-config-actions.md) — the action-button
   infrastructure this service helped drive.
-- `tests/unit/test_music_service.py` — unit tests (30).
+- `tests/unit/test_music_service.py` — unit tests.
+- `std-plugins/sonos/tests/test_sonos_music.py` — SMAPI metadata
+  extraction, Spotify container vs track dispatch,
+  `_build_spotify_container_playable` DIDL shape.
+- [Sonos Spotify playback](../../std-plugins/.claude/memory/memory-sonos-spotify-playback.md)
+  — tracks vs containers, why containers need the queue path.

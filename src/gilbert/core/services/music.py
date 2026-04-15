@@ -45,6 +45,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.ui import ToolOutput, UIBlock, UIElement, UIOption
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,64 @@ def _item_to_dict(item: MusicItem) -> dict[str, Any]:
     }
 
 
+def _item_to_payload(item: MusicItem) -> str:
+    """Serialize a ``MusicItem`` into a JSON string for round-trip transport.
+
+    Used as the ``value`` on UI block buttons so a Play button click can
+    hand the exact item back to ``play_item`` without the backend having
+    to re-search. Sonos/SMAPI can't look items up by id in a second call
+    (the token/index may have rotated), so the button has to carry every
+    field ``resolve_playable`` might need — including ``uri`` and
+    ``didl_meta`` for favorites whose playable shape was already
+    resolved upstream.
+
+    The payload is intentionally minimal (no pretty-printing) because it
+    travels as a form value through the websocket.
+    """
+    return json.dumps(
+        {
+            "id": item.id,
+            "title": item.title,
+            "kind": item.kind.value,
+            "subtitle": item.subtitle,
+            "uri": item.uri,
+            "didl_meta": item.didl_meta,
+            "album_art_url": item.album_art_url,
+            "duration_seconds": item.duration_seconds,
+            "service": item.service,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _item_from_payload(payload: str) -> MusicItem:
+    """Inverse of ``_item_to_payload`` — JSON → ``MusicItem``.
+
+    Raises ``ValueError`` on malformed input or an unknown ``kind``.
+    """
+    try:
+        d = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed music item payload: {exc}") from exc
+    if not isinstance(d, dict):
+        raise ValueError("Music item payload must be a JSON object")
+    try:
+        kind = MusicItemKind(d.get("kind", "track"))
+    except ValueError as exc:
+        raise ValueError(f"Unknown music item kind: {d.get('kind')!r}") from exc
+    return MusicItem(
+        id=str(d.get("id", "")),
+        title=str(d.get("title", "")),
+        kind=kind,
+        subtitle=str(d.get("subtitle", "")),
+        uri=str(d.get("uri", "")),
+        didl_meta=str(d.get("didl_meta", "")),
+        album_art_url=str(d.get("album_art_url", "")),
+        duration_seconds=float(d.get("duration_seconds", 0.0) or 0.0),
+        service=str(d.get("service", "")),
+    )
+
+
 def _now_playing_to_dict(np: NowPlaying) -> dict[str, Any]:
     return {
         "state": np.state.value,
@@ -73,6 +132,55 @@ def _now_playing_to_dict(np: NowPlaying) -> dict[str, Any]:
         "duration_seconds": np.duration_seconds,
         "position_seconds": np.position_seconds,
     }
+
+
+def _build_search_result_block(item: MusicItem) -> UIBlock:
+    """Render one search result as an interactive chat card.
+
+    Shape: artwork (when the backend populated ``album_art_url``) +
+    title/subtitle label + a single Play button whose ``value`` carries
+    the entire ``MusicItem`` as JSON. Clicking it fires the ``play_item``
+    tool with ``{"item": <payload>}`` — no second search, no id lookup.
+
+    Why the whole item in the button value: Sonos/SMAPI search tokens
+    rotate, and the same id may not resolve later. Carrying the full
+    dataclass sidesteps that entirely; the payload is typically a few
+    hundred bytes even with album art URLs inline.
+    """
+    subtitle = item.subtitle.strip() if item.subtitle else ""
+    kind_label = item.kind.value.capitalize()
+    if subtitle:
+        label_text = f"**{item.title}**\n{subtitle} · {kind_label}"
+    else:
+        label_text = f"**{item.title}**\n{kind_label}"
+    if item.service:
+        label_text += f" · {item.service}"
+
+    elements: list[UIElement] = []
+    if item.album_art_url:
+        elements.append(
+            UIElement(
+                type="image",
+                name="artwork",
+                url=item.album_art_url,
+                label=item.title,
+                max_width=96,
+            ),
+        )
+    elements.append(UIElement(type="label", name="info", label=label_text))
+    elements.append(
+        UIElement(
+            type="buttons",
+            name="item",
+            options=[UIOption(value=_item_to_payload(item), label="Play")],
+        ),
+    )
+    return UIBlock(
+        title=item.title,
+        elements=elements,
+        submit_label="Play",
+        tool_name="play_item",
+    )
 
 
 def _fuzzy_find(items: list[MusicItem], needle: str) -> MusicItem | None:
@@ -398,9 +506,47 @@ class MusicService(Service):
                 ],
                 required_role="everyone",
             ),
+            # No slash_command: this tool is only invoked via the Play
+            # button on a /music search result. Its required argument is
+            # an opaque JSON-encoded MusicItem — the user can't type it
+            # by hand, and slash parsing would mangle the JSON anyway.
+            ToolDefinition(
+                name="play_item",
+                description=(
+                    "Play a specific music item returned by a prior "
+                    "``search_music`` call. Takes the full item as a "
+                    "JSON payload so the speaker backend can resolve "
+                    "it without a second search round-trip."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="item",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "JSON-encoded MusicItem (as produced by a "
+                            "search result's Play button)."
+                        ),
+                    ),
+                    ToolParameter(
+                        name="speakers",
+                        type=ToolParameterType.ARRAY,
+                        description="Speaker names or aliases.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="volume",
+                        type=ToolParameterType.INTEGER,
+                        description="Volume level (0-100).",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+            ),
         ]
 
-    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute_tool(
+        self, name: str, arguments: dict[str, Any],
+    ) -> str | ToolOutput:
         match name:
             case "list_favorites":
                 return await self._tool_list_favorites()
@@ -410,6 +556,8 @@ class MusicService(Service):
                 return await self._tool_search(arguments)
             case "play_music":
                 return await self._tool_play(arguments)
+            case "play_item":
+                return await self._tool_play_item(arguments)
             case "now_playing":
                 return await self._tool_now_playing(arguments)
             case _:
@@ -423,7 +571,9 @@ class MusicService(Service):
         items = await self.list_playlists()
         return json.dumps({"playlists": [_item_to_dict(i) for i in items]})
 
-    async def _tool_search(self, arguments: dict[str, Any]) -> str:
+    async def _tool_search(
+        self, arguments: dict[str, Any],
+    ) -> str | ToolOutput:
         query = arguments["query"]
         kind_str = arguments.get("kind", "tracks")
         limit = arguments.get("limit", 10)
@@ -439,10 +589,26 @@ class MusicService(Service):
             results = await self.search(query, kind=kind, limit=limit)
         except MusicSearchUnavailableError as exc:
             return json.dumps({"error": str(exc)})
-        return json.dumps({
+
+        # Text payload: the JSON shape the AI already knows how to reason
+        # over. Unchanged from the pre-UI-block version so existing AI
+        # prompts and tool schemas keep working.
+        text = json.dumps({
             "kind": kind.value,
             "results": [_item_to_dict(i) for i in results],
         })
+
+        if not results:
+            return ToolOutput(text=text)
+
+        # Per-result UI blocks: artwork (when available), a label with
+        # title + subtitle + service, and a single Play button whose
+        # value round-trips the full MusicItem as JSON so the Play tool
+        # can resolve it without a second search hit.
+        blocks: list[UIBlock] = [
+            _build_search_result_block(item) for item in results
+        ]
+        return ToolOutput(text=text, ui_blocks=blocks)
 
     async def _tool_play(self, arguments: dict[str, Any]) -> str:
         title = arguments["title"]
@@ -508,6 +674,43 @@ class MusicService(Service):
             "service": item.service,
             "uri": playable.uri,
             "source": sources_tried[-1] if sources_tried else "",
+        })
+
+    async def _tool_play_item(self, arguments: dict[str, Any]) -> str:
+        """Play a specific item from a search result Play button click.
+
+        The form submission delivers the JSON payload under whichever
+        name the button carried. In our search UI blocks that name is
+        ``item`` (the element name), so the click arrives as
+        ``{"item": "<json payload>"}``.
+        """
+        payload = arguments.get("item")
+        if not payload:
+            return json.dumps({"error": "Missing 'item' payload"})
+        try:
+            music_item = _item_from_payload(str(payload))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        speakers = arguments.get("speakers") or None
+        volume = arguments.get("volume")
+
+        try:
+            playable = await self.play_item(
+                music_item, speaker_names=speakers, volume=volume,
+            )
+        except MusicSearchUnavailableError as exc:
+            return json.dumps({"error": str(exc)})
+        except RuntimeError as exc:
+            return json.dumps({"error": str(exc)})
+
+        return json.dumps({
+            "status": "playing",
+            "title": playable.title or music_item.title,
+            "kind": music_item.kind.value,
+            "service": music_item.service,
+            "uri": playable.uri,
+            "source": "search",
         })
 
     async def _tool_now_playing(self, arguments: dict[str, Any]) -> str:
