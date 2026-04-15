@@ -32,11 +32,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 import httpx
 import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -62,15 +64,35 @@ TARGET_URL: str = ""
 
 
 async def proxy(request: Request) -> Response:
+    start = time.monotonic()
     body = await request.body()
     fwd_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP
     }
-    async with httpx.AsyncClient(timeout=120) as client:
-        upstream = await client.post(
-            TARGET_URL, content=body, headers=fwd_headers,
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            upstream = await client.post(
+                TARGET_URL, content=body, headers=fwd_headers,
+            )
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        print(
+            f"[mcp_cors_proxy] ✗ POST /mcp → upstream error after {elapsed_ms}ms: {exc}",
+            file=sys.stderr,
         )
+        return Response(
+            content=f"upstream error: {exc}".encode(),
+            status_code=502,
+            media_type="text/plain",
+        )
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    session_id = upstream.headers.get("mcp-session-id", "-")
+    print(
+        f"[mcp_cors_proxy] → POST /mcp {upstream.status_code} "
+        f"({elapsed_ms}ms, session={session_id})",
+        file=sys.stderr,
+    )
     back_headers = {
         k: v for k, v in upstream.headers.items()
         if k.lower() not in HOP_BY_HOP
@@ -83,12 +105,34 @@ async def proxy(request: Request) -> Response:
     )
 
 
+class PrivateNetworkAccessMiddleware(BaseHTTPMiddleware):
+    """Add Chrome's Private/Local Network Access response header.
+
+    Chrome gates ``fetch`` requests from a non-local origin to a
+    private-network address (including ``127.0.0.1`` from a LAN
+    Gilbert install) on seeing ``Access-Control-Allow-Private-
+    Network: true`` in both the preflight and the actual response.
+    Starlette's CORSMiddleware only emits standard CORS headers, so
+    we wrap it with this layer to cover the PNA header on every
+    response — both the OPTIONS preflight and the POST itself.
+    """
+
+    async def dispatch(self, request, call_next):  # type: ignore[override]
+        resp = await call_next(request)
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
+        return resp
+
+
 def build_app(target_url: str) -> Starlette:
     global TARGET_URL
     TARGET_URL = target_url
     return Starlette(
         routes=[Route("/mcp", proxy, methods=["POST"])],
         middleware=[
+            # PNA must wrap CORS so the header lands on the
+            # CORSMiddleware's preflight response too, not just on
+            # the route responses.
+            Middleware(PrivateNetworkAccessMiddleware),
             Middleware(
                 CORSMiddleware,
                 allow_origins=["*"],
