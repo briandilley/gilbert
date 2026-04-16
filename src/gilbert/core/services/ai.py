@@ -75,7 +75,15 @@ _MAX_ATTACHMENTS_PER_MESSAGE = 8
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_DOCUMENT_BYTES = 32 * 1024 * 1024  # Anthropic's documented PDF cap.
 _MAX_TEXT_BYTES = 512 * 1024  # decoded UTF-8.
-_MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024
+# Generic "any file" cap for attachments the AI can't read natively
+# (zips, videos, binaries, Office docs that aren't xlsx, …). Bigger than
+# the image cap because the file isn't going to the model anyway — it's
+# just riding through the conversation row for the user to download on
+# click. Still bounded so a single upload can't balloon the entity.
+_MAX_FILE_BYTES = 50 * 1024 * 1024
+# Sum cap across an entire message. Bumped from 40 to 64 MiB so a full
+# 50 MiB generic file can ride alongside a small image or text note.
+_MAX_TOTAL_ATTACHMENT_BYTES = 64 * 1024 * 1024
 
 # Sentinel appended to the content of an assistant row when the user
 # interrupts a turn via ``chat.message.cancel``. Two jobs at once:
@@ -185,9 +193,14 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
     """Validate and coerce the ``attachments`` field of a chat.message.send
     frame.
 
-    Each entry must be a dict with at least ``kind`` in
-    ``{"image", "document", "text"}``. Raises ``ValueError`` with a
-    user-legible message on any validation failure.
+    Each entry must be a dict with ``kind`` in
+    ``{"image", "document", "text", "file"}``. The first three are the
+    AI-readable kinds (image blocks, PDF/xlsx documents, inlined text);
+    ``file`` is a catch-all for anything else the user wants to upload.
+    File-kind attachments ride through the conversation row and render
+    as download chips on the user's bubble, but the AI only sees a text
+    stub naming the file. Raises ``ValueError`` with a user-legible
+    message on any validation failure.
     """
     import base64
 
@@ -324,9 +337,49 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
                     text=text,
                 )
             )
+        elif kind == "file":
+            # Arbitrary-file catch-all: the user uploaded something the
+            # AI can't natively read (a zip, a video, an executable, a
+            # docx, whatever). We don't try to interpret the bytes —
+            # we just carry them through so the chip renders on the
+            # bubble and the user can click to download their own
+            # upload back. The Anthropic backend emits a text stub
+            # describing the attachment so the AI knows it exists.
+            data = item.get("data")
+            if not name:
+                raise ValueError(f"attachments[{idx}] file requires a name")
+            if not isinstance(data, str) or not data:
+                raise ValueError(
+                    f"attachments[{idx}] file data must be a non-empty string",
+                )
+            try:
+                decoded_len = len(base64.b64decode(data, validate=True))
+            except Exception as exc:
+                raise ValueError(
+                    f"attachments[{idx}] has invalid base64: {exc}",
+                ) from exc
+            if decoded_len > _MAX_FILE_BYTES:
+                raise ValueError(
+                    f"attachments[{idx}] file is too large "
+                    f"({decoded_len} bytes > {_MAX_FILE_BYTES} max)",
+                )
+            total_bytes += decoded_len
+            result.append(
+                FileAttachment(
+                    kind="file",
+                    name=name,
+                    # Browsers leave ``file.type`` empty for many
+                    # formats (tar.gz, custom extensions, …). Fall
+                    # back to the RFC 2046 default so the persisted
+                    # row always carries something meaningful.
+                    media_type=media_type or "application/octet-stream",
+                    data=data,
+                )
+            )
         else:
             raise ValueError(
-                f"attachments[{idx}] has unknown kind {kind!r} (expected image, document, or text)",
+                f"attachments[{idx}] has unknown kind {kind!r} "
+                "(expected image, document, text, or file)",
             )
 
         if total_bytes > _MAX_TOTAL_ATTACHMENT_BYTES:

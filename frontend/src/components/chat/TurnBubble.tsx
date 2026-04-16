@@ -566,7 +566,15 @@ function AttachmentChip({
     );
   }
 
-  if (attachment.kind === "document") {
+  if (attachment.kind === "document" || attachment.kind === "file") {
+    // ``document`` is the AI-readable path (PDF, xlsx converted to
+    // text server-side). ``file`` is the opaque catch-all for every
+    // other upload the user made. Both render as the same download
+    // chip shape — a small FileIcon, filename, type+size label, and
+    // a ``data:`` link that downloads the original bytes on click.
+    // The only practical difference is what the model sees in its
+    // prompt (document block vs. text stub), which happens upstream
+    // in the Anthropic backend.
     if (isReference) {
       return refChip(
         attachment.name || "document",
@@ -576,10 +584,12 @@ function AttachmentChip({
     }
     const inlineData = attachment.data ?? "";
     const bytes = Math.floor((inlineData.length * 3) / 4);
-    const href = `data:${attachment.media_type};base64,${inlineData}`;
+    const effectiveType = attachment.media_type || "application/octet-stream";
+    const href = `data:${effectiveType};base64,${inlineData}`;
     return (
       <a
         href={href}
+        download={attachment.name || "download"}
         target="_blank"
         rel="noreferrer"
         className="flex max-w-xs items-center gap-2 rounded-lg border bg-muted/50 px-3 py-2 no-underline hover:bg-muted"
@@ -590,7 +600,7 @@ function AttachmentChip({
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium">{attachment.name}</div>
           <div className="truncate text-[10px] text-muted-foreground">
-            {mediaTypeLabel(attachment.media_type)} ·{" "}
+            {mediaTypeLabel(effectiveType)} ·{" "}
             {formatAttachmentBytes(bytes)}
           </div>
         </div>

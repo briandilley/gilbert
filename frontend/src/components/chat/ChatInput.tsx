@@ -36,6 +36,10 @@ const MAX_IMAGE_DIMENSION = 1568;
 const JPEG_QUALITY = 0.85;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES = 512 * 1024;
+// Generic "any file" cap mirroring ``_MAX_FILE_BYTES`` on the server.
+// Keeps the catch-all branch from ingesting a 2 GB mp4 only to have
+// the backend reject it on arrival.
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -225,8 +229,43 @@ async function prepareText(file: File): Promise<FileAttachment> {
   };
 }
 
+/** Catch-all preparer for anything that isn't a known image / PDF /
+ *  xlsx / text file. Reads the raw bytes as base64 and emits a
+ *  ``kind="file"`` attachment. The server persists the payload so
+ *  the user's chat bubble renders a download chip; the AI sees only
+ *  a text stub naming the file + size + mime type. */
+async function prepareGenericFile(file: File): Promise<FileAttachment> {
+  if (file.size > MAX_FILE_BYTES) {
+    throw new Error(
+      `File too large (${Math.round(file.size / 1024 / 1024)} MB > ${MAX_FILE_BYTES / 1024 / 1024} MB max)`,
+    );
+  }
+  return {
+    kind: "file",
+    name: file.name || "upload.bin",
+    // Browsers leave ``file.type`` empty for many formats (.tar.gz,
+    // .dmg, custom extensions). Fall back to the RFC 2046 default so
+    // the persisted row always carries something meaningful.
+    media_type: file.type || "application/octet-stream",
+    data: await readAsBase64(file),
+  };
+}
+
 /** Classify a dropped/picked file and produce a ``FileAttachment``.
- *  Throws ``Error`` with a user-legible message for anything unsupported. */
+ *
+ *  Resolution order:
+ *
+ *  1. Known image types → ``kind="image"`` (resized if too big).
+ *  2. PDF → ``kind="document"``.
+ *  3. XLSX → ``kind="document"`` (server converts to markdown).
+ *  4. Text/code files (by MIME or extension) → ``kind="text"``.
+ *  5. Anything else → ``kind="file"``. Opaque catch-all so the user
+ *     can upload literally any file — the AI can't read it, but it
+ *     rides through the conversation and renders as a download chip.
+ *
+ *  Throws only on hard failures (file too large, read error). The
+ *  fallback branch means "unknown type" is no longer an error.
+ */
 export async function prepareChatAttachment(
   file: File,
 ): Promise<FileAttachment> {
@@ -239,9 +278,7 @@ export async function prepareChatAttachment(
     return prepareBinaryDocument(file, XLSX_MIME, "workbook.xlsx");
   }
   if (looksLikeText(file)) return prepareText(file);
-  throw new Error(
-    `Unsupported file "${file.name || "(unnamed)"}" — attach images, PDFs, spreadsheets, or text files.`,
-  );
+  return prepareGenericFile(file);
 }
 
 /** Parsed slash-command input broken into the command prefix the user
@@ -698,7 +735,6 @@ export function ChatInput({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/*,.md,.txt,.json,.yaml,.yml,.toml,.ini,.log,.csv,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.rb,.go,.rs,.java,.c,.cpp,.h,.hpp,.sh,.sql"
             multiple
             className="hidden"
             onChange={handleFilePick}
@@ -842,6 +878,17 @@ function attachmentLabel(att: FileAttachment): string {
     const label = att.media_type === XLSX_MIME ? "XLSX" : "PDF";
     return `${label} · ${formatBytes(bytes)}`;
   }
+  if (att.kind === "file") {
+    const bytes = Math.floor(((att.data ?? "").length * 3) / 4);
+    // Pull a short extension-style tag off the filename when
+    // possible so the strip reads like "ZIP · 12.4 MB" instead of
+    // just the mime type. Fall back to the mime subtype.
+    const dot = (att.name ?? "").lastIndexOf(".");
+    const ext =
+      dot > 0 ? (att.name ?? "").slice(dot + 1).toUpperCase() : "";
+    const label = ext || (att.media_type.split("/").pop() ?? "FILE").toUpperCase();
+    return `${label} · ${formatBytes(bytes)}`;
+  }
   return `Text · ${formatBytes(new Blob([att.text ?? ""]).size)}`;
 }
 
@@ -871,6 +918,8 @@ function PendingAttachmentCard({
       </div>
     );
   }
+  // FileIcon for binaries/documents/files; FileTextIcon for text.
+  // Images short-circuit above with a thumbnail preview.
   const Icon = att.kind === "text" ? FileTextIcon : FileIcon;
   return (
     <div className="group relative flex h-16 max-w-xs items-center gap-2 overflow-hidden rounded-md border bg-muted/50 pl-2 pr-6">

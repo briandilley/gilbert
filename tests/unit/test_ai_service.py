@@ -1507,6 +1507,69 @@ def test_parse_frame_attachments_rejects_unknown_kind() -> None:
         _parse_frame_attachments([{"kind": "video", "name": "x", "data": "x"}])
 
 
+def test_parse_frame_attachments_accepts_generic_file_kind() -> None:
+    """The ``file`` catch-all kind accepts arbitrary content types
+    (zip, mp4, binaries, …) and carries the bytes through without
+    validating the media_type against any allowlist."""
+    import base64
+
+    payload = base64.b64encode(b"fake-zip-bytes").decode()
+    result = _parse_frame_attachments(
+        [
+            {
+                "kind": "file",
+                "name": "archive.zip",
+                "media_type": "application/zip",
+                "data": payload,
+            },
+        ]
+    )
+    assert len(result) == 1
+    assert result[0].kind == "file"
+    assert result[0].name == "archive.zip"
+    assert result[0].media_type == "application/zip"
+    assert result[0].data == payload
+
+
+def test_parse_frame_attachments_file_defaults_media_type() -> None:
+    """Browsers leave ``file.type`` empty for many formats; the
+    parser should fall back to application/octet-stream so the row
+    always carries a meaningful type."""
+    import base64
+
+    payload = base64.b64encode(b"xx").decode()
+    result = _parse_frame_attachments(
+        [{"kind": "file", "name": "mystery.tar.gz", "data": payload}]
+    )
+    assert result[0].media_type == "application/octet-stream"
+
+
+def test_parse_frame_attachments_file_requires_name() -> None:
+    import base64
+
+    payload = base64.b64encode(b"x").decode()
+    with pytest.raises(ValueError, match="file requires a name"):
+        _parse_frame_attachments([{"kind": "file", "data": payload}])
+
+
+def test_parse_frame_attachments_file_requires_data() -> None:
+    with pytest.raises(ValueError, match="file data must be a non-empty string"):
+        _parse_frame_attachments([{"kind": "file", "name": "foo.bin"}])
+
+
+def test_parse_frame_attachments_rejects_oversize_file() -> None:
+    """Generic-file branch enforces ``_MAX_FILE_BYTES``."""
+    import base64
+
+    from gilbert.core.services.ai import _MAX_FILE_BYTES
+
+    oversize = base64.b64encode(b"x" * (_MAX_FILE_BYTES + 1)).decode()
+    with pytest.raises(ValueError, match="file is too large"):
+        _parse_frame_attachments(
+            [{"kind": "file", "name": "big.bin", "data": oversize}]
+        )
+
+
 def test_parse_frame_attachments_rejects_bad_image_media_type() -> None:
     import base64
 

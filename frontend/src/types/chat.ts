@@ -21,10 +21,17 @@ import type { UIBlock } from "./ui";
 // practice user messages are always inline and assistant messages are
 // almost always references.
 export interface FileAttachmentBase {
-  kind: "image" | "document" | "text";
+  /** Discriminator.
+   *  - ``image`` / ``document`` / ``text``: AI-readable kinds,
+   *    forwarded to the model as multimodal content blocks.
+   *  - ``file``: opaque catch-all for anything else the user wants
+   *    to upload (zips, videos, docx, binaries, …). The bytes
+   *    round-trip so the download chip renders, but the AI only
+   *    sees a text stub naming the file + size + mime type. */
+  kind: "image" | "document" | "text" | "file";
   name?: string;
   media_type: string;
-  /** Inline base64 payload (images/documents). */
+  /** Inline base64 payload (images/documents/files). */
   data?: string;
   /** Inline UTF-8 payload (text attachments). */
   text?: string;

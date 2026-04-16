@@ -58,6 +58,16 @@ class FileAttachment:
       ``media_type`` is a hint like ``text/markdown``. Text attachments
       are inlined into the prompt as ``## <name>\\n\\n<body>`` so the
       model can reference them by filename.
+    - ``"file"``: raw base64 bytes of an arbitrary file in ``data``.
+      Used for anything the AI can't read natively — .xlsx, .docx,
+      .zip, .mp4, binaries, whatever — so the user can still upload
+      it, see it as a download chip on their own message, and the
+      model sees a text stub announcing the filename + size + mime
+      type without trying to parse the contents. Think of it as
+      "attached but opaque to the model." Falls back to
+      ``application/octet-stream`` when the browser can't identify
+      the type. Anthropic emits a plain text block describing the
+      attachment, not a content block.
 
     For workspace-reference attachments (``workspace_path`` set), the
     backend-side rendering logic should treat them the same as inline
