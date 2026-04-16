@@ -23,12 +23,24 @@ import type { FileAttachment } from "@/types/chat";
 
 /** A pending attachment owned by the chat page. Always carries an ``id``
  *  and user-visible ``name``; ``preview`` is only set for images so the
- *  thumbnail strip can render a blob URL. */
+ *  thumbnail strip can render a blob URL.
+ *
+ *  Upload-path attachments (large generic files) start life with
+ *  ``uploading: true`` and no resolved ``attachment`` — the chip
+ *  shows a progress bar while the browser streams the bytes to
+ *  ``/api/chat/upload``. Once the upload resolves, ``attachment``
+ *  gets filled in (reference mode) and ``uploading`` flips to false.
+ *  Send is disabled while any pending attachment has ``uploading:
+ *  true``. */
 export interface PendingAttachment {
   id: string;
   name: string;
-  attachment: FileAttachment;
+  attachment: FileAttachment | null;
   preview?: string;
+  uploading?: boolean;
+  /** 0–1 fractional progress while uploading. */
+  progress?: number;
+  error?: string;
 }
 
 export const MAX_CHAT_ATTACHMENTS = 8;
@@ -37,9 +49,10 @@ const JPEG_QUALITY = 0.85;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES = 512 * 1024;
 // Generic "any file" cap mirroring ``_MAX_FILE_BYTES`` on the server.
-// Keeps the catch-all branch from ingesting a 2 GB mp4 only to have
-// the backend reject it on arrival.
-const MAX_FILE_BYTES = 50 * 1024 * 1024;
+// Files this big bypass the WebSocket entirely and stream straight
+// to disk via ``POST /api/chat/upload``; the cap is enforced both
+// client-side (here) and server-side (ai.py).
+const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 const ALLOWED_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -229,56 +242,74 @@ async function prepareText(file: File): Promise<FileAttachment> {
   };
 }
 
-/** Catch-all preparer for anything that isn't a known image / PDF /
- *  xlsx / text file. Reads the raw bytes as base64 and emits a
- *  ``kind="file"`` attachment. The server persists the payload so
- *  the user's chat bubble renders a download chip; the AI sees only
- *  a text stub naming the file + size + mime type. */
-async function prepareGenericFile(file: File): Promise<FileAttachment> {
-  if (file.size > MAX_FILE_BYTES) {
-    throw new Error(
-      `File too large (${Math.round(file.size / 1024 / 1024)} MB > ${MAX_FILE_BYTES / 1024 / 1024} MB max)`,
-    );
-  }
-  return {
-    kind: "file",
-    name: file.name || "upload.bin",
-    // Browsers leave ``file.type`` empty for many formats (.tar.gz,
-    // .dmg, custom extensions). Fall back to the RFC 2046 default so
-    // the persisted row always carries something meaningful.
-    media_type: file.type || "application/octet-stream",
-    data: await readAsBase64(file),
-  };
-}
+/** The result of classifying a picked file.
+ *
+ *  - ``inline`` — small, AI-readable, ride through the WebSocket
+ *    as base64 in the chat frame. Image/PDF/xlsx/text paths.
+ *  - ``upload`` — everything else. The caller uploads the raw File
+ *    via ``POST /api/chat/upload`` and turns the server's reply
+ *    into a reference-mode FileAttachment. Keeps 1 GB files off
+ *    the WebSocket and out of the conversation row. */
+export type PreparedAttachment =
+  | { mode: "inline"; attachment: FileAttachment }
+  | { mode: "upload"; file: File };
 
-/** Classify a dropped/picked file and produce a ``FileAttachment``.
+/** Classify a dropped/picked file.
  *
  *  Resolution order:
  *
- *  1. Known image types → ``kind="image"`` (resized if too big).
- *  2. PDF → ``kind="document"``.
- *  3. XLSX → ``kind="document"`` (server converts to markdown).
- *  4. Text/code files (by MIME or extension) → ``kind="text"``.
- *  5. Anything else → ``kind="file"``. Opaque catch-all so the user
- *     can upload literally any file — the AI can't read it, but it
- *     rides through the conversation and renders as a download chip.
+ *  1. Known image types → inline ``kind="image"`` (resized if too big).
+ *  2. PDF → inline ``kind="document"``.
+ *  3. XLSX → inline ``kind="document"`` (server converts to markdown).
+ *  4. Text/code files (by MIME or extension) → inline ``kind="text"``.
+ *  5. Anything else → upload mode. Any file type is accepted, up to
+ *     ``MAX_FILE_BYTES`` — the caller posts it to ``/api/chat/upload``.
  *
- *  Throws only on hard failures (file too large, read error). The
- *  fallback branch means "unknown type" is no longer an error.
+ *  Throws on hard failures within the inline preparation paths
+ *  (image decode error, text file too big, …). The upload branch
+ *  validates ``file.size`` up-front so the caller doesn't burn
+ *  bandwidth on a rejected upload.
  */
 export async function prepareChatAttachment(
   file: File,
-): Promise<FileAttachment> {
+): Promise<PreparedAttachment> {
   const name = file.name.toLowerCase();
-  if (ALLOWED_IMAGE_TYPES.has(file.type)) return prepareImage(file);
+  if (ALLOWED_IMAGE_TYPES.has(file.type)) {
+    return { mode: "inline", attachment: await prepareImage(file) };
+  }
   if (file.type === "application/pdf" || name.endsWith(".pdf")) {
-    return prepareBinaryDocument(file, "application/pdf", "document.pdf");
+    // PDFs under the AI-readable cap stay inline so the model can
+    // actually read them; anything larger drops through to the
+    // upload path so we don't block the user on a 200 MB PDF.
+    if (file.size <= MAX_DOCUMENT_BYTES) {
+      return {
+        mode: "inline",
+        attachment: await prepareBinaryDocument(
+          file,
+          "application/pdf",
+          "document.pdf",
+        ),
+      };
+    }
   }
   if (file.type === XLSX_MIME || name.endsWith(".xlsx")) {
-    return prepareBinaryDocument(file, XLSX_MIME, "workbook.xlsx");
+    if (file.size <= MAX_DOCUMENT_BYTES) {
+      return {
+        mode: "inline",
+        attachment: await prepareBinaryDocument(file, XLSX_MIME, "workbook.xlsx"),
+      };
+    }
   }
-  if (looksLikeText(file)) return prepareText(file);
-  return prepareGenericFile(file);
+  if (looksLikeText(file) && file.size <= MAX_TEXT_BYTES) {
+    return { mode: "inline", attachment: await prepareText(file) };
+  }
+  // Everything else → upload path.
+  if (file.size > MAX_FILE_BYTES) {
+    throw new Error(
+      `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB > ${MAX_FILE_BYTES / 1024 / 1024 / 1024} GB max)`,
+    );
+  }
+  return { mode: "upload", file };
 }
 
 /** Parsed slash-command input broken into the command prefix the user
@@ -485,6 +516,14 @@ export function ChatInput({
     }
   }, [suggestions.length, suggestionIndex]);
 
+  // True when any pending attachment is still uploading — blocks
+  // send so the user can't accidentally fire the chat before the
+  // bytes have reached disk.
+  const uploadingInProgress = useMemo(
+    () => pendingAttachments.some((p) => p.uploading),
+    [pendingAttachments],
+  );
+
   const handleSend = useCallback(() => {
     // Ignore Enter / click while a turn is already in flight — the
     // user has to hit stop first. Letting it through would race two
@@ -492,11 +531,19 @@ export function ChatInput({
     // anyone wants. The textarea stays editable so typed drafts
     // survive the wait.
     if (sending) return;
+    // Also block send while uploads are still in flight. The user
+    // can still type; they just can't fire the chat until every
+    // pending attachment has resolved.
+    if (uploadingInProgress) return;
     const trimmed = message.trim();
-    if (!trimmed && pendingAttachments.length === 0) return;
-    const outgoing: FileAttachment[] = pendingAttachments.map(
-      (p) => p.attachment,
-    );
+    // Only resolved (non-null, non-errored) attachments make it to
+    // the outgoing list. Errored placeholders stay on the chip
+    // strip so the user sees what failed, but they don't ride
+    // along with the send.
+    const outgoing: FileAttachment[] = pendingAttachments
+      .map((p) => p.attachment)
+      .filter((a): a is FileAttachment => a !== null);
+    if (!trimmed && outgoing.length === 0) return;
     onSend(trimmed, outgoing);
     const hist = historyRef.current;
     if (trimmed && hist[hist.length - 1] !== trimmed) {
@@ -512,7 +559,14 @@ export function ChatInput({
       textareaRef.current.style.height = "auto";
       textareaRef.current.focus();
     }
-  }, [sending, message, pendingAttachments, onSend, onClearAttachments]);
+  }, [
+    sending,
+    uploadingInProgress,
+    message,
+    pendingAttachments,
+    onSend,
+    onClearAttachments,
+  ]);
 
   const applyHistoryEntry = useCallback((text: string) => {
     setMessage(text);
@@ -779,10 +833,18 @@ export function ChatInput({
             <Button
               onClick={handleSend}
               disabled={
-                !message.trim() && pendingAttachments.length === 0
+                uploadingInProgress ||
+                (!message.trim() &&
+                  pendingAttachments.filter((p) => p.attachment !== null)
+                    .length === 0)
               }
               size="icon"
               className="shrink-0"
+              title={
+                uploadingInProgress
+                  ? "Waiting for uploads to finish…"
+                  : "Send"
+              }
             >
               <SendHorizontalIcon className="size-4" />
               <span className="sr-only">Send</span>
@@ -873,13 +935,21 @@ function attachmentLabel(att: FileAttachment): string {
   if (att.kind === "image") {
     return att.media_type.replace(/^image\//, "").toUpperCase();
   }
+  // Prefer the explicit ``size`` field if the server (or an earlier
+  // classifier step) filled it in; fall back to decoding the inline
+  // base64 only if size is unknown. Reference-mode attachments
+  // always carry size and never carry ``data``, so the fallback
+  // would be wrong for them.
+  const sizeFromField = att.size ?? 0;
+  const bytes =
+    sizeFromField > 0
+      ? sizeFromField
+      : Math.floor(((att.data ?? "").length * 3) / 4);
   if (att.kind === "document") {
-    const bytes = Math.floor(((att.data ?? "").length * 3) / 4);
     const label = att.media_type === XLSX_MIME ? "XLSX" : "PDF";
     return `${label} · ${formatBytes(bytes)}`;
   }
   if (att.kind === "file") {
-    const bytes = Math.floor(((att.data ?? "").length * 3) / 4);
     // Pull a short extension-style tag off the filename when
     // possible so the strip reads like "ZIP · 12.4 MB" instead of
     // just the mime type. Fall back to the mime subtype.
@@ -906,6 +976,43 @@ function PendingAttachmentCard({
   onRemove: () => void;
 }) {
   const att = item.attachment;
+
+  // Upload-in-progress or errored: show a generic card with a
+  // progress bar or error message instead of the normal attachment
+  // label. The ``attachment`` field is null until the upload
+  // resolves.
+  if (item.uploading || item.error || att === null) {
+    const pct = Math.round(((item.progress ?? 0) * 100));
+    return (
+      <div className="group relative flex h-16 max-w-xs items-center gap-2 overflow-hidden rounded-md border bg-muted/50 pl-2 pr-6">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded bg-muted">
+          <FileIcon className="size-5 text-muted-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-medium">{item.name}</div>
+          {item.error ? (
+            <div className="truncate text-[10px] text-destructive">
+              {item.error}
+            </div>
+          ) : (
+            <>
+              <div className="truncate text-[10px] text-muted-foreground">
+                Uploading… {pct}%
+              </div>
+              <div className="mt-0.5 h-1 w-full overflow-hidden rounded bg-muted">
+                <div
+                  className="h-full bg-primary transition-[width]"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </>
+          )}
+        </div>
+        <RemoveButton name={item.name} onClick={onRemove} />
+      </div>
+    );
+  }
+
   if (att.kind === "image" && item.preview) {
     return (
       <div className="group relative size-16 overflow-hidden rounded-md border bg-muted">

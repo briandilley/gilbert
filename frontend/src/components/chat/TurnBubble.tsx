@@ -570,12 +570,52 @@ function AttachmentChip({
     // ``document`` is the AI-readable path (PDF, xlsx converted to
     // text server-side). ``file`` is the opaque catch-all for every
     // other upload the user made. Both render as the same download
-    // chip shape — a small FileIcon, filename, type+size label, and
-    // a ``data:`` link that downloads the original bytes on click.
-    // The only practical difference is what the model sees in its
-    // prompt (document block vs. text stub), which happens upstream
-    // in the Anthropic backend.
+    // chip shape but the bytes come from one of three sources:
+    //
+    // 1. ``chat-uploads`` workspace reference: user uploaded this
+    //    via ``POST /api/chat/upload``. Download via the streaming
+    //    HTTP endpoint ``GET /api/chat/download/{conv}/{path}`` so
+    //    the browser handles 1 GB downloads natively instead of
+    //    choking on a base64 blob over the WebSocket.
+    // 2. Any other reference (tool-produced PDFs, generated
+    //    images, etc.): fall back to the WS-based
+    //    ``skills.workspace.download`` RPC via ``refChip``.
+    // 3. Inline ``data``: render a ``data:`` URL directly.
     if (isReference) {
+      if (attachment.workspace_skill === "chat-uploads") {
+        const convId = attachment.workspace_conv || "";
+        const path = attachment.workspace_path || "";
+        // The browser handles the streaming download natively,
+        // including progress and save-dialog. No need for the
+        // WS-based base64 download.
+        const href = `/api/chat/download/${encodeURIComponent(convId)}/${encodeURIComponent(path)}`;
+        const sizeLabel =
+          attachment.size && attachment.size > 0
+            ? ` · ${formatAttachmentBytes(attachment.size)}`
+            : "";
+        return (
+          <a
+            href={href}
+            download={attachment.name || "download"}
+            className="flex max-w-xs items-center gap-2 rounded-lg border bg-muted/50 px-3 py-2 no-underline hover:bg-muted"
+            title={`Download ${attachment.name ?? "file"}`}
+          >
+            <div className="flex size-9 shrink-0 items-center justify-center rounded bg-background">
+              <FileIcon className="size-5 text-muted-foreground" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-xs font-medium">
+                {attachment.name}
+              </div>
+              <div className="truncate text-[10px] text-muted-foreground">
+                {mediaTypeLabel(attachment.media_type)}
+                {sizeLabel}
+              </div>
+            </div>
+            <DownloadIcon className="size-4 text-muted-foreground shrink-0" />
+          </a>
+        );
+      }
       return refChip(
         attachment.name || "document",
         `${mediaTypeLabel(attachment.media_type)} · workspace file`,

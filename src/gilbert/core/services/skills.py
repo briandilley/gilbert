@@ -785,7 +785,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         """
         return self._workspace_root() / user_id / skill_name
 
-    def _get_workspace(
+    def get_workspace_path(
         self,
         user_id: str,
         skill_name: str,
@@ -813,6 +813,11 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         ``skills.workspace.download`` — the WS handler tries the
         conversation-scoped path first and falls back to legacy when
         the attachment doesn't carry a ``workspace_conv``.
+
+        The ``skill_name`` need not be a registered skill. Synthetic
+        names like ``"chat-uploads"`` are used by the HTTP upload
+        endpoint to land user-uploaded files in the conversation
+        workspace tree without polluting any real skill's directory.
         """
         if conversation_id:
             workspace = (
@@ -823,6 +828,11 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             workspace = self._legacy_workspace_dir(user_id, skill_name)
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
+
+    # Back-compat alias — internal call sites still use the underscore
+    # name. Kept so I don't have to churn every existing reference in
+    # this file; new callers should use ``get_workspace_path``.
+    _get_workspace = get_workspace_path
 
     # ── Skill Discovery ──────────────────────────────────────────────
 

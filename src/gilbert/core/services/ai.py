@@ -76,13 +76,15 @@ _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_DOCUMENT_BYTES = 32 * 1024 * 1024  # Anthropic's documented PDF cap.
 _MAX_TEXT_BYTES = 512 * 1024  # decoded UTF-8.
 # Generic "any file" cap for attachments the AI can't read natively
-# (zips, videos, binaries, Office docs that aren't xlsx, …). Bigger than
-# the image cap because the file isn't going to the model anyway — it's
-# just riding through the conversation row for the user to download on
-# click. Still bounded so a single upload can't balloon the entity.
-_MAX_FILE_BYTES = 50 * 1024 * 1024
-# Sum cap across an entire message. Bumped from 40 to 64 MiB so a full
-# 50 MiB generic file can ride alongside a small image or text note.
+# (zips, videos, binaries, Office docs that aren't xlsx, …). The bytes
+# go to disk via ``POST /api/chat/upload`` and the conversation row
+# carries only a workspace reference — so this cap applies at upload
+# time, not per-message. 1 GiB ceiling by request.
+_MAX_FILE_BYTES = 1024 * 1024 * 1024
+# Sum cap across all *inline* bytes in a single chat.message.send
+# frame. Reference-mode file attachments don't contribute to this cap
+# because they don't ride inside the frame. Kept at 64 MiB so a user
+# can still attach a small image + a small text note without friction.
 _MAX_TOTAL_ATTACHMENT_BYTES = 64 * 1024 * 1024
 
 # Sentinel appended to the content of an assistant row when the user
@@ -340,17 +342,74 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
         elif kind == "file":
             # Arbitrary-file catch-all: the user uploaded something the
             # AI can't natively read (a zip, a video, an executable, a
-            # docx, whatever). We don't try to interpret the bytes —
-            # we just carry them through so the chip renders on the
-            # bubble and the user can click to download their own
-            # upload back. The Anthropic backend emits a text stub
-            # describing the attachment so the AI knows it exists.
-            data = item.get("data")
+            # docx, whatever). Two sub-modes:
+            #
+            # 1. Reference mode (the normal case for anything over a
+            #    few MB): the file lives on disk in the chat's
+            #    per-conversation workspace, uploaded via
+            #    ``POST /api/chat/upload`` — an HTTP endpoint that
+            #    streams the bytes directly to disk. The frame
+            #    carries only ``workspace_skill`` / ``workspace_path``
+            #    / ``workspace_conv`` / ``size`` / ``media_type``, no
+            #    base64 data, so the conversation row stays small no
+            #    matter how big the file is. The chip renders with a
+            #    download link that hits ``GET /api/chat/download``
+            #    to stream the file back.
+            #
+            # 2. Inline mode (legacy / small uploads that bypassed
+            #    the upload endpoint): carries base64 ``data``
+            #    directly. Capped at ``_MAX_FILE_BYTES`` but subject
+            #    to the 1 MiB default WebSocket frame limit in
+            #    practice, so this path is only useful for tiny
+            #    files. Kept for backward compatibility with any
+            #    callers that still pre-base64 their attachments.
             if not name:
                 raise ValueError(f"attachments[{idx}] file requires a name")
+
+            workspace_skill = str(item.get("workspace_skill") or "")
+            workspace_path = str(item.get("workspace_path") or "")
+            workspace_conv = str(item.get("workspace_conv") or "")
+            raw_size = item.get("size")
+            try:
+                reported_size = int(raw_size) if raw_size is not None else 0
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"attachments[{idx}] size must be an integer",
+                ) from None
+            if reported_size < 0:
+                raise ValueError(
+                    f"attachments[{idx}] size must be non-negative",
+                )
+
+            if workspace_path:
+                # Reference mode: bytes live on disk, not in the
+                # frame. Size is the server-reported size from the
+                # upload endpoint; we trust it because the upload
+                # endpoint is the only thing that fills it in.
+                if reported_size > _MAX_FILE_BYTES:
+                    raise ValueError(
+                        f"attachments[{idx}] file is too large "
+                        f"({reported_size} bytes > {_MAX_FILE_BYTES} max)",
+                    )
+                result.append(
+                    FileAttachment(
+                        kind="file",
+                        name=name,
+                        media_type=media_type or "application/octet-stream",
+                        workspace_skill=workspace_skill,
+                        workspace_path=workspace_path,
+                        workspace_conv=workspace_conv,
+                        size=reported_size,
+                    )
+                )
+                continue  # no base64 decode needed, no total_bytes contribution
+
+            # Inline mode fallback.
+            data = item.get("data")
             if not isinstance(data, str) or not data:
                 raise ValueError(
-                    f"attachments[{idx}] file data must be a non-empty string",
+                    f"attachments[{idx}] file needs either inline data "
+                    "or a workspace reference",
                 )
             try:
                 decoded_len = len(base64.b64decode(data, validate=True))
@@ -374,6 +433,7 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
                     # row always carries something meaningful.
                     media_type=media_type or "application/octet-stream",
                     data=data,
+                    size=decoded_len,
                 )
             )
         else:
@@ -421,6 +481,8 @@ def _serialize_attachments_for_wire(
             entry["workspace_path"] = att.workspace_path
         if att.workspace_conv:
             entry["workspace_conv"] = att.workspace_conv
+        if att.size:
+            entry["size"] = att.size
         out.append(entry)
     return out
 
@@ -2865,6 +2927,12 @@ class AIService(Service):
                     entry["workspace_path"] = att.workspace_path
                 if att.workspace_conv:
                     entry["workspace_conv"] = att.workspace_conv
+                # ``size`` is meaningful for reference-mode files
+                # (where there are no bytes in the row to count) but
+                # also useful for inline kinds so history loads don't
+                # have to redecode base64 to show a size chip.
+                if att.size:
+                    entry["size"] = att.size
                 serialized_attachments.append(entry)
             d["attachments"] = serialized_attachments
         if msg.interrupted:
@@ -2898,6 +2966,11 @@ class AIService(Service):
                 kind = str(att.get("kind") or "")
                 if not kind:
                     continue
+                raw_size = att.get("size")
+                try:
+                    size_val = int(raw_size) if raw_size is not None else 0
+                except (TypeError, ValueError):
+                    size_val = 0
                 attachments.append(
                     FileAttachment(
                         kind=kind,
@@ -2908,6 +2981,7 @@ class AIService(Service):
                         workspace_skill=str(att.get("workspace_skill", "")),
                         workspace_path=str(att.get("workspace_path", "")),
                         workspace_conv=str(att.get("workspace_conv", "")),
+                        size=size_val,
                     )
                 )
         else:

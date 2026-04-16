@@ -66,6 +66,59 @@ export function useWsApi() {
     createConversation: (title: string) =>
       rpc<{ conversation_id: string; title: string }>({ type: "chat.conversation.create", title }),
 
+    /**
+     * Upload a file to a conversation's chat-uploads workspace via
+     * the HTTP endpoint, returning a reference-mode FileAttachment.
+     *
+     * Uses ``XMLHttpRequest`` rather than ``fetch`` because fetch
+     * doesn't surface upload progress yet — XHR gives us
+     * ``upload.onprogress`` events so the UI can show a progress
+     * bar for big files.
+     *
+     * This bypasses the WebSocket entirely — the bytes stream
+     * directly to disk under
+     * ``.gilbert/skill-workspaces/users/<u>/conversations/<c>/chat-uploads/<name>``
+     * and the chat message only carries the workspace coordinates.
+     * That's how we support 1 GB uploads without blowing past the
+     * WS frame limit or bloating the conversation entity.
+     */
+    uploadChatFile: (
+      conversationId: string,
+      file: File,
+      onProgress?: (loaded: number, total: number) => void,
+    ): Promise<FileAttachment> => {
+      return new Promise<FileAttachment>((resolve, reject) => {
+        const form = new FormData();
+        form.append("conversation_id", conversationId);
+        form.append("file", file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/chat/upload");
+        xhr.responseType = "json";
+        xhr.withCredentials = true; // carry the session cookie
+        if (onProgress) {
+          xhr.upload.onprogress = (ev) => {
+            if (ev.lengthComputable) {
+              onProgress(ev.loaded, ev.total);
+            }
+          };
+        }
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.response as FileAttachment);
+          } else {
+            const detail =
+              (xhr.response && (xhr.response as { detail?: string }).detail) ||
+              `HTTP ${xhr.status}`;
+            reject(new Error(detail));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.onabort = () => reject(new Error("Upload aborted"));
+        xhr.send(form);
+      });
+    },
+
     sendMessage: (
       message: string,
       conversationId: string | null,

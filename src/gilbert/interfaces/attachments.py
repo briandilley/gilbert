@@ -91,13 +91,21 @@ class FileAttachment:
     text: str = ""
     # Reference-mode fields: when set, the actual bytes live on disk in
     # the named skill workspace and the frontend fetches them via
-    # ``skills.workspace.download``. Leave empty for inline attachments.
+    # ``skills.workspace.download`` (small) or ``GET /api/chat/download``
+    # (large). Leave empty for inline attachments.
     workspace_skill: str = ""
     workspace_path: str = ""
     # Conversation id this file was generated for, or empty for legacy
     # attachments persisted before per-conversation workspaces. Used by
     # the download handler to pick the right workspace root.
     workspace_conv: str = ""
+    # Decoded byte size of the file. Filled in at upload time for
+    # reference-mode attachments (where we can't read ``data`` to find
+    # out) so the UI can show a size label and the AI stub can quote
+    # "1.2 GB" without having to stat the disk. Zero for inline
+    # attachments that haven't had it set — callers can fall back to
+    # ``len(base64.b64decode(data))`` in that case.
+    size: int = 0
 
     @property
     def is_reference(self) -> bool:

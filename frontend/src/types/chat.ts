@@ -44,6 +44,13 @@ export interface FileAttachmentBase {
    *  per-conversation workspaces — those resolve via the legacy
    *  per-(user, skill) path on the backend. */
   workspace_conv?: string;
+  /** Decoded byte size of the file. Filled in at upload time for
+   *  reference-mode attachments (``POST /api/chat/upload`` returns
+   *  it) and for inline attachments (``_parse_frame_attachments``
+   *  sets it after base64 decode). Zero when not known — callers
+   *  can fall back to computing from ``data.length`` for inline
+   *  attachments. */
+  size?: number;
 }
 
 export type FileAttachment = FileAttachmentBase;

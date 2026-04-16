@@ -142,27 +142,160 @@ export function ChatPage() {
           `Only the first ${remaining} file${remaining === 1 ? "" : "s"} were attached (max ${MAX_CHAT_ATTACHMENTS}).`,
         );
       }
-      const prepared: PendingAttachment[] = [];
+
+      // Two-phase flow:
+      //
+      // 1. Classify each file. Inline attachments (images, small
+      //    PDFs, text) get a resolved FileAttachment immediately
+      //    and are added to the pending list as normal. Upload-path
+      //    files (large / generic) are added as placeholder chips
+      //    in "uploading" state — their ``attachment`` field is
+      //    null until the upload resolves. The placeholder keeps
+      //    the chip count correct so the 8-attachment cap works
+      //    mid-upload.
+      // 2. Kick off the uploads in the background. Each upload
+      //    streams the file to ``/api/chat/upload`` with progress
+      //    events wired to the pending entry; on success the
+      //    entry's ``attachment`` gets filled in and ``uploading``
+      //    flips to false. On failure the entry gets an ``error``
+      //    label and stays in place so the user can retry or
+      //    dismiss it.
+      //
+      // Large uploads also need a conversation_id — the endpoint
+      // uses it to scope the workspace directory. For a brand-new
+      // chat we lazily create the conversation now (via
+      // ``chat.conversation.create``) and pin ``activeConvId`` so
+      // the eventual send goes into the same row.
+      type Pending = PendingAttachment & { _uploadFile?: File };
+      const newPending: Pending[] = [];
+
       for (const file of toAdd) {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         try {
-          const att = await prepareChatAttachment(file);
-          prepared.push({
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            name: file.name || "file",
-            attachment: att,
-            preview: att.kind === "image" ? URL.createObjectURL(file) : undefined,
-          });
+          const prepared = await prepareChatAttachment(file);
+          if (prepared.mode === "inline") {
+            newPending.push({
+              id,
+              name: file.name || "file",
+              attachment: prepared.attachment,
+              preview:
+                prepared.attachment.kind === "image"
+                  ? URL.createObjectURL(file)
+                  : undefined,
+            });
+          } else {
+            // Upload-path placeholder.
+            newPending.push({
+              id,
+              name: file.name || "file",
+              attachment: null,
+              uploading: true,
+              progress: 0,
+              _uploadFile: file,
+            });
+          }
         } catch (exc) {
           setAttachError(
             exc instanceof Error ? exc.message : "Failed to read file",
           );
         }
       }
-      if (prepared.length > 0) {
-        setPendingAttachments((prev) => [...prev, ...prepared]);
+
+      if (newPending.length === 0) return;
+
+      // Commit the placeholder+inline chips to state up-front so
+      // the UI shows them immediately.
+      setPendingAttachments((prev) => [
+        ...prev,
+        ...newPending.map((p) => {
+          const { _uploadFile: _drop, ...clean } = p;
+          void _drop;
+          return clean as PendingAttachment;
+        }),
+      ]);
+
+      // Now kick off any required uploads.
+      const uploadEntries = newPending.filter((p) => p._uploadFile);
+      if (uploadEntries.length === 0) return;
+
+      // Ensure we have a conversation_id for the upload endpoint.
+      // If this is a fresh chat, create one now so the eager
+      // upload has somewhere to land; if the user abandons without
+      // sending, the empty conversation sticks around and they
+      // can delete it.
+      //
+      // We deliberately don't refetch the conversation list here —
+      // handleSend will refetch after the first message, at which
+      // point the sidebar picks it up. Refetching mid-upload would
+      // cause the sidebar to flash for every attachment and also
+      // creates a forward-reference to ``refetchConversations``
+      // (which is declared via useQuery further down in this
+      // component).
+      let convId = activeConvId;
+      if (!convId) {
+        try {
+          const created = await api.createConversation("New conversation");
+          convId = created.conversation_id;
+          setActiveConvId(convId);
+        } catch (exc) {
+          // Creation failed — mark every uploading placeholder as
+          // errored so the user sees what happened.
+          const detail =
+            exc instanceof Error ? exc.message : "Failed to create conversation";
+          setPendingAttachments((prev) =>
+            prev.map((p) =>
+              uploadEntries.some((u) => u.id === p.id)
+                ? { ...p, uploading: false, error: detail }
+                : p,
+            ),
+          );
+          return;
+        }
+      }
+
+      // Kick off the uploads in parallel. Each one updates its own
+      // pending entry in place as progress events arrive and when
+      // the upload resolves / rejects.
+      for (const entry of uploadEntries) {
+        const file = entry._uploadFile!;
+        api
+          .uploadChatFile(convId!, file, (loaded, total) => {
+            setPendingAttachments((prev) =>
+              prev.map((p) =>
+                p.id === entry.id
+                  ? { ...p, progress: total > 0 ? loaded / total : 0 }
+                  : p,
+              ),
+            );
+          })
+          .then((attachment) => {
+            setPendingAttachments((prev) =>
+              prev.map((p) =>
+                p.id === entry.id
+                  ? {
+                      ...p,
+                      attachment,
+                      uploading: false,
+                      progress: 1,
+                    }
+                  : p,
+              ),
+            );
+          })
+          .catch((exc: unknown) => {
+            const detail =
+              exc instanceof Error ? exc.message : "Upload failed";
+            setPendingAttachments((prev) =>
+              prev.map((p) =>
+                p.id === entry.id
+                  ? { ...p, uploading: false, error: detail }
+                  : p,
+              ),
+            );
+          });
       }
     },
-    [],
+    [activeConvId, api],
   );
 
   const removeAttachment = useCallback((id: string) => {

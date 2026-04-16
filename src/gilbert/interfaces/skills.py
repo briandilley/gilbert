@@ -46,3 +46,23 @@ class SkillsProvider(Protocol):
     async def build_skills_context(self, conversation_id: str) -> str:
         """Build a system prompt fragment describing active skills."""
         ...
+
+    def get_workspace_path(
+        self,
+        user_id: str,
+        skill_name: str,
+        conversation_id: str | None = None,
+    ) -> Path:
+        """Resolve (and create) a workspace directory.
+
+        Returns the per-conversation workspace when ``conversation_id``
+        is set, the legacy per-user workspace otherwise. Creates the
+        directory on demand. Callers outside of tool handlers (HTTP
+        upload endpoints, sync scripts, …) use this to land files in
+        the same tree that tools read from. The ``skill_name`` need
+        not be a registered skill — synthetic names like
+        ``"chat-uploads"`` are allowed for content that belongs under
+        a particular conversation's workspace but isn't tied to any
+        real skill.
+        """
+        ...

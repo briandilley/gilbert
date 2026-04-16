@@ -1553,8 +1553,92 @@ def test_parse_frame_attachments_file_requires_name() -> None:
 
 
 def test_parse_frame_attachments_file_requires_data() -> None:
-    with pytest.raises(ValueError, match="file data must be a non-empty string"):
+    """A file attachment needs either inline data or workspace refs.
+
+    After the HTTP upload refactor the parser accepts two shapes:
+    inline (base64 ``data``) or reference-mode (``workspace_*``
+    coords). A frame with neither is rejected.
+    """
+    with pytest.raises(ValueError, match="inline data or a workspace reference"):
         _parse_frame_attachments([{"kind": "file", "name": "foo.bin"}])
+
+
+def test_parse_frame_attachments_accepts_file_reference_mode() -> None:
+    """Reference-mode file attachments carry workspace coords and
+    a server-reported size instead of base64 bytes. This is the
+    shape ``POST /api/chat/upload`` returns."""
+    result = _parse_frame_attachments(
+        [
+            {
+                "kind": "file",
+                "name": "recording.mp4",
+                "media_type": "video/mp4",
+                "workspace_skill": "chat-uploads",
+                "workspace_path": "recording.mp4",
+                "workspace_conv": "conv-abc",
+                "size": 456_000_000,  # ~456 MB
+            }
+        ]
+    )
+    assert len(result) == 1
+    att = result[0]
+    assert att.kind == "file"
+    assert att.name == "recording.mp4"
+    assert att.media_type == "video/mp4"
+    assert att.workspace_skill == "chat-uploads"
+    assert att.workspace_path == "recording.mp4"
+    assert att.workspace_conv == "conv-abc"
+    assert att.size == 456_000_000
+    # No inline bytes.
+    assert att.data == ""
+
+
+def test_parse_frame_attachments_reference_mode_rejects_oversize() -> None:
+    """Reference-mode still enforces the 1 GiB cap (even though we
+    can't read the file to verify its size — we trust the uploader)."""
+    from gilbert.core.services.ai import _MAX_FILE_BYTES
+
+    with pytest.raises(ValueError, match="file is too large"):
+        _parse_frame_attachments(
+            [
+                {
+                    "kind": "file",
+                    "name": "huge.bin",
+                    "workspace_skill": "chat-uploads",
+                    "workspace_path": "huge.bin",
+                    "workspace_conv": "conv-abc",
+                    "size": _MAX_FILE_BYTES + 1,
+                }
+            ]
+        )
+
+
+def test_parse_frame_attachments_reference_mode_zero_total_bytes() -> None:
+    """Reference-mode file attachments don't count toward the
+    per-message inline total, so a user can attach a 900 MB reference
+    file alongside a small inline image without hitting the 64 MiB
+    total cap."""
+    import base64
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    result = _parse_frame_attachments(
+        [
+            {
+                "kind": "file",
+                "name": "big.bin",
+                "workspace_skill": "chat-uploads",
+                "workspace_path": "big.bin",
+                "workspace_conv": "conv-abc",
+                "size": 900 * 1024 * 1024,  # 900 MB
+            },
+            {
+                "kind": "image",
+                "media_type": "image/png",
+                "data": png,
+            },
+        ]
+    )
+    assert len(result) == 2
 
 
 def test_parse_frame_attachments_rejects_oversize_file() -> None:
