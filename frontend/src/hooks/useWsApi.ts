@@ -49,6 +49,7 @@ import type {
   McpServerDraft,
   McpToolSpec,
 } from "@/types/mcp";
+import type { WorkspaceFile } from "@/types/workspace";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -712,6 +713,47 @@ export function useWsApi() {
         type: "mcp.clients.preview_tools",
         owner_user_id,
         profile_name,
+      }),
+
+    // ── Workspace Files ─────────────────────────────────────────────
+
+    listWorkspaceFiles: (conversationId: string) =>
+      rpc<{
+        conversation_id: string;
+        uploads: WorkspaceFile[];
+        outputs: WorkspaceFile[];
+        scratch: WorkspaceFile[];
+      }>({
+        type: "workspace.files.list",
+        conversation_id: conversationId,
+      }),
+
+    pinWorkspaceFile: (fileId: string, pinned: boolean) =>
+      rpc<{ file_id: string; pinned: boolean }>({
+        type: "workspace.files.pin",
+        file_id: fileId,
+        pinned,
+      }),
+
+    deleteWorkspaceFile: (fileId: string) =>
+      rpc<{ file_id: string }>({
+        type: "workspace.files.delete",
+        file_id: fileId,
+      }),
+
+    downloadWorkspaceFile: (
+      path: string,
+      conversationId: string,
+    ) =>
+      rpc<{
+        filename: string;
+        size: number;
+        content_base64: string;
+        media_type?: string;
+      }>({
+        type: "workspace.download",
+        path,
+        conversation_id: conversationId,
       }),
 
   }), [rpc, rpcWithRef]);

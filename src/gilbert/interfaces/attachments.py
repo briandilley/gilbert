@@ -106,8 +106,13 @@ class FileAttachment:
     # attachments that haven't had it set — callers can fall back to
     # ``len(base64.b64decode(data))`` in that case.
     size: int = 0
+    # Entity ID in the workspace_files collection. When set, the
+    # download handler can resolve the file via the registry instead
+    # of reconstructing the path from workspace_skill/path/conv.
+    # Empty for legacy attachments persisted before the file registry.
+    workspace_file_id: str = ""
 
     @property
     def is_reference(self) -> bool:
-        """True when this attachment points at a skill workspace file."""
+        """True when this attachment points at a workspace file."""
         return bool(self.workspace_path)

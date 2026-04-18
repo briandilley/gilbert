@@ -75,3 +75,7 @@ class WorkspaceProvider(Protocol):
     ) -> list[dict[str, Any]]:
         """List registered files for a conversation."""
         ...
+
+    async def build_workspace_manifest(self, conversation_id: str) -> str:
+        """Build a system prompt fragment describing the conversation's files."""
+        ...

@@ -369,6 +369,7 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
             workspace_skill = str(item.get("workspace_skill") or "")
             workspace_path = str(item.get("workspace_path") or "")
             workspace_conv = str(item.get("workspace_conv") or "")
+            workspace_file_id = str(item.get("workspace_file_id") or "")
             raw_size = item.get("size")
             try:
                 reported_size = int(raw_size) if raw_size is not None else 0
@@ -399,6 +400,7 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
                         workspace_skill=workspace_skill,
                         workspace_path=workspace_path,
                         workspace_conv=workspace_conv,
+                        workspace_file_id=workspace_file_id,
                         size=reported_size,
                     )
                 )
@@ -481,6 +483,8 @@ def _serialize_attachments_for_wire(
             entry["workspace_path"] = att.workspace_path
         if att.workspace_conv:
             entry["workspace_conv"] = att.workspace_conv
+        if att.workspace_file_id:
+            entry["workspace_file_id"] = att.workspace_file_id
         if att.size:
             entry["size"] = att.size
         out.append(entry)
@@ -2002,6 +2006,38 @@ class AIService(Service):
                     except Exception:
                         pass  # Skills unavailable — not critical
 
+        # Inject workspace file manifest so the AI knows what files are
+        # available and their metadata (row counts, dimensions, etc.)
+        if self._resolver and conversation_id:
+            try:
+                from gilbert.interfaces.workspace import WorkspaceProvider
+
+                ws_svc = self._resolver.get_capability("workspace")
+                if isinstance(ws_svc, WorkspaceProvider):
+                    manifest = await ws_svc.build_workspace_manifest(
+                        conversation_id,
+                    )
+                    if manifest:
+                        parts.append(manifest)
+                        parts.append(
+                            "## File Handling Guidelines\n"
+                            "- **Inline** (read_workspace_file): text/CSV under "
+                            "~50 KB or ~100 rows, small JSON/XML\n"
+                            "- **Script** (run_workspace_script): large files, "
+                            "binary formats, aggregations, filtering, joins, "
+                            "image processing\n"
+                            "- **Hybrid**: read a sample first (read_workspace_file), "
+                            "then script for full analysis\n"
+                            "- After generating an output file, call "
+                            "annotate_workspace_file to describe it and set lineage\n"
+                            "- Mark scripts as reusable=true when they could apply "
+                            "to similar future inputs\n"
+                            "- Use attach_workspace_file to move deliverables from "
+                            "scratch to outputs for the user to download"
+                        )
+            except Exception:
+                pass
+
         return "\n\n".join(parts) if parts else ""
 
     # --- Tool Discovery ---
@@ -2930,6 +2966,8 @@ class AIService(Service):
                     entry["workspace_path"] = att.workspace_path
                 if att.workspace_conv:
                     entry["workspace_conv"] = att.workspace_conv
+                if att.workspace_file_id:
+                    entry["workspace_file_id"] = att.workspace_file_id
                 # ``size`` is meaningful for reference-mode files
                 # (where there are no bytes in the row to count) but
                 # also useful for inline kinds so history loads don't
@@ -2984,6 +3022,7 @@ class AIService(Service):
                         workspace_skill=str(att.get("workspace_skill", "")),
                         workspace_path=str(att.get("workspace_path", "")),
                         workspace_conv=str(att.get("workspace_conv", "")),
+                        workspace_file_id=str(att.get("workspace_file_id", "")),
                         size=size_val,
                     )
                 )

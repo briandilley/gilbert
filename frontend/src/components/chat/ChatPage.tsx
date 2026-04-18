@@ -21,6 +21,7 @@ import {
   type PendingAttachment,
 } from "./ChatInput";
 import { MemberPanelContent } from "./MemberPanel";
+import { WorkspacePanelContent } from "./WorkspacePanel";
 import { InviteModal } from "./InviteModal";
 import { SkillsModal } from "./SkillsModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -39,6 +40,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
+  FolderOpenIcon,
   MenuIcon,
   MessageSquareIcon,
   PlusIcon,
@@ -67,6 +69,7 @@ export function ChatPage() {
   const [roomTitle, setRoomTitle] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [promptDialog, setPromptDialog] = useState<{
     title: string;
     placeholder?: string;
@@ -1102,6 +1105,23 @@ export function ChatPage() {
               </>
             )}
 
+            {activeConvId && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setWorkspaceOpen(!workspaceOpen)}
+                    />
+                  }
+                >
+                  <FolderOpenIcon className="size-4" />
+                </TooltipTrigger>
+                <TooltipContent>Workspace files</TooltipContent>
+              </Tooltip>
+            )}
+
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -1232,6 +1252,13 @@ export function ChatPage() {
         </div>
       )}
 
+      {/* Desktop workspace panel */}
+      {workspaceOpen && activeConvId && (
+        <div className="hidden md:block w-64 shrink-0 border-l overflow-hidden">
+          <WorkspacePanelContent conversationId={activeConvId} />
+        </div>
+      )}
+
       {/* Mobile member panel sheet */}
       <Sheet open={membersOpen} onOpenChange={setMembersOpen}>
         <SheetContent side="right" className="w-64 p-0">
@@ -1244,6 +1271,21 @@ export function ChatPage() {
             currentUserId={user?.user_id}
             onKick={handleKick}
           />
+        </SheetContent>
+      </Sheet>
+
+      {/* Mobile workspace panel sheet */}
+      <Sheet
+        open={workspaceOpen && !!activeConvId && typeof window !== "undefined" && window.innerWidth < 768}
+        onOpenChange={setWorkspaceOpen}
+      >
+        <SheetContent side="right" className="w-72 p-0">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Workspace Files</SheetTitle>
+          </SheetHeader>
+          {activeConvId && (
+            <WorkspacePanelContent conversationId={activeConvId} />
+          )}
         </SheetContent>
       </Sheet>
 

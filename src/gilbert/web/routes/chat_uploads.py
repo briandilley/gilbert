@@ -252,8 +252,9 @@ async def upload_chat_file(
     )
 
     # Register in the workspace file registry
+    workspace_file_id = ""
     try:
-        await workspace_svc.register_file(
+        entity = await workspace_svc.register_file(
             conversation_id=conversation_id,
             user_id=user.user_id,
             category="upload",
@@ -264,6 +265,7 @@ async def upload_chat_file(
             size=total,
             created_by="user",
         )
+        workspace_file_id = entity.get("_id", "")
     except Exception:
         logger.debug("failed to register uploaded file", exc_info=True)
 
@@ -274,6 +276,7 @@ async def upload_chat_file(
         "workspace_skill": "workspace",
         "workspace_path": f"uploads/{unique_name}",
         "workspace_conv": conversation_id,
+        "workspace_file_id": workspace_file_id,
         "size": total,
     }
 

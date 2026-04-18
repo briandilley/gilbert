@@ -102,6 +102,9 @@ class _FakeWorkspaceProvider:
     ) -> list[dict[str, Any]]:
         return []
 
+    async def build_workspace_manifest(self, conversation_id: str) -> str:
+        return ""
+
 
 class _FakeServiceManager:
     def __init__(

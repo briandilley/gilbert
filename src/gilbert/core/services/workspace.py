@@ -426,6 +426,94 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         )
         return docs[0] if docs else None
 
+    async def build_workspace_manifest(self, conversation_id: str) -> str:
+        """Build a system prompt fragment listing the conversation's files."""
+        from gilbert.core.file_analysis import format_metadata_summary
+
+        files = await self.list_files(conversation_id)
+        if not files:
+            return ""
+
+        uploads = [f for f in files if f.get("category") == "upload"]
+        outputs = [f for f in files if f.get("category") == "output"]
+        scratch = [f for f in files if f.get("category") == "scratch"]
+
+        # Build an ID map for lineage references
+        id_map: dict[str, str] = {}
+        for i, f in enumerate(uploads):
+            id_map[f.get("_id", "")] = f"U{i + 1}"
+        for i, f in enumerate(outputs):
+            id_map[f.get("_id", "")] = f"O{i + 1}"
+        for i, f in enumerate(scratch):
+            id_map[f.get("_id", "")] = f"S{i + 1}"
+
+        parts: list[str] = ["## Workspace Files"]
+
+        def _format_size(size: int) -> str:
+            if size >= 1_000_000:
+                return f"{size / 1_000_000:.1f} MB"
+            if size >= 1_000:
+                return f"{size / 1_000:.1f} KB"
+            return f"{size} B"
+
+        def _format_file(f: dict[str, Any], short_id: str) -> str:
+            name = f.get("filename", "")
+            mt = f.get("media_type", "")
+            size = f.get("size", 0)
+            meta = f.get("metadata", {}) or {}
+            desc = f.get("description", "")
+            pinned = f.get("pinned", False)
+            reusable = f.get("reusable", False)
+            derived_from = f.get("derived_from")
+            derivation_script = f.get("derivation_script")
+            derivation_notes = f.get("derivation_notes")
+
+            line = f"- [{short_id}] {name} ({mt}, {_format_size(size)})"
+
+            meta_summary = format_metadata_summary(meta, mt)
+            if meta_summary:
+                line += f" — {meta_summary}"
+
+            flags: list[str] = []
+            if pinned:
+                flags.append("pinned")
+            if reusable:
+                flags.append("reusable")
+            if flags:
+                line += " [" + ", ".join(flags) + "]"
+
+            if desc:
+                line += f'\n  "{desc}"'
+
+            if derived_from and derived_from in id_map:
+                parent_id = id_map[derived_from]
+                lineage = f"  ← derived from [{parent_id}]"
+                if derivation_script:
+                    lineage += f" via {derivation_script}"
+                line += f"\n{lineage}"
+
+            if derivation_notes and not desc:
+                line += f'\n  "{derivation_notes}"'
+
+            return line
+
+        if uploads:
+            parts.append("\n### Uploads")
+            for i, f in enumerate(uploads):
+                parts.append(_format_file(f, f"U{i + 1}"))
+
+        if outputs:
+            parts.append("\n### Outputs")
+            for i, f in enumerate(outputs):
+                parts.append(_format_file(f, f"O{i + 1}"))
+
+        if scratch:
+            parts.append("\n### Working Files")
+            for i, f in enumerate(scratch):
+                parts.append(_format_file(f, f"S{i + 1}"))
+
+        return "\n".join(parts)
+
     # ── ToolProvider interface ───────────────────────────────────────
 
     @property
@@ -1281,20 +1369,13 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         else:
             kind = "document"
 
-        attachment = FileAttachment(
-            kind=kind,
-            name=name,
-            media_type=media_type,
-            workspace_skill="workspace",
-            workspace_path=stored_path,
-            workspace_conv=conv_id or "",
-        )
         size_bytes = target.stat().st_size
 
         # Register the output file (or update if already registered)
+        file_id = ""
         existing = await self.find_file_by_path(conv_id, stored_path)
         if existing is None:
-            await self.register_file(
+            entity = await self.register_file(
                 conversation_id=conv_id,
                 user_id=user_id,
                 category="output",
@@ -1304,11 +1385,25 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 size=size_bytes,
                 created_by="ai",
             )
-        elif existing.get("category") != "output":
-            await self.update_file(
-                existing.get("_id", ""),
-                {"category": "output", "rel_path": stored_path},
-            )
+            file_id = entity.get("_id", "")
+        else:
+            file_id = existing.get("_id", "")
+            if existing.get("category") != "output":
+                await self.update_file(
+                    file_id,
+                    {"category": "output", "rel_path": stored_path},
+                )
+
+        attachment = FileAttachment(
+            kind=kind,
+            name=name,
+            media_type=media_type,
+            workspace_skill="workspace",
+            workspace_path=stored_path,
+            workspace_conv=conv_id or "",
+            workspace_file_id=file_id,
+            size=size_bytes,
+        )
 
         summary = (
             f"Attached {name} ({media_type}, {size_bytes} bytes). "

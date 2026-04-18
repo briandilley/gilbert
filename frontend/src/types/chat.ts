@@ -44,6 +44,9 @@ export interface FileAttachmentBase {
    *  per-conversation workspaces — those resolve via the legacy
    *  per-(user, skill) path on the backend. */
   workspace_conv?: string;
+  /** Entity ID in the workspace_files registry. When set, the file
+   *  can be resolved via the registry instead of path-based lookup. */
+  workspace_file_id?: string;
   /** Decoded byte size of the file. Filled in at upload time for
    *  reference-mode attachments (``POST /api/chat/upload`` returns
    *  it) and for inline attachments (``_parse_frame_attachments``
