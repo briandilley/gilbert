@@ -1342,6 +1342,12 @@ class AIService(Service):
                 rounds=[],
             )
 
+        # Save inline user attachments to workspace and register them
+        if attachments and user_ctx and self._resolver:
+            attachments = await self._register_inline_attachments(
+                attachments, conversation_id, user_ctx.user_id
+            )
+
         # Append user message
         messages.append(
             Message(
@@ -2039,6 +2045,130 @@ class AIService(Service):
                 pass
 
         return "\n\n".join(parts) if parts else ""
+
+    async def _register_inline_attachments(
+        self,
+        attachments: list[FileAttachment],
+        conversation_id: str,
+        user_id: str,
+    ) -> list[FileAttachment]:
+        """Save inline attachments to workspace uploads/ and register them.
+
+        Inline attachments (base64 data or text) arrive via the chat
+        message frame. They're already forwarded to the AI backend as
+        content blocks, but they also need to land in the workspace so
+        the file panel can show them and the AI can reference them in
+        scripts.
+
+        Returns a new list with inline attachments replaced by
+        reference-mode equivalents (bytes saved to disk, workspace
+        coordinates set). Already-reference attachments pass through
+        unchanged.
+        """
+        from gilbert.interfaces.workspace import WorkspaceProvider
+
+        ws_svc = self._resolver.get_capability("workspace") if self._resolver else None
+        if not isinstance(ws_svc, WorkspaceProvider):
+            return attachments
+
+        result: list[FileAttachment] = []
+        for att in attachments:
+            if att.is_reference:
+                # Already a workspace reference — just ensure it's registered
+                if not att.workspace_file_id:
+                    existing = await ws_svc.list_files(conversation_id, "upload")
+                    found = any(
+                        f.get("rel_path") == att.workspace_path for f in existing
+                    )
+                    if not found and att.workspace_path:
+                        try:
+                            await ws_svc.register_file(
+                                conversation_id=conversation_id,
+                                user_id=user_id,
+                                category="upload",
+                                filename=att.name or att.workspace_path.split("/")[-1],
+                                rel_path=att.workspace_path,
+                                media_type=att.media_type,
+                                size=att.size,
+                                created_by="user",
+                            )
+                        except Exception:
+                            pass
+                result.append(att)
+                continue
+
+            # Inline attachment — save to disk
+            import base64 as b64mod
+
+            data_bytes: bytes | None = None
+            if att.data:
+                try:
+                    data_bytes = b64mod.b64decode(att.data)
+                except Exception:
+                    result.append(att)
+                    continue
+            elif att.text:
+                data_bytes = att.text.encode("utf-8")
+
+            if data_bytes is None:
+                result.append(att)
+                continue
+
+            upload_dir = ws_svc.get_upload_dir(user_id, conversation_id)
+            filename = att.name or "attachment"
+            # Collision avoidance
+            target = upload_dir / filename
+            if target.exists():
+                stem = target.stem
+                suffix = target.suffix
+                counter = 1
+                while target.exists():
+                    target = upload_dir / f"{stem}-{counter}{suffix}"
+                    counter += 1
+                filename = target.name
+
+            try:
+                target.write_bytes(data_bytes)
+            except OSError:
+                result.append(att)
+                continue
+
+            rel_path = f"uploads/{filename}"
+
+            try:
+                entity = await ws_svc.register_file(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    category="upload",
+                    filename=filename,
+                    original_name=att.name or filename,
+                    rel_path=rel_path,
+                    media_type=att.media_type,
+                    size=len(data_bytes),
+                    created_by="user",
+                )
+                file_id = entity.get("_id", "")
+            except Exception:
+                file_id = ""
+
+            # Keep the original inline attachment (AI needs the data)
+            # but also set workspace coords so the panel can show it
+            result.append(
+                FileAttachment(
+                    kind=att.kind,
+                    name=att.name,
+                    media_type=att.media_type,
+                    data=att.data,
+                    text=att.text,
+                    workspace_skill="workspace",
+                    workspace_path=rel_path,
+                    workspace_conv=conversation_id,
+                    workspace_file_id=file_id,
+                    size=att.size or len(data_bytes),
+                )
+            )
+
+        return result
 
     # --- Tool Discovery ---
 
