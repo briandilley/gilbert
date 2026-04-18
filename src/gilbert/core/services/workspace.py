@@ -1175,6 +1175,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
     @staticmethod
     def _ensure_workspace_venv(scratch_dir: Path) -> tuple[Path, str]:
         """Create (or reuse) a venv inside the scratch directory."""
+        scratch_dir = scratch_dir.resolve()
         venv_dir = scratch_dir / ".venv"
         python_bin = venv_dir / "bin" / "python"
         if python_bin.is_file():
@@ -1201,6 +1202,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         packages: list[str],
     ) -> str:
         """Blocking workspace-script execution. Must run in executor."""
+        workspace = workspace.resolve()
         target = (workspace / script_path).resolve()
 
         try:
