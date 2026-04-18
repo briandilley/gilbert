@@ -114,37 +114,17 @@ const readAsBase64 = (blob: Blob): Promise<string> =>
     reader.readAsDataURL(blob);
   });
 
-/** Resize an image file to fit within ``MAX_IMAGE_DIMENSION`` on its longest
- *  side and return an ``image`` FileAttachment. GIFs and already-small
- *  images pass through without re-encoding. */
-async function prepareImage(file: File): Promise<FileAttachment> {
-  const mediaType = file.type;
-  if (mediaType === "image/gif") {
-    return {
-      kind: "image",
-      name: file.name,
-      media_type: mediaType,
-      data: await readAsBase64(file),
-    };
-  }
+/** Resize an image file to fit within ``MAX_IMAGE_DIMENSION`` on its
+ *  longest side, returning a new File. GIFs and already-small images
+ *  pass through unchanged. */
+async function maybeResizeImage(file: File): Promise<File> {
+  if (file.type === "image/gif") return file;
   const bitmap = await createImageBitmap(file).catch(() => null);
-  if (!bitmap) {
-    return {
-      kind: "image",
-      name: file.name,
-      media_type: mediaType,
-      data: await readAsBase64(file),
-    };
-  }
+  if (!bitmap) return file;
   const longest = Math.max(bitmap.width, bitmap.height);
   if (longest <= MAX_IMAGE_DIMENSION) {
     bitmap.close?.();
-    return {
-      kind: "image",
-      name: file.name,
-      media_type: mediaType,
-      data: await readAsBase64(file),
-    };
+    return file;
   }
   const scale = MAX_IMAGE_DIMENSION / longest;
   const targetW = Math.round(bitmap.width * scale);
@@ -155,17 +135,10 @@ async function prepareImage(file: File): Promise<FileAttachment> {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     bitmap.close?.();
-    return {
-      kind: "image",
-      name: file.name,
-      media_type: mediaType,
-      data: await readAsBase64(file),
-    };
+    return file;
   }
   ctx.drawImage(bitmap, 0, 0, targetW, targetH);
   bitmap.close?.();
-  // Always emit JPEG after a resize — smaller than PNG and the source
-  // pixels are already rasterized, so losing the alpha channel is fine.
   const outType = "image/jpeg";
   const blob: Blob = await new Promise((resolve, reject) => {
     canvas.toBlob(
@@ -174,12 +147,7 @@ async function prepareImage(file: File): Promise<FileAttachment> {
       JPEG_QUALITY,
     );
   });
-  return {
-    kind: "image",
-    name: file.name,
-    media_type: outType,
-    data: await readAsBase64(blob),
-  };
+  return new File([blob], file.name, { type: outType });
 }
 
 const XLSX_MIME =
@@ -250,9 +218,7 @@ async function prepareText(file: File): Promise<FileAttachment> {
  *    via ``POST /api/chat/upload`` and turns the server's reply
  *    into a reference-mode FileAttachment. Keeps 1 GB files off
  *    the WebSocket and out of the conversation row. */
-export type PreparedAttachment =
-  | { mode: "inline"; attachment: FileAttachment }
-  | { mode: "upload"; file: File };
+export type PreparedAttachment = { mode: "upload"; file: File };
 
 /** Classify a dropped/picked file.
  *
@@ -273,41 +239,14 @@ export type PreparedAttachment =
 export async function prepareChatAttachment(
   file: File,
 ): Promise<PreparedAttachment> {
-  const name = file.name.toLowerCase();
-  if (ALLOWED_IMAGE_TYPES.has(file.type)) {
-    return { mode: "inline", attachment: await prepareImage(file) };
-  }
-  if (file.type === "application/pdf" || name.endsWith(".pdf")) {
-    // PDFs under the AI-readable cap stay inline so the model can
-    // actually read them; anything larger drops through to the
-    // upload path so we don't block the user on a 200 MB PDF.
-    if (file.size <= MAX_DOCUMENT_BYTES) {
-      return {
-        mode: "inline",
-        attachment: await prepareBinaryDocument(
-          file,
-          "application/pdf",
-          "document.pdf",
-        ),
-      };
-    }
-  }
-  if (file.type === XLSX_MIME || name.endsWith(".xlsx")) {
-    if (file.size <= MAX_DOCUMENT_BYTES) {
-      return {
-        mode: "inline",
-        attachment: await prepareBinaryDocument(file, XLSX_MIME, "workbook.xlsx"),
-      };
-    }
-  }
-  if (looksLikeText(file) && file.size <= MAX_TEXT_BYTES) {
-    return { mode: "inline", attachment: await prepareText(file) };
-  }
-  // Everything else → upload path.
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(
       `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB > ${MAX_FILE_BYTES / 1024 / 1024 / 1024} GB max)`,
     );
+  }
+  // Resize large images before uploading
+  if (ALLOWED_IMAGE_TYPES.has(file.type)) {
+    file = await maybeResizeImage(file);
   }
   return { mode: "upload", file };
 }

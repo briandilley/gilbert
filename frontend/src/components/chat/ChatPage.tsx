@@ -176,27 +176,14 @@ export function ChatPage() {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         try {
           const prepared = await prepareChatAttachment(file);
-          if (prepared.mode === "inline") {
-            newPending.push({
-              id,
-              name: file.name || "file",
-              attachment: prepared.attachment,
-              preview:
-                prepared.attachment.kind === "image"
-                  ? URL.createObjectURL(file)
-                  : undefined,
-            });
-          } else {
-            // Upload-path placeholder.
-            newPending.push({
-              id,
-              name: file.name || "file",
-              attachment: null,
-              uploading: true,
-              progress: 0,
-              _uploadFile: file,
-            });
-          }
+          newPending.push({
+            id,
+            name: file.name || "file",
+            attachment: null,
+            uploading: true,
+            progress: 0,
+            _uploadFile: prepared.file,
+          });
         } catch (exc) {
           setAttachError(
             exc instanceof Error ? exc.message : "Failed to read file",
