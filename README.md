@@ -248,6 +248,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
 | **openai** | OpenAI GPT chat backend (configure alongside or instead of anthropic) |
+| **openai-compatible** | Vendor-neutral Chat Completions backend for vLLM, LM Studio, corporate proxies, and other endpoints without a dedicated plugin |
 | **slack** | Socket Mode bot bridging Slack DMs/mentions to the AI service |
 | **sonos** | Sonos speaker control and Sonos-linked music service access |
 | **tavily** | Web search backend with AI-generated summaries |

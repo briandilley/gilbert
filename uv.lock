@@ -25,6 +25,7 @@ members = [
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
     "gilbert-plugin-openai",
+    "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
@@ -916,6 +917,7 @@ dependencies = [
     { name = "gilbert-plugin-ngrok" },
     { name = "gilbert-plugin-ollama" },
     { name = "gilbert-plugin-openai" },
+    { name = "gilbert-plugin-openai-compatible" },
     { name = "gilbert-plugin-openrouter" },
     { name = "gilbert-plugin-qwen" },
     { name = "gilbert-plugin-slack" },
@@ -979,6 +981,7 @@ requires-dist = [
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
     { name = "gilbert-plugin-ollama", virtual = "std-plugins/ollama" },
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
+    { name = "gilbert-plugin-openai-compatible", virtual = "std-plugins/openai-compatible" },
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
     { name = "gilbert-plugin-qwen", virtual = "std-plugins/qwen" },
     { name = "gilbert-plugin-slack", virtual = "std-plugins/slack" },
@@ -1121,6 +1124,11 @@ source = { virtual = "std-plugins/ollama" }
 name = "gilbert-plugin-openai"
 version = "1.0.0"
 source = { virtual = "std-plugins/openai" }
+
+[[package]]
+name = "gilbert-plugin-openai-compatible"
+version = "1.0.0"
+source = { virtual = "std-plugins/openai-compatible" }
 
 [[package]]
 name = "gilbert-plugin-openrouter"
