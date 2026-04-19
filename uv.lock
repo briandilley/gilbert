@@ -15,6 +15,7 @@ members = [
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-google",
+    "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-openai",
@@ -867,6 +868,7 @@ dependencies = [
     { name = "gilbert-plugin-deepseek" },
     { name = "gilbert-plugin-elevenlabs" },
     { name = "gilbert-plugin-google" },
+    { name = "gilbert-plugin-groq" },
     { name = "gilbert-plugin-guess-that-song" },
     { name = "gilbert-plugin-ngrok" },
     { name = "gilbert-plugin-openai" },
@@ -923,6 +925,7 @@ requires-dist = [
     { name = "gilbert-plugin-deepseek", virtual = "std-plugins/deepseek" },
     { name = "gilbert-plugin-elevenlabs", virtual = "std-plugins/elevenlabs" },
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
+    { name = "gilbert-plugin-groq", virtual = "std-plugins/groq" },
     { name = "gilbert-plugin-guess-that-song", virtual = "std-plugins/guess-that-song" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
@@ -1004,6 +1007,11 @@ requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.193.0" },
     { name = "google-auth", specifier = ">=2.49.1" },
 ]
+
+[[package]]
+name = "gilbert-plugin-groq"
+version = "1.0.0"
+source = { virtual = "std-plugins/groq" }
 
 [[package]]
 name = "gilbert-plugin-guess-that-song"

@@ -36,6 +36,7 @@ dependencies = [
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-google",
+    "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-openai",
@@ -54,6 +55,7 @@ gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
 gilbert-plugin-google = { workspace = true }
+gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
