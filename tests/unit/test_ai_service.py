@@ -1718,7 +1718,7 @@ def test_parse_frame_attachments_rejects_too_many() -> None:
     import base64
 
     payload = base64.b64encode(b"x").decode()
-    items = [{"kind": "image", "media_type": "image/png", "data": payload}] * 9
+    items = [{"kind": "image", "media_type": "image/png", "data": payload}] * 101
     with pytest.raises(ValueError, match="too many attachments"):
         _parse_frame_attachments(items)
 

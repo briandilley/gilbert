@@ -43,7 +43,7 @@ export interface PendingAttachment {
   error?: string;
 }
 
-export const MAX_CHAT_ATTACHMENTS = 8;
+export const MAX_CHAT_ATTACHMENTS = Infinity;
 const MAX_IMAGE_DIMENSION = 1568;
 const JPEG_QUALITY = 0.85;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
@@ -713,7 +713,7 @@ export function ChatInput({
         {/* Pending attachment strip — image thumbnails for images, chips
             for documents/text. */}
         {pendingAttachments.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2">
+          <div className="mb-2 flex flex-wrap gap-2 max-h-[264px] overflow-y-auto">
             {pendingAttachments.map((p) => (
               <PendingAttachmentCard
                 key={p.id}
@@ -737,9 +737,7 @@ export function ChatInput({
             variant="ghost"
             size="icon"
             className="shrink-0"
-            disabled={
-              disabled || pendingAttachments.length >= MAX_CHAT_ATTACHMENTS
-            }
+            disabled={disabled}
             onClick={() => fileInputRef.current?.click()}
             aria-label="Attach files"
           >

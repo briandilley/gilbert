@@ -16,7 +16,6 @@ import { ChatSidebarContent } from "./ChatSidebar";
 import { MessageList } from "./MessageList";
 import {
   ChatInput,
-  MAX_CHAT_ATTACHMENTS,
   prepareChatAttachment,
   type PendingAttachment,
 } from "./ChatInput";
@@ -132,19 +131,7 @@ export function ChatPage() {
       const list = Array.from(files);
       if (list.length === 0) return;
       setAttachError(null);
-      const remaining = MAX_CHAT_ATTACHMENTS - pendingCountRef.current;
-      if (remaining <= 0) {
-        setAttachError(
-          `You can attach at most ${MAX_CHAT_ATTACHMENTS} files per message.`,
-        );
-        return;
-      }
-      const toAdd = list.slice(0, remaining);
-      if (list.length > remaining) {
-        setAttachError(
-          `Only the first ${remaining} file${remaining === 1 ? "" : "s"} were attached (max ${MAX_CHAT_ATTACHMENTS}).`,
-        );
-      }
+      const toAdd = list;
 
       // Two-phase flow:
       //

@@ -71,7 +71,7 @@ _ASSIGNMENTS_COLLECTION = "ai_profile_assignments"
 # Attachment limits for chat.message.send frames. Keep these tight enough
 # that a single turn can't bloat the conversation entity beyond what
 # WebSocket and storage can comfortably round-trip.
-_MAX_ATTACHMENTS_PER_MESSAGE = 8
+_MAX_ATTACHMENTS_PER_MESSAGE = 100
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_DOCUMENT_BYTES = 32 * 1024 * 1024  # Anthropic's documented PDF cap.
 _MAX_TEXT_BYTES = 512 * 1024  # decoded UTF-8.
