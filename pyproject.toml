@@ -44,6 +44,7 @@ dependencies = [
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
     "gilbert-plugin-openai",
+    "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
@@ -69,6 +70,7 @@ gilbert-plugin-mistral = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
 gilbert-plugin-ollama = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
+gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
 gilbert-plugin-slack = { workspace = true }

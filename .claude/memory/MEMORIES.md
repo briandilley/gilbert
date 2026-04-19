@@ -33,4 +33,5 @@
 - [Dashboard & Nav Structure](memory-dashboard-nav.md) — grouped nav RPC drives desktop dropdowns and mobile drawer, user-scoped query cache
 - [Capability Protocols](memory-capability-protocols.md) — protocol table + `isinstance` against `@runtime_checkable Protocol`s, never concrete service classes
 - [Backend Pattern](memory-backend-pattern.md) — universal backend ABC + registry pattern, side-effect imports, AI streaming surface
+- [OpenAI-Compatible AI Backend](memory-openai-compatible-backend.md) — vendor-neutral Chat Completions for vLLM/LM Studio/custom proxies, free-form model, optional auth, refresh_models
 - [Architecture Violation Checklist](memory-architecture-checklist.md) — the full "check the rules" audit (layers, concrete classes, slash commands, README freshness)
