@@ -2131,11 +2131,10 @@ class AIService(Service):
                             workspace_file_id=att.workspace_file_id,
                             size=len(raw),
                         ))
-                    elif mt == "application/pdf" or mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-                        kind = "document"
+                    elif mt == "application/pdf":
                         data = b64mod.b64encode(raw).decode("ascii")
                         new_atts.append(FileAttachment(
-                            kind=kind,
+                            kind="document",
                             name=att.name,
                             media_type=mt,
                             data=data,
