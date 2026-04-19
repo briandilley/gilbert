@@ -38,7 +38,7 @@ def _record(
     *,
     transport: str = "http",
     allow_sampling: bool = True,
-    sampling_profile: str = "mcp_sampling",
+    sampling_profile: str = "standard",
     budget_tokens: int = 1000,
     budget_window: int = 60,
 ) -> MCPServerRecord:
@@ -177,7 +177,7 @@ class TestSamplingGates:
     @pytest.mark.asyncio
     async def test_refuses_unknown_profile(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(),
             calls=[],
         )
@@ -191,7 +191,7 @@ class TestSamplingGates:
     @pytest.mark.asyncio
     async def test_refuses_empty_messages(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(),
             calls=[],
         )
@@ -206,7 +206,7 @@ class TestSamplingGates:
     @pytest.mark.asyncio
     async def test_refuses_when_budget_exhausted(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(),
             calls=[],
         )
@@ -230,7 +230,7 @@ class TestSamplingHappyPath:
     @pytest.mark.asyncio
     async def test_success_returns_create_message_result(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(text="hello from Gilbert"),
             calls=[],
         )
@@ -256,7 +256,7 @@ class TestSamplingHappyPath:
         # and the configured profile name.
         assert len(ai.calls) == 1
         call = ai.calls[0]
-        assert call["profile_name"] == "mcp_sampling"
+        assert call["profile_name"] == "standard"
         assert call["system_prompt"] == "you are a helper"
         assert len(call["messages"]) == 3
         assert call["messages"][0]["role"] == "user"
@@ -265,7 +265,7 @@ class TestSamplingHappyPath:
     @pytest.mark.asyncio
     async def test_consumes_actual_token_usage(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(input_tokens=12, output_tokens=8),
             calls=[],
         )
@@ -287,7 +287,7 @@ class TestSamplingHappyPath:
             usage=None,
         )
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=response,
             calls=[],
         )
@@ -302,7 +302,7 @@ class TestSamplingHappyPath:
     @pytest.mark.asyncio
     async def test_max_tokens_stop_reason_maps_to_max(self) -> None:
         ai = _FakeAIService(
-            _profiles={"mcp_sampling": object()},
+            _profiles={"standard": object()},
             response=_default_response(stop=StopReason.MAX_TOKENS),
             calls=[],
         )

@@ -352,7 +352,7 @@ async def main() -> int:
     client, token = await mcp_svc.create_client(
         name="Smoke Client",
         owner_user_id="alice",
-        ai_profile="mcp_server_client",
+        ai_profile="standard",
     )
 
     # Boot uvicorn in a background task so we can drive HTTP.

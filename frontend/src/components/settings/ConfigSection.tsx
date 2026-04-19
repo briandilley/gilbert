@@ -46,17 +46,22 @@ function backendGroups(
     return [{ label, params }];
   }
 
-  // No backend selector = multi-backend service (e.g., knowledge).
-  // Group by the first segment of the key (local.*, gdrive.*).
+  // No backend selector = multi-backend service (e.g., AI with
+  // backends.anthropic.*, backends.openai.*).
+  // Group by the second segment when keys start with "backends.",
+  // otherwise by the first segment.
   const groups: { label: string; params: ConfigParamMeta[] }[] = [];
   const seen = new Set<string>();
   for (const p of params) {
-    const prefix = p.key.split(".")[0];
-    if (seen.has(prefix)) continue;
-    seen.add(prefix);
+    const parts = p.key.split(".");
+    const isNested = parts[0] === "backends" && parts.length >= 3;
+    const groupKey = isNested ? `${parts[0]}.${parts[1]}` : parts[0];
+    const groupLabel = isNested ? parts[1] : groupKey;
+    if (seen.has(groupKey)) continue;
+    seen.add(groupKey);
     groups.push({
-      label: `${humanize(prefix)} Backend`,
-      params: params.filter((q) => q.key === prefix || q.key.startsWith(`${prefix}.`)),
+      label: humanize(groupLabel),
+      params: params.filter((q) => q.key === groupKey || q.key.startsWith(`${groupKey}.`)),
     });
   }
   return groups;
@@ -77,11 +82,15 @@ export function ConfigSection({ section }: ConfigSectionProps) {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [actionStates, setActionStates] = useState<Record<string, ActionUIState>>({});
 
-  // Merge server values with local edits
-  const merged = useMemo(
-    () => ({ ...section.values, ...localValues }),
-    [section.values, localValues],
-  );
+  // Merge defaults → server values → local edits so fields show their
+  // declared default when no value has been stored yet.
+  const merged = useMemo(() => {
+    const defaults: Record<string, unknown> = {};
+    for (const p of section.params) {
+      if (p.default != null) defaults[p.key] = p.default;
+    }
+    return { ...defaults, ...section.values, ...localValues };
+  }, [section.params, section.values, localValues]);
 
   const hasChanges = Object.keys(localValues).length > 0;
 

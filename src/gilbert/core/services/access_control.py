@@ -978,6 +978,8 @@ class AccessControlService(Service):
                     "tools": list(p.tools),
                     "tool_roles": dict(p.tool_roles),
                     "assigned_calls": assigned,
+                    "backend": p.backend,
+                    "model": p.model,
                 }
             )
 
@@ -1031,6 +1033,8 @@ class AccessControlService(Service):
             tool_mode=frame.get("tool_mode", "all"),
             tools=frame.get("tools", []),
             tool_roles=frame.get("tool_roles", {}),
+            backend=frame.get("backend", ""),
+            model=frame.get("model", ""),
         )
         await ai_svc.set_profile(profile)
         return {"type": "roles.profile.save.result", "ref": frame.get("id"), "status": "ok"}

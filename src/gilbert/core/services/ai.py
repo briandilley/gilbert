@@ -27,10 +27,14 @@ from gilbert.interfaces.ai import (
     AIContextProfile,
     AIRequest,
     AIResponse,
+    MODEL_TIER_ADVANCED,
+    MODEL_TIER_LIGHT,
+    MODEL_TIER_STANDARD,
     ChatTurnResult,
     FileAttachment,
     Message,
     MessageRole,
+    ModelInfo,
     StopReason,
     StreamEventType,
 )
@@ -753,59 +757,38 @@ class _MemoryHelper:
 
 
 # Built-in profiles seeded on first start
+_DEFAULT_PROFILE = "standard"
+
 _BUILTIN_PROFILES = [
     AIContextProfile(
-        name="default",
-        description="All tools available — fallback for unassigned calls",
+        name="light",
+        description="Light tier — fast, cost-effective model with all tools",
         tool_mode="all",
     ),
     AIContextProfile(
-        name="human_chat",
-        description="Human conversations via web or Slack",
+        name="standard",
+        description="Standard tier — balanced model with all tools",
         tool_mode="all",
     ),
     AIContextProfile(
-        name="text_only",
-        description="Text generation only, no tool access",
-        tool_mode="include",
-        tools=[],
-    ),
-    # Default profile for ``sampling/createMessage`` requests from
-    # remote MCP servers — no tools, so a compromised server can't
-    # use sampling as a back door into Gilbert's tool surface.
-    AIContextProfile(
-        name="mcp_sampling",
-        description="MCP server-initiated sampling — text only, no tools",
-        tool_mode="include",
-        tools=[],
-    ),
-    # Default profile for external MCP clients connecting TO Gilbert
-    # via the MCP server endpoint. **Safe-by-default**: ``include``
-    # mode with no tools, so a freshly-registered client can't reach
-    # anything until an admin explicitly whitelists tools on this
-    # profile (or points the client at a broader one like
-    # ``default``). The security posture is "grant nothing, loosen
-    # deliberately" — flipping this to ``all`` would be a foot-gun
-    # because MCP clients impersonate their owner user and would
-    # then have the owner's full tool surface.
-    AIContextProfile(
-        name="mcp_server_client",
-        description=(
-            "Safe-by-default profile for external MCP clients. "
-            "Starts empty — add tools here to grant them to every "
-            "client pointed at this profile, or create narrower "
-            "per-client profiles for untrusted integrations."
-        ),
-        tool_mode="include",
-        tools=[],
+        name="advanced",
+        description="Advanced tier — most capable model with all tools",
+        tool_mode="all",
     ),
 ]
 
+_UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced"})
+
 # Built-in call→profile assignments seeded on first start
 _BUILTIN_ASSIGNMENTS: dict[str, str] = {
-    "human_chat": "human_chat",
-    "greeting": "text_only",
-    "roast": "default",
+    "human_chat": "standard",
+    "greeting": "light",
+    "roast": "standard",
+    "scheduled_action": "standard",
+    "inbox_ai_chat": "standard",
+    "guess_song_validate": "light",
+    "mcp_sampling": "standard",
+    "mcp_server_client": "standard",
 }
 
 
@@ -820,19 +803,11 @@ class AIService(Service):
     """
 
     def __init__(self) -> None:
-        self._backend: AIBackend | None = None
-        self._backend_name: str = "anthropic"
+        self._backends: dict[str, AIBackend] = {}
         self._enabled: bool = False
-        # Tunable config — loaded from ConfigurationService during start()
-        self._config: dict[str, Any] = {}
         self._system_prompt: str = ""
         self._max_history_messages: int = 50
         self._max_tool_rounds: int = 15
-        # When a backend reports StopReason.MAX_TOKENS on a text-only response,
-        # the agentic loop can issue a bounded "please continue" turn to let
-        # the model finish its reply. This cap bounds how many such recoveries
-        # happen per chat turn so a pathological stream can't burn tokens
-        # forever. Applies independently of _max_tool_rounds.
         self._max_continuation_rounds: int = 2
         self._compression_enabled: bool = True
         self._compression_threshold: int = 40
@@ -845,16 +820,12 @@ class AIService(Service):
         # AI context profiles
         self._profiles: dict[str, AIContextProfile] = {}
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
+        self._default_profile: str = _DEFAULT_PROFILE
+        self._chat_profile: str = "standard"
         # Internal helpers (initialized in start())
         self._persona: _PersonaHelper | None = None
         self._memory: _MemoryHelper | None = None
         self._memory_enabled: bool = True
-        # Registry of in-flight chat RPC tasks keyed by WS RPC ref.
-        # Populated by _ws_chat_send on entry, removed in its finally
-        # block. The chat.message.cancel handler looks up entries here
-        # to interrupt a running turn. Each value also carries the
-        # originating user_id so cancel can enforce "only the originator
-        # can interrupt".
         self._in_flight_chats: dict[str, tuple[asyncio.Task[Any], str]] = {}
 
     def service_info(self) -> ServiceInfo:
@@ -870,11 +841,13 @@ class AIService(Service):
             toggle_description="AI chat and tool execution",
         )
 
-    @property
-    def backend(self) -> AIBackend:
-        if self._backend is None:
-            raise RuntimeError("AI backend not initialized — service is disabled or not started")
-        return self._backend
+    def get_backend(self, name: str = "") -> AIBackend:
+        """Get a backend by name, or the first available one."""
+        if name and name in self._backends:
+            return self._backends[name]
+        if self._backends:
+            return next(iter(self._backends.values()))
+        raise RuntimeError("No AI backends initialized — service is disabled or not started")
 
     async def start(self, resolver: ServiceResolver) -> None:
         from gilbert.interfaces.storage import StorageProvider
@@ -896,18 +869,12 @@ class AIService(Service):
 
         self._enabled = True
 
-        # Create backend from registry (skip if already injected, e.g. in tests)
-        if self._backend is None:
-            backend_name = section.get("backend", "anthropic")
-            self._backend_name = backend_name
-            backends = AIBackend.registered_backends()
-            backend_cls = backends.get(backend_name)
-            if backend_cls is None:
-                raise ValueError(f"Unknown AI backend: {backend_name}")
-            self._backend = backend_cls()
+        # Initialize all configured backends (skip if already injected, e.g. tests)
+        if not self._backends:
+            await self._reinit_backends(section.get("backends", {}))
 
-        # Initialize backend with settings (includes API key)
-        await self._backend.initialize(self._config)
+        if not self._backends:
+            logger.warning("No AI backends initialized — AI will be non-functional")
 
         # Resolve storage
         storage_svc = resolver.require_capability("entity_storage")
@@ -962,7 +929,8 @@ class AIService(Service):
         self._compression_summary_max_tokens = section.get(
             "compression_summary_max_tokens", self._compression_summary_max_tokens
         )
-        self._config = section.get("settings", self._config)
+        self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
+        self._chat_profile = section.get("chat_profile", self._chat_profile)
 
     # --- Configurable protocol ---
 
@@ -999,12 +967,21 @@ class AIService(Service):
                 default=2,
             ),
             ConfigParam(
-                key="backend",
+                key="default_profile",
                 type=ToolParameterType.STRING,
-                description="AI backend provider.",
-                default="anthropic",
-                restart_required=True,
-                choices=tuple(AIBackend.registered_backends().keys()) or ("anthropic",),
+                description=(
+                    "Profile used when an AI call has no explicit assignment. "
+                    "Typically one of the tier profiles (light, standard, advanced)."
+                ),
+                default=_DEFAULT_PROFILE,
+                choices_from="ai_profiles",
+            ),
+            ConfigParam(
+                key="chat_profile",
+                type=ToolParameterType.STRING,
+                description="AI profile for web and Slack chat.",
+                default="standard",
+                choices_from="ai_profiles",
             ),
             ConfigParam(
                 key="default_persona",
@@ -1054,17 +1031,14 @@ class AIService(Service):
                 default=1500,
             ),
         ]
-        # Include backend-declared params under settings.*
-        # Use the registry class (not an instance) so params are available even when disabled
-        backends = AIBackend.registered_backends()
-        backend_cls = backends.get(self._backend_name)
-        if backend_cls is not None:
-            for bp in backend_cls.backend_config_params():
+        # Include per-backend config params under backends.<name>.*
+        for name, cls in sorted(AIBackend.registered_backends().items()):
+            for bp in cls.backend_config_params():
                 params.append(
                     ConfigParam(
-                        key=f"settings.{bp.key}",
+                        key=f"backends.{name}.{bp.key}",
                         type=bp.type,
-                        description=bp.description,
+                        description=f"[{name}] {bp.description}",
                         default=bp.default,
                         restart_required=bp.restart_required,
                         sensitive=bp.sensitive,
@@ -1078,40 +1052,88 @@ class AIService(Service):
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
+        await self._reinit_backends(config.get("backends", {}))
+
+    async def _reinit_backends(self, backends_config: dict[str, Any]) -> None:
+        """Reinitialize backends from config, closing any that changed."""
+        if not isinstance(backends_config, dict):
+            return
+        for name, cls in AIBackend.registered_backends().items():
+            cfg = backends_config.get(name, {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            old = self._backends.get(name)
+            try:
+                inst = cls()
+                await inst.initialize(cfg)
+                if old is not None:
+                    await old.close()
+                self._backends[name] = inst
+                logger.info("AI backend '%s' (re)initialized", name)
+            except Exception as exc:
+                if old is not None:
+                    pass
+                else:
+                    logger.debug("AI backend '%s' not ready: %s", name, exc)
 
     async def stop(self) -> None:
-        if self._backend is not None:
-            await self._backend.close()
+        for backend in self._backends.values():
+            await backend.close()
+        self._backends.clear()
 
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
-        return all_backend_actions(
-            registry=AIBackend.registered_backends(),
-            current_backend=self._backend,
-        )
+        actions: list[ConfigAction] = []
+        for name, backend in self._backends.items():
+            actions.extend(
+                all_backend_actions(
+                    registry={name: type(backend)},
+                    current_backend=backend,
+                )
+            )
+        # Also include actions for backends not yet initialized
+        for name, cls in AIBackend.registered_backends().items():
+            if name not in self._backends:
+                actions.extend(
+                    all_backend_actions(
+                        registry={name: cls},
+                        current_backend=None,
+                    )
+                )
+        return actions
 
     async def invoke_config_action(
         self,
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(self._backend, key, payload)
+        backend_name = payload.get("backend", "")
+        backend = self._backends.get(backend_name) if backend_name else None
+        if backend is None and self._backends:
+            backend = next(iter(self._backends.values()))
+        return await invoke_backend_action(backend, key, payload)
 
     # --- AI Context Profiles ---
 
     async def _load_profiles(self) -> None:
-        """Load profiles and assignments from storage, seeding built-ins on first run."""
+        """Load profiles and assignments from storage, seeding built-ins on first run.
+
+        Also reconciles stale data: removes legacy built-in profiles that
+        are no longer shipped, and updates assignments whose target profile
+        was removed or whose built-in default has changed.
+        """
         if self._storage is None:
             # No storage — use built-ins in memory only
             self._profiles = {p.name: p for p in _BUILTIN_PROFILES}
             self._assignments = dict(_BUILTIN_ASSIGNMENTS)
             return
 
-        # Seed built-in profiles if they don't exist yet
-        for bp in _BUILTIN_PROFILES:
-            existing = await self._storage.get(_PROFILES_COLLECTION, bp.name)
-            if existing is None:
+        # Seed built-in profiles and assignments only on a fresh database
+        # (no profiles exist yet). After that, the user owns the data.
+        existing_profiles = await self._storage.query(Query(collection=_PROFILES_COLLECTION))
+        if not existing_profiles:
+            for bp in _BUILTIN_PROFILES:
                 await self._storage.put(
                     _PROFILES_COLLECTION,
                     bp.name,
@@ -1121,13 +1143,11 @@ class AIService(Service):
                         "tool_mode": bp.tool_mode,
                         "tools": bp.tools,
                         "tool_roles": bp.tool_roles,
+                        "backend": bp.backend,
+                        "model": bp.model,
                     },
                 )
-
-        # Seed built-in assignments
-        for call_name, profile_name in _BUILTIN_ASSIGNMENTS.items():
-            existing = await self._storage.get(_ASSIGNMENTS_COLLECTION, call_name)
-            if existing is None:
+            for call_name, profile_name in _BUILTIN_ASSIGNMENTS.items():
                 await self._storage.put(
                     _ASSIGNMENTS_COLLECTION,
                     call_name,
@@ -1137,24 +1157,28 @@ class AIService(Service):
                     },
                 )
 
-        # Also seed from config (config overrides built-ins)
-        config_svc = self._resolver.get_capability("configuration") if self._resolver else None
-        if config_svc is not None and isinstance(config_svc, ConfigurationReader):
-            ai_section = config_svc.get_section("ai")
-            config_profiles = ai_section.get("profiles", {})
-            for name, pdata in config_profiles.items():
-                if isinstance(pdata, dict):
-                    await self._storage.put(
-                        _PROFILES_COLLECTION,
-                        name,
-                        {
-                            "name": name,
-                            "description": pdata.get("description", ""),
-                            "tool_mode": pdata.get("tool_mode", "all"),
-                            "tools": pdata.get("tools", []),
-                            "tool_roles": pdata.get("tool_roles", {}),
-                        },
-                    )
+        # Fix any assignment (built-in or user-created) that points to a
+        # profile that no longer exists — reset it to the default profile.
+        all_assignments = await self._storage.query(Query(collection=_ASSIGNMENTS_COLLECTION))
+        for doc in all_assignments:
+            target = doc.get("profile", "")
+            call_name = doc.get("call_name", "")
+            if not target or not call_name:
+                continue
+            if await self._storage.get(_PROFILES_COLLECTION, target) is None:
+                fallback = _BUILTIN_ASSIGNMENTS.get(call_name, self._default_profile)
+                await self._storage.put(
+                    _ASSIGNMENTS_COLLECTION,
+                    call_name,
+                    {
+                        "call_name": call_name,
+                        "profile": fallback,
+                    },
+                )
+                logger.info(
+                    "Reset stale assignment '%s' from '%s' to '%s'",
+                    call_name, target, fallback,
+                )
 
         # Load all profiles from storage
         await self._refresh_profiles()
@@ -1176,6 +1200,8 @@ class AIService(Service):
                     tool_mode=doc.get("tool_mode", "all"),
                     tools=doc.get("tools", []),
                     tool_roles=doc.get("tool_roles", {}),
+                    backend=doc.get("backend", ""),
+                    model=doc.get("model", ""),
                 )
 
         # Load assignments
@@ -1191,7 +1217,7 @@ class AIService(Service):
         """Resolve the profile for an AI call. Returns None if no profile applies."""
         if ai_call is None:
             return None
-        profile_name = self._assignments.get(ai_call, "default")
+        profile_name = self._assignments.get(ai_call, self._default_profile)
         return self._profiles.get(profile_name)
 
     def list_profiles(self) -> list[AIContextProfile]:
@@ -1214,6 +1240,8 @@ class AIService(Service):
                     "tool_mode": profile.tool_mode,
                     "tools": profile.tools,
                     "tool_roles": profile.tool_roles,
+                    "backend": profile.backend,
+                    "model": profile.model,
                 },
             )
         self._profiles[profile.name] = profile
@@ -1226,8 +1254,10 @@ class AIService(Service):
 
     async def delete_profile(self, name: str) -> None:
         """Delete a profile."""
-        if name == "default":
-            raise ValueError("Cannot delete the 'default' profile")
+        if name in _UNDELETABLE_PROFILES:
+            raise ValueError(f"Cannot delete the built-in '{name}' profile")
+        if name == self._default_profile:
+            raise ValueError(f"Cannot delete '{name}' — it is the current default profile")
         if self._storage is not None:
             await self._storage.delete(_PROFILES_COLLECTION, name)
         self._profiles.pop(name, None)
@@ -1256,6 +1286,49 @@ class AIService(Service):
         self._assignments.pop(call_name, None)
         logger.info("Call '%s' assignment cleared", call_name)
 
+    # --- Backend + model resolution ---
+
+    def get_enabled_models(self) -> list[ModelInfo]:
+        """Return models from all initialized backends."""
+        models: list[ModelInfo] = []
+        for backend in self._backends.values():
+            models.extend(backend.available_models())
+        return models
+
+    def get_backends_with_models(self) -> list[dict[str, Any]]:
+        """Return per-backend model lists for the chat UI."""
+        result: list[dict[str, Any]] = []
+        for name, backend in self._backends.items():
+            result.append({
+                "name": name,
+                "models": [
+                    {"id": m.id, "name": m.name, "description": m.description}
+                    for m in backend.available_models()
+                ],
+            })
+        return result
+
+    def _resolve_backend_and_model(
+        self,
+        profile: AIContextProfile | None,
+        backend_override: str = "",
+        model_override: str = "",
+    ) -> tuple[AIBackend, str]:
+        """Resolve which backend and model to use for a request.
+
+        Resolution order:
+        1. Explicit overrides (from chat UI)
+        2. Profile's backend + model fields
+        3. First available backend + its default model
+
+        Returns (backend_instance, model_id). model_id may be empty
+        (backend uses its own default).
+        """
+        backend_name = backend_override or (profile.backend if profile else "") or ""
+        model = model_override or (profile.model if profile else "") or ""
+        backend = self.get_backend(backend_name)
+        return backend, model
+
     # --- One-shot completion (no persistence, no agentic loop) ---
 
     async def complete_one_shot(
@@ -1283,22 +1356,21 @@ class AIService(Service):
         can adopt the same entry point rather than hand-rolling
         ``AIBackend`` calls.
         """
-        if self._backend is None:
-            raise RuntimeError("AI service is not enabled")
+        if not self._backends:
+            raise RuntimeError("No AI backends initialized")
         profile = self._profiles.get(profile_name) if profile_name else None
+        backend, model = self._resolve_backend_and_model(profile)
         tools: list[ToolDefinition] = []
         if profile is not None and profile.tool_mode != "include":
-            # Only ``include``-mode profiles intentionally mask all
-            # tools via an empty list. Other modes should get the
-            # full discovered set — matching ``chat`` semantics.
             discovered = self._discover_tools(user_ctx=None, profile=profile)
             tools = [td for _, td in discovered.values()]
         request = AIRequest(
             messages=list(messages),
             system_prompt=system_prompt,
             tools=tools,
+            model=model,
         )
-        response = await self._backend.generate(request)
+        response = await backend.generate(request)
         if max_tokens is not None and response.usage is not None:
             # The backend may have respected a different max_tokens;
             # we don't second-guess it, but we surface the usage.
@@ -1319,6 +1391,9 @@ class AIService(Service):
         system_prompt: str | None = None,
         ai_call: str | None = None,
         attachments: list[FileAttachment] | None = None,
+        model: str = "",
+        backend: str = "",
+        ai_profile: str = "",
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -1329,25 +1404,18 @@ class AIService(Service):
             system_prompt: Override the system prompt entirely. When ``None``,
                 uses the default persona + user memories.
             ai_call: Named AI interaction. Resolved to an AI context profile
-                that controls which tools are available and their role
-                requirements. When ``None``, all tools are available.
+                via the assignment table. Ignored when ``ai_profile`` is set.
             attachments: Optional files to attach to this turn's user
                 message (images, documents, or text). Backends that
                 support multimodal input forward them to the model;
                 text attachments are inlined into the prompt body.
-
-        Returns:
-            A :class:`ChatTurnResult` ``NamedTuple`` carrying
-            ``(response_text, conversation_id, ui_blocks, tool_usage,
-            attachments)``. Old-style tuple unpacking still works for the
-            first four fields via ``text, cid, ui, tu, *_ = ...``; new
-            callers that care about attachments can destructure all five
-            or use attribute access (``result.attachments``).
-            ``attachments`` on the returned value is the list of files
-            tool calls produced for the user to download from this turn.
+            model: Specific model ID override (from chat UI).
+            backend: Specific backend override (from chat UI).
+            ai_profile: Profile name to use directly, bypassing the
+                assignment table.
         """
-        if self._backend is None:
-            raise RuntimeError("AI service is not enabled")
+        if not self._backends:
+            raise RuntimeError("No AI backends initialized")
         if user_ctx is None:
             user_ctx = get_current_user()
         # Load or create conversation
@@ -1430,8 +1498,16 @@ class AIService(Service):
             )
         )
 
-        # Resolve profile for this AI call
-        profile = self.get_profile(ai_call)
+        # Resolve profile: explicit ai_profile > ai_call assignment > default
+        if ai_profile:
+            profile = self._profiles.get(ai_profile)
+        else:
+            profile = self.get_profile(ai_call)
+
+        # Resolve backend + model from profile and overrides
+        resolved_backend, resolved_model = self._resolve_backend_and_model(
+            profile, backend, model
+        )
 
         # Discover and filter tools based on profile
         tools_by_name = self._discover_tools(user_ctx=user_ctx, profile=profile)
@@ -1516,11 +1592,7 @@ class AIService(Service):
         continuation_count = 0
 
         # Re-assert backend presence and capture a locally-typed
-        # handle. The nested closure below doesn't retain the
-        # ``self._backend is not None`` narrowing from the guard at
-        # the top of ``chat()``, so mypy would otherwise complain.
-        assert self._backend is not None
-        backend: AIBackend = self._backend
+        backend: AIBackend = resolved_backend
 
         async def _run_agentic_loop() -> None:
             """Execute the agentic for-loop as a cancellable unit.
@@ -1565,6 +1637,7 @@ class AIService(Service):
                     messages=truncated,
                     system_prompt=round_prompt,
                     tools=tool_defs if tool_defs else [],
+                    model=resolved_model,
                 )
 
                 # Drive the backend via ``generate_stream``. For backends that
@@ -1574,7 +1647,7 @@ class AIService(Service):
                 # out the response live. The MESSAGE_COMPLETE event carries
                 # the fully-assembled response that the rest of the agentic
                 # loop uses for stop_reason + tool_call handling — identical
-                # to the old non-streaming ``await self._backend.generate()``
+                # to the old non-streaming ``await backend.generate()``
                 # return value.
                 #
                 # Backends that don't implement streaming inherit the default
@@ -1949,7 +2022,7 @@ class AIService(Service):
         # any in-flight streaming buffers and fall back to the
         # authoritative send.result/history paths. No-op when the
         # backend doesn't support streaming.
-        if self._backend and self._backend.capabilities().streaming:
+        if backend.capabilities().streaming:
             await self._publish_event(
                 "chat.stream.turn_complete",
                 {
@@ -1966,6 +2039,7 @@ class AIService(Service):
             attachments=list(turn_attachments),
             rounds=turn_rounds,
             interrupted=was_interrupted,
+            model=response.model if response else resolved_model,
         )
 
     # --- System Prompt ---
@@ -3342,7 +3416,7 @@ class AIService(Service):
         When *force* is True, the threshold check is skipped (but
         ``keep_recent`` is still respected).
         """
-        if self._backend is None:
+        if not self._backends:
             return
 
         per_conv_config = await self.get_conversation_state(
@@ -3427,7 +3501,7 @@ class AIService(Service):
         )
 
         try:
-            resp = await self._backend.generate(summary_request)
+            resp = await self.get_backend().generate(summary_request)
             summary_text = resp.message.content.strip()
         except Exception:
             logger.warning(
@@ -3565,12 +3639,20 @@ class AIService(Service):
                         description="Per-tool role overrides: {tool_name: role_name}.",
                         required=False,
                     ),
+                    ToolParameter(
+                        name="backend",
+                        type=ToolParameterType.STRING,
+                        description="Backend name (e.g. 'anthropic'). Empty = first available.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="model",
+                        type=ToolParameterType.STRING,
+                        description="Model ID. Empty = backend's default.",
+                        required=False,
+                    ),
                 ],
                 required_role="admin",
-                # No slash_command: the nested ARRAY + OBJECT params
-                # (tools, tool_roles) don't translate cleanly to positional
-                # shell form. Manage profiles via /security/profiles in the UI
-                # or let the AI call this tool directly.
             ),
             ToolDefinition(
                 name="delete_ai_profile",
@@ -3850,6 +3932,8 @@ class AIService(Service):
                     "tool_mode": p.tool_mode,
                     "tools": p.tools,
                     "tool_roles": p.tool_roles,
+                    "backend": p.backend,
+                    "model": p.model,
                 }
             )
         return _json.dumps(
@@ -3870,6 +3954,8 @@ class AIService(Service):
             tool_mode=arguments.get("tool_mode", existing.tool_mode if existing else "all"),
             tools=arguments.get("tools", existing.tools if existing else []),
             tool_roles=arguments.get("tool_roles", existing.tool_roles if existing else {}),
+            backend=arguments.get("backend", existing.backend if existing else ""),
+            model=arguments.get("model", existing.model if existing else ""),
         )
         await self.set_profile(profile)
         return _json.dumps({"status": "saved", "profile": name})
@@ -3958,8 +4044,8 @@ class AIService(Service):
 
     async def _tool_force_compression(self, arguments: dict[str, Any]) -> str:
         conv_id = self._resolve_conversation_id(arguments.get("_conversation_id"))
-        if self._backend is None:
-            return "Cannot compress — AI backend is not available."
+        if not self._backends:
+            return "Cannot compress — no AI backend is available."
         messages = await self._load_conversation(conv_id)
         if len(messages) < 4:
             return "Not enough messages to compress (need at least 4)."
@@ -4107,6 +4193,7 @@ class AIService(Service):
             "chat.room.invite_respond": self._ws_room_invite_respond,
             "chat.user.list": self._ws_chat_list_users,
             "slash.commands.list": self._ws_slash_commands_list,
+            "chat.models.list": self._ws_models_list,
         }
 
     async def _ws_slash_commands_list(
@@ -4157,12 +4244,24 @@ class AIService(Service):
             "commands": commands,
         }
 
+    async def _ws_models_list(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return per-backend model lists for the chat UI."""
+        return {
+            "type": "chat.models.list.result",
+            "ref": frame.get("id"),
+            "backends": self.get_backends_with_models(),
+        }
+
     async def _ws_chat_send(
         self, conn: WsConnectionBase, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
 
         message = frame.get("message", "").strip()
         raw_attachments = frame.get("attachments") or []
+        frame_model = str(frame.get("model") or "")
+        frame_backend = str(frame.get("backend") or "")
         try:
             attachments = _parse_frame_attachments(raw_attachments)
         except ValueError as exc:
@@ -4216,6 +4315,7 @@ class AIService(Service):
             is_slash_command = self._match_slash_command(message, slash_cmds) is not None
 
         interrupted = False
+        reply_model = ""
         try:
             if is_shared:
                 from gilbert.core.chat import build_room_context, mentions_gilbert, publish_event
@@ -4244,8 +4344,10 @@ class AIService(Service):
                         conversation_id=conversation_id,
                         user_ctx=conn.user_ctx,
                         system_prompt=build_room_context(conv_data, conn.user_ctx),
-                        ai_call="human_chat",
+                        ai_profile=self._chat_profile,
                         attachments=attachments,
+                        model=frame_model,
+                        backend=frame_backend,
                     )
                     response_text = turn_result.response_text
                     conv_id = turn_result.conversation_id
@@ -4254,6 +4356,7 @@ class AIService(Service):
                     reply_attachments = turn_result.attachments
                     reply_rounds = turn_result.rounds
                     interrupted = turn_result.interrupted
+                    reply_model = turn_result.model
                 else:
                     # Store message without invoking AI
                     conv_id = conversation_id
@@ -4291,8 +4394,10 @@ class AIService(Service):
                     user_message=message,
                     conversation_id=conversation_id,
                     user_ctx=conn.user_ctx,
-                    ai_call="human_chat",
+                    ai_profile=self._chat_profile,
                     attachments=attachments,
+                    model=frame_model,
+                    backend=frame_backend,
                 )
                 response_text = turn_result.response_text
                 conv_id = turn_result.conversation_id
@@ -4301,6 +4406,7 @@ class AIService(Service):
                 reply_attachments = turn_result.attachments
                 reply_rounds = turn_result.rounds
                 interrupted = turn_result.interrupted
+                reply_model = turn_result.model
         except Exception as exc:
             logger.warning("chat.message.send failed", exc_info=True)
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": str(exc), "code": 500}
@@ -4309,6 +4415,14 @@ class AIService(Service):
             # after this won't find a matching task and will no-op.
             if cancel_key:
                 self._in_flight_chats.pop(cancel_key, None)
+
+        # Persist model preference when the user explicitly selects one
+        if (frame_model or frame_backend) and conv_id:
+            await self.set_conversation_state(
+                "model_preference",
+                {"backend": frame_backend, "model": frame_model},
+                conv_id,
+            )
 
         return {
             "type": "chat.message.send.result",
@@ -4320,6 +4434,7 @@ class AIService(Service):
             "attachments": _serialize_attachments_for_wire(reply_attachments),
             "rounds": reply_rounds,
             "interrupted": interrupted,
+            "model": reply_model,
         }
 
     async def _ws_chat_cancel(
@@ -4474,7 +4589,7 @@ class AIService(Service):
                 conversation_id=conversation_id,
                 user_ctx=conn.user_ctx,
                 system_prompt=system_prompt,
-                ai_call="human_chat",
+                ai_profile=self._chat_profile,
             )
             response_text = turn_result.response_text
             conv_id = turn_result.conversation_id
@@ -4557,6 +4672,9 @@ class AIService(Service):
             conn.user_id,
         )
 
+        state = data.get("state", {})
+        model_pref = state.get("model_preference") if isinstance(state, dict) else None
+
         result: dict[str, Any] = {
             "type": "chat.history.load.result",
             "ref": frame.get("id"),
@@ -4565,6 +4683,8 @@ class AIService(Service):
             "shared": is_shared,
             "title": data.get("title", ""),
         }
+        if model_pref:
+            result["model_preference"] = model_pref
         if is_shared:
             result["members"] = data.get("members", [])
             result["invites"] = [

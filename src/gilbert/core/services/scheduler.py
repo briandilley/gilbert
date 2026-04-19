@@ -142,6 +142,7 @@ class SchedulerService(Service):
             max_calls=self._DEFAULT_AI_MAX_CALLS,
             window_seconds=self._DEFAULT_AI_WINDOW_SECONDS,
         )
+        self._ai_profile: str = "standard"
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -220,12 +221,20 @@ class SchedulerService(Service):
                 ),
                 default=self._DEFAULT_AI_WINDOW_SECONDS,
             ),
+            ConfigParam(
+                key="ai_profile",
+                type=ToolParameterType.STRING,
+                description="AI profile for scheduled AI actions.",
+                default="standard",
+                choices_from="ai_profiles",
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         max_calls = int(config.get("alarm_ai_max_calls", self._DEFAULT_AI_MAX_CALLS))
         window = float(config.get("alarm_ai_window_seconds", self._DEFAULT_AI_WINDOW_SECONDS))
         self._ai_rate_limiter.update_config(max_calls, window)
+        self._ai_profile = config.get("ai_profile", self._ai_profile)
         logger.info(
             "Scheduler AI rate limit set to %d per %.0fs window",
             max_calls,
@@ -651,7 +660,7 @@ class SchedulerService(Service):
                 user_message=action.ai_prompt,
                 user_ctx=UserContext.SYSTEM,
                 system_prompt=_SCHEDULED_ACTION_SYSTEM_PROMPT,
-                ai_call="scheduled_action",
+                ai_profile=self._ai_profile,
             )
             logger.info(
                 "Scheduler '%s' AI fire: %s",

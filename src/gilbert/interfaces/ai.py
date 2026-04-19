@@ -22,18 +22,40 @@ __all__ = [
     "AIBackendCapabilities",
     "AIBackendError",
     "AIContextProfile",
+    "AIModelProvider",
     "AIProvider",
     "AIRequest",
     "AIResponse",
     "ChatTurnResult",
     "FileAttachment",
+    "MODEL_TIER_ADVANCED",
+    "MODEL_TIER_LIGHT",
+    "MODEL_TIER_STANDARD",
+    "MODEL_TIERS",
     "Message",
     "MessageRole",
+    "ModelInfo",
     "StopReason",
     "StreamEvent",
     "StreamEventType",
     "TokenUsage",
 ]
+
+# ── Model tiers ───────────────────────────────────────────────────
+
+MODEL_TIER_LIGHT = "light"
+MODEL_TIER_STANDARD = "standard"
+MODEL_TIER_ADVANCED = "advanced"
+MODEL_TIERS = (MODEL_TIER_LIGHT, MODEL_TIER_STANDARD, MODEL_TIER_ADVANCED)
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """Describes a model available from an AI backend."""
+
+    id: str
+    name: str
+    description: str = ""
 
 
 class AIBackendError(RuntimeError):
@@ -111,6 +133,7 @@ class AIRequest:
     messages: list[Message]
     system_prompt: str = ""
     tools: list[ToolDefinition] = field(default_factory=list)
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -201,15 +224,18 @@ class AIBackendCapabilities:
     (images, documents, text) in ``AIRequest.messages``."""
 
 
+
 @dataclass
 class AIContextProfile:
-    """Named profile that controls which tools are available for an AI interaction."""
+    """Named profile controlling tools, backend, and model for an AI interaction."""
 
     name: str
     description: str = ""
     tool_mode: str = "all"  # "all" | "include" | "exclude"
     tools: list[str] = field(default_factory=list)
     tool_roles: dict[str, str] = field(default_factory=dict)
+    backend: str = ""
+    model: str = ""
 
 
 class AIBackend(ABC):
@@ -257,6 +283,16 @@ class AIBackend(ABC):
     async def generate(self, request: AIRequest) -> AIResponse:
         """Send a request and return the model's response (single round)."""
         ...
+
+    def available_models(self) -> list[ModelInfo]:
+        """Return models this backend supports.
+
+        Override in subclasses to advertise the models available for
+        selection.  The default returns an empty list, meaning the
+        backend uses whatever model it was initialized with and does
+        not support per-request model switching.
+        """
+        return []
 
     def capabilities(self) -> AIBackendCapabilities:
         """Describe what this backend can do.
@@ -334,6 +370,8 @@ class ChatTurnResult(NamedTuple):
       the user message, and anything persisted so far) is preserved;
       the frontend renders a subtle "interrupted" indicator on the
       turn bubble so it's clear the answer didn't finish organically.
+    - ``model``: the model ID that actually handled this turn (echoed
+      from the backend's AIResponse).
     """
 
     response_text: str
@@ -343,6 +381,7 @@ class ChatTurnResult(NamedTuple):
     attachments: list[FileAttachment]
     rounds: list[dict[str, Any]]
     interrupted: bool = False
+    model: str = ""
 
 
 @runtime_checkable
@@ -365,6 +404,22 @@ class AIProvider(Protocol):
         system_prompt: str | None = None,
         ai_call: str | None = None,
         attachments: list[FileAttachment] | None = None,
+        model: str = "",
+        backend: str = "",
+        ai_profile: str = "",
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape."""
+        ...
+
+
+@runtime_checkable
+class AIModelProvider(Protocol):
+    """Protocol for querying enabled AI models.
+
+    Used by ``ConfigurationService`` to resolve dynamic choices for
+    model tier config params without importing the concrete AI service.
+    """
+
+    def get_enabled_models(self) -> list[ModelInfo]:
+        """Return the models currently enabled on the active backend."""
         ...

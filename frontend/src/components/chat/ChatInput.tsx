@@ -9,6 +9,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  BrainIcon,
+  ChevronDownIcon,
   FileIcon,
   FileTextIcon,
   PaperclipIcon,
@@ -81,14 +83,19 @@ const TEXT_EXTENSION_ALLOWLIST = new Set([
   "sh", "bash", "zsh", "fish", "sql", "dockerfile", "gitignore",
 ]);
 
+interface ModelSelection {
+  backend: string;
+  model: string;
+}
+
+interface BackendModelsGroup {
+  name: string;
+  models: { id: string; name: string; description: string }[];
+}
+
 interface ChatInputProps {
   onSend: (message: string, attachments?: FileAttachment[]) => void;
-  /** Fired when the user clicks the stop button while Gilbert is
-   *  thinking. Triggers ``chat.message.cancel`` in ChatPage. */
   onStop?: () => void;
-  /** True while a ``chat.message.send`` RPC is in flight. Drives the
-   *  send→stop button swap and keeps the textarea editable so the
-   *  user can start drafting their next message immediately. */
   sending?: boolean;
   placeholder?: string;
   pendingAttachments: PendingAttachment[];
@@ -96,6 +103,9 @@ interface ChatInputProps {
   onAddFiles: (files: FileList | File[]) => void;
   onRemoveAttachment: (id: string) => void;
   onClearAttachments: () => void;
+  backends?: BackendModelsGroup[];
+  modelSelection?: ModelSelection;
+  onModelChange?: (selection: ModelSelection) => void;
 }
 
 const readAsBase64 = (blob: Blob): Promise<string> =>
@@ -376,6 +386,9 @@ export function ChatInput({
   onAddFiles,
   onRemoveAttachment,
   onClearAttachments,
+  backends,
+  modelSelection,
+  onModelChange,
 }: ChatInputProps) {
   // The textarea stays editable even while Gilbert is thinking so the
   // user can start drafting their next message. ``sending`` only
@@ -385,6 +398,7 @@ export function ChatInput({
   const disabled = false;
   const [message, setMessage] = useState("");
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const historyRef = useRef<string[]>(loadHistory());
   const draftRef = useRef<string>("");
@@ -743,6 +757,15 @@ export function ChatInput({
           >
             <PaperclipIcon className="size-4" />
           </Button>
+          {backends && backends.length > 0 && onModelChange && (
+            <ModelSelector
+              backends={backends}
+              selection={modelSelection || { backend: "", model: "" }}
+              onChange={onModelChange}
+              open={modelDropdownOpen}
+              onOpenChange={setModelDropdownOpen}
+            />
+          )}
           <Textarea
             ref={textareaRef}
             value={message}
@@ -977,6 +1000,90 @@ function PendingAttachmentCard({
         </div>
       </div>
       <RemoveButton name={item.name} onClick={onRemove} />
+    </div>
+  );
+}
+
+function ModelSelector({
+  backends,
+  selection,
+  onChange,
+  open,
+  onOpenChange,
+}: {
+  backends: BackendModelsGroup[];
+  selection: ModelSelection;
+  onChange: (s: ModelSelection) => void;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const currentLabel = (() => {
+    if (selection.model) {
+      for (const b of backends) {
+        const m = b.models.find((x) => x.id === selection.model);
+        if (m) return m.name;
+      }
+      return selection.model.split("-").slice(0, 2).join(" ");
+    }
+    return "Default";
+  })();
+
+  return (
+    <div className="relative shrink-0">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-8 gap-1 px-2 text-xs text-muted-foreground"
+        onClick={() => onOpenChange(!open)}
+        title="Select model"
+      >
+        <BrainIcon className="size-3.5" />
+        <span className="max-w-[100px] truncate">{currentLabel}</span>
+        <ChevronDownIcon className="size-3" />
+      </Button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 z-50 mb-1 min-w-[220px] max-h-[300px] overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
+          <button
+            type="button"
+            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-sm hover:bg-accent ${
+              !selection.model && !selection.backend ? "bg-accent font-medium" : ""
+            }`}
+            onClick={() => {
+              onChange({ backend: "", model: "" });
+              onOpenChange(false);
+            }}
+          >
+            Default
+          </button>
+          {backends.map((b) => (
+            <div key={b.name}>
+              <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {b.name}
+              </div>
+              {b.models.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`flex w-full flex-col items-start rounded-md px-3 py-1.5 text-left hover:bg-accent ${
+                    selection.model === m.id ? "bg-accent font-medium" : ""
+                  }`}
+                  onClick={() => {
+                    onChange({ backend: b.name, model: m.id });
+                    onOpenChange(false);
+                  }}
+                >
+                  <span className="text-sm">{m.name}</span>
+                  {m.description && (
+                    <span className="text-[10px] text-muted-foreground">{m.description}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

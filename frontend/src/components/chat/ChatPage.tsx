@@ -87,6 +87,10 @@ export function ChatPage() {
   } | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [modelSelection, setModelSelection] = useState<{ backend: string; model: string }>({
+    backend: "",
+    model: "",
+  });
   const [dragActive, setDragActive] = useState(false);
   const dragDepthRef = useRef(0);
   const pendingCountRef = useRef(0);
@@ -351,6 +355,12 @@ export function ChatPage() {
     enabled: connected,
   });
 
+  const { data: modelsData } = useQuery({
+    queryKey: ["chat-models"],
+    queryFn: api.listModels,
+    enabled: connected,
+  });
+
   const loadConversation = useCallback(
     async (id: string) => {
       setLoadingConv(true);
@@ -369,6 +379,11 @@ export function ChatPage() {
         setPendingInvites(conv.invites || []);
         setOwnerId(conv.owner_id || "");
         setRoomTitle(conv.title);
+        if (conv.model_preference) {
+          setModelSelection(conv.model_preference);
+        } else {
+          setModelSelection({ backend: "", model: "" });
+        }
         setSidebarOpen(false);
       } catch {
         setActiveConvId(null);
@@ -405,10 +420,14 @@ export function ChatPage() {
 
       // Send via the tracked variant so we capture the RPC ref — the
       // stop button uses it to send a matching ``chat.message.cancel``.
+      const modelOpts = (modelSelection.model || modelSelection.backend)
+        ? { model: modelSelection.model, backend: modelSelection.backend }
+        : undefined;
       const { ref, promise } = api.sendMessageWithRef(
         message,
         activeConvId,
         attachments,
+        modelOpts,
       );
       inFlightSendRef.current = ref;
 
@@ -470,7 +489,7 @@ export function ChatPage() {
         setSending(false);
       }
     },
-    [api, activeConvId, refetchConversations],
+    [api, activeConvId, refetchConversations, modelSelection],
   );
 
   const handleStop = useCallback(async () => {
@@ -1197,6 +1216,9 @@ export function ChatPage() {
             onAddFiles={addFiles}
             onRemoveAttachment={removeAttachment}
             onClearAttachments={clearAttachments}
+            backends={modelsData?.backends}
+            modelSelection={modelSelection}
+            onModelChange={setModelSelection}
           />
         )}
 

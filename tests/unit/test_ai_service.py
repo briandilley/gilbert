@@ -194,7 +194,7 @@ def resolver(
 @pytest.fixture
 def ai_service(stub_backend: StubAIBackend) -> AIService:
     svc = AIService()
-    svc._backend = stub_backend
+    svc._backends = {"stub": stub_backend}
     svc._enabled = True
     # Set tunable config directly for testing
     svc._config = {"api_key": "sk-test-key", "max_tokens": 1024, "temperature": 0.5}
@@ -217,18 +217,17 @@ def test_service_info(ai_service: AIService) -> None:
 # --- Lifecycle ---
 
 
-async def test_start_initializes_backend(
+async def test_start_registers_backends(
     ai_service: AIService,
     stub_backend: StubAIBackend,
     resolver: ServiceResolver,
 ) -> None:
     await ai_service.start(resolver)
-    assert stub_backend.initialized
-    assert stub_backend.init_config["api_key"] == "sk-test-key"
-    assert stub_backend.init_config["max_tokens"] == 1024
+    assert "stub" in ai_service._backends
+    assert ai_service._backends["stub"] is stub_backend
 
 
-async def test_stop_closes_backend(
+async def test_stop_closes_backends(
     ai_service: AIService,
     stub_backend: StubAIBackend,
     resolver: ServiceResolver,
@@ -289,7 +288,7 @@ async def test_chat_interrupted_by_user_cancellation(
             raise _asyncio.CancelledError()
 
     cancelling = _CancellingBackend()
-    ai_service._backend = cancelling
+    ai_service._backends = {"stub": cancelling}
     await ai_service.start(resolver)
 
     result = await ai_service.chat("Do something slow")
@@ -361,7 +360,7 @@ async def test_next_turn_after_interrupt_sees_marker_in_history(
             )
 
     backend = _InterruptThenRespondBackend()
-    ai_service._backend = backend
+    ai_service._backends = {"stub": backend}
     await ai_service.start(resolver)
 
     # Turn 1 — gets cancelled.
@@ -1005,7 +1004,7 @@ async def test_chat_emits_text_delta_events_for_streaming_backend(
                 ),
             )
 
-    ai_service._backend = StreamingBackend()
+    ai_service._backends = {"stub": StreamingBackend()}
 
     # Capture published events.
     published: list[tuple[str, dict[str, Any]]] = []
@@ -1337,7 +1336,7 @@ def test_truncate_history_within_limit(ai_service: AIService) -> None:
 
 def test_truncate_history_preserves_tool_pairs() -> None:
     svc = AIService()
-    svc._backend = StubAIBackend()
+    svc._backends = {"stub": StubAIBackend()}
     svc._enabled = True
     svc._max_history_messages = 3
     messages = [
@@ -2479,7 +2478,7 @@ async def test_maybe_compress_history_backend_failure(
 
     failing_backend = AsyncMock(spec=AIBackend)
     failing_backend.generate = AsyncMock(side_effect=RuntimeError("API down"))
-    ai_service._backend = failing_backend
+    ai_service._backends = {"stub": failing_backend}
 
     msgs = [Message(role=MessageRole.USER, content=f"m{i}") for i in range(10)]
     ai_service._current_conversation_id = "conv-fail"

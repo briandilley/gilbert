@@ -31,6 +31,8 @@ interface ProfileForm {
   tool_mode: string;
   tools: string[];
   tool_roles: Record<string, string>;
+  backend: string;
+  model: string;
 }
 
 export function AIProfiles() {
@@ -40,6 +42,12 @@ export function AIProfiles() {
   const { data, isLoading } = useQuery({
     queryKey: ["ai-profiles"],
     queryFn: api.listProfiles,
+    enabled: connected,
+  });
+
+  const { data: modelsData } = useQuery({
+    queryKey: ["chat-models"],
+    queryFn: api.listModels,
     enabled: connected,
   });
 
@@ -70,6 +78,8 @@ export function AIProfiles() {
       tool_mode: "all",
       tools: [],
       tool_roles: {},
+      backend: "",
+      model: "",
     });
   }
 
@@ -79,10 +89,16 @@ export function AIProfiles() {
     tool_mode: string;
     tools: string[];
     tool_roles: Record<string, string>;
+    backend?: string;
+    model?: string;
   }) {
     setIsNew(false);
     setToolFilter("");
-    setEditing({ ...profile });
+    setEditing({
+      ...profile,
+      backend: profile.backend || "",
+      model: profile.model || "",
+    });
   }
 
   if (isLoading) return <LoadingSpinner text="Loading profiles..." className="p-4" />;
@@ -106,6 +122,11 @@ export function AIProfiles() {
                 <Badge variant="secondary" className="text-xs">
                   {profile.tool_mode}
                 </Badge>
+                {(profile.backend || profile.model) && (
+                  <Badge variant="outline" className="text-xs">
+                    {profile.model || profile.backend || "default"}
+                  </Badge>
+                )}
                 <Button
                   variant="ghost"
                   size="icon-xs"
@@ -186,6 +207,57 @@ export function AIProfiles() {
                   rows={2}
                   placeholder="What this profile is for..."
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Backend</Label>
+                <Select
+                  value={editing.backend || "__default__"}
+                  onValueChange={(v) => {
+                    if (!v) return;
+                    const newBackend = v === "__default__" ? "" : v;
+                    setEditing({ ...editing, backend: newBackend, model: "" });
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Default (first available)</SelectItem>
+                    {(modelsData?.backends ?? []).map((b) => (
+                      <SelectItem key={b.name} value={b.name}>
+                        {b.name.charAt(0).toUpperCase() + b.name.slice(1)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Model</Label>
+                <Select
+                  value={editing.model || "__default__"}
+                  onValueChange={(v) => {
+                    if (!v) return;
+                    setEditing({ ...editing, model: v === "__default__" ? "" : v });
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Default (backend decides)</SelectItem>
+                    {(modelsData?.backends ?? [])
+                      .filter((b) => !editing.backend || b.name === editing.backend)
+                      .flatMap((b) =>
+                        b.models.map((m) => (
+                          <SelectItem key={m.id} value={m.id}>
+                            {editing.backend ? m.name : `${b.name}: ${m.name}`}
+                          </SelectItem>
+                        )),
+                      )}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-1.5">

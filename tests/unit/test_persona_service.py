@@ -163,7 +163,7 @@ def test_ai_service_has_persona_tools() -> None:
             return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
     svc = AIService()
-    svc._backend = _StubBackend()
+    svc._backends = {"stub": _StubBackend()}
     svc._enabled = True
     tools = svc.get_tools()
     names = [t.name for t in tools]
@@ -188,7 +188,7 @@ async def test_tool_get_persona(
             return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
     svc = AIService()
-    svc._backend = _StubBackend()
+    svc._backends = {"stub": _StubBackend()}
     svc._enabled = True
     svc._config = {}
     await svc.start(resolver)
@@ -214,7 +214,7 @@ async def test_tool_update_persona(
             return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
     svc = AIService()
-    svc._backend = _StubBackend()
+    svc._backends = {"stub": _StubBackend()}
     svc._enabled = True
     svc._config = {}
     await svc.start(resolver)
@@ -243,7 +243,7 @@ async def test_tool_reset_persona(
             return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
     svc = AIService()
-    svc._backend = _StubBackend()
+    svc._backends = {"stub": _StubBackend()}
     svc._enabled = True
     svc._config = {}
     await svc.start(resolver)
@@ -273,7 +273,7 @@ async def test_tool_unknown_raises(
             return AIResponse(message=Message(role=MessageRole.ASSISTANT, content=""), model="stub")
 
     svc = AIService()
-    svc._backend = _StubBackend()
+    svc._backends = {"stub": _StubBackend()}
     svc._enabled = True
     svc._config = {}
     await svc.start(resolver)

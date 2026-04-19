@@ -14,6 +14,7 @@ import type {
   ChatResponse,
   ConversationMember,
   FileAttachment,
+  ModelsListResult,
 } from "@/types/chat";
 import type { Role, ToolPermission, AIProfile, UserRoleAssignment, CollectionACL } from "@/types/roles";
 import type { DocumentNode, SearchResult } from "@/types/documents";
@@ -124,33 +125,30 @@ export function useWsApi() {
       message: string,
       conversationId: string | null,
       attachments: FileAttachment[] = [],
+      modelOpts?: { model?: string; backend?: string },
     ) =>
       rpc<ChatResponse>({
         type: "chat.message.send",
         message,
         conversation_id: conversationId,
         attachments,
+        ...(modelOpts?.model ? { model: modelOpts.model } : {}),
+        ...(modelOpts?.backend ? { backend: modelOpts.backend } : {}),
       }),
 
-    /**
-     * Like ``sendMessage`` but returns both the promise and the RPC
-     * ``ref`` immediately. Use this when the caller needs to hold a
-     * handle on the in-flight turn so it can cancel it via
-     * ``cancelMessage(ref)``. The promise still resolves with the same
-     * ``ChatResponse`` shape; if the turn is interrupted the response
-     * carries ``interrupted=true`` and whatever partial state was
-     * persisted (completed rounds, attachments, ui_blocks).
-     */
     sendMessageWithRef: (
       message: string,
       conversationId: string | null,
       attachments: FileAttachment[] = [],
+      modelOpts?: { model?: string; backend?: string },
     ) =>
       rpcWithRef<ChatResponse>({
         type: "chat.message.send",
         message,
         conversation_id: conversationId,
         attachments,
+        ...(modelOpts?.model ? { model: modelOpts.model } : {}),
+        ...(modelOpts?.backend ? { backend: modelOpts.backend } : {}),
       }),
 
     /**
@@ -166,6 +164,9 @@ export function useWsApi() {
         type: "chat.message.cancel",
         ref,
       }),
+
+    listModels: () =>
+      rpc<ModelsListResult>({ type: "chat.models.list" }),
 
     submitForm: (conversationId: string, blockId: string, values: Record<string, unknown>) =>
       rpc<ChatResponse>({ type: "chat.form.submit", conversation_id: conversationId, block_id: blockId, values }),
@@ -247,7 +248,7 @@ export function useWsApi() {
         { type: "roles.profile.list" },
       ),
 
-    saveProfile: (profile: { name: string; description: string; tool_mode: string; tools: string[]; tool_roles: Record<string, string> }) =>
+    saveProfile: (profile: { name: string; description: string; tool_mode: string; tools: string[]; tool_roles: Record<string, string>; backend?: string; model?: string }) =>
       rpc<{ status: string }>({ type: "roles.profile.save", ...profile }),
 
     deleteProfile: (name: string) =>

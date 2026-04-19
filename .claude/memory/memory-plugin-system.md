@@ -20,6 +20,36 @@ Each plugin directory contains a `plugin.yaml` manifest declaring:
 - Plugin-level dependencies: `depends_on` (other plugin names)
 - Default configuration: `config` section (merged into config chain)
 
+### Plugin Directory Layout
+Every plugin directory contains:
+- `plugin.yaml` — manifest (see above)
+- `plugin.py` — defines `create_plugin()` returning a `Plugin` instance; its `setup()` does the side-effect imports (`from . import sonos_speaker  # noqa: F401`) that trigger `__init_subclass__` registration on the relevant backend ABCs
+- `pyproject.toml` — **required** for every std-plugin; declares third-party Python deps. See uv workspace section below.
+- `__init__.py` — empty (makes the directory a Python package)
+- `tests/conftest.py` — registers the plugin as `gilbert_plugin_<name>` in `sys.modules` for pytest collection. When a plugin has multiple internal modules with relative imports (`from .client import Foo` inside `presence.py`), the conftest must **omit** `submodule_search_locations` in its `spec_from_file_location` call — see `std-plugins/unifi/tests/conftest.py` for the detailed comment.
+- backend source files — the actual integration code
+
+### uv Workspace (Plugin Dependencies)
+Each plugin's third-party deps live in its own `std-plugins/<name>/pyproject.toml`:
+
+```toml
+[project]
+name = "gilbert-plugin-sonos"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["soco>=0.30.15"]
+
+[tool.uv]
+package = false
+```
+
+The root `pyproject.toml` treats all plugin directories (`std-plugins/*`, `local-plugins/*`, `installed-plugins/*`) as uv workspace members via `[tool.uv.workspace]`, and declares each std-plugin as a root dependency via `[tool.uv.sources] … { workspace = true }`. A plain `uv sync` installs every plugin's deps into the shared venv — no per-plugin commands.
+
+Plugins with no third-party deps beyond core (`httpx`, `aiohttp`, `pillow`, etc.) still need a `pyproject.toml` with `dependencies = []` — uv errors if a workspace member matched by the glob lacks one.
+
+### std-plugins submodule
+`std-plugins/` is a git submodule pointing at [`briandilley/gilbert-plugins`](https://github.com/briandilley/gilbert-plugins). `gilbert.sh start` runs `git submodule update --init --recursive` if empty, then `uv sync`, then boots Gilbert. First-party plugins are developed in that separate repo and updated here via the submodule pointer.
+
 ### Plugin Loader (`src/gilbert/plugins/loader.py`)
 - **Directory scanning**: `scan_directories(dirs)` — finds subdirs with `plugin.yaml`
 - **Manifest parsing**: `PluginManifest` class wraps parsed `plugin.yaml` data
@@ -81,6 +111,12 @@ The `PluginManagerService` allows admins to install plugins at runtime from the 
 - `stop_and_unregister(name)` — stop + remove a service entirely, with capability index cleanup. Publishes `service.stopped`. Used by uninstall.
 
 **Source buckets**: `list_installed()` classifies each plugin as `std` / `local` / `installed` / `unknown` by which configured `plugins.directories` entry contains its install path. Only `installed`-bucket plugins are uninstallable through this service — std-plugins and local-plugins are managed outside the runtime.
+
+### Runtime install with restart-required (Option C)
+When `PluginManagerService.install()` fetches a plugin that declares non-empty `[project].dependencies` in its `pyproject.toml`, it **cannot** hot-load it — the new deps aren't in the running venv. The install is persisted with `needs_restart=True` and surfaced in the UI. The user then triggers a restart via `/plugin restart` (or the `plugins.restart_host` WS handler); Gilbert calls `request_restart()` which flips uvicorn's `should_exit` and sets a flag so `__main__.py` exits the process with `RESTART_EXIT_CODE = 75` once uvicorn's serve loop returns. The `gilbert.sh` supervisor loop catches that exit code, re-runs `uv sync` (installing the new workspace member's deps), and relaunches Gilbert; the boot-time loader imports the plugin normally and `PluginManagerService.reconcile_loaded_plugins()` clears the `needs_restart` flag. Plugins with zero third-party deps still hot-load without any restart.
+
+### Supervised restart pattern
+`gilbert.sh start` / `gilbert.sh dev` run Gilbert under a supervisor loop that distinguishes "exit and restart" (exit code `75`, `EX_TEMPFAIL`) from "exit and stop" (exit code `0`, `130` from Ctrl+C, `143` from SIGTERM, or anything else from a crash). The loop re-runs `uv sync` on each iteration so any plugin dep changes land in the venv before the next boot. A SIGINT/SIGTERM trap in the supervisor sets a stop flag so Ctrl+C during a `uv sync` or between Gilbert runs still exits cleanly instead of looping back. The restart is triggered from inside Gilbert via `Gilbert.request_restart()` (set a flag + call a shutdown callback wired from `__main__.py` that flips uvicorn's `server.should_exit`). Services should never call `sys.exit()` directly — they should call `request_restart()` and let `__main__.py` return the exit code on the way out.
 
 ### Plugin Data Directory
 Plugins store persistent data in `.gilbert/plugin-data/<plugin-name>/`. Plugins never write to their own source directory. The data dir is created automatically during plugin setup.

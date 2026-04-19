@@ -69,7 +69,7 @@ class MCPServerClient:
     Every tool call the client makes runs under this user's
     ``UserContext``, so RBAC applies as if the user made the call
     directly."""
-    ai_profile: str = "mcp_server_client"
+    ai_profile: str = "standard"
     """Name of the AIContextProfile that filters which tools this
     client can see. Same machinery used for internal ``ai_calls``."""
     active: bool = True
@@ -321,7 +321,7 @@ class MCPServerService(Service):
         *,
         name: str,
         owner_user_id: str,
-        ai_profile: str = "mcp_server_client",
+        ai_profile: str = "standard",
         description: str = "",
     ) -> tuple[MCPServerClient, str]:
         """Create a new client and return ``(client, plaintext_token)``.
@@ -483,7 +483,7 @@ class MCPServerService(Service):
             client, token = await self.create_client(
                 name=str(payload.get("name") or ""),
                 owner_user_id=str(payload.get("owner_user_id") or ""),
-                ai_profile=str(payload.get("ai_profile") or "mcp_server_client"),
+                ai_profile=str(payload.get("ai_profile") or "standard"),
                 description=str(payload.get("description") or ""),
             )
         except ValueError as exc:
@@ -705,7 +705,7 @@ class MCPServerService(Service):
             name=str(doc.get("name") or ""),
             description=str(doc.get("description") or ""),
             owner_user_id=str(doc.get("owner_user_id") or ""),
-            ai_profile=str(doc.get("ai_profile") or "mcp_server_client"),
+            ai_profile=str(doc.get("ai_profile") or "standard"),
             active=bool(doc.get("active", True)),
             token_hash=str(doc.get("token_hash") or ""),
             token_prefix=str(doc.get("token_prefix") or ""),

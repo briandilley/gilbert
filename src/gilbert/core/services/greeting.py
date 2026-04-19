@@ -51,6 +51,7 @@ class GreetingService(Service):
         self._style: str = ""
         self._speakers: list[str] = []
         self._timezone: str = "UTC"
+        self._ai_profile: str = "light"
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -177,12 +178,20 @@ class GreetingService(Service):
                 default=[],
                 choices_from="speakers",
             ),
+            ConfigParam(
+                key="ai_profile",
+                type=ToolParameterType.STRING,
+                description="AI profile for greeting generation.",
+                default="light",
+                choices_from="ai_profiles",
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._start_hour = int(config.get("start_hour", self._start_hour))
         self._cutoff_hour = int(config.get("cutoff_hour", self._cutoff_hour))
         self._style = config.get("style", self._style)
+        self._ai_profile = config.get("ai_profile", self._ai_profile)
         self._speakers = config.get("speakers", self._speakers)
         self._timezone = config.get("timezone", self._timezone)
 
@@ -391,7 +400,7 @@ class GreetingService(Service):
             response, *_ = await ai_svc.chat(
                 prompt,
                 user_ctx=UserContext.SYSTEM,
-                ai_call="greeting",
+                ai_profile=self._ai_profile,
             )
             if response and len(response) < 500:
                 return response.strip()
@@ -442,7 +451,7 @@ class GreetingService(Service):
             response, *_ = await ai_svc.chat(
                 prompt,
                 user_ctx=UserContext.SYSTEM,
-                ai_call="greeting",
+                ai_profile=self._ai_profile,
             )
             if response and len(response) < 500:
                 return response.strip()

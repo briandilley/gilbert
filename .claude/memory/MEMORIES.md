@@ -31,3 +31,6 @@
 - [Config Actions](memory-config-actions.md) — action buttons on service settings pages (test_connection, link flows), with two-phase followup support
 - [MCP (Model Context Protocol)](memory-mcp.md) — Gilbert as MCP client (external servers → AI pipeline) AND MCP server (`/api/mcp` bearer-token endpoint) with per-user RBAC
 - [Dashboard & Nav Structure](memory-dashboard-nav.md) — grouped nav RPC drives desktop dropdowns and mobile drawer, user-scoped query cache
+- [Capability Protocols](memory-capability-protocols.md) — protocol table + `isinstance` against `@runtime_checkable Protocol`s, never concrete service classes
+- [Backend Pattern](memory-backend-pattern.md) — universal backend ABC + registry pattern, side-effect imports, AI streaming surface
+- [Architecture Violation Checklist](memory-architecture-checklist.md) — the full "check the rules" audit (layers, concrete classes, slash commands, README freshness)

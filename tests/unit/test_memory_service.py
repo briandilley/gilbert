@@ -131,7 +131,7 @@ class TestMemoryHelper:
                 )
 
         svc = AIService()
-        svc._backend = _Stub()
+        svc._backends = {"stub": _Stub()}
         svc._enabled = True
         tools = svc.get_tools()
         assert any(t.name == "memory" for t in tools)

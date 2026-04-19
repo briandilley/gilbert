@@ -561,7 +561,7 @@ async def test_dispatch_ai_action_calls_ai() -> None:
     assert len(ai.calls) == 1
     call = ai.calls[0]
     assert call["user_message"] == "Do the thing"
-    assert call["ai_call"] == "scheduled_action"
+    assert call["ai_profile"] == "standard"
     assert call["system_prompt"]  # non-empty
 
 

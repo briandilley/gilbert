@@ -20,6 +20,8 @@ export interface AIProfile {
   tools: string[];
   tool_roles: Record<string, string>;
   assigned_calls: string[];
+  backend: string;
+  model: string;
 }
 
 export interface UserRoleAssignment {

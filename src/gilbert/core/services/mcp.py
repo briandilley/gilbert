@@ -2125,7 +2125,7 @@ class MCPService(Service):
             tool_cache_ttl_seconds=int(payload.get("tool_cache_ttl_seconds", 300)),
             allow_sampling=bool(payload.get("allow_sampling", False)),
             sampling_profile=str(
-                payload.get("sampling_profile") or "mcp_sampling",
+                payload.get("sampling_profile") or "standard",
             ),
             sampling_budget_tokens=int(
                 payload.get("sampling_budget_tokens", 10_000),
@@ -2265,7 +2265,7 @@ class MCPService(Service):
             allowed_users=tuple(doc.get("allowed_users") or ()),
             tool_cache_ttl_seconds=int(doc.get("tool_cache_ttl_seconds", 300)),
             allow_sampling=bool(doc.get("allow_sampling", False)),
-            sampling_profile=str(doc.get("sampling_profile") or "mcp_sampling"),
+            sampling_profile=str(doc.get("sampling_profile") or "standard"),
             sampling_budget_tokens=int(doc.get("sampling_budget_tokens", 10_000)),
             sampling_budget_window_seconds=int(
                 doc.get("sampling_budget_window_seconds", 3600),

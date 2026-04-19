@@ -45,6 +45,7 @@ class RoastService(Service):
             "Keep it to 1-2 sentences."
         )
         self._speakers: list[str] = []
+        self._ai_profile: str = "standard"
         self._resolver: ServiceResolver | None = None
 
     def service_info(self) -> ServiceInfo:
@@ -129,12 +130,20 @@ class RoastService(Service):
                 default=[],
                 choices_from="speakers",
             ),
+            ConfigParam(
+                key="ai_profile",
+                type=ToolParameterType.STRING,
+                description="AI profile for roast generation.",
+                default="standard",
+                choices_from="ai_profiles",
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._probability = float(config.get("probability", self._probability))
         self._ai_prompt = config.get("ai_prompt", self._ai_prompt)
         self._speakers = config.get("speakers", self._speakers)
+        self._ai_profile = config.get("ai_profile", self._ai_profile)
 
     async def _run_roast(self) -> None:
         """Scheduler callback — roll the dice and maybe roast someone."""
@@ -197,7 +206,7 @@ class RoastService(Service):
                     response, *_ = await ai_svc.chat(
                         prompt,
                         user_ctx=UserContext.SYSTEM,
-                        ai_call="roast",
+                        ai_profile=self._ai_profile,
                     )
                     if response and len(response) < 500:
                         return str(response).strip()

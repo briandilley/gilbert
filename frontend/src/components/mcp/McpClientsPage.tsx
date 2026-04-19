@@ -296,7 +296,7 @@ function CreateClientDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [ownerUserId, setOwnerUserId] = useState("");
-  const [aiProfile, setAiProfile] = useState("mcp_server_client");
+  const [aiProfile, setAiProfile] = useState("standard");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -320,7 +320,7 @@ function CreateClientDialog({
       setName("");
       setDescription("");
       setOwnerUserId("");
-      setAiProfile("mcp_server_client");
+      setAiProfile("standard");
       setError(null);
     }
   }, [open]);

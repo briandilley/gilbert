@@ -517,6 +517,26 @@ class ConfigurationService(Service):
                         return [str(s) for s in linked]
                 except Exception:
                     logger.debug("music_services dynamic choices failed", exc_info=True)
+        elif source == "ai_enabled_models":
+            from gilbert.interfaces.ai import AIModelProvider
+
+            svc = self._resolver.get_capability("ai_chat")
+            if isinstance(svc, AIModelProvider):
+                try:
+                    return [
+                        {"value": m.id, "label": m.name}
+                        for m in svc.get_enabled_models()
+                    ]
+                except Exception:
+                    logger.debug("ai_enabled_models dynamic choices failed", exc_info=True)
+        elif source == "ai_profiles":
+            svc = self._resolver.get_capability("ai_chat")
+            if svc is not None:
+                try:
+                    profiles = svc.list_profiles()
+                    return [p.name for p in profiles]
+                except Exception:
+                    logger.debug("ai_profiles dynamic choices failed", exc_info=True)
         elif source == "inbox_mailboxes":
             # Returns labeled choices: the dropdown shows the friendly
             # name + email but stores the bare mailbox id as the value.
@@ -1017,6 +1037,9 @@ class ConfigurationService(Service):
                         "error": "Insufficient permissions for this action",
                         "code": 403,
                     }
+
+        if action.backend and "backend" not in payload:
+            payload = {**payload, "backend": action.backend}
 
         try:
             result = await configurable.invoke_config_action(key, payload)

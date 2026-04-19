@@ -57,6 +57,7 @@ class InboxAIChatService(Service):
         self._knowledge: Any = None  # KnowledgeService (optional)
         self._event_bus: Any = None  # EventBus
         self._unsubscribe: Any = None
+        self._ai_profile: str = "standard"
 
         # Per-request pending attachments, protected by a lock so
         # concurrent _process_message calls don't mix attachments.
@@ -156,6 +157,13 @@ class InboxAIChatService(Service):
                 description="Required subject line prefix (empty = no filter).",
                 default="",
             ),
+            ConfigParam(
+                key="ai_profile",
+                type=ToolParameterType.STRING,
+                description="AI profile for email-to-AI chat.",
+                default="standard",
+                choices_from="ai_profiles",
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -165,6 +173,7 @@ class InboxAIChatService(Service):
         self._allowed_domains = [d.lower().lstrip("@") for d in domains]
         subj = config.get("required_subject", "")
         self._required_subject = subj.lower().strip() if subj else ""
+        self._ai_profile = config.get("ai_profile", self._ai_profile)
 
     # ── Event handler ──────────────────────────────────────────
 
@@ -291,7 +300,7 @@ class InboxAIChatService(Service):
             user_message=context_prefix + body,
             conversation_id=conversation_id,
             user_ctx=user_ctx,
-            ai_call="inbox_ai_chat",
+            ai_profile=self._ai_profile,
         )
 
         # Collect any attachments the AI queued via the email_attach tool

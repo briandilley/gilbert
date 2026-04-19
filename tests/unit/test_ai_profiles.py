@@ -234,9 +234,8 @@ async def ai_svc(
 ) -> AIService:
     """Started AI service with profiles loaded."""
     svc = AIService()
-    svc._backend = stub_backend
+    svc._backends = {"stub": stub_backend}
     svc._enabled = True
-    svc._config = {"max_tokens": 1024, "temperature": 0.5}
     svc._system_prompt = "Test assistant"
     svc._max_tool_rounds = 3
     await svc.start(resolver)
@@ -273,33 +272,33 @@ class TestProfileResolution:
     async def test_builtin_profiles_seeded(self, ai_svc: AIService) -> None:
         profiles = ai_svc.list_profiles()
         names = {p.name for p in profiles}
-        assert "default" in names
-        assert "human_chat" in names
-        assert "text_only" in names
+        assert "light" in names
+        assert "standard" in names
+        assert "advanced" in names
 
     async def test_builtin_assignments_seeded(self, ai_svc: AIService) -> None:
         assignments = ai_svc.list_assignments()
-        assert assignments["human_chat"] == "human_chat"
-        assert assignments["greeting"] == "text_only"
+        assert assignments["human_chat"] == "standard"
+        assert assignments["greeting"] == "light"
 
     async def test_get_profile_returns_none_for_no_call(self, ai_svc: AIService) -> None:
         assert ai_svc.get_profile(None) is None
 
-    async def test_get_profile_returns_default_for_unknown_call(self, ai_svc: AIService) -> None:
+    async def test_unassigned_call_uses_default_profile(self, ai_svc: AIService) -> None:
         profile = ai_svc.get_profile("unknown_call")
         assert profile is not None
-        assert profile.name == "default"
+        assert profile.name == "standard"
 
     async def test_get_profile_resolves_via_assignment(self, ai_svc: AIService) -> None:
         profile = ai_svc.get_profile("human_chat")
         assert profile is not None
-        assert profile.name == "human_chat"
+        assert profile.name == "standard"
 
     async def test_get_profile_resolves_custom_assignment(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("custom_call", "text_only")
+        await ai_svc.set_assignment("custom_call", "light")
         profile = ai_svc.get_profile("custom_call")
         assert profile is not None
-        assert profile.name == "text_only"
+        assert profile.name == "light"
 
 
 # =============================================================================
@@ -333,9 +332,15 @@ class TestProfileCRUD:
         await ai_svc.delete_profile("temp")
         assert "temp" not in {pr.name for pr in ai_svc.list_profiles()}
 
-    async def test_cannot_delete_default(self, ai_svc: AIService) -> None:
+    async def test_cannot_delete_tier_profiles(self, ai_svc: AIService) -> None:
+        for name in ("light", "standard", "advanced"):
+            with pytest.raises(ValueError, match="Cannot delete"):
+                await ai_svc.delete_profile(name)
+
+    async def test_cannot_delete_current_default_profile(self, ai_svc: AIService) -> None:
+        """The profile currently set as default_profile cannot be deleted."""
         with pytest.raises(ValueError, match="Cannot delete"):
-            await ai_svc.delete_profile("default")
+            await ai_svc.delete_profile("standard")
 
 
 # =============================================================================
@@ -345,24 +350,24 @@ class TestProfileCRUD:
 
 class TestAssignmentCRUD:
     async def test_set_assignment(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("my_call", "text_only")
-        assert ai_svc.list_assignments()["my_call"] == "text_only"
+        await ai_svc.set_assignment("my_call", "light")
+        assert ai_svc.list_assignments()["my_call"] == "light"
 
     async def test_set_assignment_unknown_profile_raises(self, ai_svc: AIService) -> None:
         with pytest.raises(ValueError, match="Unknown profile"):
             await ai_svc.set_assignment("my_call", "nonexistent")
 
     async def test_clear_assignment(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("my_call", "text_only")
+        await ai_svc.set_assignment("my_call", "light")
         await ai_svc.clear_assignment("my_call")
         assert "my_call" not in ai_svc.list_assignments()
 
     async def test_cleared_call_falls_back_to_default(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("my_call", "text_only")
+        await ai_svc.set_assignment("my_call", "light")
         await ai_svc.clear_assignment("my_call")
         profile = ai_svc.get_profile("my_call")
         assert profile is not None
-        assert profile.name == "default"
+        assert profile.name == "standard"
 
 
 # =============================================================================
@@ -596,12 +601,19 @@ class TestChatWithProfile:
         tool_names = {t.name for t in stub_backend.requests[0].tools}
         assert tool_names == {"sales_lead"}
 
-    async def test_chat_with_text_only_profile(
+    async def test_chat_with_include_empty_profile(
         self,
         ai_svc: AIService,
         stub_backend: StubAIBackend,
     ) -> None:
-        """text_only profile should pass no tools to the AI."""
+        """A profile with tool_mode=include and empty tools passes no tools."""
+        await ai_svc.set_profile(AIContextProfile(
+            name="no_tools",
+            description="No tools",
+            tool_mode="include",
+            tools=[],
+        ))
+        await ai_svc.set_assignment("no_tools_call", "no_tools")
         stub_backend.queue_response(
             AIResponse(
                 message=Message(role=MessageRole.ASSISTANT, content="hello"),
@@ -609,7 +621,7 @@ class TestChatWithProfile:
             )
         )
 
-        await ai_svc.chat("test", ai_call="greeting", user_ctx=UserContext.SYSTEM)
+        await ai_svc.chat("test", ai_call="no_tools_call", user_ctx=UserContext.SYSTEM)
 
         assert len(stub_backend.requests) == 1
         assert stub_backend.requests[0].tools == []
@@ -769,7 +781,7 @@ class TestProfileTools:
         assert "profiles" in data
         assert "assignments" in data
         names = {p["name"] for p in data["profiles"]}
-        assert "default" in names
+        assert "standard" in names
 
     async def test_set_profile_tool(self, ai_svc: AIService) -> None:
         result = await ai_svc.execute_tool(
@@ -792,7 +804,7 @@ class TestProfileTools:
         assert data["status"] == "deleted"
 
     async def test_delete_default_profile_tool_fails(self, ai_svc: AIService) -> None:
-        result = await ai_svc.execute_tool("delete_ai_profile", {"name": "default"})
+        result = await ai_svc.execute_tool("delete_ai_profile", {"name": "standard"})
         data = json.loads(result)
         assert "error" in data
 
@@ -801,15 +813,15 @@ class TestProfileTools:
             "assign_ai_profile",
             {
                 "call_name": "test_call",
-                "profile": "text_only",
+                "profile": "light",
             },
         )
         data = json.loads(result)
         assert data["status"] == "assigned"
-        assert ai_svc.list_assignments()["test_call"] == "text_only"
+        assert ai_svc.list_assignments()["test_call"] == "light"
 
     async def test_clear_assignment_tool(self, ai_svc: AIService) -> None:
-        await ai_svc.set_assignment("test_call", "text_only")
+        await ai_svc.set_assignment("test_call", "light")
         result = await ai_svc.execute_tool("clear_ai_assignment", {"call_name": "test_call"})
         data = json.loads(result)
         assert data["status"] == "cleared"

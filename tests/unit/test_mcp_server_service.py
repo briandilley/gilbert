@@ -298,7 +298,7 @@ class TestWsHandlers:
                 "client": {
                     "name": "Claude Desktop",
                     "owner_user_id": "alice",
-                    "ai_profile": "mcp_server_client",
+                    "ai_profile": "standard",
                 },
             },
         )

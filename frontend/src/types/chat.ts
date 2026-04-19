@@ -1,5 +1,27 @@
 import type { UIBlock } from "./ui";
 
+// ── Model tier types ──────────────────────────────────────────────────
+
+export interface ModelEntry {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface BackendModels {
+  name: string;
+  models: ModelEntry[];
+}
+
+export interface ModelsListResult {
+  backends: BackendModels[];
+}
+
+export interface ModelPreference {
+  backend: string;
+  model: string;
+}
+
 // Attachments come in two shapes that share ``kind``/``name``/``media_type``
 // but differ in where the bytes live:
 //
@@ -97,6 +119,7 @@ export interface ConversationDetail {
   members?: ConversationMember[];
   invites?: { user_id: string; display_name: string }[];
   owner_id?: string;
+  model_preference?: ModelPreference;
 }
 
 export interface ToolUsageEntry {
@@ -128,6 +151,8 @@ export interface ChatResponse {
    *  attachments produced before the stop) is preserved in the
    *  response; the frontend renders a subtle stop indicator. */
   interrupted?: boolean;
+  /** The model ID that handled this turn (echoed from the backend). */
+  model?: string;
 }
 
 // ── Turn-grouped chat history ────────────────────────────────────────
