@@ -26,6 +26,7 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "alarm.": 200,
     "screen.": 200,
     "chat.": 200,
+    "workspace.": 200,
     "radio_dj.": 200,
     # user (100)
     "presence.": 100,
@@ -69,6 +70,7 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "skills.list": 200,
     "skills.conversation.": 200,
     "skills.workspace.": 200,
+    "workspace.": 200,
     # user (100)
     "chat.": 100,
     # Scheduler: listing is user-level; state-changing operations on

@@ -53,6 +53,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         self._enabled: bool = False
         self._resolver: ServiceResolver | None = None
         self._storage: Any = None
+        self._event_bus: Any = None
 
     # ── Service interface ────────────────────────────────────────────
 
@@ -98,6 +99,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             from gilbert.interfaces.events import EventBusProvider
 
             if isinstance(event_bus_svc, EventBusProvider):
+                self._event_bus = event_bus_svc.bus
                 self._unsubscribe_conv_destroyed = event_bus_svc.bus.subscribe(
                     "chat.conversation.destroyed",
                     self._on_conversation_destroyed,
@@ -331,7 +333,31 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
 
         await self._storage.put(_WORKSPACE_FILES_COLLECTION, file_id, entity)
         entity["_id"] = file_id
+
+        await self._emit_file_event(
+            "workspace.file.created", entity, user_id
+        )
+
         return entity
+
+    async def _emit_file_event(
+        self, event_type: str, entity: dict[str, Any], user_id: str
+    ) -> None:
+        if self._event_bus is None:
+            return
+        from gilbert.interfaces.events import Event
+
+        await self._event_bus.publish(
+            Event(
+                event_type=event_type,
+                data={
+                    "file": entity,
+                    "conversation_id": entity.get("conversation_id", ""),
+                    "visible_to": [user_id],
+                },
+                source="workspace",
+            )
+        )
 
     async def list_files(
         self, conversation_id: str, category: str | None = None
@@ -399,6 +425,12 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 pass
 
         await self._storage.delete(_WORKSPACE_FILES_COLLECTION, file_id)
+
+        entity["_id"] = file_id
+        await self._emit_file_event(
+            "workspace.file.deleted", entity, user_id
+        )
+
         return True
 
     async def find_file_by_path(

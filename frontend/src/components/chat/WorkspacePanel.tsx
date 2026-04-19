@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useEventBus } from "@/hooks/useEventBus";
 import {
   ChevronRightIcon,
   DownloadIcon,
@@ -260,6 +261,23 @@ export function WorkspacePanelContent({ conversationId }: WorkspacePanelProps) {
   useEffect(() => {
     loadFiles();
   }, [loadFiles]);
+
+  // Reload when workspace file events arrive for this conversation
+  const loadFilesRef = useRef(loadFiles);
+  loadFilesRef.current = loadFiles;
+
+  const handleFileEvent = useCallback(
+    (event: { data?: { conversation_id?: string } }) => {
+      if (
+        event.data?.conversation_id === conversationId
+      ) {
+        loadFilesRef.current();
+      }
+    },
+    [conversationId],
+  );
+  useEventBus("workspace.file.created", handleFileEvent);
+  useEventBus("workspace.file.deleted", handleFileEvent);
 
   const handleDownload = useCallback(async (file: WorkspaceFile) => {
     if (!conversationId) return;

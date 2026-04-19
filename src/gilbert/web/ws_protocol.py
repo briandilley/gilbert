@@ -114,6 +114,20 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_workspace_event(self, event: Event) -> bool:
+        """Content-level filter for workspace events.
+
+        Workspace events carry ``visible_to`` to scope delivery to
+        the conversation owner. Users only see workspace file events
+        for their own conversations.
+        """
+        if not event.event_type.startswith("workspace."):
+            return True
+        visible_to = event.data.get("visible_to")
+        if visible_to is not None and self.user_id not in visible_to:
+            return False
+        return True
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -343,6 +357,8 @@ class WsConnectionManager:
             if not conn.can_see_chat_event(event):
                 continue
             if not conn.can_see_auth_event(event):
+                continue
+            if not conn.can_see_workspace_event(event):
                 continue
             conn.send_event(event)
 
