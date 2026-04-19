@@ -143,6 +143,7 @@ class UserService(Service):
                     "roles": ["admin"],
                 },
             )
+            self._warn_if_root_unusable(self._root_password_hash)
             return
 
         # Keep the root password in sync with what's in config.
@@ -152,6 +153,21 @@ class UserService(Service):
                 _ROOT_USER_ID,
                 {"password_hash": self._root_password_hash},
             )
+        self._warn_if_root_unusable(existing.get("password_hash", ""))
+
+    @staticmethod
+    def _warn_if_root_unusable(effective_hash: str) -> None:
+        # An empty password_hash makes local login impossible (LocalAuth
+        # rejects empty hashes), so without an external admin identity
+        # provider nobody can reach the Settings UI to fix it. Surface a
+        # loud warning every boot so the trap is obvious in logs.
+        if effective_hash:
+            return
+        logger.warning(
+            "Root user has no password — local login is disabled. "
+            "Set auth.root_password in .gilbert/config.yaml and restart "
+            "(see README → Configure)."
+        )
 
     # ---- Provider discovery ----
 

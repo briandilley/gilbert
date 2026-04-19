@@ -86,6 +86,30 @@ async def test_root_user_not_duplicated(storage: Any) -> None:
     assert root["password_hash"] == "hash2"  # Updated
 
 
+async def test_empty_root_password_warns(storage: Any, caplog: Any) -> None:
+    svc = UserService(root_password_hash="", default_roles=["user"])
+    resolver = StubResolver({"entity_storage": StubStorageService(storage)})
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="gilbert.core.services.users"):
+        await svc.start(resolver)
+
+    assert any("no password" in r.message for r in caplog.records), (
+        "expected a warning when root is created with an empty password hash"
+    )
+
+
+async def test_nonempty_root_password_does_not_warn(storage: Any, caplog: Any) -> None:
+    svc = UserService(root_password_hash="hashed_pw", default_roles=["user"])
+    resolver = StubResolver({"entity_storage": StubStorageService(storage)})
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="gilbert.core.services.users"):
+        await svc.start(resolver)
+
+    assert not any("no password" in r.message for r in caplog.records)
+
+
 async def test_create_user_applies_default_roles(user_service: UserService) -> None:
     user = await user_service.create_user("u1", {"email": "a@b.com", "display_name": "A"})
     assert "user" in user["roles"]
