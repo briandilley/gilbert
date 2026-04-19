@@ -594,21 +594,23 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     "/workspace write <path> <content>"
                 ),
                 description=(
-                    "Write a text file to the conversation workspace. "
+                    "Write a small text file to the conversation workspace. "
                     "Files are written to scratch/ by default. Use "
-                    "category='output' to write directly to outputs/. "
-                    "Creates parent directories as needed. Use this to "
-                    "stage scripts for run_workspace_script, or to write "
-                    "analysis artifacts."
+                    "category='output' to write directly to outputs/.\n\n"
+                    "**Best for:** small scripts (<100 lines), config files, "
+                    "templates. **NOT for:** large data files, CSVs with many "
+                    "rows, or generated reports — use run_workspace_script "
+                    "to generate those (the script writes them to disk "
+                    "directly, avoiding token limits)."
                 ),
                 parameters=[
                     ToolParameter(
                         name="path",
                         type=ToolParameterType.STRING,
                         description=(
-                            "Relative path within the target category directory "
-                            "(e.g. 'analyze.py' or 'configs/settings.json'). "
-                            "Parent directories are created as needed."
+                            "Simple filename within the category directory "
+                            "(e.g. 'analyze.py', 'config.json'). "
+                            "Keep paths flat — avoid nested subdirectories."
                         ),
                     ),
                     ToolParameter(
