@@ -21,15 +21,34 @@ from gilbert.interfaces.service import ServiceResolver
 from tests.unit.test_mcp_service import FakeACL, FakeStorage
 
 
-class _FakeUsersService:
-    """Minimal stand-in for the users service — supports only the
-    ``get_user`` method the mcp_server service calls."""
+class _FakeUserBackend:
+    """Minimal stand-in for ``UserBackend`` — supports only the
+    ``get_user`` lookup the mcp_server service uses."""
 
     def __init__(self, users: dict[str, dict[str, Any]]) -> None:
         self._users = users
 
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
         return self._users.get(user_id)
+
+
+class _FakeUsersService:
+    """Stand-in satisfying ``UserManagementProvider`` Protocol."""
+
+    def __init__(self, users: dict[str, dict[str, Any]]) -> None:
+        self._users = users
+        self._backend = _FakeUserBackend(users)
+
+    @property
+    def allow_user_creation(self) -> bool:
+        return False
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        return list(self._users.values())
+
+    @property
+    def backend(self) -> Any:
+        return self._backend
 
 
 class _FakeResolver(ServiceResolver):

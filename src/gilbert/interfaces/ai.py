@@ -26,6 +26,8 @@ __all__ = [
     "AIProvider",
     "AIRequest",
     "AIResponse",
+    "AISamplingProvider",
+    "AIToolDiscoveryProvider",
     "ChatTurnResult",
     "FileAttachment",
     "MODEL_TIER_ADVANCED",
@@ -35,6 +37,7 @@ __all__ = [
     "Message",
     "MessageRole",
     "ModelInfo",
+    "SharedConversationProvider",
     "StopReason",
     "StreamEvent",
     "StreamEventType",
@@ -413,6 +416,22 @@ class AIProvider(Protocol):
 
 
 @runtime_checkable
+class SharedConversationProvider(Protocol):
+    """Protocol for the AI service's shared-conversation listing.
+
+    The WebSocket handshake uses this to seed each connection's set of
+    shared rooms without importing the concrete ``AIService`` class.
+    """
+
+    async def list_shared_conversations(
+        self,
+        user_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        ...
+
+
+@runtime_checkable
 class AIModelProvider(Protocol):
     """Protocol for querying enabled AI models.
 
@@ -422,4 +441,45 @@ class AIModelProvider(Protocol):
 
     def get_enabled_models(self) -> list[ModelInfo]:
         """Return the models currently enabled on the active backend."""
+        ...
+
+
+@runtime_checkable
+class AISamplingProvider(Protocol):
+    """Protocol for one-shot AI completion (no conversation, no tool loop).
+
+    Used by ``MCPService`` to service ``sampling/createMessage`` requests
+    from remote MCP servers without importing the concrete AI service.
+    """
+
+    def has_profile(self, name: str) -> bool:
+        """Return True if a profile with this name exists."""
+        ...
+
+    async def complete_one_shot(
+        self,
+        *,
+        messages: list[Message],
+        system_prompt: str = "",
+        profile_name: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AIResponse:
+        ...
+
+
+@runtime_checkable
+class AIToolDiscoveryProvider(Protocol):
+    """Protocol for filtered AI tool discovery.
+
+    Used by ``MCPServerService`` to enumerate the tools an external MCP
+    client can see (profile + RBAC applied) without importing the
+    concrete AI service.
+    """
+
+    def discover_tools(
+        self,
+        *,
+        user_ctx: UserContext,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
         ...

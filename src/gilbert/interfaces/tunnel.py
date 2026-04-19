@@ -45,3 +45,8 @@ class TunnelProvider(Protocol):
     def public_url(self) -> str:
         """The current public tunnel URL, or empty string if not connected."""
         ...
+
+    def public_url_for(self, path: str) -> str:
+        """Build a public URL for the given request path, or empty string
+        when no tunnel is active."""
+        ...

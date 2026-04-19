@@ -1224,6 +1224,10 @@ class AIService(Service):
         """List all defined profiles."""
         return sorted(self._profiles.values(), key=lambda p: p.name)
 
+    def has_profile(self, name: str) -> bool:
+        """Return True if a profile with this name exists."""
+        return name in self._profiles
+
     def list_assignments(self) -> dict[str, str]:
         """List all call→profile assignments."""
         return dict(self._assignments)

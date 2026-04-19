@@ -26,7 +26,7 @@ from typing import Any
 from starlette.requests import Request
 
 from gilbert.core.app import Gilbert
-from gilbert.core.services.mcp_server import MCPServerService
+from gilbert.interfaces.mcp import MCPServerEndpoint
 from gilbert.interfaces.service import Service, ServiceResolver
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class _McpAsgiEndpoint:
             return
 
         mcp_server_svc = gilbert.service_manager.get_by_capability("mcp_server")
-        if not isinstance(mcp_server_svc, MCPServerService):
+        if not isinstance(mcp_server_svc, MCPServerEndpoint):
             await _send_json(send, 503, {"error": "MCP server is not enabled"})
             return
         if not mcp_server_svc.enabled:

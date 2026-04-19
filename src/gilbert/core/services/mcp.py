@@ -36,11 +36,11 @@ from gilbert.core.services.mcp_oauth import (
     OAuthFlowManager,
     auth_for_stored_tokens,
 )
-from gilbert.integrations.mcp_browser import BrowserMCPBackend
-from gilbert.integrations.mcp_http import _RemoteMCPBackend
+from gilbert.interfaces.ai import AISamplingProvider
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.mcp import (
+    AuthCapableMCPBackend,
     MCPAuthConfig,
     MCPAuthKind,
     MCPBackend,
@@ -53,6 +53,7 @@ from gilbert.interfaces.mcp import (
     MCPServerScope,
     MCPToolResult,
     MCPToolSpec,
+    WsBoundMCPBackend,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
@@ -68,6 +69,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.tunnel import TunnelProvider
 from gilbert.interfaces.ws import RpcHandler, WsConnectionBase
 
 logger = logging.getLogger(__name__)
@@ -510,10 +512,10 @@ class MCPService(Service):
         record = entry.record
         backend = entry.backend
         httpx_auth = (
-            self._build_httpx_auth(record) if isinstance(backend, _RemoteMCPBackend) else None
+            self._build_httpx_auth(record) if isinstance(backend, AuthCapableMCPBackend) else None
         )
         async with asyncio.timeout(self._connect_timeout):
-            if isinstance(backend, _RemoteMCPBackend) and httpx_auth is not None:
+            if isinstance(backend, AuthCapableMCPBackend) and httpx_auth is not None:
                 await backend.connect_with_auth(record, auth=httpx_auth)
             else:
                 await backend.connect(record)
@@ -562,12 +564,10 @@ class MCPService(Service):
         there's no tunnel — fine for local development, but that host
         must actually be reachable from the authorizing browser."""
         tunnel = self._tunnel_svc
-        if tunnel is not None:
-            public_url_for = getattr(tunnel, "public_url_for", None)
-            if callable(public_url_for):
-                url = public_url_for("/api/mcp/oauth/callback")
-                if url:
-                    return str(url)
+        if isinstance(tunnel, TunnelProvider):
+            url = tunnel.public_url_for("/api/mcp/oauth/callback")
+            if url:
+                return str(url)
         return "http://localhost:8000/api/mcp/oauth/callback"
 
     async def _stop_client(self, server_id: str) -> None:
@@ -1349,8 +1349,14 @@ class MCPService(Service):
             if backend_cls is None:
                 return
             backend = backend_cls()
+            if not isinstance(backend, AuthCapableMCPBackend):
+                logger.warning(
+                    "MCP transport %r does not support OAuth — cannot drive flow",
+                    record.transport,
+                )
+                return
             try:
-                await backend.connect_with_auth(record, auth=provider)  # type: ignore[attr-defined]
+                await backend.connect_with_auth(record, auth=provider)
             except asyncio.CancelledError:
                 with contextlib.suppress(Exception):
                     await backend.close()
@@ -1725,7 +1731,7 @@ class MCPService(Service):
         if resolver is None:
             return _error(-32000, "MCP service not started")
         ai_svc = resolver.get_capability("ai")
-        if ai_svc is None or not hasattr(ai_svc, "complete_one_shot"):
+        if not isinstance(ai_svc, AISamplingProvider):
             return _error(-32000, "AI service unavailable")
 
         # Verify the requested profile exists. We don't enforce it's
@@ -1733,8 +1739,7 @@ class MCPService(Service):
         # but we do reject calls that name a missing profile so an
         # admin mistyping the config name doesn't silently degrade
         # to the default profile.
-        profiles = getattr(ai_svc, "_profiles", None)
-        if isinstance(profiles, dict) and record.sampling_profile not in profiles:
+        if not ai_svc.has_profile(record.sampling_profile):
             return _error(
                 -32000,
                 (
@@ -1896,7 +1901,26 @@ class MCPService(Service):
                 # lives on the order of hours.
                 tool_cache_ttl_seconds=86_400,
             )
-            backend = BrowserMCPBackend()
+            backend_cls = MCPBackend.registered_backends().get("browser")
+            if backend_cls is None:
+                results.append(
+                    {
+                        "slug": slug,
+                        "ok": False,
+                        "error": "browser MCP backend not registered",
+                    }
+                )
+                continue
+            backend = backend_cls()
+            if not isinstance(backend, WsBoundMCPBackend):
+                results.append(
+                    {
+                        "slug": slug,
+                        "ok": False,
+                        "error": "browser backend missing bind() — check registration",
+                    }
+                )
+                continue
             backend.bind(conn, slug, call_timeout=self._call_timeout)
             entry = _ClientEntry(record, backend)
             try:

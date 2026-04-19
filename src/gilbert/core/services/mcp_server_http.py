@@ -40,8 +40,10 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.requests import Request
 
 from gilbert.core.context import _current_user
-from gilbert.core.services.mcp_server import MCPServerClient, MCPServerService
+from gilbert.core.services.mcp_server import MCPServerClient
+from gilbert.interfaces.ai import AIToolDiscoveryProvider
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.mcp import MCPServerEndpoint
 from gilbert.interfaces.service import ServiceResolver
 
 logger = logging.getLogger(__name__)
@@ -112,7 +114,7 @@ class MCPServerHttpApp:
             if client is None:
                 return []
             ai_svc = self._resolver.get_capability("ai")
-            if ai_svc is None or not hasattr(ai_svc, "discover_tools"):
+            if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return []
             user_ctx = _user_ctx_for(client)
             try:
@@ -146,7 +148,7 @@ class MCPServerHttpApp:
             if client is None:
                 return [_error_text("no client context")]
             ai_svc = self._resolver.get_capability("ai")
-            if ai_svc is None or not hasattr(ai_svc, "discover_tools"):
+            if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return [_error_text("AI service unavailable")]
             user_ctx = _user_ctx_for(client)
             try:
@@ -273,7 +275,7 @@ def _current_user_reset(token: Token[UserContext]) -> None:
 
 
 async def authenticate_mcp_request(
-    mcp_server_svc: MCPServerService,
+    mcp_server_svc: MCPServerEndpoint,
     request: Request,
 ) -> tuple[MCPServerClient, UserContext] | None:
     """Pull the bearer out of the request and authenticate.

@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
 
@@ -338,3 +338,83 @@ class MCPBackend(ABC):
         CreateMessageResult | ErrorData``.
         """
         return None
+
+
+@runtime_checkable
+class AuthCapableMCPBackend(Protocol):
+    """Protocol for MCP backends that accept a per-connect auth override.
+
+    Remote (HTTP/SSE) backends implement this so the service can pass
+    an ``httpx.Auth``-compatible provider — typically the SDK's
+    ``OAuthClientProvider`` — without the call site having to know which
+    concrete backend it's holding.
+    """
+
+    async def connect_with_auth(
+        self,
+        record: MCPServerRecord,
+        *,
+        auth: Any,
+    ) -> None:
+        ...
+
+
+@runtime_checkable
+class WsBoundMCPBackend(Protocol):
+    """Protocol for MCP backends that ride a live WebSocket connection.
+
+    The browser transport is bound to a user's WS session before
+    ``connect`` so calls can be routed back to the bridge running in
+    that user's browser. The service uses this protocol to bind the
+    backend without importing the concrete browser class.
+    """
+
+    def bind(
+        self,
+        conn: Any,
+        slug: str,
+        *,
+        call_timeout: float = 30.0,
+    ) -> None:
+        ...
+
+
+@runtime_checkable
+class MCPOAuthCallbackHandler(Protocol):
+    """Protocol for the MCP client service's OAuth callback completion.
+
+    The web route at ``/api/mcp/oauth/callback`` uses this to resolve
+    the pending flow without importing the concrete client service.
+    """
+
+    async def complete_oauth_callback(
+        self,
+        state: str,
+        code: str,
+        received_state: str | None,
+    ) -> bool:
+        ...
+
+
+@runtime_checkable
+class MCPServerEndpoint(Protocol):
+    """Protocol for the MCP server-side endpoint that the web layer
+    delegates to.
+
+    The HTTP route at ``/api/mcp`` resolves the ``"mcp_server"``
+    capability and uses this protocol to gate the request and run
+    bearer authentication, without importing the concrete service
+    class from ``core/services/``.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        ...
+
+    async def authenticate(
+        self,
+        token: str,
+        *,
+        client_ip: str = "",
+    ) -> Any:
+        ...

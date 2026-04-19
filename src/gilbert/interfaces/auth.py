@@ -218,6 +218,30 @@ class LoginMethod:
 
 
 @runtime_checkable
+class LoginMethodProvider(Protocol):
+    """Protocol for the auth service's login-method enumeration.
+
+    The unauthenticated ``/api/auth/methods`` route uses this to render
+    the login page without importing the concrete auth service.
+    """
+
+    def get_login_methods(self) -> list[LoginMethod]:
+        ...
+
+
+@runtime_checkable
+class SessionValidator(Protocol):
+    """Protocol for resolving a session id into a ``UserContext``.
+
+    Used by the WebSocket route to authenticate inbound connections
+    without importing the concrete auth service.
+    """
+
+    async def validate_session(self, session_id: str) -> UserContext | None:
+        ...
+
+
+@runtime_checkable
 class AccessControlProvider(Protocol):
     """Protocol for role-based access control queries.
 

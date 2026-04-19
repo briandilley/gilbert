@@ -8,7 +8,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from gilbert.core.app import Gilbert
-from gilbert.interfaces.auth import AccessControlProvider, UserContext
+from gilbert.interfaces.ai import SharedConversationProvider
+from gilbert.interfaces.auth import AccessControlProvider, SessionValidator, UserContext
 from gilbert.web.ws_protocol import WsConnection, WsConnectionManager, dispatch_frame
 
 logger = logging.getLogger(__name__)
@@ -47,15 +48,13 @@ async def event_stream(websocket: WebSocket) -> None:
 
     # Seed shared conversation membership
     ai_svc = gilbert.service_manager.get_by_capability("ai_chat")
-    if ai_svc is not None:
+    if isinstance(ai_svc, SharedConversationProvider):
         try:
-            list_shared = getattr(ai_svc, "list_shared_conversations", None)
-            if callable(list_shared):
-                convos = await list_shared(user_id=user_ctx.user_id, limit=200)
-                for c in convos:
-                    cid = c.get("_id", "")
-                    if cid and c.get("_is_member", False):
-                        conn.shared_conv_ids.add(cid)
+            convos = await ai_svc.list_shared_conversations(user_id=user_ctx.user_id, limit=200)
+            for c in convos:
+                cid = c.get("_id", "")
+                if cid and c.get("_is_member", False):
+                    conn.shared_conv_ids.add(cid)
         except Exception:
             logger.debug("Failed to seed shared memberships", exc_info=True)
 
@@ -116,12 +115,10 @@ async def _authenticate(websocket: WebSocket, gilbert: Gilbert) -> UserContext:
 
     if session_id:
         auth_svc = gilbert.service_manager.get_by_capability("authentication")
-        if auth_svc is not None:
-            validate = getattr(auth_svc, "validate_session", None)
-            if callable(validate):
-                ctx = await validate(session_id)
-                if isinstance(ctx, UserContext):
-                    return ctx
+        if isinstance(auth_svc, SessionValidator):
+            ctx = await auth_svc.validate_session(session_id)
+            if isinstance(ctx, UserContext):
+                return ctx
 
     return UserContext.GUEST
 

@@ -12,6 +12,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from gilbert.core.app import Gilbert
+from gilbert.interfaces.auth import LoginMethodProvider
+from gilbert.interfaces.mcp import MCPOAuthCallbackHandler
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -26,12 +28,9 @@ async def auth_methods(request: Request) -> list[dict[str, Any]]:
     """Return available login methods as JSON (pre-auth, no session needed)."""
     gilbert = _gilbert(request)
     auth_svc = gilbert.service_manager.get_by_capability("authentication")
-    if auth_svc is None:
+    if not isinstance(auth_svc, LoginMethodProvider):
         return []
-    get_methods = getattr(auth_svc, "get_login_methods", None)
-    if not callable(get_methods):
-        return []
-    methods = get_methods()
+    methods = auth_svc.get_login_methods()
     return [
         {
             "provider_type": m.provider_type,
@@ -85,7 +84,7 @@ async def mcp_oauth_callback(request: Request) -> HTMLResponse:
             status_code=400,
         )
 
-    if mcp_svc is None:
+    if not isinstance(mcp_svc, MCPOAuthCallbackHandler):
         return HTMLResponse(
             _callback_page(
                 title="MCP not running",
@@ -95,18 +94,7 @@ async def mcp_oauth_callback(request: Request) -> HTMLResponse:
             status_code=503,
         )
 
-    handler = getattr(mcp_svc, "complete_oauth_callback", None)
-    if handler is None:
-        return HTMLResponse(
-            _callback_page(
-                title="Handler missing",
-                message="MCP service doesn't support OAuth callbacks.",
-                ok=False,
-            ),
-            status_code=500,
-        )
-
-    resolved = await handler(state, code, state)
+    resolved = await mcp_svc.complete_oauth_callback(state, code, state)
     if not resolved:
         return HTMLResponse(
             _callback_page(

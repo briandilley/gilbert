@@ -68,8 +68,8 @@ Any service declaring `ai_tools` capability that implements `tool_provider_name`
 
 ### AnthropicAI Backend
 - Direct HTTP via httpx.AsyncClient (no anthropic SDK dependency)
-- Backend-specific params: `model`, `max_tokens` (default **16384**, up from 4096), `temperature` — declared via `backend_config_params()`
-- API key is a backend param (`settings.api_key`, marked sensitive)
+- Backend-specific params (under `backends.anthropic.*`): `api_key` (sensitive), `model` (default model when no per-request model is set), `enabled_models` (subset of advertised models exposed in the chat UI / profile editor), `max_tokens` (default **16384**), `temperature`
+- Advertises a `ModelInfo` registry via `available_models()` so `AIModelProvider` consumers can surface dropdowns without hard-coding IDs
 - Streams via `generate_stream` + SSE; non-streaming `generate` path still exists for `test_connection` and simple callers
 - **Dangling-tool_use heal:** `_build_messages` post-processes the request body via `_heal_dangling_tool_uses` so any historical conversation with an unpaired `tool_use` block (left over from a pre-Stream-1 max_tokens cut-off) gets a synthetic `tool_result` injected before being sent to Anthropic. Without the heal, those rows blow up Anthropic's strict tool_use/tool_result pairing requirement.
 
@@ -78,11 +78,15 @@ AIService implements `Configurable` with `config_category = "Intelligence"`. Par
 - `max_history_messages` — conversation history window (default 50)
 - `max_tool_rounds` — max agentic loop iterations (default 15)
 - `max_continuation_rounds` — max "please continue" recoveries after a max_tokens cutoff per turn (default 2)
-- `backend` — backend provider name (restart required)
+- `default_profile` — fallback profile name when no explicit ai_call/ai_profile is set (default `standard`, choices_from `ai_profiles`)
+- `chat_profile` — profile for web + Slack human chat (default `standard`, choices_from `ai_profiles`)
 - `default_persona` — default persona text (multiline)
 - `memory_enabled` — whether AI memory system is enabled (restart required)
 
-Backend params are merged under `settings.*` prefix with `backend_param=True`.
+### Multi-backend Setup
+The service holds a `dict[str, AIBackend]` keyed by backend name and initializes every backend whose section appears under the `backends.*` config tree. Per-backend params are merged in as `backends.<name>.<param>` (e.g., `backends.anthropic.api_key`, `backends.anthropic.enabled_models`) and the backend section is hot-rebuilt by `_reinit_backends` on `on_config_changed`. Profiles can pin a specific backend/model; if unpinned, the service uses the first available backend.
+
+`AISamplingProvider` and `AIToolDiscoveryProvider` Protocols (in `interfaces/ai.py`) expose `complete_one_shot` / `discover_tools` to other services (MCP) without a concrete-class import. `AIModelProvider` exposes `get_enabled_models()` so `ConfigurationService` can surface dynamic model dropdowns. `SharedConversationProvider` lets the WS handshake seed each connection's room memberships without a concrete import.
 
 ## Related
 - [Service System](memory-service-system.md)

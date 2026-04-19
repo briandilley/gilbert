@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from gilbert.interfaces.ai import AIToolDiscoveryProvider
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -39,6 +40,7 @@ from gilbert.interfaces.storage import (
     StorageProvider,
 )
 from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.users import UserManagementProvider
 from gilbert.interfaces.ws import RpcHandler, WsConnectionBase
 
 logger = logging.getLogger(__name__)
@@ -269,12 +271,9 @@ class MCPServerService(Service):
         if self._resolver is None:
             return None
         users_svc = self._resolver.get_capability("users")
-        if users_svc is None:
+        if not isinstance(users_svc, UserManagementProvider):
             return None
-        get_user = getattr(users_svc, "get_user", None)
-        if get_user is None:
-            return None
-        user = await get_user(client.owner_user_id)
+        user = await users_svc.backend.get_user(client.owner_user_id)
         if user is None:
             return None
         return UserContext(
@@ -596,12 +595,11 @@ class MCPServerService(Service):
         if self._resolver is None:
             return _ws_error(frame, "Service not started", code=503)
         ai_svc = self._resolver.get_capability("ai")
-        discover = getattr(ai_svc, "discover_tools", None) if ai_svc else None
-        if discover is None:
+        if not isinstance(ai_svc, AIToolDiscoveryProvider):
             return _ws_error(frame, "AI service unavailable", code=503)
 
         try:
-            discovered = discover(
+            discovered = ai_svc.discover_tools(
                 user_ctx=user_ctx,
                 profile_name=profile_name,
             )
@@ -636,12 +634,9 @@ class MCPServerService(Service):
         if self._resolver is None:
             return None
         users_svc = self._resolver.get_capability("users")
-        if users_svc is None:
+        if not isinstance(users_svc, UserManagementProvider):
             return None
-        get_user = getattr(users_svc, "get_user", None)
-        if get_user is None:
-            return None
-        user = await get_user(owner_user_id)
+        user = await users_svc.backend.get_user(owner_user_id)
         if user is None:
             return None
         return UserContext(

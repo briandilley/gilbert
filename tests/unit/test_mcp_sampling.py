@@ -79,21 +79,24 @@ def _params(
 
 @dataclass
 class _FakeAIService:
-    """Minimal stand-in that satisfies the shape ``_on_sampling_request``
-    looks for. Records every call so tests can assert the messages,
-    system prompt, and profile reached the service intact."""
+    """Minimal stand-in that satisfies the ``AISamplingProvider`` Protocol.
+    Records every call so tests can assert the messages, system prompt,
+    and profile reached the service intact."""
 
     _profiles: dict[str, Any]
     response: AIResponse
     calls: list[dict[str, Any]]
 
+    def has_profile(self, name: str) -> bool:
+        return name in self._profiles
+
     async def complete_one_shot(
         self,
         *,
         messages: list[Message],
-        system_prompt: str,
-        profile_name: str | None,
-        max_tokens: int,
+        system_prompt: str = "",
+        profile_name: str | None = None,
+        max_tokens: int | None = None,
     ) -> AIResponse:
         self.calls.append(
             {
