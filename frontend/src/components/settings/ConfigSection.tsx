@@ -261,8 +261,22 @@ export function ConfigSection({ section }: ConfigSectionProps) {
             </div>
           )}
 
-          {/* Everything else only visible when enabled (or if no enabled toggle) */}
-          {(!enabledParam || merged["enabled"] === true) && <>
+          {/* Everything else only visible when enabled (or if no enabled toggle).
+              Wrap in a soft-bordered container when there's an enable toggle so
+              the dependency relationship is visually obvious — the toggle is
+              the "root" and the container visually holds "the stuff it gates."
+              Services without an enable toggle render the body bare since
+              there's no conditional dependency to signal. Inner sections
+              (per-backend groups below) use stronger borders so nested cards
+              still read as distinct. */}
+          {(!enabledParam || merged["enabled"] === true) && (
+            <div
+              className={
+                enabledParam
+                  ? "rounded-md border border-border/40 bg-muted/10 p-4"
+                  : ""
+              }
+            >
 
           {/* Service-level params */}
           {serviceParams.length > 0 && (
@@ -282,7 +296,7 @@ export function ConfigSection({ section }: ConfigSectionProps) {
 
           {/* Backend-specific settings — only shown when a backend is selected */}
           {backendSettingsParams.length > 0 && (!backendParam || backendName) && (
-            <div className="mt-4 pt-4 border-t border-dashed">
+            <div className={serviceParams.length > 0 || backendParam ? "mt-4 pt-4 border-t border-dashed" : ""}>
               {backendGroups(backendSettingsParams, backendName, !!backendParam).map((group) => {
                 // Multi-backend groups collapse unless explicitly enabled.
                 // An unset / ``null`` / ``undefined`` stored value counts as
@@ -326,7 +340,8 @@ export function ConfigSection({ section }: ConfigSectionProps) {
             </div>
           )}
 
-          </>}
+            </div>
+          )}
 
           {/* Actions — one-click operations declared by the service/backend.
               Filter by current dropdown backend so switching backends (even
