@@ -132,6 +132,7 @@ AIBackend            →  anthropic plugin → AnthropicAI (Claude)
                         openrouter plugin → OpenRouterAI (~200 models, multi-provider)
                         ollama plugin    → OllamaAI (local / self-hosted open-weights)
                         gemini plugin    → GeminiAI (Google Gemini 2.5)
+                        bedrock plugin   → BedrockAI (AWS Bedrock Converse API)
 VisionBackend        →  anthropic plugin → AnthropicVision
 TTSBackend           →  elevenlabs plugin → ElevenLabsTTS
 SpeakerBackend       →  sonos plugin → SonosSpeaker
