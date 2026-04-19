@@ -771,6 +771,23 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 ],
                 required_role="user",
             ),
+            ToolDefinition(
+                name="delete_workspace_file",
+                slash_command="delete",
+                slash_help="Delete a workspace file: /workspace delete <path>",
+                description=(
+                    "Delete a file from the conversation workspace. "
+                    "Removes both the file from disk and its registry entry."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="path",
+                        type=ToolParameterType.STRING,
+                        description="Relative path to the file (e.g. 'scratch/temp.py').",
+                    ),
+                ],
+                required_role="user",
+            ),
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -787,6 +804,8 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 return await self._tool_attach_workspace_file(arguments)
             case "annotate_workspace_file":
                 return await self._tool_annotate_workspace_file(arguments)
+            case "delete_workspace_file":
+                return await self._tool_delete_workspace_file(arguments)
             # Legacy tool names — aliases for backward compat
             case "browse_skill_workspace":
                 return await self._tool_browse_workspace(arguments)
@@ -1494,6 +1513,43 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             {"status": "annotated", "path": rel_path, "updated": list(updates.keys())}
         )
 
+    async def _tool_delete_workspace_file(
+        self, arguments: dict[str, Any]
+    ) -> str:
+        rel_path = str(arguments.get("path", "")).strip()
+        user_id = arguments.get("_user_id", "system")
+        conv_id = self._conv_id_from_args(arguments)
+
+        if not rel_path or not conv_id:
+            return json.dumps({"error": "path and conversation context required"})
+
+        # Delete from disk
+        root = self.get_workspace_root(user_id, conv_id)
+        target = (root / rel_path).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            return json.dumps({"error": "Path traversal not allowed"})
+
+        deleted_disk = False
+        if target.is_file():
+            target.unlink()
+            deleted_disk = True
+
+        # Delete registry entry
+        deleted_registry = False
+        entity = await self.find_file_by_path(conv_id, rel_path)
+        if entity:
+            await self.delete_file(entity.get("_id", ""))
+            deleted_registry = True
+
+        if not deleted_disk and not deleted_registry:
+            return json.dumps({"error": f"File not found: {rel_path}"})
+
+        return json.dumps(
+            {"status": "deleted", "path": rel_path}
+        )
+
     # ── WebSocket Handlers ───────────────────────────────────────────
 
     async def _ws_workspace_browse(
@@ -1643,9 +1699,26 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
 
         files = await self.list_files(conv_id)
 
-        uploads = [f for f in files if f.get("category") == "upload"]
-        outputs = [f for f in files if f.get("category") == "output"]
-        scratch = [f for f in files if f.get("category") == "scratch"]
+        # Reconcile: remove registry entries for files deleted from disk
+        user_id = getattr(conn, "user_id", "system")
+        live: list[dict[str, Any]] = []
+        for f in files:
+            rel_path = f.get("rel_path", "")
+            f_user = f.get("user_id", user_id)
+            if rel_path and f.get("conversation_id"):
+                root = self.get_workspace_root(f_user, f["conversation_id"])
+                if not (root / rel_path).is_file():
+                    fid = f.get("_id", "")
+                    if fid and self._storage:
+                        await self._storage.delete(
+                            _WORKSPACE_FILES_COLLECTION, fid
+                        )
+                    continue
+            live.append(f)
+
+        uploads = [f for f in live if f.get("category") == "upload"]
+        outputs = [f for f in live if f.get("category") == "output"]
+        scratch = [f for f in live if f.get("category") == "scratch"]
 
         return {
             "type": "workspace.files.list.result",
