@@ -292,15 +292,37 @@ class SpeakerService(Service):
         logger.info("Alias '%s' removed", alias)
 
     async def resolve_speaker_name(self, name: str) -> str | None:
-        """Resolve a speaker name or alias to a speaker_id. Returns None if not found."""
+        """Resolve a speaker name or alias to a speaker_id. Returns None if not found.
+
+        Prefers an **exact case** match on the speaker's name, so
+        distinct speakers named e.g. "Garage" and "GARAGE" resolve
+        to distinct ids rather than collapsing to whichever appears
+        first in the list. Falls back to a case-insensitive match
+        only when no exact match exists and exactly one speaker
+        matches case-insensitively — ambiguous case-insensitive
+        matches raise to force the caller to use the exact casing.
+        """
         backend = self._require_backend()
-        # Try direct match by speaker name
         speakers = await backend.list_speakers()
+
+        # 1) Exact case-sensitive name match — wins unambiguously
+        # even when other speakers share the lowercased spelling.
         for s in speakers:
-            if s.name.lower() == name.lower():
+            if s.name == name:
                 return s.speaker_id
 
-        # Try alias lookup
+        # 2) Case-insensitive name match — but only if it's unique.
+        ci_matches = [s for s in speakers if s.name.lower() == name.lower()]
+        if len(ci_matches) == 1:
+            return ci_matches[0].speaker_id
+        if len(ci_matches) > 1:
+            names = sorted(s.name for s in ci_matches)
+            raise KeyError(
+                f"Ambiguous speaker name {name!r} — matches {names!r} "
+                f"case-insensitively. Use the exact casing."
+            )
+
+        # 3) Alias lookup — aliases are stored lowercased.
         storage = self._get_storage_backend()
         from gilbert.interfaces.storage import Filter, FilterOp, Query
 

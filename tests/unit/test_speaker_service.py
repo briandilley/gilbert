@@ -430,6 +430,79 @@ async def test_alias_collision_with_other_alias(
         await service.set_alias("uid-2", "Kitchen")
 
 
+async def test_resolve_name_prefers_exact_case_match(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """When two distinct speakers have case-different names (a real
+    situation when Sonos speakers include something like "Garage" and
+    "GARAGE"), the resolver must return distinct ids for each input
+    rather than collapsing both lookups to whichever appeared first
+    in the list — previously case-insensitive compare broke the
+    second speaker's addressability by name entirely."""
+    stub_backend._speakers.extend(
+        [
+            SpeakerInfo(
+                speaker_id="uid-garage-lower",
+                name="Garage",
+                ip_address="192.168.1.20",
+                model="Sonos One",
+                volume=30,
+                state=PlaybackState.STOPPED,
+            ),
+            SpeakerInfo(
+                speaker_id="uid-garage-upper",
+                name="GARAGE",
+                ip_address="192.168.1.21",
+                model="Sonos One",
+                volume=30,
+                state=PlaybackState.STOPPED,
+            ),
+        ]
+    )
+    await service.start(resolver)
+
+    assert await service.resolve_speaker_name("Garage") == "uid-garage-lower"
+    assert await service.resolve_speaker_name("GARAGE") == "uid-garage-upper"
+
+
+async def test_resolve_name_raises_on_ambiguous_case(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """If the caller's casing doesn't exactly match any speaker but
+    multiple speakers share the lowercased spelling, the resolver
+    must refuse to guess — silently picking one speaker would leave
+    the caller thinking they targeted both when they only targeted
+    one."""
+    stub_backend._speakers.extend(
+        [
+            SpeakerInfo(
+                speaker_id="uid-garage-lower",
+                name="Garage",
+                ip_address="192.168.1.20",
+                model="Sonos One",
+                volume=30,
+                state=PlaybackState.STOPPED,
+            ),
+            SpeakerInfo(
+                speaker_id="uid-garage-upper",
+                name="GARAGE",
+                ip_address="192.168.1.21",
+                model="Sonos One",
+                volume=30,
+                state=PlaybackState.STOPPED,
+            ),
+        ]
+    )
+    await service.start(resolver)
+
+    with pytest.raises(KeyError, match="Ambiguous"):
+        await service.resolve_speaker_name("garage")
+
+
 async def test_remove_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
     await service.set_alias("uid-2", "Bedroom")
