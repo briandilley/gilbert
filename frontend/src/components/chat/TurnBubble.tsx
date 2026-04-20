@@ -16,6 +16,7 @@ import {
   AlertTriangleIcon,
   CheckIcon,
   ChevronRightIcon,
+  CopyIcon,
   DownloadIcon,
   FileIcon,
   FileTextIcon,
@@ -372,7 +373,12 @@ function ToolEntry({ tool }: { tool: ChatRoundTool }) {
       {open && (
         <div className="divide-y">
           {hasArgs && (
-            <CollapsibleSection label="arguments" defaultOpen>
+            <CollapsibleSection
+              label="arguments"
+              defaultOpen
+              copyText={() => toCopyText(tool.arguments)}
+              copyLabel="Copy arguments"
+            >
               <HighlightedContent
                 value={tool.arguments}
                 emptyLabel="(no arguments)"
@@ -380,7 +386,12 @@ function ToolEntry({ tool }: { tool: ChatRoundTool }) {
             </CollapsibleSection>
           )}
           {hasResult && (
-            <CollapsibleSection label="result" defaultOpen>
+            <CollapsibleSection
+              label="result"
+              defaultOpen
+              copyText={() => toCopyText(tool.result)}
+              copyLabel="Copy result"
+            >
               <HighlightedContent value={tool.result} emptyLabel="(no output)" />
             </CollapsibleSection>
           )}
@@ -399,24 +410,40 @@ function CollapsibleSection({
   label,
   defaultOpen = false,
   children,
+  copyText,
+  copyLabel,
 }: {
   label: string;
   defaultOpen?: boolean;
   children: React.ReactNode;
+  copyText?: () => string;
+  copyLabel?: string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // Split header into a toggle button and (optionally) a copy button
+  // side-by-side. A nested ``<button>`` inside the toggle ``<button>``
+  // would be invalid HTML, so they're siblings in a flex row.
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-1 px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ChevronRightIcon
-          className={cn("size-2.5 transition-transform", open && "rotate-90")}
-        />
-        <span>{label}</span>
-      </button>
+      <div className="w-full flex items-center gap-1 px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-1 flex-1 min-w-0 hover:text-foreground transition-colors text-left"
+        >
+          <ChevronRightIcon
+            className={cn("size-2.5 transition-transform", open && "rotate-90")}
+          />
+          <span>{label}</span>
+        </button>
+        {copyText && (
+          <CopyButton
+            getText={copyText}
+            label={copyLabel ?? `Copy ${label}`}
+            className="shrink-0"
+          />
+        )}
+      </div>
       {open && <div className="px-2 pb-1.5">{children}</div>}
     </div>
   );
@@ -435,8 +462,21 @@ function FinalAnswer({ turn }: { turn: ChatTurn }) {
         </div>
       )}
       {turn.final_content && (
-        <div className="rounded-2xl px-3.5 py-2 text-sm leading-relaxed bg-muted rounded-tl-sm">
+        // ``group relative`` + absolutely-positioned copy button: the
+        // button only fades in on hover so the bubble stays clean at
+        // rest. We copy the raw Markdown (``turn.final_content``)
+        // rather than the rendered DOM text — that way pasting back
+        // into any Markdown surface round-trips losslessly.
+        <div className="group relative rounded-2xl px-3.5 py-2 text-sm leading-relaxed bg-muted rounded-tl-sm">
           <MarkdownContent content={turn.final_content} />
+          <div className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+            <CopyButton
+              getText={() => turn.final_content}
+              label="Copy response"
+              stopPropagation={false}
+              className="bg-background/70 backdrop-blur-sm"
+            />
+          </div>
         </div>
       )}
     </div>
@@ -758,6 +798,93 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// ─── Copy button ─────────────────────────────────────────────────────
+
+/**
+ * Small icon-only copy button. Uses a getter so the text can be lazily
+ * built from current state on click, rather than eagerly on every
+ * render. Briefly swaps to a check icon for ~1.5s after a successful
+ * copy as visual feedback.
+ *
+ * ``navigator.clipboard.writeText`` is unavailable in insecure contexts
+ * (http:// on non-localhost) — we silently swallow the rejection
+ * rather than crashing, matching the pattern in McpPromptPanel.
+ */
+function CopyButton({
+  getText,
+  label = "Copy",
+  className,
+  stopPropagation = true,
+}: {
+  getText: () => string;
+  label?: string;
+  className?: string;
+  stopPropagation?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async (e: React.MouseEvent) => {
+    if (stopPropagation) e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(getText());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Insecure context, clipboard permission denied, etc. No-op.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className={cn(
+        "inline-flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+        className,
+      )}
+      title={copied ? "Copied" : label}
+      aria-label={copied ? "Copied to clipboard" : label}
+    >
+      {copied ? (
+        <CheckIcon className="size-3" />
+      ) : (
+        <CopyIcon className="size-3" />
+      )}
+    </button>
+  );
+}
+
+/**
+ * Normalize a tool argument / result value into a clipboard-friendly
+ * string. Objects become pretty-printed JSON. Strings that *look* like
+ * JSON get re-pretty-printed so a payload that happened to arrive as a
+ * minified blob round-trips out as readable text. Everything else
+ * falls through to ``String(value)``.
+ */
+function toCopyText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 function HighlightedContent({
