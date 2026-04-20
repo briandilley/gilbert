@@ -407,13 +407,17 @@ class SpeakerService(Service):
         title: str = "",
         position_seconds: float | None = None,
         didl_meta: str = "",
+        announce: bool = False,
     ) -> None:
         """Play a URI on the specified speakers.
 
         Resolves names, prepares topology, then plays. ``didl_meta`` is
-        an optional DIDL-Lite envelope for items that need one (Sonos
-        radio stations, containerized favorites) — most playable URIs
-        don't need it.
+        an optional legacy DIDL-Lite envelope (unused by the aiosonos
+        Sonos backend, still honoured by non-Sonos backends). When
+        ``announce=True`` the speaker backend may route playback through
+        a short-overlay path (e.g. Sonos ``audio_clip``) that ducks the
+        current music, plays the clip, and auto-restores — no
+        snapshot/restore ritual required.
         """
         target_ids = await self._resolve_target_ids(speaker_names)
         await self.prepare_speakers(target_ids)
@@ -426,6 +430,7 @@ class SpeakerService(Service):
                 title=title,
                 position_seconds=position_seconds,
                 didl_meta=didl_meta,
+                announce=announce,
             )
         )
 
@@ -524,28 +529,41 @@ class SpeakerService(Service):
         # Determine volume
         effective_volume = volume or self._default_announce_volume
 
-        # Snapshot current playback state so we can resume after
+        # Snapshot current playback state so we can resume after —
+        # on the aiosonos Sonos backend snapshot/restore are no-ops
+        # because ``audio_clip`` (triggered by ``announce=True`` below)
+        # ducks + auto-restores natively. Kept in the flow so non-
+        # Sonos backends that implement snapshot/restore still work.
         target_ids = await self._resolve_target_ids(speaker_names)
         await backend.snapshot(target_ids)
 
-        # Play on speakers — topology handled by play_on_speakers
+        # Play on speakers — topology handled by play_on_speakers.
+        # ``announce=True`` tells backends that support it (Sonos) to
+        # route through a short-overlay clip path so the listener
+        # doesn't hear music stop completely, and the previous track
+        # resumes automatically when the clip ends.
         audio_url = self._audio_url(str(file_path.resolve()))
         await self.play_on_speakers(
             uri=audio_url,
             speaker_names=speaker_names,
             volume=effective_volume,
             title=f"Announcement: {text[:50]}",
+            announce=True,
         )
 
         # Wait for playback to finish before restoring.
         # Use audio duration if available, fall back to polling.
+        # On audio_clip-capable backends this is just a courtesy wait
+        # before releasing the announce lock — the speaker has already
+        # scheduled its own restore once the clip ends.
         duration = self._estimate_mp3_duration(result.audio)
         if duration > 0:
             await asyncio.sleep(duration + 0.5)
         else:
             await self._wait_for_playback(target_ids)
 
-        # Restore previous playback state (resumes music if it was playing)
+        # Restore previous playback state (no-op on aiosonos; kept for
+        # non-Sonos backends that still need the manual restore).
         try:
             await backend.restore(target_ids)
         except Exception:

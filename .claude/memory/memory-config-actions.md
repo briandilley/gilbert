@@ -99,7 +99,7 @@ calls (no writes, no large payloads):
 - `anthropic_ai.py` — 1-message generate, reports model name
 - `anthropic_vision.py` — 16-token text-only chat
 - `elevenlabs_tts.py` — `list_voices()` (no synthesis credits used)
-- `sonos_speaker.py` — re-runs `soco.discover()`, refreshes cached devices
+- `sonos_speaker.py` — reports how many S2 speakers the zeroconf browser has discovered and how many WebSocket connections are live
 - `tavily_search.py` — 1-result search
 - `ngrok_tunnel.py` — reports current `public_url` as `open_url`
 - `gmail.py` — `users().getProfile("me")`, reports email + msg count
@@ -108,7 +108,7 @@ calls (no writes, no large payloads):
 - `unifi/presence.py` — re-logs-in to each configured UniFi host,
   aggregates per-host results
 - `unifi/doorbell.py` — client login + `list_cameras()`
-- `sonos_music.py` — discovery + (if authed) trivial SMAPI search
+- `sonos_music.py` — hits Spotify Web API `GET /me` to verify the refresh token is valid and the app config works
 
 ### Backends with non-test actions
 

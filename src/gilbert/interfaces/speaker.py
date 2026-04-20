@@ -54,10 +54,19 @@ class PlayRequest:
     didl_meta: str = ""
     """Optional DIDL-Lite metadata envelope for items that need one.
 
-    Sonos radio stations and some favorites can't be played from just a
-    URI — they require a matching ``<DIDL-Lite>`` blob that carries the
-    item's class, service credentials, and parent container. Passed
-    through to ``SoCo.play_uri(meta=...)`` when non-empty.
+    Legacy UPnP field preserved for callers that still construct
+    DIDL-Lite envelopes by hand. The aiosonos-based Sonos backend
+    ignores it (the WebSocket API builds its own metadata), but
+    non-Sonos backends can still use it.
+    """
+    announce: bool = False
+    """When true, play as a short announcement overlay rather than
+    replacing current playback.
+
+    The Sonos backend maps this to its native ``audio_clip`` WebSocket
+    API, which ducks the music, plays the clip, and automatically
+    restores playback when finished — no snapshot/restore dance
+    required. Other backends can treat this as a hint or ignore it.
     """
 
 
