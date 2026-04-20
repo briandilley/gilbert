@@ -408,6 +408,7 @@ class MusicService(Service):
                     "List the user's Sonos favorites (tracks, playlists, radio stations)."
                 ),
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="list_playlists",
@@ -416,6 +417,7 @@ class MusicService(Service):
                 slash_help="List saved Sonos playlists: /music playlists",
                 description="List the user's saved Sonos playlists.",
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="search_music",
@@ -448,6 +450,7 @@ class MusicService(Service):
                     ),
                 ],
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="play_music",
@@ -509,6 +512,7 @@ class MusicService(Service):
                     ),
                 ],
                 required_role="everyone",
+                parallel_safe=True,
             ),
             # No slash_command: this tool is only invoked via the Play
             # button on a /music search result. Its required argument is

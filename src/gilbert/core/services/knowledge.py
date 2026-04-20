@@ -896,6 +896,7 @@ class KnowledgeService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="get_document",
@@ -911,6 +912,7 @@ class KnowledgeService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="list_documents",
@@ -933,6 +935,7 @@ class KnowledgeService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="list_document_sources",
@@ -941,6 +944,7 @@ class KnowledgeService(Service):
                 slash_help="List document sources/backends: /kb sources",
                 description="List all registered document sources/backends.",
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="render_document_page",
@@ -967,6 +971,7 @@ class KnowledgeService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="find_files",
@@ -1014,6 +1019,7 @@ class KnowledgeService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="upload_document",

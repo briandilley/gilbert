@@ -106,6 +106,7 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "entities.": 0,
     "plugins.": 0,
     "gilbert.peer.publish": 0,
+    "usage.": 0,
 }
 DEFAULT_RPC_LEVEL: int = 100  # unlisted frame types → user role
 

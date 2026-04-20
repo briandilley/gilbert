@@ -32,6 +32,7 @@ Speaker control with an abstract interface and a Sonos implementation backed by 
 - "Last used" speaker tracking — if no speakers specified, reuses previous target set or falls back to all.
 - `default_announce_speakers` config — list of speaker names used when no speakers are specified in an announce call (falls back before "last used" or "all").
 - **Announce flow**: SpeakerService.announce() generates TTS audio, writes to a workspace file, then calls `play_on_speakers(..., announce=True)`. The speaker backend's announce route (`audio_clip`) handles duck+play+restore. Silence padding is still handled by the TTS service (`silence_padding` config param on TTSConfig), not here.
+- **Per-speaker announce locks**: Announcements are serialized *per target speaker*, not globally. `_speaker_locks: dict[str, asyncio.Lock]` holds one lock per speaker ID, created lazily under `_speaker_locks_guard`. `announce()` resolves target IDs first, then acquires every target's lock in sorted-ID order (deadlock-free under overlapping sets) via `contextlib.AsyncExitStack` before calling `_announce_inner`. Result: two announces on disjoint speaker sets fan out concurrently; overlapping sets still serialize on the shared speaker. The `announce` ToolDefinition is flagged `parallel_safe=True` so the AI execution loop can `asyncio.gather` N announce calls, and the per-speaker locks handle the correctness guarantee underneath.
 
 ### Configuration
 - Config model: `SpeakerConfig` in `src/gilbert/config.py`.

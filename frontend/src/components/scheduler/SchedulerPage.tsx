@@ -17,8 +17,42 @@ import {
 } from "lucide-react";
 import type { Job, Schedule, ScheduledAction } from "@/types/scheduler";
 
-/** Human-readable summary of a schedule. */
+/** "01:00:30" → "01:00"; empty stays empty. Trims the seconds so the
+ *  UI display matches how users enter times (HH:MM) unless seconds
+ *  are actually non-zero. */
+function compactTime(hhmmss: string): string {
+  if (!hhmmss) return "";
+  const parts = hhmmss.split(":");
+  if (parts.length >= 2 && (parts[2] ?? "00") === "00") {
+    return `${parts[0]}:${parts[1]}`;
+  }
+  return hhmmss;
+}
+
+/** "2099-06-01T01:00:00" → "Jun 1 01:00". Falls back to the raw
+ *  string if it can't be parsed so we never swallow a value the
+ *  backend considers valid. */
+function compactDatetime(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const month = d.toLocaleString("en-US", { month: "short" });
+  const day = d.getDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${month} ${day} ${hh}:${mm}`;
+}
+
+/** Human-readable summary of a schedule, including any bounds/window
+ *  suffix so a single glance at the row tells the user when this job
+ *  is allowed to fire. */
 function formatSchedule(schedule: Schedule): string {
+  const base = formatScheduleBase(schedule);
+  const suffix = formatScheduleBounds(schedule);
+  return suffix ? `${base} ${suffix}` : base;
+}
+
+function formatScheduleBase(schedule: Schedule): string {
   switch (schedule.type) {
     case "interval": {
       const s = schedule.interval_seconds;
@@ -42,6 +76,25 @@ function formatSchedule(schedule: Schedule): string {
     default:
       return schedule.type;
   }
+}
+
+function formatScheduleBounds(schedule: Schedule): string {
+  const parts: string[] = [];
+  const ws = compactTime(schedule.window_start_time);
+  const we = compactTime(schedule.window_end_time);
+  if (ws && we) {
+    parts.push(`${ws}–${we} daily`);
+  }
+  const start = compactDatetime(schedule.start_at);
+  const end = compactDatetime(schedule.end_at);
+  if (start && end) {
+    parts.push(`from ${start} to ${end}`);
+  } else if (start) {
+    parts.push(`from ${start}`);
+  } else if (end) {
+    parts.push(`until ${end}`);
+  }
+  return parts.join(" ");
 }
 
 /** Short summary of what an action does — fits in a table cell. */
@@ -396,6 +449,12 @@ function JobStateBadge({
 }
 
 function JobDetails({ job }: { job: Job }) {
+  const hasBounds =
+    job.schedule.start_at ||
+    job.schedule.end_at ||
+    job.schedule.window_start_time ||
+    job.schedule.window_end_time;
+
   return (
     <div className="space-y-3 text-xs">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -411,6 +470,30 @@ function JobDetails({ job }: { job: Job }) {
         />
         <DetailField label="State" value={job.state} />
       </div>
+
+      {hasBounds && (
+        // Only render the bounds block when at least one bound is set
+        // so unbounded jobs (the common case) don't show a row full of
+        // em-dashes that adds no information.
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <DetailField
+            label="Start at"
+            value={compactDatetime(job.schedule.start_at) || "—"}
+          />
+          <DetailField
+            label="End at"
+            value={compactDatetime(job.schedule.end_at) || "—"}
+          />
+          <DetailField
+            label="Window start"
+            value={compactTime(job.schedule.window_start_time) || "—"}
+          />
+          <DetailField
+            label="Window end"
+            value={compactTime(job.schedule.window_end_time) || "—"}
+          />
+        </div>
+      )}
 
       {job.last_error && (
         <div className="rounded border border-destructive/50 bg-destructive/10 p-2">

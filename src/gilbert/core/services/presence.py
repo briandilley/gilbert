@@ -422,6 +422,7 @@ class PresenceService(Service):
                     ),
                 ],
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="who_is_here",
@@ -430,6 +431,7 @@ class PresenceService(Service):
                 slash_help="Who's currently around: /presence here",
                 description="List all users who are currently present or nearby.",
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="list_all_presence",
@@ -438,6 +440,7 @@ class PresenceService(Service):
                 slash_help="Full presence snapshot: /presence all",
                 description="List presence state for all tracked users.",
                 required_role="everyone",
+                parallel_safe=True,
             ),
         ]
 

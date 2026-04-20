@@ -287,6 +287,13 @@ class Gilbert:
 
         self.service_manager.register(MCPServerService())
 
+        # Usage service — records per-round token usage from AIService.
+        # Registered before AIService so the UsageRecorder capability is
+        # resolvable during the first chat turn.
+        from gilbert.core.services.usage import UsageService
+
+        self.service_manager.register(UsageService())
+
         self.service_manager.register(AIService())
 
         # 8. Register factories for hot-swap support

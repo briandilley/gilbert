@@ -18,7 +18,9 @@ Run the full architecture validation checklist against the Gilbert codebase. Thi
    - **Duck-Typing and Private Access Violations**: Find `getattr` used for capability access, private `._field` access across modules, unnecessary `# type: ignore` comments.
    
    - **Business Logic in Wrong Layer**: Check web routes for authorization logic, AI prompt construction, backend resolution. Check for shared constants defined in wrong layers.
-   
+
+   - **Multi-User Isolation**: Services are singletons shared across every user; per-request state on `self` races under concurrent users. Grep `self\._current_|self\._active_|self\._pending_` in `src/gilbert/core/services/` and `std-plugins/*/` — each hit must either be service-lifetime config (fine) or migrated to a `ContextVar` in `gilbert.core.context`. Also audit: module-level mutables used across requests, global `asyncio.Lock`s that protect per-target resources (should be per-target dicts), `asyncio.Task`s spawned without `context=copy_context()` inside request handlers. See [Multi-User Isolation](memory-multi-user-isolation.md).
+
    - **Plugin-Specific Checks**: Verify plugins use `resolver.get_capability()` not concrete imports, implement `Configurable` for runtime config, don't access private attributes, and declare `slash_namespace`.
    
    - **Slash Command Violations**: Audit every `ToolDefinition` for missing `slash_command`, missing `slash_help`, services with 3+ tools not using `slash_group`, hostile parameter ordering, invalid identifiers, duplicates.

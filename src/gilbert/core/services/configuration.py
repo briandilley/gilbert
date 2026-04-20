@@ -750,6 +750,7 @@ class ConfigurationService(Service):
                     ),
                 ],
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_configuration",
@@ -786,6 +787,7 @@ class ConfigurationService(Service):
                     ),
                 ],
                 required_role="admin",
+                parallel_safe=True,
             ),
         ]
 

@@ -496,6 +496,7 @@ class AccessControlService(Service):
                 slash_help="List all roles: /acl roles",
                 description="List all roles in the system with their hierarchy levels.",
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="create_role",
@@ -570,6 +571,7 @@ class AccessControlService(Service):
                 slash_help="List tool role requirements: /acl tools",
                 description="List all tools and their required roles, including any overrides.",
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_tool_permission",
@@ -609,6 +611,7 @@ class AccessControlService(Service):
                 slash_help="List collection ACLs: /acl collections",
                 description="List access control rules for entity collections.",
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_collection_acl",
@@ -642,6 +645,7 @@ class AccessControlService(Service):
                 slash_help="List event visibility rules: /acl events",
                 description="List all event visibility rules (which roles can see which events via WebSocket).",
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_event_visibility",
@@ -685,6 +689,7 @@ class AccessControlService(Service):
                 slash_help="List RPC permission rules: /acl rpcs",
                 description="List all WebSocket RPC handler permission rules (which roles can call which frame types).",
                 required_role="admin",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_rpc_permission",

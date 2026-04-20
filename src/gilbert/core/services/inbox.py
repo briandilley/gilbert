@@ -1595,6 +1595,7 @@ class InboxService(Service):
                 ),
                 parameters=[],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="inbox_search",
@@ -1636,6 +1637,7 @@ class InboxService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="inbox_read",
@@ -1658,6 +1660,7 @@ class InboxService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="inbox_reply",

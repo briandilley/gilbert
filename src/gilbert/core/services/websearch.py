@@ -251,6 +251,7 @@ class WebSearchService(Service, ToolProvider):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="image_search",
@@ -276,6 +277,7 @@ class WebSearchService(Service, ToolProvider):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="fetch_url",
@@ -301,6 +303,7 @@ class WebSearchService(Service, ToolProvider):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="fetch_url_raw",
@@ -320,6 +323,7 @@ class WebSearchService(Service, ToolProvider):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
         ]
 

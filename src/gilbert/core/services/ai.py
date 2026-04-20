@@ -6,13 +6,18 @@ separate services, now merged into AIService).
 
 import asyncio
 import contextlib
+import contextvars
 import json as _json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gilbert.core.context import get_current_user
+from gilbert.core.context import (
+    get_current_conversation_id,
+    get_current_user,
+    set_current_conversation_id,
+)
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
@@ -28,9 +33,6 @@ from gilbert.interfaces.ai import (
     AIContextProfile,
     AIRequest,
     AIResponse,
-    MODEL_TIER_ADVANCED,
-    MODEL_TIER_LIGHT,
-    MODEL_TIER_STANDARD,
     ChatTurnResult,
     FileAttachment,
     Message,
@@ -64,6 +66,7 @@ from gilbert.interfaces.tools import (
     ToolResult,
 )
 from gilbert.interfaces.ui import ToolOutput, UIBlock
+from gilbert.interfaces.usage import UsageRecord, UsageRecorder
 from gilbert.interfaces.ws import WsConnectionBase
 
 logger = logging.getLogger(__name__)
@@ -139,6 +142,57 @@ _INTERRUPT_MARKER = (
     "message as a new, standalone request; only revisit this task if "
     "they explicitly ask you to.]"
 )
+
+
+def _empty_round_usage() -> dict[str, Any]:
+    """Return a zero-valued per-round usage dict for when no usage is available."""
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cost_usd": 0.0,
+    }
+
+
+def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
+    """Fold per-round and final-round usage into one per-turn total.
+
+    Returns ``None`` when no round in the turn carries usage data — lets the
+    chat UI suppress the totals chip entirely for turns that never had
+    tokens recorded (e.g. error turns, pre-reporting conversations).
+    """
+    totals = _empty_round_usage()
+    totals["rounds"] = 0
+    saw_any = False
+    for rnd in turn.get("rounds", []) or []:
+        usage = rnd.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        saw_any = True
+        totals["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+        totals["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+        totals["cache_creation_tokens"] += int(
+            usage.get("cache_creation_tokens", 0) or 0
+        )
+        totals["cache_read_tokens"] += int(usage.get("cache_read_tokens", 0) or 0)
+        totals["cost_usd"] += float(usage.get("cost_usd", 0.0) or 0.0)
+        totals["rounds"] += 1
+    final = turn.get("final_usage")
+    if isinstance(final, dict):
+        saw_any = True
+        totals["input_tokens"] += int(final.get("input_tokens", 0) or 0)
+        totals["output_tokens"] += int(final.get("output_tokens", 0) or 0)
+        totals["cache_creation_tokens"] += int(
+            final.get("cache_creation_tokens", 0) or 0
+        )
+        totals["cache_read_tokens"] += int(final.get("cache_read_tokens", 0) or 0)
+        totals["cost_usd"] += float(final.get("cost_usd", 0.0) or 0.0)
+        totals["rounds"] += 1
+    if not saw_any:
+        return None
+    totals["cost_usd"] = round(totals["cost_usd"], 6)
+    return totals
 
 
 def _strip_interrupt_marker(content: str) -> str:
@@ -565,6 +619,21 @@ something, don't mention it at all — not even to say you can't do it. \
 Just focus on what you CAN do.\
 """
 
+# Always-appended operational hint. Lives outside ``DEFAULT_PERSONA`` so
+# it survives user persona customization — parallel dispatch is a runtime
+# affordance, not a personality choice, and losing it silently because
+# someone rewrote their persona would be a confusing footgun.
+_PARALLEL_TOOL_USE_HINT = """\
+## Parallel tool use
+When a task needs several tool calls whose inputs don't depend on each \
+other's outputs — e.g. announcing on multiple speakers, searching multiple \
+topics, fetching multiple URLs, looking up several people — emit all of \
+them in a single response. The runtime fans out parallel-safe tools via \
+``asyncio.gather`` so they run concurrently; calling them one at a time \
+across multiple rounds only makes sense when a later call genuinely needs \
+an earlier result.\
+"""
+
 
 class _PersonaHelper:
     """Internal helper — manages the AI persona text in entity storage."""
@@ -817,7 +886,13 @@ class AIService(Service):
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
-        self._current_conversation_id: str | None = None
+        # NOTE: the active conversation id lives in a ContextVar (see
+        # gilbert.core.context.{get,set}_current_conversation_id), not
+        # on the AIService instance. The service is a singleton shared
+        # across users; an instance attribute would race when two
+        # conversations overlap (two users, two tabs, shared rooms),
+        # causing events to publish with the wrong conv_id and the UI
+        # to show tool calls in the wrong chat.
         # AI context profiles
         self._profiles: dict[str, AIContextProfile] = {}
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
@@ -1451,6 +1526,30 @@ class AIService(Service):
                 response.usage.input_tokens + response.usage.output_tokens,
                 max_tokens,
             )
+        # Record usage for one-shot completions (MCP sampling, batch jobs,
+        # eval harnesses). Caller is anonymous from the AIService's POV so
+        # we stamp it as the SYSTEM user; the profile name + invocation
+        # source preserve the context for reporting.
+        if response.usage is not None:
+            recorder = self._resolve_usage_recorder()
+            if recorder is not None:
+                try:
+                    await recorder.record_round(
+                        user_ctx=UserContext.SYSTEM,
+                        conversation_id="",
+                        profile=profile.name if profile is not None else "",
+                        backend=backend.backend_name,
+                        model=response.model,
+                        usage=response.usage,
+                        tool_names=[
+                            tc.tool_name for tc in response.message.tool_calls
+                        ],
+                        stop_reason=response.stop_reason.value,
+                        round_num=0,
+                        invocation_source="one_shot",
+                    )
+                except Exception as exc:
+                    logger.warning("Usage recorder raised in one_shot: %s", exc)
         return response
 
     # --- Chat ---
@@ -1497,7 +1596,7 @@ class AIService(Service):
             conversation_id = str(uuid.uuid4())
             messages = []
 
-        self._current_conversation_id = conversation_id
+        set_current_conversation_id(conversation_id)
 
         # ── Slash-command short-circuit ─────────────────────────────
         # If the user typed ``/<name> ...`` and ``<name>`` matches a tool
@@ -1649,6 +1748,23 @@ class AIService(Service):
         # — is NOT emitted here; its content rides on ``final_content``
         # on the returned ``ChatTurnResult``.
         turn_rounds: list[dict[str, Any]] = []
+        # Aggregate token + cost totals for the whole turn. Each AI round
+        # (including the final end_turn round and any max_tokens-recovery
+        # continuations) adds into this via ``_record_round_usage``. Ships
+        # back to the frontend on ``ChatTurnResult.turn_usage`` so the chat
+        # UI can show a per-turn total alongside the answer.
+        turn_usage_totals: dict[str, Any] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "cost_usd": 0.0,
+            "rounds": 0,
+        }
+        # The most-recent round's individual usage + cost. Attached to the
+        # next ``turn_rounds`` entry so each round card in the chat UI
+        # shows its own token count — not the cumulative running total.
+        current_round_usage: dict[str, Any] = _empty_round_usage()
         # Files produced by tool calls during this turn — collected across
         # every round and then landed on the final assistant ``Message`` so
         # the frontend can render download chips next to the reply. Both
@@ -1666,6 +1782,11 @@ class AIService(Service):
         # Re-assert backend presence and capture a locally-typed
         backend: AIBackend = resolved_backend
 
+        # Label for usage records. ``ai_call`` arg means "invoked from a
+        # specific named AI call" (greeting, roast, scheduled action);
+        # otherwise it's a normal chat turn.
+        invocation_source: str = f"ai_call:{ai_call}" if ai_call else "chat"
+
         async def _run_agentic_loop() -> None:
             """Execute the agentic for-loop as a cancellable unit.
 
@@ -1676,7 +1797,7 @@ class AIService(Service):
             only the two that get rebound (``response`` and
             ``continuation_count``) are declared ``nonlocal``.
             """
-            nonlocal response, continuation_count
+            nonlocal response, continuation_count, current_round_usage
             for round_num in range(self._max_tool_rounds):
                 truncated = self._truncate_history(
                     messages, compression_state=compression_state
@@ -1752,6 +1873,24 @@ class AIService(Service):
                     )
                 self._log_api_call(request, response, round_num)
 
+                # Record token usage for this round. The returned dict
+                # contains {input_tokens, output_tokens, cache_*_tokens,
+                # cost_usd} and is attached to the next ``turn_rounds``
+                # entry (for tool rounds) or folded into the turn totals
+                # (for the final end_turn round). Never raises — if the
+                # UsageService isn't registered yet or storage hiccups,
+                # the AI loop continues unaffected.
+                current_round_usage = await self._record_round_usage(
+                    response=response,
+                    user_ctx=user_ctx,
+                    conversation_id=conversation_id,
+                    profile=profile,
+                    backend_name=backend.backend_name,  # type: ignore[attr-defined]
+                    round_num=round_num,
+                    turn_totals=turn_usage_totals,
+                    invocation_source=invocation_source,
+                )
+
                 # Tell listeners the incremental text for this round is done
                 # so they can commit their buffer and prepare for the next
                 # round (tool execution, another AI round, or turn end).
@@ -1764,7 +1903,11 @@ class AIService(Service):
                         },
                     )
 
-                # Append assistant message to history
+                # Append assistant message to history. Stamp the round's
+                # usage dict onto the message so it persists with the
+                # conversation and history replay can surface per-round
+                # metrics without a second lookup.
+                response.message.usage = dict(current_round_usage)
                 messages.append(response.message)
 
                 stop = response.stop_reason
@@ -1776,6 +1919,7 @@ class AIService(Service):
                         tools_by_name,
                         user_ctx=user_ctx,
                         profile=profile,
+                        backend=backend,
                     )
                     all_ui_blocks.extend(round_ui_blocks)
                     messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
@@ -1820,6 +1964,7 @@ class AIService(Service):
                         {
                             "reasoning": round_reasoning,
                             "tools": round_tools,
+                            "usage": dict(current_round_usage),
                         }
                     )
                     continue
@@ -1873,6 +2018,7 @@ class AIService(Service):
                             author_name=response.message.author_name,
                             visible_to=response.message.visible_to,
                             attachments=list(response.message.attachments),
+                            usage=response.message.usage,
                         )
                         response = AIResponse(
                             message=messages[-1],
@@ -1913,6 +2059,7 @@ class AIService(Service):
                             author_name=response.message.author_name,
                             visible_to=response.message.visible_to,
                             attachments=list(response.message.attachments),
+                            usage=response.message.usage,
                         )
                         response = AIResponse(
                             message=messages[-1],
@@ -2112,6 +2259,7 @@ class AIService(Service):
             rounds=turn_rounds,
             interrupted=was_interrupted,
             model=response.model if response else resolved_model,
+            turn_usage=dict(turn_usage_totals),
         )
 
     # --- System Prompt ---
@@ -2153,6 +2301,12 @@ class AIService(Service):
                     "update the persona. Only mention this once — never bring it up again "
                     "in subsequent messages or conversations."
                 )
+
+        # Always append the parallel-tool-use hint so the model knows it
+        # should batch independent tool calls into one response. Lives
+        # here rather than inside the persona so a customized persona
+        # doesn't accidentally drop it.
+        parts.append(_PARALLEL_TOOL_USE_HINT)
 
         # Inject the active user's identity so the AI knows who it's
         # talking to without having to ask. Skipped for system/guest
@@ -2444,163 +2598,273 @@ class AIService(Service):
         tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
+        backend: AIBackend | None = None,
     ) -> tuple[list[ToolResult], list[UIBlock]]:
-        """Execute a batch of tool calls and return results + any UI blocks."""
+        """Execute a batch of tool calls and return results + any UI blocks.
+
+        Tools marked ``parallel_safe=True`` run concurrently via
+        ``asyncio.gather`` when the active backend advertises
+        ``parallel_tool_calls=True``. Unsafe tools — or any tool on a
+        backend without the capability — run one at a time, preserving
+        the original serial behavior. Result order always matches the
+        input ``tool_calls`` order regardless of completion order.
+        """
+        tool_roles = profile.tool_roles if profile else {}
+        backend_parallel = bool(
+            backend is not None and backend.capabilities().parallel_tool_calls
+        )
+
+        # Pre-resolve room membership once per batch — it's stable across
+        # the turn, so we don't need to re-fetch it per tool call (which
+        # would also serialize storage reads).
+        conv_id = get_current_conversation_id()
+        room_members: list[dict[str, str]] | None = None
+        storage = getattr(self, "_storage", None)
+        if conv_id and storage:
+            conv_data = await storage.get(_COLLECTION, conv_id)
+            if conv_data and conv_data.get("shared"):
+                room_members = [
+                    {
+                        "user_id": m.get("user_id", ""),
+                        "display_name": m.get("display_name", ""),
+                    }
+                    for m in conv_data.get("members", [])
+                ]
+
+        # Partition into execution groups. A "group" is either a single
+        # tool (serial path) or a run of consecutive parallel_safe tools
+        # (gather path). Consecutive grouping preserves the model's
+        # intended ordering: if the model emits [read, write, read], the
+        # two reads don't fan across the write.
+        groups: list[list[ToolCall]] = []
+        for tc in tool_calls:
+            pd = tools_by_name.get(tc.tool_name)
+            is_parallel = (
+                backend_parallel and pd is not None and pd[1].parallel_safe
+            )
+            if is_parallel and groups and self._group_is_parallel(
+                groups[-1], tools_by_name
+            ):
+                groups[-1].append(tc)
+            else:
+                groups.append([tc])
+
         results: list[ToolResult] = []
         ui_blocks: list[UIBlock] = []
-        tool_roles = profile.tool_roles if profile else {}
 
-        for tc in tool_calls:
-            provider_and_def = tools_by_name.get(tc.tool_name)
-            if provider_and_def is None:
-                results.append(
-                    ToolResult(
-                        tool_call_id=tc.tool_call_id,
-                        content=f"Error: unknown tool '{tc.tool_name}'",
-                        is_error=True,
-                    )
+        for group in groups:
+            if len(group) == 1:
+                tr, blocks = await self._run_one_tool(
+                    group[0],
+                    tools_by_name,
+                    user_ctx=user_ctx,
+                    tool_roles=tool_roles,
+                    conv_id=conv_id,
+                    room_members=room_members,
                 )
+                results.append(tr)
+                ui_blocks.extend(blocks)
                 continue
-            provider, tool_def = provider_and_def
 
-            # Defense in depth: re-check permission before execution.
-            # Uses profile tool_roles overrides for consistency with _discover_tools.
-            if user_ctx is not None and user_ctx.user_id != "system" and self._acl_svc is not None:
-                if isinstance(self._acl_svc, AccessControlProvider):
-                    effective_role = tool_roles.get(tc.tool_name, tool_def.required_role)
-                    role_level = self._acl_svc.get_role_level(effective_role)
-                    user_level = self._acl_svc.get_effective_level(user_ctx)
-                    if user_level > role_level:
-                        results.append(
-                            ToolResult(
-                                tool_call_id=tc.tool_call_id,
-                                content=f"Permission denied: tool '{tc.tool_name}' requires higher privileges",
-                                is_error=True,
-                            )
-                        )
-                        continue
+            # Parallel batch: each task gets its own contextvars copy so
+            # ``set_current_user`` / any other ContextVar set inside one
+            # task cannot bleed into its siblings. ``asyncio.Task`` with
+            # an explicit ``context=`` is the supported way to do that
+            # (Python 3.11+; we're on 3.12).
+            logger.debug(
+                "Running %d tools in parallel: %s",
+                len(group),
+                ", ".join(tc.tool_name for tc in group),
+            )
+            tasks = [
+                asyncio.Task(
+                    self._run_one_tool(
+                        tc,
+                        tools_by_name,
+                        user_ctx=user_ctx,
+                        tool_roles=tool_roles,
+                        conv_id=conv_id,
+                        room_members=room_members,
+                    ),
+                    context=contextvars.copy_context(),
+                )
+                for tc in group
+            ]
+            # ``_run_one_tool`` catches its own exceptions and always
+            # returns a ``ToolResult`` (error ones flagged ``is_error``),
+            # so ``return_exceptions=False`` is correct — anything that
+            # escapes here is a bug in the wrapper itself, not user code.
+            gathered = await asyncio.gather(*tasks)
+            for tr, blocks in gathered:
+                results.append(tr)
+                ui_blocks.extend(blocks)
 
-            # Inject user context so tools can identify the caller
-            if user_ctx is not None:
-                tc.arguments["_user_id"] = user_ctx.user_id
-                tc.arguments["_user_name"] = user_ctx.display_name
-                tc.arguments["_user_roles"] = list(user_ctx.roles)
-                if user_ctx.email:
-                    tc.arguments["_user_email"] = user_ctx.email
+        return results, ui_blocks
 
-            # Inject conversation id + invocation source so tools can
-            # gate behavior on the active conversation (e.g. SkillService
-            # refuses inactive skills when called via the AI path but
-            # not when called via slash). Slash-command invocations set
-            # ``_invocation_source = "slash"`` to bypass that gate.
-            conv_id = getattr(self, "_current_conversation_id", None)
-            if conv_id:
-                tc.arguments["_conversation_id"] = conv_id
-            tc.arguments["_invocation_source"] = "ai"
+    @staticmethod
+    def _group_is_parallel(
+        group: list[ToolCall],
+        tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
+    ) -> bool:
+        """Return True iff every call in ``group`` is parallel_safe."""
+        for tc in group:
+            pd = tools_by_name.get(tc.tool_name)
+            if pd is None or not pd[1].parallel_safe:
+                return False
+        return True
 
-            # Inject room members if in a shared conversation
-            storage = getattr(self, "_storage", None)
-            if conv_id and storage:
-                conv_data = await storage.get(_COLLECTION, conv_id)
-                if conv_data and conv_data.get("shared"):
-                    tc.arguments["_room_members"] = [
-                        {
-                            "user_id": m.get("user_id", ""),
-                            "display_name": m.get("display_name", ""),
-                        }
-                        for m in conv_data.get("members", [])
-                    ]
+    async def _run_one_tool(
+        self,
+        tc: ToolCall,
+        tools_by_name: dict[str, tuple[ToolProvider, ToolDefinition]],
+        *,
+        user_ctx: UserContext | None,
+        tool_roles: dict[str, str],
+        conv_id: str | None,
+        room_members: list[dict[str, str]] | None,
+    ) -> tuple[ToolResult, list[UIBlock]]:
+        """Execute a single tool call, handling RBAC, argument injection,
+        lifecycle events, and exception capture.
 
-            await self._publish_event(
-                "chat.tool.started",
-                {
-                    "conversation_id": self._current_conversation_id,
-                    "tool_name": tc.tool_name,
-                    "tool_call_id": tc.tool_call_id,
-                    "arguments": self._sanitize_tool_args(tc.arguments),
-                },
+        Returns ``(ToolResult, ui_blocks)``. Never raises — any error
+        becomes a ``ToolResult`` with ``is_error=True`` so callers can
+        keep iterating a batch without special-casing exceptions.
+        """
+        ui_blocks: list[UIBlock] = []
+
+        provider_and_def = tools_by_name.get(tc.tool_name)
+        if provider_and_def is None:
+            return ToolResult(
+                tool_call_id=tc.tool_call_id,
+                content=f"Error: unknown tool '{tc.tool_name}'",
+                is_error=True,
+            ), ui_blocks
+        provider, tool_def = provider_and_def
+
+        # Defense in depth: re-check permission before execution.
+        # Uses profile tool_roles overrides for consistency with _discover_tools.
+        if user_ctx is not None and user_ctx.user_id != "system" and self._acl_svc is not None:
+            if isinstance(self._acl_svc, AccessControlProvider):
+                effective_role = tool_roles.get(tc.tool_name, tool_def.required_role)
+                role_level = self._acl_svc.get_role_level(effective_role)
+                user_level = self._acl_svc.get_effective_level(user_ctx)
+                if user_level > role_level:
+                    return ToolResult(
+                        tool_call_id=tc.tool_call_id,
+                        content=f"Permission denied: tool '{tc.tool_name}' requires higher privileges",
+                        is_error=True,
+                    ), ui_blocks
+
+        # Per-task argument copy — parallel siblings must not share a
+        # dict with each other or with ``ToolCall.arguments`` on the
+        # caller's frozen ToolCall. The copy is shallow; tools that
+        # mutate nested structures during execution should make their
+        # own defensive copies of those, but the injected keys
+        # themselves are scalar/list-typed and safe.
+        arguments: dict[str, Any] = dict(tc.arguments)
+        if user_ctx is not None:
+            arguments["_user_id"] = user_ctx.user_id
+            arguments["_user_name"] = user_ctx.display_name
+            arguments["_user_roles"] = list(user_ctx.roles)
+            if user_ctx.email:
+                arguments["_user_email"] = user_ctx.email
+        if conv_id:
+            arguments["_conversation_id"] = conv_id
+        arguments["_invocation_source"] = "ai"
+        if room_members is not None:
+            arguments["_room_members"] = room_members
+
+        await self._publish_event(
+            "chat.tool.started",
+            {
+                "conversation_id": conv_id,
+                "tool_name": tc.tool_name,
+                "tool_call_id": tc.tool_call_id,
+                "arguments": self._sanitize_tool_args(arguments),
+            },
+        )
+
+        # Propagate caller identity through the async context so tools
+        # can resolve it via core.context.get_current_user(). When this
+        # method runs inside a parallel asyncio.Task created with a
+        # copied context, the .set() is local to that task and cannot
+        # overwrite a sibling's user. On the serial singleton path, the
+        # .set() persists in the running context just like it did before
+        # this refactor, preserving the historical behavior.
+        if user_ctx is not None:
+            from gilbert.core.context import set_current_user
+
+            set_current_user(user_ctx)
+
+        try:
+            raw_result = await provider.execute_tool(tc.tool_name, arguments)
+
+            # Normalize: tools may return
+            #   - ``str``                 (simple text)
+            #   - ``ToolOutput``          (text + ui_blocks + attachments)
+            #   - ``ToolResult``          (for callers that need full control)
+            # The uniform internal shape is a ``ToolResult`` with an
+            # ``attachments`` tuple that we collect at the turn level.
+            # The tool's own ``tool_call_id`` is ignored — we rebind to
+            # the live ``ToolCall.tool_call_id`` so the model sees a
+            # result that matches its request id.
+            tool_attachments: tuple[FileAttachment, ...] = ()
+            result_is_error = False
+            if isinstance(raw_result, ToolResult):
+                result_text = raw_result.content
+                tool_attachments = raw_result.attachments
+                result_is_error = raw_result.is_error
+            elif isinstance(raw_result, ToolOutput):
+                result_text = raw_result.text
+                tool_attachments = raw_result.attachments
+                for block in raw_result.ui_blocks:
+                    import dataclasses as _dc
+
+                    # Auto-assign block_id if missing
+                    if not block.block_id:
+                        block = _dc.replace(block, block_id=str(uuid.uuid4()))
+                    # Tag with tool name if not set
+                    if not block.tool_name:
+                        block = _dc.replace(block, tool_name=tc.tool_name)
+                    ui_blocks.append(block)
+            else:
+                result_text = raw_result
+
+            tool_result = ToolResult(
+                tool_call_id=tc.tool_call_id,
+                content=result_text,
+                is_error=result_is_error,
+                attachments=tool_attachments,
             )
 
-            # Propagate caller identity through the async context so
-            # tools can resolve it via core.context.get_current_user().
-            if user_ctx is not None:
-                from gilbert.core.context import set_current_user
-
-                set_current_user(user_ctx)
-
-            try:
-                raw_result = await provider.execute_tool(tc.tool_name, tc.arguments)
-
-                # Normalize: tools may return
-                #   - ``str``                 (simple text)
-                #   - ``ToolOutput``          (text + ui_blocks + attachments)
-                #   - ``ToolResult``          (for callers that need full control)
-                # The uniform internal shape is a ``ToolResult`` with an
-                # ``attachments`` tuple that we collect at the turn level.
-                # The tool's own ``tool_call_id`` is ignored — we rebind to
-                # the live ``ToolCall.tool_call_id`` so the model sees a
-                # result that matches its request id.
-                tool_attachments: tuple[FileAttachment, ...] = ()
-                result_is_error = False
-                if isinstance(raw_result, ToolResult):
-                    result_text = raw_result.content
-                    tool_attachments = raw_result.attachments
-                    result_is_error = raw_result.is_error
-                elif isinstance(raw_result, ToolOutput):
-                    result_text = raw_result.text
-                    tool_attachments = raw_result.attachments
-                    for block in raw_result.ui_blocks:
-                        import dataclasses as _dc
-
-                        # Auto-assign block_id if missing
-                        if not block.block_id:
-                            block = _dc.replace(block, block_id=str(uuid.uuid4()))
-                        # Tag with tool name if not set
-                        if not block.tool_name:
-                            block = _dc.replace(block, tool_name=tc.tool_name)
-                        ui_blocks.append(block)
-                else:
-                    result_text = raw_result
-
-                results.append(
-                    ToolResult(
-                        tool_call_id=tc.tool_call_id,
-                        content=result_text,
-                        is_error=result_is_error,
-                        attachments=tool_attachments,
-                    )
-                )
-
-                await self._publish_event(
-                    "chat.tool.completed",
-                    {
-                        "conversation_id": self._current_conversation_id,
-                        "tool_name": tc.tool_name,
-                        "tool_call_id": tc.tool_call_id,
-                        "is_error": False,
-                        "result_preview": result_text[:200] if result_text else "",
-                    },
-                )
-            except Exception as exc:
-                logger.exception("Tool execution failed: %s", tc.tool_name)
-                results.append(
-                    ToolResult(
-                        tool_call_id=tc.tool_call_id,
-                        content=f"Error executing tool: {exc}",
-                        is_error=True,
-                    )
-                )
-                await self._publish_event(
-                    "chat.tool.completed",
-                    {
-                        "conversation_id": self._current_conversation_id,
-                        "tool_name": tc.tool_name,
-                        "tool_call_id": tc.tool_call_id,
-                        "is_error": True,
-                        "result_preview": str(exc)[:200],
-                    },
-                )
-        return results, ui_blocks
+            await self._publish_event(
+                "chat.tool.completed",
+                {
+                    "conversation_id": conv_id,
+                    "tool_name": tc.tool_name,
+                    "tool_call_id": tc.tool_call_id,
+                    "is_error": False,
+                    "result_preview": result_text[:200] if result_text else "",
+                },
+            )
+            return tool_result, ui_blocks
+        except Exception as exc:
+            logger.exception("Tool execution failed: %s", tc.tool_name)
+            await self._publish_event(
+                "chat.tool.completed",
+                {
+                    "conversation_id": conv_id,
+                    "tool_name": tc.tool_name,
+                    "tool_call_id": tc.tool_call_id,
+                    "is_error": True,
+                    "result_preview": str(exc)[:200],
+                },
+            )
+            return ToolResult(
+                tool_call_id=tc.tool_call_id,
+                content=f"Error executing tool: {exc}",
+                is_error=True,
+            ), ui_blocks
 
     # --- Slash-command execution ---
 
@@ -3273,6 +3537,8 @@ class AIService(Service):
             d["attachments"] = serialized_attachments
         if msg.interrupted:
             d["interrupted"] = True
+        if msg.usage:
+            d["usage"] = msg.usage
         return d
 
     @staticmethod
@@ -3332,6 +3598,8 @@ class AIService(Service):
                             data=str(img.get("data", "")),
                         )
                     )
+        raw_usage = data.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else None
         return Message(
             role=MessageRole(data["role"]),
             content=data.get("content", ""),
@@ -3342,13 +3610,14 @@ class AIService(Service):
             visible_to=data.get("visible_to"),
             attachments=attachments,
             interrupted=bool(data.get("interrupted", False)),
+            usage=usage,
         )
 
     # --- Conversation State ---
 
     def _resolve_conversation_id(self, conversation_id: str | None) -> str:
         """Resolve to an explicit or the current conversation ID."""
-        cid = conversation_id or self._current_conversation_id
+        cid = conversation_id or get_current_conversation_id()
         if not cid:
             raise RuntimeError("No active conversation")
         return cid
@@ -4185,15 +4454,16 @@ class AIService(Service):
         title = arguments.get("title", "").strip()
         if not title:
             return _json.dumps({"error": "Title is required"})
-        if not self._current_conversation_id or not self._storage:
+        conv_id = get_current_conversation_id()
+        if not conv_id or not self._storage:
             return _json.dumps({"error": "No active conversation"})
 
-        data = await self._storage.get("ai_conversations", self._current_conversation_id)
+        data = await self._storage.get("ai_conversations", conv_id)
         if data is None:
             return _json.dumps({"error": "Conversation not found"})
 
         data["title"] = title
-        await self._storage.put("ai_conversations", self._current_conversation_id, data)
+        await self._storage.put("ai_conversations", conv_id, data)
 
         # Emit event so WebSocket clients can update their UI
         if self._resolver:
@@ -4206,7 +4476,7 @@ class AIService(Service):
                         Event(
                             event_type="chat.conversation.renamed",
                             data={
-                                "conversation_id": self._current_conversation_id,
+                                "conversation_id": conv_id,
                                 "title": title,
                             },
                             source="ai",
@@ -4216,6 +4486,86 @@ class AIService(Service):
         return _json.dumps({"status": "renamed", "title": title})
 
     # --- Logging ---
+
+    async def _record_round_usage(
+        self,
+        *,
+        response: AIResponse,
+        user_ctx: UserContext | None,
+        conversation_id: str,
+        profile: AIContextProfile | None,
+        backend_name: str,
+        round_num: int,
+        turn_totals: dict[str, Any],
+        invocation_source: str,
+    ) -> dict[str, Any]:
+        """Persist this round's usage (if a UsageRecorder is registered)
+        and fold its numbers into ``turn_totals``.
+
+        Returns a per-round usage dict (input/output/cache/cost) so the
+        caller can attach it to a ``turn_rounds`` entry. Safe to call with
+        a missing recorder or missing usage — returns a zeroed dict and
+        leaves ``turn_totals`` untouched. Failures inside the recorder are
+        logged and swallowed so the AI loop never breaks on reporting.
+        """
+        usage = response.usage
+        if usage is None:
+            return _empty_round_usage()
+
+        # Fold raw token counts into the turn totals unconditionally. Cost
+        # gets added after the recorder computes it (or, without a
+        # recorder, remains 0).
+        turn_totals["input_tokens"] += usage.input_tokens
+        turn_totals["output_tokens"] += usage.output_tokens
+        turn_totals["cache_creation_tokens"] += usage.cache_creation_tokens
+        turn_totals["cache_read_tokens"] += usage.cache_read_tokens
+        turn_totals["rounds"] += 1
+
+        recorder = self._resolve_usage_recorder()
+        cost = 0.0
+        if recorder is not None:
+            tool_names = [tc.tool_name for tc in response.message.tool_calls]
+            try:
+                rec: UsageRecord = await recorder.record_round(
+                    user_ctx=user_ctx or UserContext.SYSTEM,
+                    conversation_id=conversation_id,
+                    profile=profile.name if profile is not None else "",
+                    backend=backend_name,
+                    model=response.model,
+                    usage=usage,
+                    tool_names=tool_names,
+                    stop_reason=response.stop_reason.value,
+                    round_num=round_num,
+                    invocation_source=invocation_source,
+                )
+                cost = rec.cost_usd
+            except Exception as exc:
+                logger.warning(
+                    "Usage recorder raised (conv=%s round=%d): %s",
+                    conversation_id,
+                    round_num,
+                    exc,
+                )
+
+        turn_totals["cost_usd"] = round(turn_totals["cost_usd"] + cost, 6)
+
+        return {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_tokens": usage.cache_creation_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cost_usd": round(cost, 6),
+        }
+
+    def _resolve_usage_recorder(self) -> UsageRecorder | None:
+        if self._resolver is None:
+            return None
+        svc = self._resolver.get_capability("usage_recording")
+        if svc is None:
+            return None
+        if isinstance(svc, UsageRecorder):
+            return svc
+        return None
 
     def _log_api_call(self, request: AIRequest, response: AIResponse, round_num: int) -> None:
         usage_str = ""
@@ -4388,6 +4738,7 @@ class AIService(Service):
 
         interrupted = False
         reply_model = ""
+        reply_turn_usage: dict[str, Any] | None = None
         try:
             if is_shared:
                 from gilbert.core.chat import build_room_context, mentions_gilbert, publish_event
@@ -4429,6 +4780,7 @@ class AIService(Service):
                     reply_rounds = turn_result.rounds
                     interrupted = turn_result.interrupted
                     reply_model = turn_result.model
+                    reply_turn_usage = turn_result.turn_usage
                 else:
                     # Store message without invoking AI
                     conv_id = conversation_id
@@ -4479,6 +4831,7 @@ class AIService(Service):
                 reply_rounds = turn_result.rounds
                 interrupted = turn_result.interrupted
                 reply_model = turn_result.model
+                reply_turn_usage = turn_result.turn_usage
         except Exception as exc:
             logger.warning("chat.message.send failed", exc_info=True)
             return {"type": "gilbert.error", "ref": frame.get("id"), "error": str(exc), "code": 500}
@@ -4524,6 +4877,7 @@ class AIService(Service):
             "rounds": reply_rounds,
             "interrupted": interrupted,
             "model": reply_model,
+            "turn_usage": reply_turn_usage,
         }
 
     async def _ws_chat_cancel(
@@ -4823,27 +5177,32 @@ class AIService(Service):
         # content from the row that emitted the most recent batch of
         # tool_calls; ``round_tools`` is the list of tool entries for
         # that round, indexed by tool_call_id so subsequent tool_result
-        # rows can fill in the result/is_error fields.
+        # rows can fill in the result/is_error fields. ``round_usage``
+        # is that assistant row's ``usage`` dict (tokens + cost), carried
+        # into the round entry so the chat UI can render per-round metrics.
         round_reasoning: str = ""
         round_tools: list[dict[str, Any]] = []
         round_tools_by_id: dict[str, dict[str, Any]] = {}
+        round_usage: dict[str, Any] | None = None
 
         def finalize_round() -> None:
             """Push the in-progress round (if any) onto the current turn."""
-            nonlocal round_reasoning, round_tools, round_tools_by_id
+            nonlocal round_reasoning, round_tools, round_tools_by_id, round_usage
             if current is None:
                 return
             if not round_reasoning and not round_tools:
                 return
-            current["rounds"].append(
-                {
-                    "reasoning": round_reasoning,
-                    "tools": round_tools,
-                }
-            )
+            entry: dict[str, Any] = {
+                "reasoning": round_reasoning,
+                "tools": round_tools,
+            }
+            if round_usage:
+                entry["usage"] = round_usage
+            current["rounds"].append(entry)
             round_reasoning = ""
             round_tools = []
             round_tools_by_id = {}
+            round_usage = None
 
         def start_turn(user_row: dict[str, Any]) -> None:
             """Open a new turn keyed on a user message row."""
@@ -4950,6 +5309,8 @@ class AIService(Service):
                 round_reasoning = (
                     _strip_interrupt_marker(content) if row_interrupted else content
                 )
+                row_usage = row.get("usage")
+                round_usage = row_usage if isinstance(row_usage, dict) else None
                 if row_interrupted:
                     current["interrupted"] = True
                 for tc in tool_calls:
@@ -5014,6 +5375,13 @@ class AIService(Service):
             current["final_attachments"] = self._serialize_persisted_attachments(
                 row.get("attachments")
             )
+            # Capture the final round's usage (end_turn or max_tokens row
+            # tokens) as ``final_usage``. The frontend reads both
+            # ``rounds[].usage`` and ``final_usage`` to compute per-turn
+            # totals on history replay.
+            final_usage_raw = row.get("usage")
+            if isinstance(final_usage_raw, dict):
+                current["final_usage"] = final_usage_raw
             # Propagate the persisted interrupted marker: set on the
             # trailing assistant row by ``chat()`` when the user hit
             # stop mid-flight. Drives the subtle stop icon on the
@@ -5025,6 +5393,10 @@ class AIService(Service):
                 current["final_author_name"] = row.get("author_name", "")
 
         finalize_current_turn()
+        # Sum per-round + final usage onto each turn so the chat UI can
+        # render a single per-turn total without re-walking the shape.
+        for turn in turns:
+            turn["turn_usage"] = _sum_turn_usage(turn)
         return turns
 
     def _build_turn_user_message(

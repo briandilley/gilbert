@@ -51,6 +51,11 @@ import type {
   McpToolSpec,
 } from "@/types/mcp";
 import type { WorkspaceFile } from "@/types/workspace";
+import type {
+  UsageAggregate,
+  UsageDimensions,
+  UsageQueryPayload,
+} from "@/types/usage";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -525,6 +530,17 @@ export function useWsApi() {
       rpc<{ status: string; pending_plugins: string[] }>({
         type: "plugins.restart_host",
       }),
+
+    // ── Usage reporting ───────────────────────────────────────────
+
+    queryUsage: (payload: UsageQueryPayload) =>
+      rpc<{ rows: UsageAggregate[] }>({
+        type: "usage.query",
+        payload,
+      }).then((r) => r.rows),
+
+    listUsageDimensions: () =>
+      rpc<UsageDimensions>({ type: "usage.dimensions" }),
 
     // ── Scheduler ─────────────────────────────────────────────────
 

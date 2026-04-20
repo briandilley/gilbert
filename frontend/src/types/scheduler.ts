@@ -16,12 +16,24 @@ export type ScheduledActionKind = "event" | "tool" | "ai_prompt";
  * - `daily`: once per day at hour:minute
  * - `hourly`: once per hour at minute
  * - `once`: single-shot N seconds from creation
+ *
+ * Recurring schedules (interval/daily/hourly) can also carry optional
+ * bounds that the backend honors at fire time:
+ * - `start_at` / `end_at`: ISO-8601 naive-local datetimes delimiting
+ *   when the job is allowed to fire. Empty string means unbounded.
+ * - `window_start_time` / `window_end_time`: a `HH:MM[:SS]` daily
+ *   window that gates interval fires (ignored for daily/hourly/once).
+ *   Empty strings mean "no window". Paired: both set or neither.
  */
 export interface Schedule {
   type: ScheduleKind;
   interval_seconds: number;
   hour: number;
   minute: number;
+  start_at: string;
+  end_at: string;
+  window_start_time: string;
+  window_end_time: string;
 }
 
 /**

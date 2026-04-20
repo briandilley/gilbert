@@ -62,6 +62,158 @@ def test_schedule_once() -> None:
     assert s.interval_seconds == 10
 
 
+# --- Schedule bounds & windows ---
+
+from datetime import datetime, time as dtime, timedelta  # noqa: E402
+
+from gilbert.core.services.scheduler import (  # noqa: E402
+    _clamp_to_daily_window,
+    _parse_optional_iso_datetime,
+    _parse_optional_time,
+)
+
+
+def test_next_delay_waits_for_start_at_on_first_fire() -> None:
+    """INTERVAL with a future start_at: the first fire is delayed to
+    start_at, not ``interval_seconds`` after registration. This is the
+    "every minute starting at 1am" case."""
+    future = datetime.now() + timedelta(minutes=10)
+    schedule = Schedule.every(60, start_at=future)
+    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
+    # Roughly 10 minutes out, not 60 seconds.
+    assert delay is not None
+    assert 9 * 60 < delay <= 10 * 60 + 5
+
+
+def test_next_delay_fires_immediately_when_start_at_in_past() -> None:
+    """Past start_at must not delay the first fire — the window has
+    opened, we should tick now. The natural anchor is ``now`` (not
+    last_fire_at) on the first fire so there's no manufactured delay."""
+    past = datetime.now() - timedelta(hours=1)
+    schedule = Schedule.every(60, start_at=past)
+    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
+    assert delay == 0.0
+
+
+def test_next_delay_retires_job_past_end_at() -> None:
+    """Once end_at is in the past, _next_delay returns None so the
+    loop transitions the job to DONE. Without this, a "for today only"
+    alarm would keep ticking tomorrow."""
+    past = datetime.now() - timedelta(seconds=1)
+    schedule = Schedule.every(60, end_at=past)
+    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
+    assert delay is None
+
+
+def test_next_delay_clamps_to_daily_window_when_outside() -> None:
+    """Outside the window, next fire is pushed to the NEXT window
+    start (today if we haven't hit it yet, tomorrow otherwise). This
+    is the "every minute from 1am to 2am every day" case — if it's
+    noon, the next fire isn't noon+60s, it's 1am tomorrow."""
+    # Pick a window known to be in the past relative to now, regardless
+    # of what time the test runs — 00:00 to 00:01. The "next valid"
+    # is tomorrow at 00:00.
+    schedule = Schedule.every(
+        60,
+        window_start_time=dtime(0, 0),
+        window_end_time=dtime(0, 1),
+    )
+    # last_fire_at right now so natural = now + 60s, definitely outside
+    # the one-minute window at midnight (unless the test runs in that
+    # one minute — accept either branch).
+    now = datetime.now()
+    delay = SchedulerService._next_delay(schedule, last_fire_at=now)
+    assert delay is not None
+    # Either (rare) inside the window this exact minute, or clamped to
+    # tomorrow 00:00 which is well over an hour out.
+    if not (now.hour == 0 and now.minute == 0):
+        # Any time except exactly 00:00 should land at tomorrow 00:00.
+        # Minimum delay to "tomorrow 00:00" is at least several
+        # minutes; bound loosely to avoid flake.
+        assert delay > 60.0
+
+
+def test_next_delay_honors_window_when_inside() -> None:
+    """Inside the window, the interval applies normally. A 60-second
+    interval job whose window spans "all day" behaves exactly as a
+    windowless job."""
+    # 24-hour window: 00:00:00 to 23:59:59 — we're always inside.
+    schedule = Schedule.every(
+        60,
+        window_start_time=dtime(0, 0),
+        window_end_time=dtime(23, 59, 59),
+    )
+    last_fire = datetime.now() - timedelta(seconds=10)
+    delay = SchedulerService._next_delay(schedule, last_fire_at=last_fire)
+    # 60s interval, minus 10s since last fire → ~50s remaining.
+    assert delay is not None
+    assert 45 <= delay <= 60
+
+
+def test_next_delay_once_retires_after_fire() -> None:
+    """ONCE: first call returns the delay; second call (with
+    last_fire_at set) returns None so the loop exits cleanly."""
+    schedule = Schedule.once_after(30)
+    first = SchedulerService._next_delay(schedule, last_fire_at=None)
+    assert first == 30
+
+    after_fire = SchedulerService._next_delay(
+        schedule, last_fire_at=datetime.now()
+    )
+    assert after_fire is None
+
+
+def test_clamp_to_daily_window_before_start_jumps_to_today() -> None:
+    """Before the window's start-of-day, the next valid fire is today
+    at the window start — not the previous day's start."""
+    candidate = datetime(2026, 6, 1, 12, 30)  # noon
+    result = _clamp_to_daily_window(
+        candidate, dtime(13, 0), dtime(14, 0)
+    )
+    assert result == datetime(2026, 6, 1, 13, 0)
+
+
+def test_clamp_to_daily_window_past_end_jumps_to_tomorrow() -> None:
+    """After the window's end, the next valid fire is TOMORROW at the
+    window start — preserves the daily-recurrence semantic."""
+    candidate = datetime(2026, 6, 1, 15, 0)  # 3pm
+    result = _clamp_to_daily_window(
+        candidate, dtime(13, 0), dtime(14, 0)
+    )
+    assert result == datetime(2026, 6, 2, 13, 0)
+
+
+def test_clamp_to_daily_window_inside_passes_through() -> None:
+    """Inside the window, the candidate is returned unchanged — no
+    artificial drift."""
+    candidate = datetime(2026, 6, 1, 13, 30)
+    result = _clamp_to_daily_window(
+        candidate, dtime(13, 0), dtime(14, 0)
+    )
+    assert result == candidate
+
+
+def test_parse_optional_iso_datetime_roundtrip() -> None:
+    """Empty / None / malformed → None; valid ISO roundtrips as a
+    naive datetime. Timezone-aware input is converted to local-naive
+    because the scheduler does naive-local time arithmetic throughout."""
+    assert _parse_optional_iso_datetime(None) is None
+    assert _parse_optional_iso_datetime("") is None
+    assert _parse_optional_iso_datetime("not a date") is None
+
+    parsed = _parse_optional_iso_datetime("2026-04-19T01:30:00")
+    assert parsed == datetime(2026, 4, 19, 1, 30, 0)
+    assert parsed.tzinfo is None
+
+
+def test_parse_optional_time_roundtrip() -> None:
+    assert _parse_optional_time(None) is None
+    assert _parse_optional_time("") is None
+    assert _parse_optional_time("bogus") is None
+    assert _parse_optional_time("01:00") == dtime(1, 0)
+    assert _parse_optional_time("01:00:30") == dtime(1, 0, 30)
+
+
 # --- Job management ---
 
 
@@ -1161,6 +1313,207 @@ async def test_set_alarm_rejects_both_tool_and_ai_prompt() -> None:
     assert "only one of" in parsed["error"].lower()
     # Nothing got registered
     assert "bad" not in svc._jobs
+
+
+# --- set_alarm bounds + window validation ---
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_accepts_start_at_and_end_at() -> None:
+    """Happy path: 'every minute from 1am to 2am today only' should
+    register, persist the bounds, and expose them in list_timers."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "bounded",
+            "type": "interval",
+            "interval_seconds": 60,
+            "start_at": "2099-01-01T01:00:00",
+            "end_at": "2099-01-01T02:00:00",
+            "message": "tick",
+        },
+    )
+    parsed = json.loads(result)
+    assert parsed["status"] == "set"
+    info = svc.get_job("bounded")
+    assert info is not None
+    assert info.schedule.start_at == datetime(2099, 1, 1, 1, 0)
+    assert info.schedule.end_at == datetime(2099, 1, 1, 2, 0)
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_end_before_start() -> None:
+    """Bounded runs must go forward in time. Inverted bounds are almost
+    always user error (or a typo) and would silently retire the job on
+    first tick — better to fail loudly at setup."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "bad",
+            "type": "interval",
+            "interval_seconds": 60,
+            "start_at": "2099-01-01T02:00:00",
+            "end_at": "2099-01-01T01:00:00",
+        },
+    )
+    assert "after start_at" in json.loads(result)["error"]
+    assert "bad" not in svc._jobs
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_half_specified_window() -> None:
+    """window_start_time and window_end_time must be set together; a
+    single-sided window is ambiguous and rejecting it early prevents
+    silent misbehaviour."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "halfwindow",
+            "type": "interval",
+            "interval_seconds": 60,
+            "window_start_time": "01:00",
+        },
+    )
+    assert "together" in json.loads(result)["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_overnight_window() -> None:
+    """Overnight windows (end before start, e.g. 22:00-02:00) aren't
+    supported — they'd require second-day wrapping in the clamp
+    logic that isn't implemented. Reject with a clear message rather
+    than half-working."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "overnight",
+            "type": "interval",
+            "interval_seconds": 60,
+            "window_start_time": "22:00",
+            "window_end_time": "02:00",
+        },
+    )
+    assert "overnight windows" in json.loads(result)["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_window_on_daily_alarm() -> None:
+    """Daily/hourly alarms already carry their own time anchor; a
+    time-of-day window on them is nonsensical. Reject so the user
+    doesn't discover this via mysterious non-firing."""
+    svc = SchedulerService()
+    svc._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    result = await svc.execute_tool(
+        "set_alarm",
+        {
+            "name": "daily-with-window",
+            "type": "daily",
+            "hour": 8,
+            "minute": 30,
+            "window_start_time": "01:00",
+            "window_end_time": "02:00",
+        },
+    )
+    assert "interval" in json.loads(result)["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_bounds_round_trip_through_persistence() -> None:
+    """Re-registration across a restart must preserve start_at, end_at,
+    and the window — otherwise a bounded alarm created before a reboot
+    would run unbounded after it."""
+    stored: dict[str, dict[str, Any]] = {}
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    fake = _FakeStorage()
+
+    svc1 = SchedulerService()
+    svc1._resolver = _resolver_with(tools=[_FakeTool()], acl=_FakeACL())
+    svc1._storage = fake  # type: ignore[assignment]
+    await svc1.execute_tool(
+        "set_alarm",
+        {
+            "name": "windowed",
+            "type": "interval",
+            "interval_seconds": 60,
+            "start_at": "2099-06-01T00:00:00",
+            "end_at": "2099-06-30T00:00:00",
+            "window_start_time": "01:00",
+            "window_end_time": "02:00",
+        },
+    )
+    await svc1.stop()
+
+    svc2 = SchedulerService()
+    svc2._storage = fake  # type: ignore[assignment]
+    await svc2._load_persisted_jobs()
+    info = svc2.get_job("windowed")
+    assert info is not None
+    assert info.schedule.start_at == datetime(2099, 6, 1, 0, 0)
+    assert info.schedule.end_at == datetime(2099, 6, 30, 0, 0)
+    assert info.schedule.window_start_time == dtime(1, 0)
+    assert info.schedule.window_end_time == dtime(2, 0)
+    await svc2.stop()
+
+
+@pytest.mark.asyncio
+async def test_load_persisted_jobs_drops_expired_recurring_bounds() -> None:
+    """A recurring alarm whose end_at is in the past on startup should
+    be dropped from storage — analogous to how expired one-shot
+    timers are cleaned up. Otherwise stale records would linger and
+    re-register-then-immediately-retire on every restart."""
+    past = (datetime.now() - timedelta(days=1)).isoformat()
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "retired": {
+                "id": "retired",
+                "name": "retired",
+                "schedule_type": "interval",
+                "interval_seconds": 60,
+                "start_at": "",
+                "end_at": past,
+                "window_start_time": "",
+                "window_end_time": "",
+                "owner": "u1",
+                "action": {"type": "event", "message": "stale"},
+                "created_at": past,
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+    assert svc.get_job("retired") is None
+    assert "retired" not in stored["scheduler_jobs"]
+    await svc.stop()
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,14 @@ class ToolDefinition:
     # prefixed on top: ``/<plugin_ns>.<slash_group> <slash_command>``.
     slash_group: str | None = None
     slash_help: str = ""  # short help text; falls back to ``description``
+    # Opt-in flag: this tool is safe to execute concurrently with other
+    # ``parallel_safe`` tools emitted in the same AI turn. A tool qualifies
+    # when it (a) has no shared mutable state with its siblings, (b) doesn't
+    # depend on another tool's result from the same batch, and (c) won't
+    # exceed an external rate limit when fanned out. Default is ``False`` —
+    # unsafe-by-default means adding a new tool is never a hidden concurrency
+    # hazard. Pure reads (search/fetch/get_*) are the natural first opt-ins.
+    parallel_safe: bool = False
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert parameters to JSON Schema format (used by most AI providers)."""

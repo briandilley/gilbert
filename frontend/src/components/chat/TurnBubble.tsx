@@ -10,6 +10,7 @@ import type {
 } from "@/types/chat";
 import { isReferenceAttachment } from "@/types/chat";
 import { cn } from "@/lib/utils";
+import { summarizeUsage } from "@/lib/usage";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useWsApi } from "@/hooks/useWsApi";
 import {
@@ -122,6 +123,7 @@ export function TurnBubble({
                   <SquareIcon className="size-2.5 fill-muted-foreground/70 text-muted-foreground/70" />
                 </span>
               )}
+              <TurnUsageChip turn={turn} />
             </span>
 
             {(hasRounds || (turn.streaming && !hasFinal)) && (
@@ -295,6 +297,14 @@ function RoundView({
     >
       <div className="flex items-baseline gap-2 text-[10px] uppercase tracking-wide text-muted-foreground">
         <span className="tabular-nums">round {roundNumber}</span>
+        {round.usage && (
+          <span
+            className="normal-case tracking-normal tabular-nums text-muted-foreground/80"
+            title="Tokens and cost for this round"
+          >
+            {summarizeUsage(round.usage)}
+          </span>
+        )}
       </div>
       {round.reasoning && (
         <div
@@ -481,6 +491,68 @@ function FinalAnswer({ turn }: { turn: ChatTurn }) {
       )}
     </div>
   );
+}
+
+// ─── Per-turn usage chip ─────────────────────────────────────────────
+
+function TurnUsageChip({ turn }: { turn: ChatTurn }) {
+  // Prefer the authoritative ``turn_usage`` from the server; fall back
+  // to summing ``rounds[].usage`` + ``final_usage`` when only those are
+  // present (streaming live-in-progress state).
+  const usage = turn.turn_usage ?? sumTurnUsage(turn);
+  if (!usage) return null;
+  const label = summarizeUsage(usage);
+  if (!label) return null;
+  return (
+    <span
+      className="text-[10px] tabular-nums text-muted-foreground/70 pl-1 border-l border-muted-foreground/25"
+      title={
+        usage.rounds
+          ? `${usage.rounds} round${usage.rounds === 1 ? "" : "s"} · full-turn token total`
+          : "Full-turn token total"
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
+function sumTurnUsage(turn: ChatTurn) {
+  let input = 0;
+  let output = 0;
+  let cacheC = 0;
+  let cacheR = 0;
+  let cost = 0;
+  let count = 0;
+  let saw = false;
+  for (const r of turn.rounds) {
+    if (!r.usage) continue;
+    saw = true;
+    input += r.usage.input_tokens;
+    output += r.usage.output_tokens;
+    cacheC += r.usage.cache_creation_tokens;
+    cacheR += r.usage.cache_read_tokens;
+    cost += r.usage.cost_usd;
+    count += 1;
+  }
+  if (turn.final_usage) {
+    saw = true;
+    input += turn.final_usage.input_tokens;
+    output += turn.final_usage.output_tokens;
+    cacheC += turn.final_usage.cache_creation_tokens;
+    cacheR += turn.final_usage.cache_read_tokens;
+    cost += turn.final_usage.cost_usd;
+    count += 1;
+  }
+  if (!saw) return null;
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    cache_creation_tokens: cacheC,
+    cache_read_tokens: cacheR,
+    cost_usd: cost,
+    rounds: count,
+  };
 }
 
 // ─── Attachment chip (shared between user and assistant) ─────────────

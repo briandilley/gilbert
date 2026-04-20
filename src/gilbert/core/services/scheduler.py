@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time as dtime, timedelta
 from typing import Any
 
 from gilbert.core.context import get_current_user
@@ -35,6 +35,86 @@ logger = logging.getLogger(__name__)
 # registered in-memory on each startup by their owning services and
 # are NOT persisted here.
 _JOBS_COLLECTION = "scheduler_jobs"
+
+
+def _parse_optional_iso_datetime(value: Any) -> datetime | None:
+    """Parse an ISO-8601 datetime string into a naive local datetime.
+
+    Accepts ``None`` and empty strings (both return ``None``). Strips
+    trailing ``Z`` for Python < 3.11 compatibility. Any timezone-aware
+    input is converted to local-naive — the scheduler's time arithmetic
+    is naive-local throughout, matching how ``hour``/``minute`` are
+    already interpreted for DAILY/HOURLY schedules.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _parse_optional_time(value: Any) -> dtime | None:
+    """Parse a ``HH:MM`` (or ``HH:MM:SS``) string into a ``time``.
+
+    ``None`` / empty returns ``None``; unparseable input returns
+    ``None`` rather than raising so that a bad config value just
+    disables the window rather than crashing the scheduler.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return dtime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _format_optional_datetime(dt: datetime | None) -> str:
+    """Inverse of ``_parse_optional_iso_datetime`` for persistence."""
+    return dt.isoformat() if dt is not None else ""
+
+
+def _format_optional_time(t: dtime | None) -> str:
+    """Inverse of ``_parse_optional_time`` for persistence."""
+    return t.isoformat() if t is not None else ""
+
+
+def _clamp_to_daily_window(
+    candidate: datetime, window_start: dtime, window_end: dtime
+) -> datetime:
+    """Push ``candidate`` forward to the next point inside [start, end].
+
+    If ``candidate``'s time-of-day is already inside the window, returns
+    it unchanged. If it's before the start, jumps to today's start. If
+    it's past the end, jumps to tomorrow's start. Overnight windows
+    (end < start) are not supported — the caller validates that.
+    """
+    today_start = candidate.replace(
+        hour=window_start.hour,
+        minute=window_start.minute,
+        second=window_start.second,
+        microsecond=0,
+    )
+    today_end = candidate.replace(
+        hour=window_end.hour,
+        minute=window_end.minute,
+        second=window_end.second,
+        microsecond=0,
+    )
+    if candidate < today_start:
+        return today_start
+    if candidate <= today_end:
+        return candidate
+    return today_start + timedelta(days=1)
 
 
 # Minimal system prompt for AI-driven scheduled actions. Kept small to
@@ -360,16 +440,29 @@ class SchedulerService(Service):
     # --- Job execution loop ---
 
     async def _run_job_loop(self, job: _Job) -> None:
-        """Run a job on its schedule until cancelled."""
+        """Run a job on its schedule until cancelled or retired.
+
+        Tracks ``last_fire_at`` locally so interval-with-window jobs can
+        anchor the next-fire calculation off the previous fire (not off
+        the loop iteration time, which drifts when sleeps are long).
+        The loop exits cleanly when ``_next_delay`` returns ``None`` —
+        that means the schedule has nothing more to do (one-shot done,
+        past ``end_at``, etc.) and the job transitions to ``DONE``.
+        """
+        last_fire_at: datetime | None = None
         try:
             while True:
-                delay = self._next_delay(job.info.schedule)
+                delay = self._next_delay(job.info.schedule, last_fire_at)
+                if delay is None:
+                    job.info.state = JobState.DONE
+                    return
                 await asyncio.sleep(delay)
 
                 if not job.info.enabled:
                     continue
 
                 await self._execute_job(job)
+                last_fire_at = datetime.now()
 
                 if job.info.schedule.type == ScheduleType.ONCE:
                     job.info.state = JobState.DONE
@@ -399,13 +492,43 @@ class SchedulerService(Service):
         job.info.state = JobState.IDLE
 
     @staticmethod
-    def _next_delay(schedule: Schedule) -> float:
-        """Calculate seconds until the next run."""
-        if schedule.type in (ScheduleType.INTERVAL, ScheduleType.ONCE):
+    def _next_delay(
+        schedule: Schedule,
+        last_fire_at: datetime | None = None,
+    ) -> float | None:
+        """Seconds until the next fire, or ``None`` if the job is retired.
+
+        ``last_fire_at`` lets interval jobs anchor off the previous fire
+        so drift doesn't accumulate across long bounds/window sleeps.
+        For non-interval schedules the parameter is ignored — DAILY and
+        HOURLY compute against ``datetime.now()`` directly.
+
+        Returns ``None`` in three cases:
+        - A ONCE job has already fired.
+        - The next computed fire would land after ``end_at``.
+        - The schedule type is unrecognised (shouldn't happen, but
+          returning ``None`` retires the loop cleanly rather than
+          looping forever at the 60s fallback).
+        """
+        now = datetime.now()
+
+        if schedule.type == ScheduleType.ONCE:
+            # ONCE is one-shot: if we've already fired, we're done.
+            if last_fire_at is not None:
+                return None
             return schedule.interval_seconds
 
-        now = datetime.now()
-        if schedule.type == ScheduleType.DAILY:
+        # Candidate next-fire, ignoring bounds/window.
+        natural: datetime
+        if schedule.type == ScheduleType.INTERVAL:
+            if last_fire_at is None:
+                # First fire: honour start_at if set, else fire ASAP.
+                natural = schedule.start_at or now
+            else:
+                natural = last_fire_at + timedelta(
+                    seconds=schedule.interval_seconds
+                )
+        elif schedule.type == ScheduleType.DAILY:
             target = now.replace(
                 hour=schedule.hour,
                 minute=schedule.minute,
@@ -413,18 +536,60 @@ class SchedulerService(Service):
                 microsecond=0,
             )
             if target <= now:
-                target = target.replace(day=target.day + 1)
-            return (target - now).total_seconds()
-
-        if schedule.type == ScheduleType.HOURLY:
+                target += timedelta(days=1)
+            natural = target
+        elif schedule.type == ScheduleType.HOURLY:
             target = now.replace(minute=schedule.minute, second=0, microsecond=0)
             if target <= now:
-                from datetime import timedelta
-
                 target += timedelta(hours=1)
-            return (target - now).total_seconds()
+            natural = target
+        else:
+            return None
 
-        return 60.0  # fallback
+        # ``start_at`` only delays the first fire for non-interval
+        # schedules (INTERVAL handles it in the natural calc above).
+        # For DAILY/HOURLY we still need to push past ``start_at``.
+        if schedule.start_at is not None and natural < schedule.start_at:
+            natural = schedule.start_at
+            # DAILY/HOURLY anchor natural to a specific time-of-day;
+            # if start_at itself doesn't match that anchor we have to
+            # advance to the next valid anchor after start_at.
+            if schedule.type == ScheduleType.DAILY:
+                anchor = natural.replace(
+                    hour=schedule.hour,
+                    minute=schedule.minute,
+                    second=0,
+                    microsecond=0,
+                )
+                if anchor < natural:
+                    anchor += timedelta(days=1)
+                natural = anchor
+            elif schedule.type == ScheduleType.HOURLY:
+                anchor = natural.replace(
+                    minute=schedule.minute, second=0, microsecond=0
+                )
+                if anchor < natural:
+                    anchor += timedelta(hours=1)
+                natural = anchor
+
+        # Daily recurring window — only meaningful for INTERVAL.
+        if (
+            schedule.type == ScheduleType.INTERVAL
+            and schedule.window_start_time is not None
+            and schedule.window_end_time is not None
+        ):
+            natural = _clamp_to_daily_window(
+                natural,
+                schedule.window_start_time,
+                schedule.window_end_time,
+            )
+
+        # Absolute deadline — if we've rolled past it, retire the job.
+        if schedule.end_at is not None and natural > schedule.end_at:
+            return None
+
+        delay = (natural - now).total_seconds()
+        return max(0.0, delay)
 
     # --- Action dispatch ---
 
@@ -859,6 +1024,10 @@ class SchedulerService(Service):
             "interval_seconds": schedule.interval_seconds,
             "hour": schedule.hour,
             "minute": schedule.minute,
+            "start_at": _format_optional_datetime(schedule.start_at),
+            "end_at": _format_optional_datetime(schedule.end_at),
+            "window_start_time": _format_optional_time(schedule.window_start_time),
+            "window_end_time": _format_optional_time(schedule.window_end_time),
             "owner": owner,
             "action": action.to_dict(),
             "created_at": now_iso,
@@ -907,6 +1076,14 @@ class SchedulerService(Service):
                     interval_seconds=float(row.get("interval_seconds", 0) or 0),
                     hour=int(row.get("hour", 0) or 0),
                     minute=int(row.get("minute", 0) or 0),
+                    start_at=_parse_optional_iso_datetime(row.get("start_at")),
+                    end_at=_parse_optional_iso_datetime(row.get("end_at")),
+                    window_start_time=_parse_optional_time(
+                        row.get("window_start_time")
+                    ),
+                    window_end_time=_parse_optional_time(
+                        row.get("window_end_time")
+                    ),
                 )
 
                 # Drop one-shot timers that should have already fired
@@ -925,6 +1102,24 @@ class SchedulerService(Service):
                                 continue
                         except ValueError:
                             pass
+
+                # Drop recurring jobs whose end_at is already past — they
+                # would just re-register, tick once, and retire to DONE.
+                # Dropping at load time keeps the scheduler clean across
+                # restarts.
+                if (
+                    schedule.end_at is not None
+                    and schedule.end_at <= datetime.now()
+                ):
+                    logger.info(
+                        "Scheduler: dropping expired recurring job '%s' "
+                        "(end_at=%s)",
+                        name,
+                        schedule.end_at.isoformat(),
+                    )
+                    await self._unpersist_job(name)
+                    dropped_expired += 1
+                    continue
 
                 action = ScheduledAction.from_dict(row.get("action"))
                 owner = str(row.get("owner") or "")
@@ -971,6 +1166,7 @@ class SchedulerService(Service):
                 slash_help="List all active timers and alarms: /timer list",
                 description="List all active timers and alarms (both system and user).",
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_timer",
@@ -1184,6 +1380,53 @@ class SchedulerService(Service):
                         ),
                         required=False,
                     ),
+                    ToolParameter(
+                        name="start_at",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional ISO-8601 datetime (local time, e.g. "
+                            "'2026-04-20T01:00:00') — the first fire cannot "
+                            "happen before this. Use for 'every minute "
+                            "starting at 1am': type='interval', "
+                            "interval_seconds=60, start_at='<today>T01:00:00'."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="end_at",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional ISO-8601 datetime — the alarm retires "
+                            "after this. Combine with start_at for a bounded "
+                            "run (e.g. 'from 1am to 2am today only'). Must be "
+                            "after start_at."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="window_start_time",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional daily recurring time-of-day window "
+                            "start, 'HH:MM' (24h). Only applies to "
+                            "type='interval'. Must be paired with "
+                            "window_end_time. Use for 'every minute from "
+                            "1am to 2am every day': type='interval', "
+                            "interval_seconds=60, window_start_time='01:00', "
+                            "window_end_time='02:00'. Overnight windows "
+                            "(end before start) are not supported."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="window_end_time",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Daily window end time, 'HH:MM' (24h). Paired "
+                            "with window_start_time."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
             ),
@@ -1262,6 +1505,14 @@ class SchedulerService(Service):
                     "interval_seconds": j.schedule.interval_seconds,
                     "hour": j.schedule.hour,
                     "minute": j.schedule.minute,
+                    "start_at": _format_optional_datetime(j.schedule.start_at),
+                    "end_at": _format_optional_datetime(j.schedule.end_at),
+                    "window_start_time": _format_optional_time(
+                        j.schedule.window_start_time
+                    ),
+                    "window_end_time": _format_optional_time(
+                        j.schedule.window_end_time
+                    ),
                     "state": j.state.value,
                     "enabled": j.enabled,
                     "owner": j.owner,
@@ -1316,15 +1567,68 @@ class SchedulerService(Service):
         alarm_name = arguments["name"]
         alarm_type = arguments["type"]
 
+        start_at = _parse_optional_iso_datetime(arguments.get("start_at"))
+        end_at = _parse_optional_iso_datetime(arguments.get("end_at"))
+        window_start = _parse_optional_time(arguments.get("window_start_time"))
+        window_end = _parse_optional_time(arguments.get("window_end_time"))
+
+        # Validate input: a bounded end must come after the bounded
+        # start, and a window must be same-day with start < end.
+        if start_at is not None and end_at is not None and end_at <= start_at:
+            return json.dumps({"error": "end_at must be after start_at."})
+        if (window_start is None) != (window_end is None):
+            return json.dumps(
+                {
+                    "error": (
+                        "window_start_time and window_end_time must be set "
+                        "together."
+                    )
+                }
+            )
+        if (
+            window_start is not None
+            and window_end is not None
+            and window_end <= window_start
+        ):
+            return json.dumps(
+                {
+                    "error": (
+                        "window_end_time must be after window_start_time "
+                        "(overnight windows are not supported)."
+                    )
+                }
+            )
+        if window_start is not None and alarm_type != "interval":
+            return json.dumps(
+                {
+                    "error": (
+                        "window_start_time / window_end_time only apply to "
+                        "'interval' alarms."
+                    )
+                }
+            )
+
         if alarm_type == "interval":
-            schedule = Schedule.every(float(arguments.get("interval_seconds", 60)))
+            schedule = Schedule.every(
+                float(arguments.get("interval_seconds", 60)),
+                start_at=start_at,
+                end_at=end_at,
+                window_start_time=window_start,
+                window_end_time=window_end,
+            )
         elif alarm_type == "daily":
             schedule = Schedule.daily_at(
                 hour=int(arguments.get("hour", 0)),
                 minute=int(arguments.get("minute", 0)),
+                start_at=start_at,
+                end_at=end_at,
             )
         elif alarm_type == "hourly":
-            schedule = Schedule.hourly_at(minute=int(arguments.get("minute", 0)))
+            schedule = Schedule.hourly_at(
+                minute=int(arguments.get("minute", 0)),
+                start_at=start_at,
+                end_at=end_at,
+            )
         else:
             return json.dumps({"error": f"Unknown schedule type: {alarm_type}"})
 
@@ -1433,6 +1737,14 @@ class SchedulerService(Service):
                 "interval_seconds": info.schedule.interval_seconds,
                 "hour": info.schedule.hour,
                 "minute": info.schedule.minute,
+                "start_at": _format_optional_datetime(info.schedule.start_at),
+                "end_at": _format_optional_datetime(info.schedule.end_at),
+                "window_start_time": _format_optional_time(
+                    info.schedule.window_start_time
+                ),
+                "window_end_time": _format_optional_time(
+                    info.schedule.window_end_time
+                ),
             },
             "action": info.action.to_dict(),
         }

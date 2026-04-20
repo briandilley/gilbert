@@ -153,6 +153,26 @@ export interface ChatResponse {
   interrupted?: boolean;
   /** The model ID that handled this turn (echoed from the backend). */
   model?: string;
+  /** Aggregate token + cost totals for the whole turn (sum over every
+   *  round including the final end_turn round). The chat UI renders
+   *  this once per turn bubble. */
+  turn_usage?: TurnUsage | null;
+}
+
+// ── Token/cost usage shapes ──────────────────────────────────────────
+
+export interface RoundUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+}
+
+export interface TurnUsage extends RoundUsage {
+  /** How many AI rounds contributed to this total (tool rounds plus the
+   *  final end_turn round). */
+  rounds: number;
 }
 
 // ── Turn-grouped chat history ────────────────────────────────────────
@@ -180,6 +200,10 @@ export interface ChatRoundTool {
 export interface ChatRound {
   reasoning: string;
   tools: ChatRoundTool[];
+  /** Per-round token + cost numbers. Present on live turns and on any
+   *  historical round that was recorded after the usage-tracking feature
+   *  shipped. Older rounds won't have it. */
+  usage?: RoundUsage;
 }
 
 export interface ChatTurnUserMessage {
@@ -213,4 +237,13 @@ export interface ChatTurn {
    *  answer (if any yet) are static. Cleared once the
    *  ``chat.message.send`` RPC resolves and the turn is committed. */
   streaming?: boolean;
+  /** Token + cost totals for this turn. Populated by the server
+   *  (``turn_usage`` on the committed turn, or summed across
+   *  ``rounds[].usage`` + ``final_usage`` on history replay). ``null``
+   *  when no rounds recorded usage (old conversations, or a pre-AI
+   *  error turn). */
+  turn_usage?: TurnUsage | null;
+  /** The final end_turn/max_tokens round's usage. Only set on history
+   *  replay — live turns fold this into ``turn_usage`` directly. */
+  final_usage?: RoundUsage;
 }

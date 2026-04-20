@@ -93,10 +93,24 @@ class StopReason(StrEnum):
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """Token consumption for a single API call."""
+    """Token consumption for a single API call.
+
+    Fields are normalized across providers so they're disjoint: ``input_tokens``
+    excludes any tokens served from cache. Backends that receive provider
+    responses where prompt counts include cache hits (OpenAI's
+    ``prompt_tokens`` includes ``cached_tokens``) must subtract before
+    populating ``input_tokens`` here.
+    """
 
     input_tokens: int
     output_tokens: int
+    cache_creation_tokens: int = 0
+    """Tokens written to the provider's prompt cache (Anthropic only).
+    Typically billed at ~1.25× the regular input rate."""
+
+    cache_read_tokens: int = 0
+    """Tokens read from the provider's prompt cache. Typically billed at
+    ~0.1× the regular input rate."""
 
 
 @dataclass
@@ -127,6 +141,13 @@ class Message:
     # frontend surfaces it as a subtle icon on the turn bubble so it's
     # clear the turn was stopped on purpose, not that it errored.
     interrupted: bool = False
+    # Per-round token + cost totals stamped onto every ASSISTANT row by
+    # ``AIService._record_round_usage``. Shape:
+    # ``{input_tokens, output_tokens, cache_creation_tokens,
+    # cache_read_tokens, cost_usd}``. Persisted with the conversation so
+    # history replay can surface per-round metrics, and summed across
+    # assistant rows to reconstruct ``ChatTurnResult.turn_usage`` totals.
+    usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +246,15 @@ class AIBackendCapabilities:
     attachments_user: bool = False
     """Backend can consume user-side multimodal ``FileAttachment`` blocks
     (images, documents, text) in ``AIRequest.messages``."""
+
+    parallel_tool_calls: bool = False
+    """Backend reliably emits multiple ``tool_use`` blocks in a single
+    ``AIResponse`` when the model decides tools can run in parallel, and
+    the backend's streaming parser correctly assembles all of them. When
+    ``False``, the agentic loop still works — the model will simply emit
+    one tool call per round and results are awaited serially. Turn this
+    on only after verifying the backend's ``generate_stream`` handles
+    concurrent ``tool_use`` blocks (not just the first one)."""
 
 
 
@@ -385,6 +415,12 @@ class ChatTurnResult(NamedTuple):
     rounds: list[dict[str, Any]]
     interrupted: bool = False
     model: str = ""
+    turn_usage: dict[str, Any] | None = None
+    """Aggregate token + cost totals for the whole turn (summed over every
+    AI round including the final end_turn round). Shape:
+    ``{input_tokens, output_tokens, cache_creation_tokens,
+    cache_read_tokens, cost_usd, rounds}``. ``None`` when no rounds ran
+    (slash-command short-circuit, pre-AI errors)."""
 
 
 @runtime_checkable

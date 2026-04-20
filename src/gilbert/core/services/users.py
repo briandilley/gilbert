@@ -579,6 +579,7 @@ class UserService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="get_user",
@@ -594,6 +595,7 @@ class UserService(Service):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="create_user",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, time
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
@@ -158,31 +159,104 @@ class ScheduleType(StrEnum):
 
 @dataclass
 class Schedule:
-    """Describes when and how often a job runs."""
+    """Describes when and how often a job runs.
+
+    Beyond the base schedule (``type`` + rate fields), four optional
+    bounds can be layered on:
+
+    - ``start_at`` / ``end_at`` — absolute naive-local datetimes that
+      delay the first fire and retire the job after a deadline. A job
+      won't fire before ``start_at``; once ``end_at`` is past, the
+      loop transitions to ``DONE``. Useful for "every minute starting
+      at 1am" or "every minute from 1am to 2am today only".
+    - ``window_start_time`` / ``window_end_time`` — a time-of-day
+      window that recurs every day. Fires only happen inside the
+      window; outside, the loop sleeps until the next window start.
+      Useful for "every minute from 1am to 2am every day". Windows
+      apply only to INTERVAL jobs — DAILY/HOURLY already carry their
+      own time anchor, and ONCE is a single shot.
+
+    All four are orthogonal: e.g. window=01:00-02:00 plus
+    ``end_at=next Sunday`` gives "every minute between 1am and 2am
+    daily until Sunday." Overnight windows (end < start) are not
+    supported — keep window_end after window_start on the same day.
+    """
 
     type: ScheduleType
     interval_seconds: float = 0
     hour: int = 0
     minute: int = 0
+    #: First fire cannot happen before this time. ``None`` = no lower
+    #: bound (first fire is scheduled per the type's normal rules).
+    start_at: datetime | None = None
+    #: Job retires to ``DONE`` once the next computed fire would land
+    #: after this time. ``None`` = no deadline.
+    end_at: datetime | None = None
+    #: Start of a daily time-of-day window for INTERVAL jobs. If set,
+    #: ``window_end_time`` must also be set. Ignored for
+    #: DAILY/HOURLY/ONCE.
+    window_start_time: time | None = None
+    #: End of the daily window. Must be on the same clock day as
+    #: ``window_start_time`` (i.e. strictly after it).
+    window_end_time: time | None = None
 
     @classmethod
-    def every(cls, seconds: float) -> Schedule:
-        """Run every N seconds."""
-        return cls(type=ScheduleType.INTERVAL, interval_seconds=seconds)
+    def every(
+        cls,
+        seconds: float,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        window_start_time: time | None = None,
+        window_end_time: time | None = None,
+    ) -> Schedule:
+        """Run every N seconds, optionally bounded by start/end/window."""
+        return cls(
+            type=ScheduleType.INTERVAL,
+            interval_seconds=seconds,
+            start_at=start_at,
+            end_at=end_at,
+            window_start_time=window_start_time,
+            window_end_time=window_end_time,
+        )
 
     @classmethod
-    def daily_at(cls, hour: int, minute: int = 0) -> Schedule:
-        """Run daily at a specific time."""
-        return cls(type=ScheduleType.DAILY, hour=hour, minute=minute)
+    def daily_at(
+        cls,
+        hour: int,
+        minute: int = 0,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> Schedule:
+        """Run daily at a specific time, optionally bounded by start/end."""
+        return cls(
+            type=ScheduleType.DAILY,
+            hour=hour,
+            minute=minute,
+            start_at=start_at,
+            end_at=end_at,
+        )
 
     @classmethod
-    def hourly_at(cls, minute: int = 0) -> Schedule:
-        """Run hourly at a specific minute."""
-        return cls(type=ScheduleType.HOURLY, minute=minute)
+    def hourly_at(
+        cls,
+        minute: int = 0,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> Schedule:
+        """Run hourly at a specific minute, optionally bounded."""
+        return cls(
+            type=ScheduleType.HOURLY,
+            minute=minute,
+            start_at=start_at,
+            end_at=end_at,
+        )
 
     @classmethod
     def once_after(cls, seconds: float) -> Schedule:
-        """Run once after a delay."""
+        """Run once after a delay. Bounds don't apply — the delay is the schedule."""
         return cls(type=ScheduleType.ONCE, interval_seconds=seconds)
 
 

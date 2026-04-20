@@ -225,6 +225,14 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Usage",
+                        "description": "AI token usage + cost reporting",
+                        "url": "/usage",
+                        "icon": "bar-chart",
+                        "required_role": "admin",
+                        "requires_capability": "usage_reporting",
+                    },
+                    {
                         "label": "Plugins",
                         "description": "Install & manage plugins",
                         "url": "/plugins",

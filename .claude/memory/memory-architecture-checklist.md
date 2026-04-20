@@ -33,6 +33,20 @@ Scan imports in each layer:
 - **Web routes** implementing authorization logic, AI prompt construction, backend resolution, or third-party API URL building. Routes should only parse requests, call services, and format responses.
 - **Shared constants/mappings** defined in `core/`, `integrations/`, or `web/` that are used by multiple layers — these belong in `interfaces/`.
 
+### Multi-User Isolation
+
+Services are singletons shared across every user and in-flight request. Per-request state stored on `self` will race under concurrent users and leak events/data between conversations. Audit procedure:
+
+- **Flag every instance attribute matching `_current_*`, `_active_*`, `_pending_*`.** For each, decide whether the value is service-lifetime (config, backend handles — fine) or request-scoped (user id, conversation id, active turn — must migrate). Grep: `self\._current_|self\._active_|self\._pending_` in `src/gilbert/core/services/` and `std-plugins/*/`.
+- **Any attribute set inside a request handler and read after an `await`** is suspicious. Even attributes that look request-scoped ("I only set this at the start of each request") race when two requests overlap, because the second one's `set` lands during the first one's `await`.
+- **Request-scoped identity (user id, conversation id, correlation id, trace context)** must live in a `ContextVar` in `gilbert.core.context`, not on a service instance. Reads go through `get_current_*()`, writes through `set_current_*()` at entry points only.
+- **Parallel `asyncio.Task`s must be spawned with an explicit context:** `asyncio.Task(coro, context=contextvars.copy_context())`. Otherwise `ContextVar.set()` inside one task leaks to siblings. Grep for `asyncio.gather` and `asyncio.create_task` / `asyncio.Task` — any instance without `context=` that's invoked inside a request handler needs review.
+- **Global locks protecting per-target resources** (e.g., `_announce_lock` covering every speaker) serialize unrelated work. A lock should be global only if the thing it protects is genuinely global. If the operation is parameterized by a target (speaker id, file path, user id, conversation id), gate by a `dict[target_id, asyncio.Lock]` keyed appropriately.
+- **Module-level mutable state** (`_current_session: dict = {}` at module scope, populated during one request and read during another) has the same failure mode as instance attributes. Treat it the same way.
+- **Tool handlers** should read caller identity from injected `_user_id` / `_conversation_id` arguments, not from `self` or global context — this makes the race surface explicit at the call boundary.
+
+See [Multi-User Isolation](memory-multi-user-isolation.md) for the full pattern catalog, failure modes, and fix recipes.
+
 ### Plugin-Specific Checks
 
 - Plugin resolves dependencies via **concrete imports** instead of `resolver.require_capability()` / `resolver.get_capability()`.

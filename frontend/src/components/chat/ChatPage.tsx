@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -50,6 +50,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PromptDialog } from "@/components/ui/PromptDialog";
+import { summarizeUsage } from "@/lib/usage";
 
 export function ChatPage() {
   const { user } = useAuth();
@@ -1062,6 +1063,7 @@ export function ChatPage() {
             <h2 className="text-sm font-medium truncate">
               {chatTitle || "Chat"}
             </h2>
+            <ConversationUsageLine turns={turns} />
           </div>
 
           {/* Actions */}
@@ -1358,6 +1360,53 @@ export function ChatPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/**
+ * Running token + cost total for the currently-open conversation. Sums
+ * across every turn's ``turn_usage`` (which is already server-computed
+ * for both live and replayed turns). Renders under the conversation
+ * title so the user always sees the conversation's total spend.
+ */
+function ConversationUsageLine({ turns }: { turns: ChatTurn[] }) {
+  const totals = useMemo(() => {
+    let input = 0;
+    let output = 0;
+    let cacheC = 0;
+    let cacheR = 0;
+    let cost = 0;
+    let rounds = 0;
+    for (const t of turns) {
+      const u = t.turn_usage;
+      if (!u) continue;
+      input += u.input_tokens;
+      output += u.output_tokens;
+      cacheC += u.cache_creation_tokens;
+      cacheR += u.cache_read_tokens;
+      cost += u.cost_usd;
+      rounds += u.rounds ?? 0;
+    }
+    if (!rounds && !input && !output && !cost) return null;
+    return {
+      input_tokens: input,
+      output_tokens: output,
+      cache_creation_tokens: cacheC,
+      cache_read_tokens: cacheR,
+      cost_usd: cost,
+      rounds,
+    };
+  }, [turns]);
+  if (!totals) return null;
+  const label = summarizeUsage(totals, { includeCache: true });
+  if (!label) return null;
+  return (
+    <div
+      className="text-[10px] tabular-nums text-muted-foreground/80 truncate"
+      title={`${totals.rounds} AI round${totals.rounds === 1 ? "" : "s"} in this conversation`}
+    >
+      {label}
     </div>
   );
 }

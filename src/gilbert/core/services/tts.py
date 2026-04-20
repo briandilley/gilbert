@@ -220,6 +220,13 @@ class TTSService(Service):
                     ),
                 ],
                 required_role="everyone",
+                # Each call writes its output to a UUID-named MP3, so
+                # filenames never collide across concurrent callers and
+                # the output-dir cleanup step is idempotent. External
+                # TTS providers handle independent HTTP calls fine —
+                # fan-out here is what makes multi-speaker announces
+                # snappy, since announce() synthesizes per target.
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="list_voices",
@@ -228,6 +235,7 @@ class TTSService(Service):
                 slash_help="List available TTS voices: /tts voices",
                 description="List all available TTS voices from the provider.",
                 required_role="everyone",
+                parallel_safe=True,
             ),
         ]
 

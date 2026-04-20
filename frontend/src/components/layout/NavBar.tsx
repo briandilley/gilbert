@@ -39,6 +39,7 @@ import {
   RadioIcon,
   RotateCcwIcon,
   TerminalIcon,
+  BarChart3Icon,
   ChevronDownIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -72,6 +73,7 @@ const ICONS: Record<string, LucideIcon> = {
   "radio": RadioIcon,
   "rotate-ccw": RotateCcwIcon,
   "terminal": TerminalIcon,
+  "bar-chart": BarChart3Icon,
 };
 
 /** Tailwind color for each top-level group's icon. */

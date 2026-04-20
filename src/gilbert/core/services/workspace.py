@@ -95,6 +95,19 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         # built (same pattern as SpeakerService uses for TTS audio).
         self._web_host: str = "0.0.0.0"
         self._web_port: int = 8000
+        # Per-path locks for the write tools. The AI loop fan-out pattern
+        # is typically "write N *different* files in parallel", which is
+        # safe; the rare "two calls to the same path in one batch" case
+        # would race on disk write + registry bookkeeping, so we gate
+        # each tool by path to make same-path collisions serialize
+        # transparently. Key is ``"<conv_id>:<rel_path>"`` so two
+        # conversations writing the same rel_path don't contend. Dict
+        # grows unbounded with workspace path cardinality; in practice
+        # that's bounded by real files on disk, and per-path locks are
+        # cheap (~100 bytes each). ``_path_locks_guard`` serializes the
+        # dict insert so we don't race on get-or-create.
+        self._path_locks: dict[str, asyncio.Lock] = {}
+        self._path_locks_guard = asyncio.Lock()
 
     # ── Service interface ────────────────────────────────────────────
 
@@ -982,6 +995,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 ),
                 parameters=[],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="read_workspace_file",
@@ -999,6 +1013,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     ),
                 ],
                 required_role="user",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="write_workspace_file",
@@ -1044,6 +1059,9 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     ),
                 ],
                 required_role="user",
+                # Per-path locks inside the handler serialize same-path
+                # concurrent writes; different paths fan out.
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="run_workspace_script",
@@ -1139,6 +1157,11 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     ),
                 ],
                 required_role="user",
+                # Per-path locks serialize same-source concurrent
+                # attaches (preventing the scratch→outputs copy + unique-
+                # filename dance from racing). Different source paths
+                # fan out.
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="annotate_workspace_file",
@@ -1186,6 +1209,9 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     ),
                 ],
                 required_role="user",
+                # Per-path locks serialize concurrent metadata updates
+                # on the same file; different files fan out.
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="delete_workspace_file",
@@ -1203,6 +1229,9 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     ),
                 ],
                 required_role="user",
+                # Per-path locks serialize concurrent deletes/writes on
+                # the same file; different files fan out.
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="share_workspace_file",
@@ -1325,6 +1354,21 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         if isinstance(conv_id, str) and conv_id:
             return conv_id
         return None
+
+    async def _get_path_lock(self, conv_id: str, rel_path: str) -> asyncio.Lock:
+        """Return the lock guarding mutations on ``rel_path`` within
+        conversation ``conv_id``. Lazily created on first use and cached
+        for the service lifetime. Two concurrent tool calls against the
+        same ``(conv_id, rel_path)`` acquire the same lock and serialize;
+        different paths get different locks and fan out freely.
+        """
+        key = f"{conv_id}:{rel_path}"
+        async with self._path_locks_guard:
+            lock = self._path_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._path_locks[key] = lock
+            return lock
 
     @staticmethod
     def _migrate_legacy_args(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1597,29 +1641,35 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         except ValueError:
             return json.dumps({"error": "Path traversal not allowed"})
 
-        try:
-            await _to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-            await _to_thread(target.write_text, content, encoding="utf-8")
-        except OSError as exc:
-            return json.dumps({"error": f"Cannot write file: {exc}"})
-
         root = self.get_workspace_root(user_id, conv_id)
         try:
             stored = target.relative_to(root.resolve()).as_posix()
         except ValueError:
             stored = rel_path
 
-        media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        await self.register_file(
-            conversation_id=conv_id,
-            user_id=user_id,
-            category=category,
-            filename=target.name,
-            rel_path=stored,
-            media_type=media_type,
-            size=byte_len,
-            created_by="ai",
-        )
+        # Serialize any other tool call targeting the same file in this
+        # conversation so concurrent writes/annotate/delete on one path
+        # don't race on disk or registry bookkeeping. Different paths
+        # acquire different locks and fan out freely.
+        path_lock = await self._get_path_lock(conv_id, stored)
+        async with path_lock:
+            try:
+                await _to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+                await _to_thread(target.write_text, content, encoding="utf-8")
+            except OSError as exc:
+                return json.dumps({"error": f"Cannot write file: {exc}"})
+
+            media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            await self.register_file(
+                conversation_id=conv_id,
+                user_id=user_id,
+                category=category,
+                filename=target.name,
+                rel_path=stored,
+                media_type=media_type,
+                size=byte_len,
+                created_by="ai",
+            )
 
         return json.dumps(
             {
@@ -1851,82 +1901,88 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                 is_error=True,
             )
 
-        # Resolve the file
-        target, err = self._resolve_file_path(user_id, rel_path, conv_id)
-        if err is not None:
-            return ToolResult(
-                tool_call_id="",
-                content=json.dumps({"error": err}),
-                is_error=True,
-            )
-        assert target is not None
-
-        # If the file is in scratch/, copy it to outputs/
-        root = self.get_workspace_root(user_id, conv_id)
-        output_dir = self.get_output_dir(user_id, conv_id)
-
-        try:
-            relative = target.relative_to(root.resolve())
-        except ValueError:
-            # Legacy file — copy it to outputs
-            relative = Path(target.name)
-
-        if str(relative).startswith("scratch/"):
-            dest = output_dir / target.name
-            if dest.exists():
-                stem = dest.stem
-                suffix = dest.suffix
-                counter = 1
-                while dest.exists():
-                    dest = output_dir / f"{stem}-{counter}{suffix}"
-                    counter += 1
-            await _to_thread(shutil.copy2, target, dest)
-            target = dest
-            stored_path = f"outputs/{dest.name}"
-        elif str(relative).startswith("outputs/"):
-            stored_path = str(relative.as_posix())
-        else:
-            # uploads/ or other — reference in place
-            stored_path = str(relative.as_posix()) if relative else target.name
-
-        name = display_name or target.name
-        media_type, _enc = mimetypes.guess_type(target.name)
-        media_type = media_type or "application/octet-stream"
-
-        if media_type.startswith("image/"):
-            kind = "image"
-        elif media_type.startswith("text/") or media_type in (
-            "application/json",
-            "application/xml",
-        ):
-            kind = "text"
-        else:
-            kind = "document"
-
-        size_bytes = target.stat().st_size
-
-        # Register the output file (or update if already registered)
-        file_id = ""
-        existing = await self.find_file_by_path(conv_id, stored_path)
-        if existing is None:
-            entity = await self.register_file(
-                conversation_id=conv_id,
-                user_id=user_id,
-                category="output",
-                filename=target.name,
-                rel_path=stored_path,
-                media_type=media_type,
-                size=size_bytes,
-                created_by="ai",
-            )
-            file_id = entity.get("_id", "")
-        else:
-            file_id = existing.get("_id", "")
-            if existing.get("category") != "output":
-                await self.update_file(
-                    file_id,
-                    {"category": "output", "rel_path": stored_path},
+        # Serialize concurrent attaches of the same source path so the
+        # scratch→outputs copy + registry lookup/create below can't race
+        # (two callers both seeing the unique filename dance at the same
+        # time could end up writing to the same dest file).
+        path_lock = await self._get_path_lock(conv_id, rel_path)
+        async with path_lock:
+            # Resolve the file
+            target, err = self._resolve_file_path(user_id, rel_path, conv_id)
+            if err is not None:
+                return ToolResult(
+                    tool_call_id="",
+                    content=json.dumps({"error": err}),
+                    is_error=True,
                 )
+            assert target is not None
+
+            # If the file is in scratch/, copy it to outputs/
+            root = self.get_workspace_root(user_id, conv_id)
+            output_dir = self.get_output_dir(user_id, conv_id)
+
+            try:
+                relative = target.relative_to(root.resolve())
+            except ValueError:
+                # Legacy file — copy it to outputs
+                relative = Path(target.name)
+
+            if str(relative).startswith("scratch/"):
+                dest = output_dir / target.name
+                if dest.exists():
+                    stem = dest.stem
+                    suffix = dest.suffix
+                    counter = 1
+                    while dest.exists():
+                        dest = output_dir / f"{stem}-{counter}{suffix}"
+                        counter += 1
+                await _to_thread(shutil.copy2, target, dest)
+                target = dest
+                stored_path = f"outputs/{dest.name}"
+            elif str(relative).startswith("outputs/"):
+                stored_path = str(relative.as_posix())
+            else:
+                # uploads/ or other — reference in place
+                stored_path = str(relative.as_posix()) if relative else target.name
+
+            name = display_name or target.name
+            media_type, _enc = mimetypes.guess_type(target.name)
+            media_type = media_type or "application/octet-stream"
+
+            if media_type.startswith("image/"):
+                kind = "image"
+            elif media_type.startswith("text/") or media_type in (
+                "application/json",
+                "application/xml",
+            ):
+                kind = "text"
+            else:
+                kind = "document"
+
+            size_bytes = target.stat().st_size
+
+            # Register the output file (or update if already registered)
+            file_id = ""
+            existing = await self.find_file_by_path(conv_id, stored_path)
+            if existing is None:
+                entity = await self.register_file(
+                    conversation_id=conv_id,
+                    user_id=user_id,
+                    category="output",
+                    filename=target.name,
+                    rel_path=stored_path,
+                    media_type=media_type,
+                    size=size_bytes,
+                    created_by="ai",
+                )
+                file_id = entity.get("_id", "")
+            else:
+                file_id = existing.get("_id", "")
+                if existing.get("category") != "output":
+                    await self.update_file(
+                        file_id,
+                        {"category": "output", "rel_path": stored_path},
+                    )
 
         attachment = FileAttachment(
             kind=kind,
@@ -1958,43 +2014,48 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         if not rel_path or not conv_id:
             return json.dumps({"error": "path and conversation context required"})
 
-        entity = await self.find_file_by_path(conv_id, rel_path)
-        if entity is None:
+        # Serialize concurrent metadata updates on the same file so the
+        # read-modify-write sequence below can't clobber itself under
+        # fan-out. Different paths run in parallel.
+        path_lock = await self._get_path_lock(conv_id, rel_path)
+        async with path_lock:
+            entity = await self.find_file_by_path(conv_id, rel_path)
+            if entity is None:
+                return json.dumps(
+                    {"error": f"File not registered: {rel_path}. It may not have been created through workspace tools."}
+                )
+
+            file_id = entity.get("_id", "")
+            updates: dict[str, Any] = {}
+
+            description = arguments.get("description")
+            if description is not None:
+                updates["description"] = str(description)
+
+            reusable = arguments.get("reusable")
+            if reusable is not None:
+                updates["reusable"] = bool(reusable)
+
+            derivation_notes = arguments.get("derivation_notes")
+            if derivation_notes is not None:
+                updates["derivation_notes"] = str(derivation_notes)
+
+            derived_from_path = arguments.get("derived_from")
+            if derived_from_path is not None:
+                parent = await self.find_file_by_path(conv_id, str(derived_from_path))
+                if parent:
+                    updates["derived_from"] = parent.get("_id", "")
+                    updates["derivation_method"] = "script"
+                else:
+                    updates["derived_from"] = None
+
+            if not updates:
+                return json.dumps({"status": "no changes", "path": rel_path})
+
+            await self.update_file(file_id, updates)
             return json.dumps(
-                {"error": f"File not registered: {rel_path}. It may not have been created through workspace tools."}
+                {"status": "annotated", "path": rel_path, "updated": list(updates.keys())}
             )
-
-        file_id = entity.get("_id", "")
-        updates: dict[str, Any] = {}
-
-        description = arguments.get("description")
-        if description is not None:
-            updates["description"] = str(description)
-
-        reusable = arguments.get("reusable")
-        if reusable is not None:
-            updates["reusable"] = bool(reusable)
-
-        derivation_notes = arguments.get("derivation_notes")
-        if derivation_notes is not None:
-            updates["derivation_notes"] = str(derivation_notes)
-
-        derived_from_path = arguments.get("derived_from")
-        if derived_from_path is not None:
-            parent = await self.find_file_by_path(conv_id, str(derived_from_path))
-            if parent:
-                updates["derived_from"] = parent.get("_id", "")
-                updates["derivation_method"] = "script"
-            else:
-                updates["derived_from"] = None
-
-        if not updates:
-            return json.dumps({"status": "no changes", "path": rel_path})
-
-        await self.update_file(file_id, updates)
-        return json.dumps(
-            {"status": "annotated", "path": rel_path, "updated": list(updates.keys())}
-        )
 
     async def _tool_delete_workspace_file(
         self, arguments: dict[str, Any]
@@ -2014,24 +2075,28 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         except ValueError:
             return json.dumps({"error": "Path traversal not allowed"})
 
-        deleted_disk = False
-        if target.is_file():
-            target.unlink()
-            deleted_disk = True
+        # Serialize concurrent operations on this path so an in-flight
+        # write or annotate can finish before the delete lands.
+        path_lock = await self._get_path_lock(conv_id, rel_path)
+        async with path_lock:
+            deleted_disk = False
+            if target.is_file():
+                target.unlink()
+                deleted_disk = True
 
-        # Delete registry entry
-        deleted_registry = False
-        entity = await self.find_file_by_path(conv_id, rel_path)
-        if entity:
-            await self.delete_file(entity.get("_id", ""))
-            deleted_registry = True
+            # Delete registry entry
+            deleted_registry = False
+            entity = await self.find_file_by_path(conv_id, rel_path)
+            if entity:
+                await self.delete_file(entity.get("_id", ""))
+                deleted_registry = True
 
-        if not deleted_disk and not deleted_registry:
-            return json.dumps({"error": f"File not found: {rel_path}"})
+            if not deleted_disk and not deleted_registry:
+                return json.dumps({"error": f"File not found: {rel_path}"})
 
-        return json.dumps(
-            {"status": "deleted", "path": rel_path}
-        )
+            return json.dumps(
+                {"status": "deleted", "path": rel_path}
+            )
 
     async def _tool_share_workspace_file(
         self, arguments: dict[str, Any]

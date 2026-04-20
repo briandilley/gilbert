@@ -1,5 +1,6 @@
 """Tests for AIService — agentic loop, tool discovery, conversation persistence."""
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -2572,8 +2573,10 @@ async def test_maybe_compress_history_generates_summary(
         )
     )
 
+    from gilbert.core.context import set_current_conversation_id
+
     msgs = [Message(role=MessageRole.USER, content=f"m{i}") for i in range(20)]
-    ai_service._current_conversation_id = "conv-compress"
+    set_current_conversation_id("conv-compress")
     await ai_service._maybe_compress_history(msgs, "conv-compress")
 
     assert len(stub_backend.requests) == 1
@@ -2621,9 +2624,500 @@ async def test_maybe_compress_history_backend_failure(
     failing_backend.generate = AsyncMock(side_effect=RuntimeError("API down"))
     ai_service._backends = {"stub": failing_backend}
 
+    from gilbert.core.context import set_current_conversation_id
+
     msgs = [Message(role=MessageRole.USER, content=f"m{i}") for i in range(10)]
-    ai_service._current_conversation_id = "conv-fail"
+    set_current_conversation_id("conv-fail")
     await ai_service._maybe_compress_history(msgs, "conv-fail")
 
 
 from gilbert.core.services.ai import _COMPRESSION_SYSTEM_PROMPT
+
+
+# --- Parallel tool invocation ---
+
+
+class _ParallelStubBackend(StubAIBackend):
+    """StubAIBackend that advertises ``parallel_tool_calls=True`` — used
+    for tests that exercise the gather path in ``_execute_tool_calls``.
+    """
+
+    def capabilities(self):  # type: ignore[no-untyped-def]
+        from gilbert.interfaces.ai import AIBackendCapabilities
+
+        return AIBackendCapabilities(parallel_tool_calls=True)
+
+
+class _GatingToolProvider(Service):
+    """Tool provider where each invocation increments a shared counter,
+    waits for a threshold, then returns its own tool_name. Proves tools
+    ran concurrently: under serial execution, tool N waits forever for
+    tool N+1 to start and the test times out.
+    """
+
+    def __init__(
+        self,
+        names: list[str],
+        *,
+        parallel_safe: bool = True,
+        expected_concurrent: int = 2,
+    ) -> None:
+        self._tools = [
+            ToolDefinition(
+                name=n, description=f"tool {n}", parallel_safe=parallel_safe
+            )
+            for n in names
+        ]
+        self._expected = expected_concurrent
+        self._in_flight = 0
+        self._gate = asyncio.Event()
+        self.call_order: list[str] = []
+        self.concurrency_peak = 0
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="gating", capabilities=frozenset({"ai_tools"}))
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "gating"
+
+    def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
+        return list(self._tools)
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        self._in_flight += 1
+        self.concurrency_peak = max(self.concurrency_peak, self._in_flight)
+        if self._in_flight >= self._expected:
+            self._gate.set()
+        try:
+            await asyncio.wait_for(self._gate.wait(), timeout=2.0)
+        finally:
+            self._in_flight -= 1
+        self.call_order.append(name)
+        return f"result-{name}"
+
+
+def _make_tools_by_name(
+    provider: Any,
+) -> dict[str, tuple[Any, ToolDefinition]]:
+    return {t.name: (provider, t) for t in provider.get_tools()}
+
+
+async def test_parallel_safe_tools_run_concurrently(
+    ai_service: AIService,
+) -> None:
+    """Two parallel_safe tools on a parallel-capable backend run via
+    ``asyncio.gather`` — proven by a gate that only opens when both are
+    in-flight simultaneously. A serial loop would deadlock here."""
+    import asyncio as _asyncio
+
+    backend = _ParallelStubBackend()
+    provider = _GatingToolProvider(["a", "b"], expected_concurrent=2)
+
+    tool_calls = [
+        ToolCall(tool_call_id="tc_a", tool_name="a", arguments={}),
+        ToolCall(tool_call_id="tc_b", tool_name="b", arguments={}),
+    ]
+
+    results, _ui = await _asyncio.wait_for(
+        ai_service._execute_tool_calls(
+            tool_calls,
+            _make_tools_by_name(provider),
+            backend=backend,
+        ),
+        timeout=3.0,
+    )
+
+    assert provider.concurrency_peak == 2
+    assert len(results) == 2
+    # Result list preserves input order, independent of completion order.
+    assert [r.tool_call_id for r in results] == ["tc_a", "tc_b"]
+
+
+async def test_parallel_mixed_with_unsafe_preserves_order(
+    ai_service: AIService,
+) -> None:
+    """Sequence [safe, safe, unsafe, safe]: the first two gather, the
+    unsafe one runs alone, and the trailing safe one runs alone (no
+    sibling to batch with). Result order always matches input order."""
+    backend = _ParallelStubBackend()
+
+    class Mixed(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="mixed", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "mixed"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="s1", description="", parallel_safe=True),
+                ToolDefinition(name="s2", description="", parallel_safe=True),
+                ToolDefinition(name="u", description="", parallel_safe=False),
+                ToolDefinition(name="s3", description="", parallel_safe=True),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            return f"result-{name}"
+
+    provider = Mixed()
+    tool_calls = [
+        ToolCall(tool_call_id="t1", tool_name="s1", arguments={}),
+        ToolCall(tool_call_id="t2", tool_name="s2", arguments={}),
+        ToolCall(tool_call_id="t3", tool_name="u", arguments={}),
+        ToolCall(tool_call_id="t4", tool_name="s3", arguments={}),
+    ]
+
+    results, _ui = await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        backend=backend,
+    )
+
+    assert [r.tool_call_id for r in results] == ["t1", "t2", "t3", "t4"]
+    assert [r.content for r in results] == [
+        "result-s1",
+        "result-s2",
+        "result-u",
+        "result-s3",
+    ]
+
+
+async def test_parallel_exception_does_not_cancel_siblings(
+    ai_service: AIService,
+) -> None:
+    """When one gathered task raises, siblings keep running and return
+    their own results. The raiser surfaces as a ToolResult(is_error=True)."""
+    import asyncio as _asyncio
+
+    backend = _ParallelStubBackend()
+
+    class TwoTools(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="two", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "two"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="boom", description="", parallel_safe=True),
+                ToolDefinition(name="ok", description="", parallel_safe=True),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            if name == "boom":
+                raise RuntimeError("kaboom")
+            await _asyncio.sleep(0.05)
+            return "ok-result"
+
+    provider = TwoTools()
+    tool_calls = [
+        ToolCall(tool_call_id="t_boom", tool_name="boom", arguments={}),
+        ToolCall(tool_call_id="t_ok", tool_name="ok", arguments={}),
+    ]
+
+    results, _ui = await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        backend=backend,
+    )
+
+    assert [r.tool_call_id for r in results] == ["t_boom", "t_ok"]
+    assert results[0].is_error
+    assert "kaboom" in results[0].content
+    assert not results[1].is_error
+    assert results[1].content == "ok-result"
+
+
+async def test_parallel_per_task_context_isolation(
+    ai_service: AIService,
+) -> None:
+    """A parallel task that mutates its own ContextVar must not bleed
+    the change into sibling tasks. Without per-task ``copy_context``,
+    one task's ``set_current_user`` would overwrite the parent context
+    that siblings read from."""
+    import asyncio as _asyncio
+
+    from gilbert.core.context import get_current_user, set_current_user
+
+    backend = _ParallelStubBackend()
+    outer_user = UserContext(
+        user_id="outer",
+        display_name="Outer",
+        email="",
+        roles=frozenset({"user"}),
+    )
+    intruder = UserContext(
+        user_id="intruder",
+        display_name="X",
+        email="",
+        roles=frozenset({"user"}),
+    )
+
+    observed: dict[str, str] = {}
+
+    class CtxTools(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="ctx", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "ctx"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="leaker", description="", parallel_safe=True),
+                ToolDefinition(name="watcher", description="", parallel_safe=True),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            if name == "leaker":
+                # Overwrite the ContextVar — under isolation this stays
+                # local to this task.
+                set_current_user(intruder)
+                await _asyncio.sleep(0.05)
+                observed["leaker"] = get_current_user().user_id
+            else:
+                # Give the leaker a head start so any bleed would hit us.
+                await _asyncio.sleep(0.02)
+                observed["watcher"] = get_current_user().user_id
+                await _asyncio.sleep(0.05)
+            return "ok"
+
+    provider = CtxTools()
+    tool_calls = [
+        ToolCall(tool_call_id="t_leak", tool_name="leaker", arguments={}),
+        ToolCall(tool_call_id="t_watch", tool_name="watcher", arguments={}),
+    ]
+
+    await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        user_ctx=outer_user,
+        backend=backend,
+    )
+
+    assert observed["leaker"] == "intruder"  # local mutation visible to self
+    assert observed["watcher"] == "outer"  # sibling untouched
+
+
+async def test_parallel_argument_copy_isolation(
+    ai_service: AIService,
+) -> None:
+    """Each parallel task gets its own arguments dict so that in-task
+    mutation doesn't leak into siblings or back onto ToolCall.arguments."""
+    backend = _ParallelStubBackend()
+    seen_args: list[dict[str, Any]] = []
+
+    class MutatingTools(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="mut", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "mut"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="m1", description="", parallel_safe=True),
+                ToolDefinition(name="m2", description="", parallel_safe=True),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            arguments["leaked_from"] = name  # mutate our own dict
+            seen_args.append(dict(arguments))
+            return "ok"
+
+    provider = MutatingTools()
+    shared_args = {"shared": "value"}
+    tool_calls = [
+        ToolCall(tool_call_id="t1", tool_name="m1", arguments=shared_args),
+        ToolCall(tool_call_id="t2", tool_name="m2", arguments=shared_args),
+    ]
+
+    await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        backend=backend,
+    )
+
+    # Original ToolCall.arguments untouched (dict(tc.arguments) copy).
+    assert "leaked_from" not in shared_args
+    # Each task saw only its own leak, not the sibling's.
+    m1_args = next(a for a in seen_args if a.get("leaked_from") == "m1")
+    m2_args = next(a for a in seen_args if a.get("leaked_from") == "m2")
+    assert "leaked_from" not in {k: v for k, v in m1_args.items() if v == "m2"}
+    assert m1_args["leaked_from"] == "m1"
+    assert m2_args["leaked_from"] == "m2"
+
+
+async def test_unsafe_backend_falls_back_to_serial(
+    ai_service: AIService,
+) -> None:
+    """A backend without ``parallel_tool_calls`` capability runs every
+    tool serially even if the tools themselves are ``parallel_safe``.
+    This is the compatibility fallback for backends whose streaming
+    parser hasn't been verified for multi-tool responses."""
+    import asyncio as _asyncio
+
+    # StubAIBackend defaults to parallel_tool_calls=False.
+    backend = StubAIBackend()
+    active: list[str] = []
+    peak = {"value": 0}
+
+    class SerialProbe(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="sp", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "sp"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="x", description="", parallel_safe=True),
+                ToolDefinition(name="y", description="", parallel_safe=True),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            active.append(name)
+            peak["value"] = max(peak["value"], len(active))
+            await _asyncio.sleep(0.02)
+            active.remove(name)
+            return f"result-{name}"
+
+    provider = SerialProbe()
+    tool_calls = [
+        ToolCall(tool_call_id="t1", tool_name="x", arguments={}),
+        ToolCall(tool_call_id="t2", tool_name="y", arguments={}),
+    ]
+
+    results, _ui = await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        backend=backend,
+    )
+
+    assert peak["value"] == 1, "backend lacks capability — tools must run serially"
+    assert [r.content for r in results] == ["result-x", "result-y"]
+
+
+async def test_unsafe_tool_among_parallel_siblings_stays_serial(
+    ai_service: AIService,
+) -> None:
+    """A ``parallel_safe=False`` tool always runs alone, even on a
+    parallel-capable backend. This keeps side-effectful tools from
+    racing with anything in the same batch."""
+    import asyncio as _asyncio
+
+    backend = _ParallelStubBackend()
+    active: list[str] = []
+    peaks: dict[str, int] = {}
+
+    class Mix(Service):
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name="mix", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "mix"
+
+        def get_tools(
+            self, user_ctx: UserContext | None = None
+        ) -> list[ToolDefinition]:
+            return [
+                ToolDefinition(name="unsafe", description="", parallel_safe=False),
+            ]
+
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            active.append(name)
+            peaks[name] = max(peaks.get(name, 0), len(active))
+            await _asyncio.sleep(0.02)
+            active.remove(name)
+            return "ok"
+
+    provider = Mix()
+    # Two unsafe calls in a row must NOT get gathered together.
+    tool_calls = [
+        ToolCall(tool_call_id="t1", tool_name="unsafe", arguments={}),
+        ToolCall(tool_call_id="t2", tool_name="unsafe", arguments={}),
+    ]
+
+    await ai_service._execute_tool_calls(
+        tool_calls,
+        _make_tools_by_name(provider),
+        backend=backend,
+    )
+
+    assert peaks["unsafe"] == 1
+
+
+async def test_parallel_results_fan_in_to_next_round(
+    ai_service: AIService,
+    storage_service: StorageService,
+) -> None:
+    """Regression guard on dependency handling: when the model emits
+    two parallel_safe tools in one round, BOTH results are appended as
+    tool_result blocks to the next AI request in input order. This is
+    how downstream tools in round N+1 see all the N-round outputs at
+    once — the "fan-in" step the model relies on."""
+    backend = _ParallelStubBackend()
+    provider = _GatingToolProvider(["a", "b"], expected_concurrent=2)
+
+    backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    ToolCall(tool_call_id="tc_a", tool_name="a", arguments={}),
+                    ToolCall(tool_call_id="tc_b", tool_name="b", arguments={}),
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="Done."),
+            model="stub",
+        )
+    )
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [provider] if cap == "ai_tools" else []
+
+    ai_service._backends = {"parallel_stub": backend}
+    await ai_service.start(resolver)
+
+    await ai_service.chat("Do two things at once")
+
+    # Round 2's request must carry both tool_results in input order.
+    assert len(backend.requests) == 2
+    tool_result_msg = backend.requests[1].messages[-1]
+    assert tool_result_msg.role == MessageRole.TOOL_RESULT
+    ids = [tr.tool_call_id for tr in tool_result_msg.tool_results]
+    assert ids == ["tc_a", "tc_b"]
+    # And both results are genuine tool outputs, not error placeholders.
+    assert all(not tr.is_error for tr in tool_result_msg.tool_results)

@@ -18,6 +18,7 @@ import { PluginsPage } from "@/components/plugins/PluginsPage";
 import { McpPage } from "@/components/mcp/McpPage";
 import { McpClientsPage } from "@/components/mcp/McpClientsPage";
 import { McpLocalPage } from "@/components/mcp/McpLocalPage";
+import { UsagePage } from "@/components/usage/UsagePage";
 
 export default function App() {
   return (
@@ -46,6 +47,7 @@ export default function App() {
           <Route path="/plugins" element={<PluginsPage />} />
           <Route path="/system" element={<SystemPage />} />
           <Route path="/screens" element={<ScreensPage />} />
+          <Route path="/usage" element={<UsagePage />} />
         </Route>
       </Route>
     </Routes>

@@ -1,6 +1,7 @@
 """Speaker service — wraps a SpeakerBackend as a discoverable service with announce support."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -52,9 +53,16 @@ class SpeakerService(Service):
         self._web_port: int = 8000
         # Track last-used speaker set for "use last" default
         self._last_speaker_ids: list[str] = []
-        # Announcement queue lock — prevents announcements from stepping
-        # on each other by serializing TTS + playback.
-        self._announce_lock = asyncio.Lock()
+        # Per-speaker announcement locks. Each speaker has its own lock
+        # so announcements targeting *different* speakers fan out, while
+        # announcements targeting the *same* speaker still serialize
+        # (otherwise snapshot/restore on that speaker would race and
+        # two clips would talk over each other). Locks are created lazily
+        # and acquired in sorted-ID order so two overlapping-set callers
+        # can't deadlock. ``_speaker_locks_guard`` serializes the
+        # get-or-create step so we don't race on dict insertion.
+        self._speaker_locks: dict[str, asyncio.Lock] = {}
+        self._speaker_locks_guard = asyncio.Lock()
         self._speaker_cache: list[SpeakerInfo] = []
 
     def service_info(self) -> ServiceInfo:
@@ -511,23 +519,66 @@ class SpeakerService(Service):
         If no speaker_names are given, falls back to the configured
         default announce speakers (or all speakers if that's also empty).
 
-        Announcements are serialized via a lock so they don't step on
-        each other. After starting playback, waits for the estimated
-        audio duration before releasing the lock.
+        Announcements are serialized **per speaker**, not globally —
+        two concurrent announcements that target disjoint speaker sets
+        fan out and run in parallel, while any overlap on a shared
+        speaker queues on that speaker's lock. This lets the assistant
+        say different things on different speakers at the same time
+        (e.g. personal greetings per room) without letting two clips
+        collide on the same device's snapshot/restore state.
         """
         # Fall back to configured default speakers
         if speaker_names is None and self._default_announce_speakers:
             speaker_names = self._default_announce_speakers
-        async with self._announce_lock:
-            return await self._announce_inner(text, speaker_names, volume)
+        # Resolve target speakers outside any per-speaker lock so the
+        # lock set is known before we start acquiring. An empty set
+        # means no speakers to announce on — let _announce_inner handle
+        # the degenerate case without acquiring any locks.
+        target_ids = await self._resolve_target_ids(speaker_names)
+        if not target_ids:
+            return await self._announce_inner(
+                text, speaker_names, volume, target_ids=target_ids
+            )
+        locks = await self._get_speaker_locks(target_ids)
+        async with contextlib.AsyncExitStack() as stack:
+            for lock in locks:
+                await stack.enter_async_context(lock)
+            return await self._announce_inner(
+                text, speaker_names, volume, target_ids=target_ids
+            )
+
+    async def _get_speaker_locks(
+        self, speaker_ids: list[str]
+    ) -> list[asyncio.Lock]:
+        """Return one lock per unique speaker ID, ordered by ID.
+
+        Sorted-order acquisition is the standard fix for the
+        multi-lock deadlock: if caller A asks for [s1, s2] and caller
+        B asks for [s2, s3], both acquire them in the same global
+        order so neither can end up holding a lock the other needs in
+        reverse. Locks are created lazily under ``_speaker_locks_guard``
+        so the get-or-create step itself is race-free.
+        """
+        unique_ids = sorted(set(speaker_ids))
+        async with self._speaker_locks_guard:
+            for sid in unique_ids:
+                if sid not in self._speaker_locks:
+                    self._speaker_locks[sid] = asyncio.Lock()
+        return [self._speaker_locks[sid] for sid in unique_ids]
 
     async def _announce_inner(
         self,
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        target_ids: list[str] | None = None,
     ) -> str:
-        """Inner announce — must be called under _announce_lock."""
+        """Inner announce — must be called with the target speakers'
+        per-speaker locks already held. Accepts a pre-resolved
+        ``target_ids`` to avoid re-running name resolution (and the
+        ``_last_speaker_ids`` mutation that goes with it) after the
+        caller has already done so to build the lock set.
+        """
         if self._tts_svc is None:
             raise RuntimeError("TTS service is not available — cannot announce")
 
@@ -556,7 +607,8 @@ class SpeakerService(Service):
         # because ``audio_clip`` (triggered by ``announce=True`` below)
         # ducks + auto-restores natively. Kept in the flow so non-
         # Sonos backends that implement snapshot/restore still work.
-        target_ids = await self._resolve_target_ids(speaker_names)
+        if target_ids is None:
+            target_ids = await self._resolve_target_ids(speaker_names)
         await backend.snapshot(target_ids)
 
         # Play on speakers — topology handled by play_on_speakers.
@@ -684,6 +736,7 @@ class SpeakerService(Service):
                 slash_help="List all speakers with state + volume: /speaker list",
                 description="List all discovered speakers with their current state, volume, and group info.",
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="play_audio",
@@ -781,6 +834,7 @@ class SpeakerService(Service):
                     ),
                 ],
                 required_role="everyone",
+                parallel_safe=True,
             ),
             ToolDefinition(
                 name="set_speaker_alias",
@@ -851,6 +905,11 @@ class SpeakerService(Service):
                     ),
                 ],
                 required_role="user",
+                # Safe to run in parallel with other announces targeting
+                # *different* speakers — per-speaker locks in the service
+                # still serialize same-speaker collisions so clips never
+                # overlap on one device.
+                parallel_safe=True,
             ),
         ]
 

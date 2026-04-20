@@ -798,3 +798,206 @@ async def test_tool_unknown_raises(service: SpeakerService, resolver: ServiceRes
     await service.start(resolver)
     with pytest.raises(KeyError, match="Unknown tool"):
         await service.execute_tool("nonexistent", {})
+
+
+# --- Per-speaker announce locks ---
+
+
+def _make_concurrent_tracking_tts(peak: dict[str, int]) -> MagicMock:
+    """Return a mock TTS service whose ``synthesize`` coroutine records
+    how many calls are in flight concurrently, using a short sleep to
+    create overlap windows. ``peak["value"]`` ends up holding the peak
+    concurrency observed across all invocations."""
+    import asyncio as _asyncio
+
+    from gilbert.core.services.tts import TTSService
+
+    in_flight = {"value": 0}
+    mock = MagicMock(spec=TTSService)
+
+    async def _synthesize(_req: Any) -> SynthesisResult:
+        in_flight["value"] += 1
+        peak["value"] = max(peak["value"], in_flight["value"])
+        try:
+            await _asyncio.sleep(0.05)
+        finally:
+            in_flight["value"] -= 1
+        return SynthesisResult(
+            audio=b"fake-audio",
+            format=AudioFormat.MP3,
+            characters_used=10,
+        )
+
+    mock.synthesize = AsyncMock(side_effect=_synthesize)
+    return mock
+
+
+async def _make_speaker_service_with_tts(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    mock_tts: MagicMock,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> SpeakerService:
+    import gilbert.core.output as output_mod
+
+    monkeypatch.setattr(output_mod, "OUTPUT_DIR", tmp_path / "output")
+
+    mock_resolver = AsyncMock(spec=ServiceResolver)
+
+    def get_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        if cap == "text_to_speech":
+            return mock_tts
+        return None
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    mock_resolver.get_capability.side_effect = get_cap
+    mock_resolver.require_capability.side_effect = require_cap
+
+    service = SpeakerService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(mock_resolver)
+    return service
+
+
+async def test_announce_parallel_different_speakers_fan_out(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Two concurrent announces to disjoint speaker sets run at the
+    same time — per-speaker locks let them fan out. Under the old
+    global lock this test would serialize and peak concurrency == 1."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    mock_tts = _make_concurrent_tracking_tts(peak)
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, mock_tts, tmp_path, monkeypatch
+    )
+
+    await _asyncio.gather(
+        service.announce("hi speaker 1", speaker_names=["Speaker 1"]),
+        service.announce("hi speaker 2", speaker_names=["Speaker 2"]),
+    )
+
+    assert peak["value"] == 2, (
+        "announces to disjoint speakers must overlap under per-speaker locks"
+    )
+
+
+async def test_announce_parallel_same_speaker_serializes(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Two concurrent announces targeting the *same* speaker still
+    serialize — that speaker's single lock queues the second caller.
+    This is intentional: overlapping clips on one device would step
+    on each other's snapshot/restore and audio."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    mock_tts = _make_concurrent_tracking_tts(peak)
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, mock_tts, tmp_path, monkeypatch
+    )
+
+    await _asyncio.gather(
+        service.announce("first", speaker_names=["Speaker 1"]),
+        service.announce("second", speaker_names=["Speaker 1"]),
+    )
+
+    assert peak["value"] == 1, (
+        "same-speaker announces must serialize on that speaker's lock"
+    )
+
+
+async def test_announce_overlapping_sets_serialize_on_shared_speaker(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Overlapping target sets (A=[s1,s2], B=[s2,s3]) share one
+    speaker — caller B blocks on s2's lock while A holds it. Peak
+    concurrency must be 1 because the shared speaker forces
+    serialization even though s1 and s3 are disjoint."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    mock_tts = _make_concurrent_tracking_tts(peak)
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, mock_tts, tmp_path, monkeypatch
+    )
+
+    await _asyncio.gather(
+        service.announce("A", speaker_names=["Speaker 1", "Speaker 2"]),
+        service.announce("B", speaker_names=["Speaker 2", "Speaker 3"]),
+    )
+
+    assert peak["value"] == 1, (
+        "overlapping sets must serialize on the shared speaker's lock"
+    )
+
+
+async def test_announce_sorted_lock_acquisition_prevents_deadlock(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Classic deadlock scenario: caller A asks for [s1, s2], caller B
+    asks for [s2, s1]. If we acquired in caller-supplied order each
+    could hold one and wait on the other. Sorted-order acquisition
+    eliminates the possibility, so both complete under a reasonable
+    timeout. Belt-and-suspenders test for the deadlock-prevention
+    invariant in ``_get_speaker_locks``."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    mock_tts = _make_concurrent_tracking_tts(peak)
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, mock_tts, tmp_path, monkeypatch
+    )
+
+    await _asyncio.wait_for(
+        _asyncio.gather(
+            service.announce("A", speaker_names=["Speaker 1", "Speaker 2"]),
+            service.announce("B", speaker_names=["Speaker 2", "Speaker 1"]),
+        ),
+        timeout=3.0,
+    )
+
+
+async def test_get_speaker_locks_reuses_and_sorts(
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """The lock dict is the source of truth and lock identity is
+    stable: asking for the same speaker_id twice returns the same
+    ``asyncio.Lock`` instance, and the returned list is always sorted
+    by ID regardless of input order."""
+    service = SpeakerService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    first = await service._get_speaker_locks(["uid-2", "uid-1"])
+    second = await service._get_speaker_locks(["uid-1", "uid-2"])
+    assert first == second  # same lock objects, same order (sorted by ID)
+    assert len(service._speaker_locks) == 2
+
+    # Duplicate IDs collapse to one lock.
+    third = await service._get_speaker_locks(["uid-1", "uid-1", "uid-1"])
+    assert len(third) == 1
+    assert third[0] is service._speaker_locks["uid-1"]

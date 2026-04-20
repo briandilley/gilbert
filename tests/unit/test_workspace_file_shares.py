@@ -518,3 +518,126 @@ async def test_consume_renormalizes_legacy_record(
     assert resolved is not None
     _path, media_type, _filename = resolved
     assert media_type == "audio/wav"
+
+
+# --- Per-path write locks ---
+
+
+async def test_get_path_lock_reuses_and_scopes_by_conversation(
+    service: WorkspaceService,
+) -> None:
+    """Same ``(conv_id, rel_path)`` returns the same ``asyncio.Lock``
+    instance; different conversations or different paths get distinct
+    locks. This is the correctness invariant the write tools depend on
+    — if two calls for the same path got different locks, they'd race."""
+    a = await service._get_path_lock("conv-1", "outputs/a.txt")
+    b = await service._get_path_lock("conv-1", "outputs/a.txt")
+    c = await service._get_path_lock("conv-1", "outputs/b.txt")
+    d = await service._get_path_lock("conv-2", "outputs/a.txt")
+
+    assert a is b, "same path in same conv must return the same lock"
+    assert a is not c, "different paths must not share a lock"
+    assert a is not d, "different conversations must not share a lock"
+
+
+async def test_parallel_writes_different_paths_fan_out(
+    service: WorkspaceService,
+) -> None:
+    """Two ``write_workspace_file`` calls targeting different paths
+    overlap under the per-path lock regime. If they accidentally
+    shared a lock (or a global lock), peak concurrency would be 1
+    and this test would still pass the correctness check but fail
+    the concurrency check."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    in_flight = {"value": 0}
+
+    original = service.register_file
+
+    async def _slow_register(**kwargs: Any) -> dict[str, Any]:
+        in_flight["value"] += 1
+        peak["value"] = max(peak["value"], in_flight["value"])
+        try:
+            await _asyncio.sleep(0.05)
+        finally:
+            in_flight["value"] -= 1
+        return await original(**kwargs)
+
+    service.register_file = _slow_register  # type: ignore[method-assign]
+
+    await _asyncio.gather(
+        service._tool_write_workspace_file(
+            {
+                "path": "alpha.txt",
+                "content": "A",
+                "_user_id": "u1",
+                "_conversation_id": "conv-parallel",
+            }
+        ),
+        service._tool_write_workspace_file(
+            {
+                "path": "beta.txt",
+                "content": "B",
+                "_user_id": "u1",
+                "_conversation_id": "conv-parallel",
+            }
+        ),
+    )
+
+    assert peak["value"] == 2, (
+        "writes to different paths must overlap under per-path locks"
+    )
+
+
+async def test_parallel_writes_same_path_serialize(
+    service: WorkspaceService,
+) -> None:
+    """Two concurrent writes to the *same* path must serialize — one
+    writer holds the lock, the other waits. Peak concurrency == 1
+    proves the defensive lock is doing its job."""
+    import asyncio as _asyncio
+
+    peak = {"value": 0}
+    in_flight = {"value": 0}
+
+    original = service.register_file
+
+    async def _slow_register(**kwargs: Any) -> dict[str, Any]:
+        in_flight["value"] += 1
+        peak["value"] = max(peak["value"], in_flight["value"])
+        try:
+            await _asyncio.sleep(0.05)
+        finally:
+            in_flight["value"] -= 1
+        return await original(**kwargs)
+
+    service.register_file = _slow_register  # type: ignore[method-assign]
+
+    await _asyncio.gather(
+        service._tool_write_workspace_file(
+            {
+                "path": "same.txt",
+                "content": "first",
+                "_user_id": "u1",
+                "_conversation_id": "conv-same",
+            }
+        ),
+        service._tool_write_workspace_file(
+            {
+                "path": "same.txt",
+                "content": "second",
+                "_user_id": "u1",
+                "_conversation_id": "conv-same",
+            }
+        ),
+    )
+
+    assert peak["value"] == 1, (
+        "writes to the same path must serialize on that path's lock"
+    )
+    # One of the two writes won the race; the file on disk should
+    # contain a well-formed value from one of them (not a torn mix).
+    root = service.get_workspace_root("u1", "conv-same")
+    final = (root / "scratch" / "same.txt").read_text()
+    assert final in ("first", "second")
