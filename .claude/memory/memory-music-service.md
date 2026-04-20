@@ -36,12 +36,12 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 - **`link_spotify`** — generates an authorize URL containing `client_id`, `redirect_uri`, and a CSRF `state` nonce. Returns it as `open_url`.
 - **`link_spotify_complete`** — reads the auth code out of the `spotify_auth_code` config field (the user pasted it after approving in Spotify), exchanges it for access + refresh tokens, persists the refresh token into settings via the `persist` side-channel, and auto-clears the paste field.
 
-`_extract_auth_code` parses whatever the user pasted — a full redirect URL (`https://localhost:8000/callback?code=…`), a query fragment (`?code=…`), or a bare code.
+`_extract_auth_code` parses whatever the user pasted — a full redirect URL (`http://127.0.0.1:8000/callback?code=…`), a query fragment (`?code=…`), or a bare code.
 
 ### Config
 - `client_id` — Spotify app client ID (from the Spotify Developer Dashboard).
 - `client_secret` *(sensitive)* — matching Spotify app client secret.
-- `redirect_uri` — must match one registered on the Spotify app exactly; default `https://localhost:8000/callback`. Spotify now rejects plain `http://localhost:…` for redirect URIs and requires HTTPS for most origins — the endpoint doesn't need to actually serve HTTPS, Spotify only validates the scheme at authorize time and we parse the code out of the URL the user pastes.
+- `redirect_uri` — must match one registered on the Spotify app exactly; default `http://127.0.0.1:8000/callback`. Spotify's current policy: HTTPS-only for named hosts with one exception — numeric loopback IPs (`http://127.0.0.1:…` or `http://[::1]:…`) are accepted on plain HTTP. `http://localhost:…` is rejected as "Insecure" because DNS can redirect it; `https://localhost:…` is rejected as "Not matching configuration" (Spotify treats localhost as untrusted for HTTPS too). The endpoint doesn't need to actually respond — Spotify validates the URL format at authorize time and we parse the code out of the URL the user pastes.
 - `refresh_token` *(sensitive)* — auto-populated by the link flow.
 - `spotify_auth_code` — transient, cleared by `link_spotify_complete`.
 - Legacy fields retained for backward compat but ignored: `preferred_service`, `auth_token`, `auth_key` (the old SMAPI token was speaker-bound and isn't transferable to the Web API; users must re-run the link flow after upgrade).
