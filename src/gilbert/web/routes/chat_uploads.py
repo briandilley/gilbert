@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -362,6 +364,100 @@ async def download_chat_file(
         headers={
             "Content-Disposition": f'attachment; filename="{safe_name}"',
             "Content-Length": str(resolved.stat().st_size),
+            "Cache-Control": "private, max-age=0, no-cache",
+        },
+    )
+
+
+@router.get("/download-all/{conversation_id}")
+async def download_all_chat_files(
+    conversation_id: str,
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> StreamingResponse:
+    """Stream every workspace file for a conversation back as a ZIP.
+
+    Bundles ``uploads/``, ``outputs/``, and ``scratch/`` using the same
+    directory layout as the on-disk workspace so the archive is a
+    faithful snapshot of everything the user and AI have accumulated
+    for this chat.
+
+    The ZIP is built in a ``TemporaryFile`` (spills to disk, auto-deleted
+    on close) which lets us compute ``Content-Length`` up front and gives
+    the browser a proper download progress bar. Files that are registered
+    but missing on disk are skipped rather than failing the whole archive.
+    """
+    _, workspace_svc = await _authorize_conversation(request, conversation_id, user)
+
+    files = await workspace_svc.list_files(conversation_id)
+    workspace_root = workspace_svc.get_workspace_root(
+        user.user_id, conversation_id
+    ).resolve()
+
+    # Build the archive into an auto-deleting temp file. ``zipfile``
+    # needs a seekable target to write its central directory at the
+    # end, which rules out direct streaming. A temp file keeps memory
+    # bounded regardless of archive size. It outlives this function
+    # — the StreamingResponse's generator closes it after the last
+    # chunk ships — so a ``with`` block isn't usable here.
+    tmp = tempfile.TemporaryFile()  # noqa: SIM115
+    included = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            seen: set[str] = set()
+            for entry in files:
+                rel_path = entry.get("rel_path") or ""
+                if not rel_path or rel_path in seen:
+                    continue
+                seen.add(rel_path)
+                full = (workspace_root / rel_path).resolve()
+                # Belt and suspenders: skip anything that somehow
+                # escapes the workspace root (bad registry data,
+                # symlink tricks).
+                try:
+                    full.relative_to(workspace_root)
+                except ValueError:
+                    continue
+                if not full.is_file():
+                    continue
+                zf.write(full, arcname=rel_path)
+                included += 1
+    except Exception:
+        tmp.close()
+        logger.exception(
+            "zip build failed for conv=%s user=%s", conversation_id, user.user_id
+        )
+        raise HTTPException(status_code=500, detail="failed to build archive") from None
+
+    tmp.seek(0, 2)
+    size = tmp.tell()
+    tmp.seek(0)
+
+    logger.info(
+        "workspace zip: user=%s conv=%s files=%d size=%d",
+        user.user_id,
+        conversation_id,
+        included,
+        size,
+    )
+
+    def _iter_zip() -> Any:
+        try:
+            while True:
+                chunk = tmp.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            tmp.close()
+
+    filename = f"workspace-{conversation_id}.zip"
+    return StreamingResponse(
+        _iter_zip(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(size),
             "Cache-Control": "private, max-age=0, no-cache",
         },
     )

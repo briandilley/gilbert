@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useEventBus } from "@/hooks/useEventBus";
 import {
+  ArchiveIcon,
   ChevronRightIcon,
   DownloadIcon,
   FileIcon,
@@ -338,12 +339,42 @@ export function WorkspacePanelContent({ conversationId }: WorkspacePanelProps) {
 
   const hasFiles = uploads.length > 0 || outputs.length > 0 || scratch.length > 0;
 
+  const handleDownloadAll = useCallback(() => {
+    if (!conversationId) return;
+    // Direct HTTP download — the session cookie auths the request and
+    // the browser handles streaming + the Save-As dialog natively.
+    const a = document.createElement("a");
+    a.href = `/api/chat/download-all/${encodeURIComponent(conversationId)}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, [conversationId]);
+
   return (
     <ScrollArea className="h-full">
       <div className="p-3">
-        <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-3 px-1">
-          Workspace Files
-        </h3>
+        <div className="flex items-center justify-between mb-3 px-1">
+          <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Workspace Files
+          </h3>
+          {hasFiles && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="size-6 p-0"
+                    onClick={handleDownloadAll}
+                  />
+                }
+              >
+                <ArchiveIcon className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipContent>Download all as ZIP</TooltipContent>
+            </Tooltip>
+          )}
+        </div>
 
         {loading && !hasFiles && (
           <p className="text-xs text-muted-foreground px-2">Loading...</p>
