@@ -20,6 +20,7 @@ Named bundles of (tool allowlist + backend + model) that every AI call resolves 
 - `light` — light tier (fast, cost-effective model), all tools
 - `standard` — standard tier (balanced model), all tools
 - `advanced` — advanced tier (most capable model), all tools
+- `text_only` — **zero tools** (`tool_mode="include"`, `tools=[]`). Used for pure text-generation calls (greetings, roasts) where giving the model tool access would let it accidentally trigger side effects. *Footgun learned the hard way:* greeting was briefly assigned to `light`, the model saw the `announce` tool in its toolset and called it repeatedly with greeting text — resulting in the Sonos clip-loop bug. Any AI call that asks the model to *write text* (not *do something*) should use `text_only`.
 
 The tiers themselves are just profile names; admins map each tier to a real backend/model under **Settings → AI → Profiles**. Custom profiles can be added on top.
 
@@ -29,8 +30,8 @@ The tiers themselves are just profile names; admins map each tier to a real back
 | ai_call | Profile |
 |---|---|
 | `human_chat` | standard |
-| `greeting` | light |
-| `roast` | standard |
+| `greeting` | text_only |
+| `roast` | text_only |
 | `scheduled_action` | standard |
 | `inbox_ai_chat` | standard |
 | `guess_song_validate` | light |

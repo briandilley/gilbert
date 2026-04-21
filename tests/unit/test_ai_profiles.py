@@ -275,11 +275,13 @@ class TestProfileResolution:
         assert "light" in names
         assert "standard" in names
         assert "advanced" in names
+        assert "text_only" in names
 
     async def test_builtin_assignments_seeded(self, ai_svc: AIService) -> None:
         assignments = ai_svc.list_assignments()
         assert assignments["human_chat"] == "standard"
-        assert assignments["greeting"] == "light"
+        assert assignments["greeting"] == "text_only"
+        assert assignments["roast"] == "text_only"
 
     async def test_get_profile_returns_none_for_no_call(self, ai_svc: AIService) -> None:
         assert ai_svc.get_profile(None) is None

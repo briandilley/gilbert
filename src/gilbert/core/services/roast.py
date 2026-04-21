@@ -45,7 +45,7 @@ class RoastService(Service):
             "Keep it to 1-2 sentences."
         )
         self._speakers: list[str] = []
-        self._ai_profile: str = "standard"
+        self._ai_profile: str = "text_only"
         self._resolver: ServiceResolver | None = None
 
     def service_info(self) -> ServiceInfo:

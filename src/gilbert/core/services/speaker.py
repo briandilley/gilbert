@@ -450,7 +450,14 @@ class SpeakerService(Service):
         snapshot/restore ritual required.
         """
         target_ids = await self._resolve_target_ids(speaker_names)
-        await self.prepare_speakers(target_ids)
+
+        # Skip topology changes for announce clips — audio_clip is a
+        # per-player overlay that doesn't need grouping, and reshuffling
+        # the group mid-music can cause the speaker to lose its playback
+        # queue, leaving the announcement URI as the "current" track
+        # that loops after restore.
+        if not announce:
+            await self.prepare_speakers(target_ids)
 
         await self._require_backend().play_uri(
             PlayRequest(

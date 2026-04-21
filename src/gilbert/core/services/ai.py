@@ -845,15 +845,21 @@ _BUILTIN_PROFILES = [
         description="Advanced tier — most capable model with all tools",
         tool_mode="all",
     ),
+    AIContextProfile(
+        name="text_only",
+        description="Text generation only — no tools exposed to the model",
+        tool_mode="include",
+        tools=[],
+    ),
 ]
 
-_UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced"})
+_UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced", "text_only"})
 
 # Built-in call→profile assignments seeded on first start
 _BUILTIN_ASSIGNMENTS: dict[str, str] = {
     "human_chat": "standard",
-    "greeting": "light",
-    "roast": "standard",
+    "greeting": "text_only",
+    "roast": "text_only",
     "scheduled_action": "standard",
     "inbox_ai_chat": "standard",
     "guess_song_validate": "light",
@@ -1136,12 +1142,25 @@ class AIService(Service):
         Backends with ``enabled=False`` in their config section are skipped
         entirely — any existing instance is closed and dropped from the
         registry so profile dropdowns / model lists stop listing them.
-        ``enabled`` defaults to True so configs predating the toggle keep
-        initializing their backends without manual migration.
+
+        A backend whose name does not appear in ``backends_config`` at all
+        is treated as *not configured* and skipped.  Only backends that
+        have an explicit config section (even if empty apart from
+        ``enabled``) are initialized.  Within an existing section,
+        ``enabled`` still defaults to ``True`` so configs predating the
+        toggle keep working without migration.
         """
         if not isinstance(backends_config, dict):
             return
         for name, cls in AIBackend.registered_backends().items():
+            if name not in backends_config:
+                # Never configured — skip without touching any existing
+                # instance (there shouldn't be one, but be safe).
+                old = self._backends.pop(name, None)
+                if old is not None:
+                    await old.close()
+                    logger.info("AI backend '%s' removed (no config section)", name)
+                continue
             cfg = backends_config.get(name, {})
             if not isinstance(cfg, dict):
                 cfg = {}
@@ -1272,11 +1291,12 @@ class AIService(Service):
             self._assignments = dict(_BUILTIN_ASSIGNMENTS)
             return
 
-        # Seed built-in profiles and assignments only on a fresh database
-        # (no profiles exist yet). After that, the user owns the data.
-        existing_profiles = await self._storage.query(Query(collection=_PROFILES_COLLECTION))
-        if not existing_profiles:
-            for bp in _BUILTIN_PROFILES:
+        # Ensure built-in profiles exist.  Missing profiles are created
+        # (fresh DB or after a deletion); existing ones are left as-is so
+        # user edits are preserved.  Same for built-in assignments.
+        for bp in _BUILTIN_PROFILES:
+            existing = await self._storage.get(_PROFILES_COLLECTION, bp.name)
+            if existing is None:
                 await self._storage.put(
                     _PROFILES_COLLECTION,
                     bp.name,
@@ -1290,7 +1310,10 @@ class AIService(Service):
                         "model": bp.model,
                     },
                 )
-            for call_name, profile_name in _BUILTIN_ASSIGNMENTS.items():
+                logger.info("Seeded built-in AI profile '%s'", bp.name)
+        for call_name, profile_name in _BUILTIN_ASSIGNMENTS.items():
+            existing = await self._storage.get(_ASSIGNMENTS_COLLECTION, call_name)
+            if existing is None:
                 await self._storage.put(
                     _ASSIGNMENTS_COLLECTION,
                     call_name,
@@ -1299,6 +1322,7 @@ class AIService(Service):
                         "profile": profile_name,
                     },
                 )
+                logger.info("Seeded built-in assignment '%s' -> '%s'", call_name, profile_name)
 
         # Fix any assignment (built-in or user-created) that points to a
         # profile that no longer exists — reset it to the default profile.

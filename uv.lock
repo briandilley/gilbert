@@ -13,6 +13,8 @@ members = [
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
+    "gilbert-plugin-current-data-sync",
+    "gilbert-plugin-current-sales-assistant",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-gemini",
@@ -1043,6 +1045,16 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "boto3", specifier = ">=1.35" }]
+
+[[package]]
+name = "gilbert-plugin-current-data-sync"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-data-sync" }
+
+[[package]]
+name = "gilbert-plugin-current-sales-assistant"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-sales-assistant" }
 
 [[package]]
 name = "gilbert-plugin-deepseek"
