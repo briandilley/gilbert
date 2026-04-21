@@ -16,6 +16,7 @@ Both links coexist independently. Users typically link one Spotify account to Gi
 ### Interface
 - `src/gilbert/interfaces/music.py` — `MusicBackend` ABC, `MusicItem`, `Playable`, `MusicItemKind` (TRACK / ALBUM / ARTIST / PLAYLIST / STATION / FAVORITE), `MusicSearchUnavailableError`.
 - Methods: `list_favorites`, `list_playlists`, `search(query, kind, limit)`, `resolve_playable(item)`.
+- `supports_queue: bool` class attribute (default `False`) — backends declare whether they can route resolved items through a speaker queue. `MusicService.supports_queue` mirrors it and gates the queue tools.
 - `LinkedMusicServiceLister` protocol — `list_linked_services()` used by `ConfigurationService` to drive the `preferred_service` dropdown.
 
 ### Backend (Spotify Web API)
@@ -55,6 +56,9 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 - `list_favorites`, `list_playlists` — browse user's Spotify library.
 - `search_music` (+ `/music search <query>`) — Spotify search across kinds.
 - `play_music` — resolve + play a search result or library item.
+- `play_item` — button-invoked sibling of `play_music` that takes a JSON-encoded MusicItem payload.
+- `add_to_queue` (+ `/music queue <title>`) — resolve + append to the speaker queue without stopping playback. **Only exposed when the active backend sets `supports_queue = True`.** Routes through `SpeakerService.enqueue_on_speakers`, which delegates to `SpeakerBackend.enqueue_uri` (default raises `NotImplementedError`; `SonosSpeaker` overrides to call `SonosSmapiClient.enqueue_spotify` — pure `AddURIToQueue` + idempotent `SetAVTransportURI`, no clear/seek/play).
+- `queue_item` — button-invoked sibling of `add_to_queue` (same JSON payload shape as `play_item`).
 - `now_playing` — queries the speaker backend for current track.
 
 ## Related

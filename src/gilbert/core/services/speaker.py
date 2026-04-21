@@ -471,6 +471,31 @@ class SpeakerService(Service):
             )
         )
 
+    async def enqueue_on_speakers(
+        self,
+        uri: str,
+        speaker_names: list[str] | None = None,
+        title: str = "",
+        didl_meta: str = "",
+    ) -> None:
+        """Append a URI to the speaker's queue without stopping playback.
+
+        Routes to ``SpeakerBackend.enqueue_uri``. Raises
+        ``NotImplementedError`` if the backend doesn't support queueing —
+        callers should guard on the music service's ``supports_queue``
+        flag before invoking this.
+        """
+        target_ids = await self._resolve_target_ids(speaker_names)
+        await self.prepare_speakers(target_ids)
+        await self._require_backend().enqueue_uri(
+            PlayRequest(
+                uri=uri,
+                speaker_ids=target_ids,
+                title=title,
+                didl_meta=didl_meta,
+            )
+        )
+
     async def stop_speakers(
         self,
         speaker_names: list[str] | None = None,

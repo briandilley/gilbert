@@ -101,6 +101,12 @@ class MusicBackend(ABC):
 
     _registry: dict[str, type[MusicBackend]] = {}
     backend_name: str = ""
+    supports_queue: bool = False
+    """Declares whether this backend supports adding resolved items to a
+    speaker queue. Backends whose playback path goes through a speaker
+    that owns a persistent queue (e.g. Sonos + SMAPI) override this to
+    ``True``; backends that only support one-shot playback leave it
+    ``False`` and the queue tools stay hidden."""
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)

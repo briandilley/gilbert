@@ -149,6 +149,18 @@ class SpeakerBackend(ABC):
     async def clear_queue(self, speaker_ids: list[str] | None = None) -> None:
         """Clear the playback queue. Override in backends that have queues."""
 
+    async def enqueue_uri(self, request: PlayRequest) -> None:
+        """Append audio to the speaker's queue without replacing playback.
+
+        Default raises ``NotImplementedError`` — backends with a
+        persistent queue (e.g. Sonos) should override to add the URI at
+        the end of the queue. Callers should guard on the music service's
+        ``supports_queue`` flag rather than catching the exception.
+        """
+        raise NotImplementedError(
+            "This speaker backend does not support queue operations"
+        )
+
     # --- Volume ---
 
     @abstractmethod

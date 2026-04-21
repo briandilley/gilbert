@@ -374,6 +374,47 @@ class MusicService(Service):
         )
         return playable
 
+    @property
+    def supports_queue(self) -> bool:
+        """True when the active music backend supports queue operations.
+
+        When ``False``, the ``add_to_queue`` / ``queue_item`` tools are
+        hidden from ``get_tools`` and ``add_to_queue`` raises instead of
+        silently succeeding. Mirrors ``MusicBackend.supports_queue``.
+        """
+        return bool(self._backend and self._backend.supports_queue)
+
+    async def add_to_queue(
+        self,
+        item: MusicItem,
+        speaker_names: list[str] | None = None,
+    ) -> Playable:
+        """Resolve an item and append it to the speaker queue.
+
+        Raises ``RuntimeError`` if the backend or speaker service doesn't
+        support queueing. The caller is expected to have already guarded
+        on ``supports_queue``.
+        """
+        if not self.supports_queue:
+            raise RuntimeError(
+                "Music backend does not support queue operations"
+            )
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None:
+            raise RuntimeError(
+                "Speaker service is not available — cannot queue music"
+            )
+
+        playable = await self._require_backend().resolve_playable(item)
+
+        await speaker_svc.enqueue_on_speakers(
+            uri=playable.uri,
+            speaker_names=speaker_names,
+            title=playable.title or item.title,
+            didl_meta=playable.didl_meta,
+        )
+        return playable
+
     def list_linked_services(self) -> list[str]:
         """Forward to the backend. Satisfies ``LinkedMusicServiceLister``
         so the configuration service can populate the preferred-service
@@ -398,7 +439,7 @@ class MusicService(Service):
     def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
         if not self._enabled:
             return []
-        return [
+        tools: list[ToolDefinition] = [
             ToolDefinition(
                 name="list_favorites",
                 slash_group="music",
@@ -551,6 +592,83 @@ class MusicService(Service):
             ),
         ]
 
+        # Queue tools are opt-in — only surface them when the backend
+        # advertises ``supports_queue``. Prevents the AI from trying to
+        # queue on backends that only support one-shot playback.
+        if self.supports_queue:
+            tools.append(
+                ToolDefinition(
+                    name="add_to_queue",
+                    slash_group="music",
+                    slash_command="queue",
+                    slash_help=(
+                        "Add to queue by title: /music queue <title> "
+                        "[speakers=...] [source=favorites|playlists|search]"
+                    ),
+                    description=(
+                        "Add music to the speaker queue by title. Searches "
+                        "favorites first, then playlists, then a fresh "
+                        "search. Set ``source`` to restrict the lookup. "
+                        "Does not stop current playback."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="title",
+                            type=ToolParameterType.STRING,
+                            description=(
+                                "Title to match (track, playlist, or favorite name)."
+                            ),
+                        ),
+                        ToolParameter(
+                            name="speakers",
+                            type=ToolParameterType.ARRAY,
+                            description="Speaker names or aliases.",
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="source",
+                            type=ToolParameterType.STRING,
+                            description=(
+                                "Restrict lookup: favorites, playlists, or search."
+                            ),
+                            required=False,
+                            enum=["favorites", "playlists", "search"],
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
+            tools.append(
+                # Mirrors ``play_item`` — button-invoked sibling that
+                # takes a JSON-encoded MusicItem payload. Intentionally
+                # has no slash command for the same reason as play_item.
+                ToolDefinition(
+                    name="queue_item",
+                    description=(
+                        "Append a specific music item to the queue. Takes "
+                        "the full item as a JSON payload produced by a "
+                        "prior search result."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="item",
+                            type=ToolParameterType.STRING,
+                            description=(
+                                "JSON-encoded MusicItem (same shape as play_item's argument)."
+                            ),
+                        ),
+                        ToolParameter(
+                            name="speakers",
+                            type=ToolParameterType.ARRAY,
+                            description="Speaker names or aliases.",
+                            required=False,
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
+        return tools
+
     async def execute_tool(
         self,
         name: str,
@@ -567,6 +685,10 @@ class MusicService(Service):
                 return await self._tool_play(arguments)
             case "play_item":
                 return await self._tool_play_item(arguments)
+            case "add_to_queue":
+                return await self._tool_add_to_queue(arguments)
+            case "queue_item":
+                return await self._tool_queue_item(arguments)
             case "now_playing":
                 return await self._tool_now_playing(arguments)
             case _:
@@ -723,6 +845,110 @@ class MusicService(Service):
         return json.dumps(
             {
                 "status": "playing",
+                "title": playable.title or music_item.title,
+                "kind": music_item.kind.value,
+                "service": music_item.service,
+                "uri": playable.uri,
+                "source": "search",
+            }
+        )
+
+    async def _tool_add_to_queue(self, arguments: dict[str, Any]) -> str:
+        """Resolve a title via the usual favorites→playlists→search chain,
+        then append it to the speaker queue. Mirrors ``_tool_play``'s
+        lookup behavior so the user-facing semantics stay consistent —
+        ``/music queue <title>`` behaves like ``/music play <title>``
+        except the current track keeps playing."""
+        title = arguments["title"]
+        speakers = arguments.get("speakers") or None
+        source = arguments.get("source", "")
+
+        item: MusicItem | None = None
+        sources_tried: list[str] = []
+
+        async def _try_favorites() -> MusicItem | None:
+            items = await self.list_favorites()
+            return _fuzzy_find(items, title)
+
+        async def _try_playlists() -> MusicItem | None:
+            items = await self.list_playlists()
+            return _fuzzy_find(items, title)
+
+        async def _try_search() -> MusicItem | None:
+            try:
+                results = await self.search(title, kind=MusicItemKind.TRACK, limit=1)
+            except MusicSearchUnavailableError:
+                return None
+            return results[0] if results else None
+
+        if source == "favorites":
+            sources_tried.append("favorites")
+            item = await _try_favorites()
+        elif source == "playlists":
+            sources_tried.append("playlists")
+            item = await _try_playlists()
+        elif source == "search":
+            sources_tried.append("search")
+            item = await _try_search()
+        else:
+            sources_tried.append("favorites")
+            item = await _try_favorites()
+            if item is None:
+                sources_tried.append("playlists")
+                item = await _try_playlists()
+            if item is None:
+                sources_tried.append("search")
+                item = await _try_search()
+
+        if item is None:
+            return json.dumps(
+                {
+                    "error": f"No music found matching '{title}'",
+                    "sources_tried": sources_tried,
+                }
+            )
+
+        try:
+            playable = await self.add_to_queue(item, speaker_names=speakers)
+        except MusicSearchUnavailableError as exc:
+            return json.dumps({"error": str(exc)})
+        except (RuntimeError, NotImplementedError) as exc:
+            return json.dumps({"error": str(exc)})
+
+        return json.dumps(
+            {
+                "status": "queued",
+                "title": playable.title or item.title,
+                "kind": item.kind.value,
+                "service": item.service,
+                "uri": playable.uri,
+                "source": sources_tried[-1] if sources_tried else "",
+            }
+        )
+
+    async def _tool_queue_item(self, arguments: dict[str, Any]) -> str:
+        """Button-invoked sibling of ``_tool_play_item`` — takes the same
+        JSON-encoded MusicItem payload and enqueues it instead of playing."""
+        payload = arguments.get("item")
+        if not payload:
+            return json.dumps({"error": "Missing 'item' payload"})
+        try:
+            music_item = _item_from_payload(str(payload))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        speakers = arguments.get("speakers") or None
+
+        try:
+            playable = await self.add_to_queue(music_item, speaker_names=speakers)
+        except MusicSearchUnavailableError as exc:
+            return json.dumps({"error": str(exc)})
+        except (RuntimeError, NotImplementedError) as exc:
+            return json.dumps({"error": str(exc)})
+
+        return json.dumps(
+            {
+                "status": "queued",
                 "title": playable.title or music_item.title,
                 "kind": music_item.kind.value,
                 "service": music_item.service,

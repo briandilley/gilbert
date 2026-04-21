@@ -153,6 +153,7 @@ def _mock_speaker_svc() -> Any:
 
     speaker_svc = MagicMock(spec=SpeakerService)
     speaker_svc.play_on_speakers = AsyncMock()
+    speaker_svc.enqueue_on_speakers = AsyncMock()
     return speaker_svc
 
 
@@ -226,6 +227,41 @@ def test_get_tools(service: MusicService) -> None:
         "play_item",
         "now_playing",
     }
+
+
+def test_queue_tools_hidden_when_backend_does_not_support_queue(
+    service: MusicService,
+) -> None:
+    """Stub backend leaves ``supports_queue`` at its default ``False``,
+    so the queue tools must not appear."""
+    assert service.supports_queue is False
+    names = [t.name for t in service.get_tools()]
+    assert "add_to_queue" not in names
+    assert "queue_item" not in names
+
+
+def test_queue_tools_exposed_when_backend_supports_queue(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Flipping the backend's ``supports_queue`` flag adds both the
+    slash-command tool and its button-invoked sibling."""
+    stub_backend.supports_queue = True
+    svc = MusicService()
+    svc._backend = stub_backend
+    svc._enabled = True
+
+    names = [t.name for t in svc.get_tools()]
+    assert "add_to_queue" in names
+    assert "queue_item" in names
+
+    queue_tool = next(t for t in svc.get_tools() if t.name == "add_to_queue")
+    assert queue_tool.slash_group == "music"
+    assert queue_tool.slash_command == "queue"
+
+    queue_item_tool = next(t for t in svc.get_tools() if t.name == "queue_item")
+    # Button-invoked only — same rationale as ``play_item``.
+    assert not queue_item_tool.slash_command
+    assert not queue_item_tool.slash_group
 
 
 def test_all_user_facing_tools_grouped_under_music(service: MusicService) -> None:
@@ -740,6 +776,121 @@ def test_now_playing_tool_exposed(service: MusicService) -> None:
     assert tool.slash_group == "music"
     assert tool.slash_command == "now"
     assert tool.required_role == "everyone"
+
+
+# --- Queue ---
+
+
+async def test_add_to_queue_requires_speaker_service(service: MusicService) -> None:
+    """Even when the backend supports queueing, missing speaker service
+    surfaces a legible error rather than crashing."""
+    service._backend.supports_queue = True  # type: ignore[union-attr]
+    result = await service.execute_tool("add_to_queue", {"title": "Horizon"})
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "Speaker service" in parsed["error"]
+
+
+async def test_add_to_queue_fails_when_backend_does_not_support_it(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """``add_to_queue`` on a non-queue backend returns an error rather
+    than silently routing to play."""
+    assert stub_backend.supports_queue is False
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    result = await service.execute_tool("add_to_queue", {"title": "Horizon"})
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "queue" in parsed["error"].lower()
+    speaker_svc.enqueue_on_speakers.assert_not_awaited()
+
+
+async def test_add_to_queue_favorite_by_title(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Happy path: resolves via favorites, then calls the speaker's
+    enqueue method (not play_on_speakers)."""
+    stub_backend.supports_queue = True
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    result = await service.execute_tool(
+        "add_to_queue",
+        {"title": "Horizon", "speakers": ["Kitchen"]},
+    )
+    parsed = json.loads(result)
+
+    assert parsed["status"] == "queued"
+    assert parsed["title"] == "Horizon"
+    assert parsed["source"] == "favorites"
+
+    speaker_svc.enqueue_on_speakers.assert_awaited_once()
+    speaker_svc.play_on_speakers.assert_not_awaited()
+    call_kwargs = speaker_svc.enqueue_on_speakers.call_args[1]
+    assert call_kwargs["uri"].startswith("x-sonos-spotify:")
+    assert call_kwargs["speaker_names"] == ["Kitchen"]
+
+
+async def test_tool_queue_item_round_trips_from_button_value(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Same contract as ``play_item`` — a JSON-encoded payload from a
+    prior search result routes through to the speaker's enqueue."""
+    from gilbert.core.services.music import _item_to_payload
+
+    stub_backend.supports_queue = True
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    item = MusicItem(
+        id="opaque-search-result",
+        title="Black Dog",
+        kind=MusicItemKind.TRACK,
+        subtitle="Led Zeppelin",
+        uri="",
+        service="Spotify",
+    )
+    payload = _item_to_payload(item)
+
+    result = await service.execute_tool(
+        "queue_item",
+        {"item": payload, "speakers": ["Kitchen"]},
+    )
+    parsed = json.loads(result)
+    assert parsed["status"] == "queued"
+    assert parsed["title"] == "Black Dog"
+
+    speaker_svc.enqueue_on_speakers.assert_awaited_once()
+    call_kwargs = speaker_svc.enqueue_on_speakers.call_args[1]
+    assert "opaque-search-result" in call_kwargs["uri"]
+    assert call_kwargs["speaker_names"] == ["Kitchen"]
+
+
+async def test_tool_queue_item_missing_payload_returns_error(
+    service: MusicService,
+) -> None:
+    service._backend.supports_queue = True  # type: ignore[union-attr]
+    result = await service.execute_tool("queue_item", {})
+    parsed = json.loads(result)
+    assert "error" in parsed
+    assert "Missing" in parsed["error"]
 
 
 # --- ConfigActionProvider forwarding ---
