@@ -384,6 +384,33 @@ class MusicService(Service):
         """
         return bool(self._backend and self._backend.supports_queue)
 
+    async def play_queue(
+        self,
+        speaker_names: list[str] | None = None,
+    ) -> bool:
+        """Start (or resume) playback of the speaker queue.
+
+        Distinct from ``play_item`` / ``play_music`` — those clear the
+        queue and replace it with one item. This just presses play on
+        whatever queue already exists.
+
+        Returns ``False`` when playback was already in progress (no
+        action taken) and ``True`` when a Play was actually issued.
+        Raises ``RuntimeError`` if the backend doesn't expose a queue.
+        """
+        if not self.supports_queue:
+            raise RuntimeError(
+                "Music backend does not support queue operations"
+            )
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None:
+            raise RuntimeError(
+                "Speaker service is not available — cannot play queue"
+            )
+        return bool(
+            await speaker_svc.play_queue_on_speakers(speaker_names=speaker_names)
+        )
+
     async def add_to_queue(
         self,
         item: MusicItem,
@@ -502,9 +529,16 @@ class MusicService(Service):
                     "[speakers=...] [source=favorites|playlists|search]"
                 ),
                 description=(
-                    "Play music by title. By default searches favorites "
-                    "first, then playlists, then runs a fresh search. "
-                    "Set ``source`` to restrict the lookup."
+                    "Play a SPECIFIC music item by title — REPLACES the "
+                    "current queue with just this one item and starts "
+                    "playing it. Use this when the user names a track/"
+                    "album/playlist to play right now. For appending to "
+                    "the existing queue without interrupting playback "
+                    "use ``add_to_queue``. For resuming playback of an "
+                    "already-built queue use ``play_queue``. "
+                    "By default searches favorites first, then playlists, "
+                    "then runs a fresh search. Set ``source`` to restrict "
+                    "the lookup."
                 ),
                 parameters=[
                     ToolParameter(
@@ -563,9 +597,11 @@ class MusicService(Service):
                 name="play_item",
                 description=(
                     "Play a specific music item returned by a prior "
-                    "``search_music`` call. Takes the full item as a "
-                    "JSON payload so the speaker backend can resolve "
-                    "it without a second search round-trip."
+                    "``search_music`` call — REPLACES the queue with "
+                    "this one item and starts it. Takes the full item "
+                    "as a JSON payload so the speaker backend can resolve "
+                    "it without a second search round-trip. Sibling of "
+                    "``queue_item`` (which appends instead of replacing)."
                 ),
                 parameters=[
                     ToolParameter(
@@ -606,10 +642,15 @@ class MusicService(Service):
                         "[speakers=...] [source=favorites|playlists|search]"
                     ),
                     description=(
-                        "Add music to the speaker queue by title. Searches "
+                        "APPEND music to the speaker queue by title "
+                        "without replacing or stopping anything — current "
+                        "playback keeps going; the new item plays when "
+                        "the queue reaches it. Use this when the user "
+                        "says 'queue up', 'add', 'play next', or 'after "
+                        "this'. For immediate playback that replaces the "
+                        "queue use ``play_music`` instead. Searches "
                         "favorites first, then playlists, then a fresh "
-                        "search. Set ``source`` to restrict the lookup. "
-                        "Does not stop current playback."
+                        "search. Set ``source`` to restrict the lookup."
                     ),
                     parameters=[
                         ToolParameter(
@@ -639,15 +680,49 @@ class MusicService(Service):
                 ),
             )
             tools.append(
+                ToolDefinition(
+                    name="play_queue",
+                    slash_group="music",
+                    slash_command="play-queue",
+                    slash_help=(
+                        "Start/resume the queue: /music play-queue [speakers=...]"
+                    ),
+                    description=(
+                        "Start (or resume) playback of the existing "
+                        "speaker queue — does NOT clear the queue or add "
+                        "new content. Use this when the user wants to "
+                        "hear the queue they already built with "
+                        "``add_to_queue``, or resume after a pause. For "
+                        "starting a specific item use ``play_music`` "
+                        "(which replaces the queue). Safe to call when "
+                        "music is already playing: in that case it's a "
+                        "no-op (returns ``already_playing``) so the "
+                        "current track doesn't restart from the "
+                        "beginning of the queue."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="speakers",
+                            type=ToolParameterType.ARRAY,
+                            description="Speaker names or aliases.",
+                            required=False,
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
+            tools.append(
                 # Mirrors ``play_item`` — button-invoked sibling that
                 # takes a JSON-encoded MusicItem payload. Intentionally
                 # has no slash command for the same reason as play_item.
                 ToolDefinition(
                     name="queue_item",
                     description=(
-                        "Append a specific music item to the queue. Takes "
-                        "the full item as a JSON payload produced by a "
-                        "prior search result."
+                        "APPEND a specific music item to the queue "
+                        "without interrupting playback. Takes the full "
+                        "item as a JSON payload produced by a prior "
+                        "search result. Sibling of ``play_item`` (which "
+                        "replaces the queue instead of appending)."
                     ),
                     parameters=[
                         ToolParameter(
@@ -689,6 +764,8 @@ class MusicService(Service):
                 return await self._tool_add_to_queue(arguments)
             case "queue_item":
                 return await self._tool_queue_item(arguments)
+            case "play_queue":
+                return await self._tool_play_queue(arguments)
             case "now_playing":
                 return await self._tool_now_playing(arguments)
             case _:
@@ -924,6 +1001,23 @@ class MusicService(Service):
                 "uri": playable.uri,
                 "source": sources_tried[-1] if sources_tried else "",
             }
+        )
+
+    async def _tool_play_queue(self, arguments: dict[str, Any]) -> str:
+        """Start or resume the existing speaker queue without touching it.
+
+        When music is already playing we don't re-issue Play — a
+        ``SetAVTransportURI`` + ``Play`` sequence would reset the queue
+        to track 1 and restart whatever's currently playing mid-song.
+        Returns ``already_playing`` in that case so the caller can show
+        a no-op message."""
+        speakers = arguments.get("speakers") or None
+        try:
+            started = await self.play_queue(speaker_names=speakers)
+        except (RuntimeError, NotImplementedError) as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(
+            {"status": "playing_queue" if started else "already_playing"}
         )
 
     async def _tool_queue_item(self, arguments: dict[str, Any]) -> str:

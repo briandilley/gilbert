@@ -60,6 +60,8 @@ class StubSpeakerBackend(SpeakerBackend):
         self.stopped_ids: list[str] | None = None
         self.volume_changes: list[tuple[str, int]] = []
         self._now_playing: dict[str, NowPlaying] = {}
+        self.play_queue_calls: list[list[str]] = []
+        self.enqueue_requests: list[PlayRequest] = []
 
     async def initialize(self, config: dict[str, object]) -> None:
         self.initialized = True
@@ -121,6 +123,29 @@ class StubSpeakerBackend(SpeakerBackend):
         if speaker_id in self._now_playing:
             return self._now_playing[speaker_id]
         return await super().get_now_playing(speaker_id)
+
+    async def enqueue_uri(self, request: PlayRequest) -> None:
+        self.enqueue_requests.append(request)
+
+    async def play_queue(self, speaker_ids: list[str] | None = None) -> None:
+        self.play_queue_calls.append(list(speaker_ids or []))
+
+    def set_state(self, speaker_id: str, state: PlaybackState) -> None:
+        """Mutate a speaker's playback state (tests for play_queue gating)."""
+        self._speakers = [
+            SpeakerInfo(
+                speaker_id=s.speaker_id,
+                name=s.name,
+                ip_address=s.ip_address,
+                model=s.model,
+                group_id=s.group_id,
+                group_name=s.group_name,
+                is_group_coordinator=s.is_group_coordinator,
+                volume=s.volume,
+                state=state if s.speaker_id == speaker_id else s.state,
+            )
+            for s in self._speakers
+        ]
 
 
 class StubStorageBackend(StorageBackend):
@@ -400,6 +425,57 @@ async def test_tool_stop_audio_all(
     assert parsed["status"] == "stopped"
     # All speakers resolved and stopped
     assert set(stub_backend.stopped_ids) == {"uid-1", "uid-2", "uid-3"}
+
+
+# --- Queue ---
+
+
+async def test_enqueue_on_speakers_routes_to_backend(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """``enqueue_on_speakers`` must drop a PlayRequest into the backend's
+    ``enqueue_uri`` hook — never ``play_uri``. Mixing them up would
+    quietly replace what's playing on every queue add."""
+    await service.start(resolver)
+    await service.enqueue_on_speakers(
+        uri="spotify:track:abc",
+        speaker_names=["Speaker 1"],
+        title="Test Track",
+    )
+    assert len(stub_backend.enqueue_requests) == 1
+    assert stub_backend.enqueue_requests[0].uri == "spotify:track:abc"
+    assert stub_backend.last_play_request is None  # play_uri not called
+
+
+async def test_play_queue_on_speakers_calls_backend_when_idle(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    await service.start(resolver)
+    # uid-1 is STOPPED in the fixture — so ``play_queue`` should fire.
+    started = await service.play_queue_on_speakers(speaker_names=["Speaker 1"])
+    assert started is True
+    assert stub_backend.play_queue_calls == [["uid-1"]]
+
+
+async def test_play_queue_on_speakers_noop_when_already_playing(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """Regression guard for the "resume restarts the queue at track 1"
+    bug: when the target speaker is already PLAYING, ``play_queue``
+    must NOT be invoked — the SetAVTransportURI that precedes Play
+    would reset queue position and interrupt the current song."""
+    await service.start(resolver)
+    stub_backend.set_state("uid-1", PlaybackState.PLAYING)
+
+    started = await service.play_queue_on_speakers(speaker_names=["Speaker 1"])
+    assert started is False
+    assert stub_backend.play_queue_calls == []
 
 
 # --- Aliases ---

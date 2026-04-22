@@ -161,6 +161,18 @@ class SpeakerBackend(ABC):
             "This speaker backend does not support queue operations"
         )
 
+    async def play_queue(self, speaker_ids: list[str] | None = None) -> None:
+        """Start (or resume) playback of the existing speaker queue.
+
+        Different from ``play_uri`` in that it does NOT clear or replace
+        the queue — it just points the transport at whatever's already
+        queued and presses play. Default raises ``NotImplementedError``.
+        Paired with ``enqueue_uri`` on backends that expose a queue.
+        """
+        raise NotImplementedError(
+            "This speaker backend does not support queue operations"
+        )
+
     # --- Volume ---
 
     @abstractmethod

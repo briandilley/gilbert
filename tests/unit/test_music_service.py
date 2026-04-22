@@ -154,6 +154,9 @@ def _mock_speaker_svc() -> Any:
     speaker_svc = MagicMock(spec=SpeakerService)
     speaker_svc.play_on_speakers = AsyncMock()
     speaker_svc.enqueue_on_speakers = AsyncMock()
+    # Default: play_queue succeeds (returns True). Tests that care about
+    # the already-playing no-op override this to return False.
+    speaker_svc.play_queue_on_speakers = AsyncMock(return_value=True)
     return speaker_svc
 
 
@@ -243,8 +246,9 @@ def test_queue_tools_hidden_when_backend_does_not_support_queue(
 def test_queue_tools_exposed_when_backend_supports_queue(
     stub_backend: StubMusicBackend,
 ) -> None:
-    """Flipping the backend's ``supports_queue`` flag adds both the
-    slash-command tool and its button-invoked sibling."""
+    """Flipping the backend's ``supports_queue`` flag adds the queue
+    trio: append (``add_to_queue`` / ``queue_item``) + play
+    (``play_queue``)."""
     stub_backend.supports_queue = True
     svc = MusicService()
     svc._backend = stub_backend
@@ -253,15 +257,42 @@ def test_queue_tools_exposed_when_backend_supports_queue(
     names = [t.name for t in svc.get_tools()]
     assert "add_to_queue" in names
     assert "queue_item" in names
+    assert "play_queue" in names
 
     queue_tool = next(t for t in svc.get_tools() if t.name == "add_to_queue")
     assert queue_tool.slash_group == "music"
     assert queue_tool.slash_command == "queue"
 
+    play_queue_tool = next(t for t in svc.get_tools() if t.name == "play_queue")
+    assert play_queue_tool.slash_group == "music"
+    assert play_queue_tool.slash_command == "play-queue"
+
     queue_item_tool = next(t for t in svc.get_tools() if t.name == "queue_item")
     # Button-invoked only — same rationale as ``play_item``.
     assert not queue_item_tool.slash_command
     assert not queue_item_tool.slash_group
+
+
+def test_queue_tool_descriptions_distinguish_replace_vs_append(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """The AI's tool picker relies on descriptions to pick the right
+    tool. Regression guard: keep the replace/append/resume words in the
+    three action descriptions so a model can't confuse them.
+
+    Without distinctive wording, an "add these songs after this one"
+    request ends up firing ``play_music`` which clears the queue."""
+    stub_backend.supports_queue = True
+    svc = MusicService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    tools = {t.name: t for t in svc.get_tools()}
+
+    assert "REPLACES" in tools["play_music"].description
+    assert "APPEND" in tools["add_to_queue"].description
+    # ``play_queue`` must explicitly say it doesn't clear/replace.
+    assert "does NOT clear" in tools["play_queue"].description
+    assert "resume" in tools["play_queue"].description.lower()
 
 
 def test_all_user_facing_tools_grouped_under_music(service: MusicService) -> None:
@@ -891,6 +922,76 @@ async def test_tool_queue_item_missing_payload_returns_error(
     parsed = json.loads(result)
     assert "error" in parsed
     assert "Missing" in parsed["error"]
+
+
+async def test_tool_play_queue_routes_to_speaker_service(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """``play_queue`` must hit the speaker's queue-play method and NOT
+    touch the play/enqueue paths — those would either replace the queue
+    or add noise to it."""
+    stub_backend.supports_queue = True
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    result = await service.execute_tool("play_queue", {"speakers": ["Kitchen"]})
+    parsed = json.loads(result)
+    assert parsed["status"] == "playing_queue"
+
+    speaker_svc.play_queue_on_speakers.assert_awaited_once_with(
+        speaker_names=["Kitchen"],
+    )
+    speaker_svc.play_on_speakers.assert_not_awaited()
+    speaker_svc.enqueue_on_speakers.assert_not_awaited()
+
+
+async def test_tool_play_queue_is_noop_when_already_playing(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """If the speaker is already playing, ``play_queue`` must NOT
+    re-issue Play — the SetAVTransportURI that normally precedes it
+    resets the queue to track 1, restarting the current song. The
+    speaker service signals "already playing" by returning False;
+    ``_tool_play_queue`` surfaces that as ``already_playing`` so the
+    caller can explain the no-op to the user."""
+    stub_backend.supports_queue = True
+    speaker_svc = _mock_speaker_svc()
+    speaker_svc.play_queue_on_speakers = AsyncMock(return_value=False)
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    result = await service.execute_tool("play_queue", {})
+    parsed = json.loads(result)
+    assert parsed["status"] == "already_playing"
+
+
+async def test_tool_play_queue_fails_when_backend_does_not_support_queue(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Parity with ``add_to_queue``: if the backend doesn't support the
+    queue, return a legible error."""
+    assert stub_backend.supports_queue is False
+    speaker_svc = _mock_speaker_svc()
+    resolver = _resolver_with_speaker(speaker_svc)
+
+    service = MusicService()
+    service._backend = stub_backend
+    service._enabled = True
+    await service.start(resolver)
+
+    result = await service.execute_tool("play_queue", {})
+    parsed = json.loads(result)
+    assert "error" in parsed
+    speaker_svc.play_queue_on_speakers.assert_not_awaited()
 
 
 # --- ConfigActionProvider forwarding ---

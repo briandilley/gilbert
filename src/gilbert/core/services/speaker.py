@@ -496,6 +496,40 @@ class SpeakerService(Service):
             )
         )
 
+    async def play_queue_on_speakers(
+        self,
+        speaker_names: list[str] | None = None,
+    ) -> bool:
+        """Start or resume queue playback on the specified speakers.
+
+        Does NOT clear the queue or add new content — callers should
+        have built the queue via prior ``enqueue_on_speakers`` calls (or
+        an equivalent). Raises ``NotImplementedError`` if the backend
+        doesn't support queue operations.
+
+        When playback is already in progress this is a no-op and returns
+        ``False`` — otherwise the SMAPI SetAVTransportURI that normally
+        precedes the Play action would reset the queue back to track 1,
+        losing the listener's position mid-song. Returns ``True`` when
+        a Play was actually issued.
+        """
+        backend = self._require_backend()
+        target_ids = await self._resolve_target_ids(speaker_names)
+        await self.prepare_speakers(target_ids)
+
+        # Check playback state on the coordinator (first target). All
+        # group members share transport state, so any one is enough.
+        if target_ids:
+            try:
+                state = await backend.get_playback_state(target_ids[0])
+            except Exception:
+                state = PlaybackState.STOPPED
+            if state == PlaybackState.PLAYING:
+                return False
+
+        await backend.play_queue(target_ids)
+        return True
+
     async def stop_speakers(
         self,
         speaker_names: list[str] | None = None,

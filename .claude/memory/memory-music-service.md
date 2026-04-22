@@ -57,8 +57,9 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 - `search_music` (+ `/music search <query>`) — Spotify search across kinds.
 - `play_music` — resolve + play a search result or library item.
 - `play_item` — button-invoked sibling of `play_music` that takes a JSON-encoded MusicItem payload.
-- `add_to_queue` (+ `/music queue <title>`) — resolve + append to the speaker queue without stopping playback. **Only exposed when the active backend sets `supports_queue = True`.** Routes through `SpeakerService.enqueue_on_speakers`, which delegates to `SpeakerBackend.enqueue_uri` (default raises `NotImplementedError`; `SonosSpeaker` overrides to call `SonosSmapiClient.enqueue_spotify` — pure `AddURIToQueue` + idempotent `SetAVTransportURI`, no clear/seek/play).
+- `add_to_queue` (+ `/music queue <title>`) — resolve + append to the speaker queue without stopping OR starting playback. **Only exposed when the active backend sets `supports_queue = True`.** Routes through `SpeakerService.enqueue_on_speakers` → `SpeakerBackend.enqueue_uri` → `SonosSmapiClient.enqueue_spotify`, which is a **pure `AddURIToQueue`** — no `SetAVTransportURI`, no Play. Switching the transport source in the middle of other playback was causing speakers to abruptly cut to the queue; the source-switch now only happens inside the explicit `resume_queue` path.
 - `queue_item` — button-invoked sibling of `add_to_queue` (same JSON payload shape as `play_item`).
+- `play_queue` (+ `/music play-queue`) — start or resume playback of the existing speaker queue without clearing/replacing it. `SpeakerService.play_queue_on_speakers` checks `get_playback_state` on the target first: **if already PLAYING, it's a no-op** (returns `False`; tool reports `already_playing`) to avoid the `SetAVTransportURI` + `Play` sequence resetting the queue back to track 1. Otherwise routes to `SonosSmapiClient.resume_queue` (`SetAVTransportURI` + `Play`). Tool descriptions use explicit "REPLACES / APPEND / does NOT clear" wording so the AI picks the right of the three playback verbs.
 - `now_playing` — queries the speaker backend for current track.
 
 ## Related
