@@ -50,7 +50,8 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 ### Service
 - `src/gilbert/core/services/music.py` — `MusicService` implementing Service, Configurable, ToolProvider.
 - Wraps the backend; no direct Spotify knowledge lives here.
-- `play_item(item, speaker_names, volume)` calls `backend.resolve_playable(item)` then `speaker_svc.play_on_speakers(uri=playable.uri, ...)`. The speaker backend handles the Spotify-specific `load_content` dispatch.
+- `play_item(item, speaker_names, volume, initiator="user")` calls `backend.resolve_playable(item)` then `speaker_svc.play_on_speakers(uri=playable.uri, ...)`. The speaker backend handles the Spotify-specific `load_content` dispatch.
+- Emits `music.playback_started` on each successful `play_item` / `add_to_queue` / `play_queue` (event bus optional — resolved in `start()`). Payload: `{uri, title, kind, initiator}`. `initiator` defaults to `"user"`; RadioDJ passes `"dj"` for its own plays so it can filter self-emissions and avoid disarming itself. The already-playing no-op path of `play_queue` intentionally does NOT emit — it doesn't represent a new user intent.
 
 ### AI Tools Exposed
 - `list_favorites`, `list_playlists` — browse user's Spotify library.

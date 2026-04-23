@@ -83,6 +83,14 @@ class RadioDJService(Service):
         self._genre_rotation_index: int = 0
         self._present_users: set[str] = set()
         self._stopped_by_empty: bool = False
+        # True when the DJ believes the current playback was started by
+        # itself. Flipped to False by the ``music.playback_started``
+        # event handler when a user-initiated play/queue action fires.
+        # Auto-switch paths consult ``_should_auto_switch`` which checks
+        # this AND the current playback state — so the DJ defers while
+        # the user's chosen music is playing, and reclaims when the
+        # speaker goes quiet.
+        self._dj_owns_playback: bool = True
 
         # Unsub callables for event bus
         self._unsubs: list[Any] = []
@@ -143,6 +151,15 @@ class RadioDJService(Service):
             )
             self._unsubs.append(
                 self._event_bus.subscribe("presence.departed", self._on_presence_departed)
+            )
+            # Learn when a user plays music outside the DJ (via /music
+            # play, the AI's play_music tool, a Play button on a search
+            # result, etc.) so we can stop clobbering their selection
+            # on the next presence tick.
+            self._unsubs.append(
+                self._event_bus.subscribe(
+                    "music.playback_started", self._on_music_playback_started
+                )
             )
 
         # Configuration
@@ -433,6 +450,52 @@ class RadioDJService(Service):
         elapsed = (datetime.now(UTC) - self._last_genre_switch).total_seconds()
         return elapsed >= self._min_switch_minutes * 60
 
+    async def _should_auto_switch(self) -> bool:
+        """Ownership guard: should the DJ be allowed to change the music now?
+
+        Returns ``False`` when a user has taken manual control (via
+        ``/music play``, the play_music tool, a button click, etc.) AND
+        their music is still playing — the DJ would rudely clobber it.
+
+        When the DJ doesn't currently own playback we query
+        ``now_playing``: if the speaker's gone quiet we reclaim
+        ownership and allow the switch, because "silent speakers + users
+        present" is exactly what the DJ exists to fill.
+        """
+        if self._dj_owns_playback:
+            return True
+        now = await self._get_now_playing()
+        if now is None or now.state != PlaybackState.PLAYING:
+            # User's music has stopped — reclaim the floor.
+            self._dj_owns_playback = True
+            return True
+        # Someone else's music is still playing — back off.
+        logger.debug(
+            "Radio DJ deferring auto-switch: user-initiated playback "
+            "is still PLAYING (uri=%s title=%r)",
+            now.uri,
+            now.title,
+        )
+        return False
+
+    async def _on_music_playback_started(self, event: Event) -> None:
+        """Flip ownership off whenever a non-DJ play action reaches the speaker.
+
+        The DJ remains ``_active`` — it just defers to the user. Next
+        presence tick or arrival where ``_should_auto_switch`` returns
+        True (i.e. user's music stopped) will let the DJ resume."""
+        initiator = str(event.data.get("initiator") or "")
+        if initiator == "dj":
+            return
+        if self._dj_owns_playback:
+            logger.info(
+                "Radio DJ yielding playback to %s-initiated play (uri=%s title=%r)",
+                initiator or "external",
+                event.data.get("uri"),
+                event.data.get("title"),
+            )
+        self._dj_owns_playback = False
+
     # --- Playback ---
 
     async def _play_genre(self, genre: str) -> bool:
@@ -465,6 +528,7 @@ class RadioDJService(Service):
                     playlist,
                     speaker_names=self._speakers or None,
                     volume=self._default_volume,
+                    initiator="dj",
                 )
             except (RuntimeError, MusicSearchUnavailableError) as exc:
                 logger.warning("Radio DJ playback failed for %s: %s", genre, exc)
@@ -473,6 +537,10 @@ class RadioDJService(Service):
             old_genre = self._current_genre
             self._current_genre = genre
             self._last_genre_switch = datetime.now(UTC)
+            # We just played our own track — take ownership back. The
+            # event handler will NOT flip this to False for our own
+            # emission because the event carries ``initiator="dj"``.
+            self._dj_owns_playback = True
             await self._persist_state()
 
             if self._event_bus and old_genre != genre:
@@ -733,9 +801,11 @@ class RadioDJService(Service):
 
         present = await self._get_present_user_ids()
 
-        # Stop if empty
+        # Stop if empty. Only "our" playback is safe to stop — cutting
+        # the user's own music when the room empties is the exact
+        # behavior that made the DJ feel invasive.
         if not present and self._stop_when_empty:
-            if not self._stopped_by_empty:
+            if not self._stopped_by_empty and self._dj_owns_playback:
                 logger.info("Radio DJ: no one present, stopping playback")
                 await self._stop_playback()
                 self._stopped_by_empty = True
@@ -743,6 +813,8 @@ class RadioDJService(Service):
 
         # Resume if people arrived and we stopped due to empty
         if present and self._stopped_by_empty:
+            if not await self._should_auto_switch():
+                return
             self._stopped_by_empty = False
             genre = await self.select_genre(present)
             if genre:
@@ -752,14 +824,22 @@ class RadioDJService(Service):
 
         # Check if presence changed and we can switch
         if present != self._present_users and self._can_switch_genre():
-            genre = await self.select_genre(present)
-            if genre and genre.lower() != (self._current_genre or "").lower():
-                await self._play_genre(genre)
+            if await self._should_auto_switch():
+                genre = await self.select_genre(present)
+                if genre and genre.lower() != (self._current_genre or "").lower():
+                    await self._play_genre(genre)
 
         self._present_users = present
 
     async def _on_presence_arrived(self, event: Event) -> None:
-        """Handle a presence.arrived event — recalculate genre immediately."""
+        """Handle a presence.arrived event.
+
+        Arrivals used to bypass ``min_switch_interval`` so every new
+        person walking in would trigger an instant genre change.
+        That felt like the DJ was "playing stuff whenever it wants";
+        arrivals now honor the same throttle as the poll loop so
+        repeated comings and goings can't thrash playback.
+        """
         if not self._active:
             return
 
@@ -767,15 +847,22 @@ class RadioDJService(Service):
         if user_id:
             self._present_users.add(user_id)
 
-        # Resume if we stopped due to empty shop
+        # Resume if we stopped due to empty shop — but only if we still
+        # own the floor (user hasn't started their own music since).
         if self._stopped_by_empty:
+            if not await self._should_auto_switch():
+                return
             self._stopped_by_empty = False
             genre = await self.select_genre(self._present_users)
             if genre:
                 await self._play_genre(genre)
             return
 
-        # Bypass throttle on arrival — recalculate genre
+        if not self._can_switch_genre():
+            return
+        if not await self._should_auto_switch():
+            return
+
         genre = await self.select_genre(self._present_users)
         if genre and genre.lower() != (self._current_genre or "").lower():
             await self._play_genre(genre)
@@ -792,10 +879,13 @@ class RadioDJService(Service):
         self._present_users = present
 
         if not present and self._stop_when_empty:
-            logger.info("Radio DJ: last person left, stopping playback")
-            await self._stop_playback()
-            self._stopped_by_empty = True
-        elif self._can_switch_genre():
+            # Same "only stop our own playback" rule as ``_poll`` — the
+            # user's externally-chosen music keeps playing regardless.
+            if self._dj_owns_playback:
+                logger.info("Radio DJ: last person left, stopping playback")
+                await self._stop_playback()
+                self._stopped_by_empty = True
+        elif self._can_switch_genre() and await self._should_auto_switch():
             genre = await self.select_genre(present)
             if genre and genre.lower() != (self._current_genre or "").lower():
                 await self._play_genre(genre)

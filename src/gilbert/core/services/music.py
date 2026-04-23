@@ -30,6 +30,7 @@ from gilbert.interfaces.configuration import (
     ConfigParam,
     ConfigurationReader,
 )
+from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.music import (
     LinkedMusicServiceLister,
     MusicBackend,
@@ -213,12 +214,14 @@ class MusicService(Service):
         self._config: dict[str, object] = {}
         self._speaker_svc: Any | None = None
         self._resolver: ServiceResolver | None = None
+        self._event_bus: EventBus | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="music",
             capabilities=frozenset({"music", "ai_tools"}),
-            optional=frozenset({"configuration", "speaker_control"}),
+            optional=frozenset({"configuration", "speaker_control", "event_bus"}),
+            events=frozenset({"music.playback_started"}),
             toggleable=True,
             toggle_description="Music playback and search",
         )
@@ -256,7 +259,44 @@ class MusicService(Service):
         self._backend = backend_cls()
 
         await self._backend.initialize(self._config)
+
+        event_bus_svc = resolver.get_capability("event_bus")
+        if event_bus_svc is not None and isinstance(event_bus_svc, EventBusProvider):
+            self._event_bus = event_bus_svc.bus
+
         logger.info("Music service started (backend=%s)", backend_name)
+
+    async def _emit_playback_started(
+        self,
+        uri: str,
+        title: str,
+        kind: str,
+        initiator: str,
+    ) -> None:
+        """Publish ``music.playback_started`` when a play/queue action
+        actually takes effect on the speaker.
+
+        ``initiator`` carries who triggered the playback: ``"user"`` for
+        anything driven by the AI, a slash command, or a button click;
+        ``"dj"`` when the RadioDJ's auto-rotation called in. Downstream
+        subscribers (notably RadioDJ) use this field to distinguish "I
+        did that" from "someone else did that" so they can stop
+        clobbering user-chosen music.
+        """
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(
+            Event(
+                event_type="music.playback_started",
+                data={
+                    "uri": uri,
+                    "title": title,
+                    "kind": kind,
+                    "initiator": initiator,
+                },
+                source="music",
+            )
+        )
 
     # --- Configurable protocol ---
 
@@ -357,8 +397,16 @@ class MusicService(Service):
         item: MusicItem,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        initiator: str = "user",
     ) -> Playable:
-        """Resolve an item into a playable URI and start playback."""
+        """Resolve an item into a playable URI and start playback.
+
+        ``initiator`` is carried through to the ``music.playback_started``
+        event so subscribers can distinguish user-driven plays from
+        auto-rotation plays (RadioDJ passes ``"dj"``). Defaults to
+        ``"user"`` because all public call sites — AI tools, slash
+        commands, UI buttons — represent user intent.
+        """
         speaker_svc = self._get_speaker_svc()
         if speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
@@ -371,6 +419,12 @@ class MusicService(Service):
             volume=volume,
             title=playable.title or item.title,
             didl_meta=playable.didl_meta,
+        )
+        await self._emit_playback_started(
+            uri=playable.uri,
+            title=playable.title or item.title,
+            kind=item.kind.value,
+            initiator=initiator,
         )
         return playable
 
@@ -387,6 +441,7 @@ class MusicService(Service):
     async def play_queue(
         self,
         speaker_names: list[str] | None = None,
+        initiator: str = "user",
     ) -> bool:
         """Start (or resume) playback of the speaker queue.
 
@@ -407,20 +462,33 @@ class MusicService(Service):
             raise RuntimeError(
                 "Speaker service is not available — cannot play queue"
             )
-        return bool(
+        started = bool(
             await speaker_svc.play_queue_on_speakers(speaker_names=speaker_names)
         )
+        # Emit only when playback actually starts — the no-op path
+        # (already playing) doesn't represent a new user intent.
+        if started:
+            await self._emit_playback_started(
+                uri="",
+                title="",
+                kind="queue",
+                initiator=initiator,
+            )
+        return started
 
     async def add_to_queue(
         self,
         item: MusicItem,
         speaker_names: list[str] | None = None,
+        initiator: str = "user",
     ) -> Playable:
         """Resolve an item and append it to the speaker queue.
 
         Raises ``RuntimeError`` if the backend or speaker service doesn't
         support queueing. The caller is expected to have already guarded
-        on ``supports_queue``.
+        on ``supports_queue``. Emits ``music.playback_started`` (with
+        kind=``queue_add``) so RadioDJ-style subscribers learn the user
+        is exerting manual control and can back off.
         """
         if not self.supports_queue:
             raise RuntimeError(
@@ -439,6 +507,12 @@ class MusicService(Service):
             speaker_names=speaker_names,
             title=playable.title or item.title,
             didl_meta=playable.didl_meta,
+        )
+        await self._emit_playback_started(
+            uri=playable.uri,
+            title=playable.title or item.title,
+            kind="queue_add",
+            initiator=initiator,
         )
         return playable
 

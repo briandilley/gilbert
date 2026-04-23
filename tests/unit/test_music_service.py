@@ -994,6 +994,134 @@ async def test_tool_play_queue_fails_when_backend_does_not_support_queue(
     speaker_svc.play_queue_on_speakers.assert_not_awaited()
 
 
+# --- Event emissions ---
+
+
+class _RecordingEventBus:
+    """In-memory event bus that just records every publish. Satisfies
+    ``EventBusProvider`` when wrapped by ``_EventBusSvc``."""
+
+    def __init__(self) -> None:
+        self.published: list[Any] = []
+
+    def subscribe(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
+
+    def subscribe_pattern(self, pattern: str, handler: Any) -> Any:
+        return lambda: None
+
+    async def publish(self, event: Any) -> None:
+        self.published.append(event)
+
+
+class _EventBusSvc:
+    def __init__(self) -> None:
+        self.bus = _RecordingEventBus()
+
+
+def _wire_service_with_events(
+    stub_backend: StubMusicBackend,
+) -> tuple[MusicService, Any, _RecordingEventBus]:
+    """Build a fully-wired MusicService for event emission tests.
+
+    ``start()`` is skipped because it early-returns on the fixture's
+    bare config (enabled=False by default). Fields the emitter relies
+    on are set directly, matching the pattern used elsewhere in this
+    file for service construction."""
+    speaker_svc = _mock_speaker_svc()
+    bus = _RecordingEventBus()
+    svc = MusicService()
+    svc._backend = stub_backend
+    svc._enabled = True
+    svc._speaker_svc = speaker_svc
+    svc._event_bus = bus
+    return svc, speaker_svc, bus
+
+
+async def test_play_item_emits_playback_started_event(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Anything that starts playback must emit music.playback_started
+    so RadioDJ (and future subscribers) can tell user-initiated plays
+    apart from their own. Missing emission is the exact thing that
+    made the DJ trample user-chosen music."""
+    service, _speaker, bus = _wire_service_with_events(stub_backend)
+
+    item = MusicItem(
+        id="fav-1",
+        title="Horizon",
+        kind=MusicItemKind.TRACK,
+        uri="x-sonos-spotify:spotify%3atrack%3aabc",
+        service="Spotify",
+    )
+    await service.play_item(item)
+
+    assert len(bus.published) == 1
+    ev = bus.published[0]
+    assert ev.event_type == "music.playback_started"
+    assert ev.data["initiator"] == "user"
+    assert ev.data["kind"] == "track"
+    assert ev.data["title"] == "Horizon"
+
+
+async def test_play_item_honors_explicit_initiator(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """When RadioDJ calls play_item with initiator="dj", that value
+    must land in the event so the DJ's own subscription can filter
+    out its self-emission."""
+    service, _speaker, bus = _wire_service_with_events(stub_backend)
+
+    item = MusicItem(
+        id="fav-1",
+        title="Horizon",
+        kind=MusicItemKind.TRACK,
+        uri="x-sonos-spotify:spotify%3atrack%3aabc",
+    )
+    await service.play_item(item, initiator="dj")
+    assert bus.published[0].data["initiator"] == "dj"
+
+
+async def test_add_to_queue_emits_event(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Queue adds also disarm the DJ — user is asserting music control."""
+    stub_backend.supports_queue = True
+    service, _speaker, bus = _wire_service_with_events(stub_backend)
+
+    item = MusicItem(
+        id="fav-1",
+        title="Black Dog",
+        kind=MusicItemKind.TRACK,
+        uri="x-sonos-spotify:spotify%3atrack%3aabc",
+    )
+    await service.add_to_queue(item)
+    assert len(bus.published) == 1
+    assert bus.published[0].data["kind"] == "queue_add"
+    assert bus.published[0].data["initiator"] == "user"
+
+
+async def test_play_queue_emits_event_only_when_actually_starting(
+    stub_backend: StubMusicBackend,
+) -> None:
+    """Already-playing no-op must NOT emit — it doesn't represent a new
+    user intent. Otherwise the DJ would think the user grabbed control
+    every time someone re-ran /music play-queue."""
+    stub_backend.supports_queue = True
+    service, speaker_svc, bus = _wire_service_with_events(stub_backend)
+
+    # Speaker service signals "already playing" → no event.
+    speaker_svc.play_queue_on_speakers = AsyncMock(return_value=False)
+    await service.play_queue()
+    assert bus.published == []
+
+    # And when it does start, it emits.
+    speaker_svc.play_queue_on_speakers = AsyncMock(return_value=True)
+    await service.play_queue()
+    assert len(bus.published) == 1
+    assert bus.published[0].data["kind"] == "queue"
+
+
 # --- ConfigActionProvider forwarding ---
 
 

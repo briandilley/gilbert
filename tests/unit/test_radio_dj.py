@@ -145,6 +145,9 @@ class FakeMusicService:
         self.current_now_playing: Any = None
         # Test hook: set to True to simulate empty search results.
         self.empty_results: bool = False
+        # Recorded on each play_item call — lets tests verify the DJ
+        # passes initiator="dj" rather than defaulting to "user".
+        self.last_play_initiator: str = ""
 
     def service_info(self) -> Any:
         from gilbert.interfaces.service import ServiceInfo
@@ -177,8 +180,10 @@ class FakeMusicService:
         item: MusicItem,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        initiator: str = "user",
     ) -> Playable:
         # Mirror the real MusicService.play_item: resolve + delegate to speakers.
+        self.last_play_initiator = initiator
         if self.speaker_svc is not None:
             await self.speaker_svc.play_on_speakers(
                 uri=item.uri,
@@ -864,6 +869,138 @@ class TestEventHandling:
         )
         await started_dj._on_presence_arrived(event)
         speaker_svc.play_on_speakers.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_arrival_honors_throttle(
+        self,
+        started_dj: RadioDJService,
+        speaker_svc: FakeSpeakerService,
+    ) -> None:
+        """Regression guard for "DJ plays whenever it wants": arrivals
+        used to bypass min_switch_interval. Now they respect it, so
+        people walking in and out can't thrash playback."""
+        started_dj._active = True
+        # A recent genre switch → throttle NOT elapsed.
+        started_dj._last_genre_switch = datetime.now(UTC)
+        started_dj._current_genre = "jazz"
+        started_dj._present_users = {"alice"}
+
+        event = Event(
+            event_type="presence.arrived",
+            data={"user_id": "bob"},
+            source="presence",
+        )
+        await started_dj._on_presence_arrived(event)
+        speaker_svc.play_on_speakers.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_external_play_disarms_dj_auto_switch(
+        self,
+        started_dj: RadioDJService,
+        speaker_svc: FakeSpeakerService,
+        music_svc: FakeMusicService,
+        presence_svc: FakePresenceService,
+    ) -> None:
+        """End-to-end: user plays their own music while the DJ is
+        active → a ``music.playback_started`` event with
+        initiator="user" flips _dj_owns_playback off. The next auto-
+        switch attempt defers and does NOT call play_on_speakers."""
+        from gilbert.interfaces.speaker import NowPlaying, PlaybackState
+
+        started_dj._active = True
+        started_dj._current_genre = "jazz"
+        started_dj._last_genre_switch = datetime.now(UTC) - timedelta(hours=1)
+        started_dj._present_users = {"alice"}
+        presence_svc._users = ["alice", "bob"]  # presence changes → would switch
+
+        # Simulate the event the MusicService would emit when the user
+        # runs /music play or clicks a Play button.
+        user_event = Event(
+            event_type="music.playback_started",
+            data={
+                "uri": "spotify:track:userpick",
+                "title": "User's Song",
+                "kind": "track",
+                "initiator": "user",
+            },
+            source="music",
+        )
+        await started_dj._on_music_playback_started(user_event)
+        assert started_dj._dj_owns_playback is False
+
+        # The user's track is still playing according to now_playing.
+        music_svc.current_now_playing = NowPlaying(
+            state=PlaybackState.PLAYING,
+            title="User's Song",
+            uri="spotify:track:userpick",
+        )
+
+        speaker_svc.play_on_speakers.reset_mock()
+        await started_dj._poll()
+        # DJ deferred — user's music is still playing.
+        speaker_svc.play_on_speakers.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dj_reclaims_playback_when_external_music_stops(
+        self,
+        started_dj: RadioDJService,
+        speaker_svc: FakeSpeakerService,
+        music_svc: FakeMusicService,
+        presence_svc: FakePresenceService,
+    ) -> None:
+        """Once the user's music ends (now_playing reports not-PLAYING),
+        the DJ can take the floor again on the next presence tick."""
+        from gilbert.interfaces.speaker import NowPlaying, PlaybackState
+
+        started_dj._active = True
+        started_dj._dj_owns_playback = False  # user had taken over
+        started_dj._current_genre = "jazz"
+        started_dj._last_genre_switch = datetime.now(UTC) - timedelta(hours=1)
+        started_dj._present_users = {"alice"}
+        presence_svc._users = ["alice", "bob"]
+
+        # Speaker is silent — user's track ended.
+        music_svc.current_now_playing = NowPlaying(state=PlaybackState.STOPPED)
+
+        await started_dj._poll()
+        # DJ reclaimed ownership and auto-switched.
+        assert started_dj._dj_owns_playback is True
+        speaker_svc.play_on_speakers.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_dj_play_keeps_ownership_via_initiator_filter(
+        self,
+        started_dj: RadioDJService,
+        music_svc: FakeMusicService,
+    ) -> None:
+        """The DJ's own play_item emits initiator="dj"; the handler
+        must NOT flip ownership off for its own emission."""
+        started_dj._dj_owns_playback = True
+        dj_event = Event(
+            event_type="music.playback_started",
+            data={
+                "uri": "spotify:playlist:dj",
+                "title": "Best of Jazz",
+                "kind": "playlist",
+                "initiator": "dj",
+            },
+            source="music",
+        )
+        await started_dj._on_music_playback_started(dj_event)
+        assert started_dj._dj_owns_playback is True
+
+    @pytest.mark.asyncio
+    async def test_dj_passes_initiator_dj_to_music_service(
+        self,
+        started_dj: RadioDJService,
+        music_svc: FakeMusicService,
+    ) -> None:
+        """Regression guard for the ownership feedback loop: every DJ
+        play must tag itself so the event handler can filter self-
+        emissions. Without this, the DJ would disarm itself on its
+        own plays."""
+        await started_dj._play_genre("jazz")
+        assert music_svc.last_play_initiator == "dj"
 
 
 # --- AI Tools ---

@@ -34,8 +34,15 @@ for search" action.
 - `state` — DJ state persistence across restarts (`dj_state`)
 
 ### Events
-- Subscribes to: `presence.arrived`, `presence.departed`
+- Subscribes to: `presence.arrived`, `presence.departed`, `music.playback_started`
 - Emits: `radio_dj.started`, `radio_dj.stopped`, `radio_dj.genre_changed`, `radio_dj.track_liked`, `radio_dj.track_vetoed`
+
+### Ownership / non-invasiveness
+
+Two behaviors that used to make the DJ feel intrusive, now fixed:
+
+- **Throttle on arrivals** — `_on_presence_arrived` used to bypass `min_switch_interval` so every new arrival triggered an instant genre change. It now honors the throttle the same as `_poll`.
+- **Yield to user-chosen playback** — `_dj_owns_playback` starts True and flips False when the DJ sees a `music.playback_started` event whose `initiator != "dj"` (emitted by `MusicService` on any `play_item` / `add_to_queue` / `play_queue` call). Every auto-switch path (`_poll`, `_on_presence_arrived`, `_on_presence_departed`, and the stop-when-empty branch) now goes through `_should_auto_switch()`, which short-circuits when ownership is lost **and** `now_playing.state == PLAYING`. If the speaker's gone quiet the DJ reclaims the floor. The DJ's own plays pass `initiator="dj"` to `play_item`, so self-emissions don't disarm it.
 
 ### AI Tools
 `radio_start`, `radio_stop`, `radio_request`, `radio_skip`, `radio_like`, `radio_dislike`, `radio_veto`, `radio_status`, `radio_set_preferences` (admin only). `radio_status` includes a `now_playing` block (title/artist/album/state/position) when the music service can report it.
