@@ -9,6 +9,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # is treated as a terminal stop and the supervisor loop exits.
 RESTART_EXIT_CODE=75
 
+# Captures Gilbert's stderr (in addition to showing it on the terminal)
+# so glibc abort messages, native-extension tracebacks, and anything else
+# that bypasses Python's logging framework survive a crash. Python's own
+# logs still go to ``.gilbert/gilbert.log`` via the logging config.
+STDERR_LOG=".gilbert/stderr.log"
+
+# How many consecutive crashes (non-zero / non-signal / non-restart exits)
+# to tolerate before giving up, and how long to wait between attempts. A
+# clean exit, Ctrl+C, SIGTERM, or an explicit restart all reset the
+# counter; only back-to-back crashes count.
+MAX_CRASH_RESTARTS=3
+CRASH_RESTART_DELAY=20
+
 # Set by the SIGINT/SIGTERM trap so the supervisor loop knows to stop
 # even if the signal arrives between Gilbert runs (e.g. during a
 # ``uv sync``). Without this, hitting Ctrl+C during the sync would
@@ -50,9 +63,12 @@ run_gilbert_supervised() {
     # flips ``SUPERVISOR_STOP`` so Ctrl+C during a sync or a restart
     # cycle still breaks the loop cleanly.
     local exit_code
+    local crash_count=0
+    local stderr_log_abs="$SCRIPT_DIR/$STDERR_LOG"
     trap 'SUPERVISOR_STOP=true' INT TERM
 
     ensure_std_plugins
+    mkdir -p "$(dirname "$stderr_log_abs")"
 
     while true; do
         if [ "$SUPERVISOR_STOP" = "true" ]; then
@@ -69,12 +85,20 @@ run_gilbert_supervised() {
         fi
 
         echo "Starting Gilbert..."
+        {
+            echo
+            echo "===== Gilbert starting at $(date -Iseconds) ====="
+        } >> "$stderr_log_abs"
         # Temporarily drop ``set -e`` so a non-zero exit from Gilbert
         # doesn't abort the script before we can inspect the code.
+        # Duplicate stderr to ``$STDERR_LOG`` so glibc abort messages and
+        # other non-Python-logging output survive a crash.
         set +e
-        uv run python -m gilbert
+        uv run python -m gilbert 2> >(tee -a "$stderr_log_abs" >&2)
         exit_code=$?
         set -e
+        echo "===== Gilbert exited with code $exit_code at $(date -Iseconds) =====" \
+            >> "$stderr_log_abs"
 
         case "$exit_code" in
             0)
@@ -88,6 +112,7 @@ run_gilbert_supervised() {
                     echo "Restart requested, but supervisor is stopping."
                     break
                 fi
+                crash_count=0
                 echo "Gilbert requested a restart — resyncing and relaunching..."
                 continue
                 ;;
@@ -100,9 +125,23 @@ run_gilbert_supervised() {
                 break
                 ;;
             *)
-                echo "Gilbert exited with code $exit_code — not restarting." >&2
-                trap - INT TERM
-                exit "$exit_code"
+                crash_count=$((crash_count + 1))
+                if [ "$crash_count" -ge "$MAX_CRASH_RESTARTS" ]; then
+                    echo "Gilbert crashed $crash_count times in a row (last exit $exit_code) — giving up. See $STDERR_LOG." >&2
+                    trap - INT TERM
+                    exit "$exit_code"
+                fi
+                echo "Gilbert exited with code $exit_code — attempt $crash_count/$MAX_CRASH_RESTARTS, restarting in ${CRASH_RESTART_DELAY}s..." >&2
+                # ``sleep`` is interruptible; if the user hits Ctrl+C
+                # during the delay the trap flips SUPERVISOR_STOP and we
+                # break out on the next iteration. ``|| true`` keeps
+                # ``set -e`` from aborting on a signal-killed sleep.
+                sleep "$CRASH_RESTART_DELAY" || true
+                if [ "$SUPERVISOR_STOP" = "true" ]; then
+                    echo "Supervisor stopping (interrupt during crash-restart delay)."
+                    break
+                fi
+                continue
                 ;;
         esac
     done
