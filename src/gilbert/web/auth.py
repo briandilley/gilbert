@@ -9,20 +9,32 @@ from starlette.responses import RedirectResponse, Response
 from gilbert.core.context import set_current_user
 from gilbert.interfaces.auth import GuestPolicy, UserContext
 
-# Paths that bypass authentication.
-# Exact matches checked first, then prefixes.
-# Paths that bypass authentication on local access.
-_PUBLIC_EXACT = ("/", "/auth/login", "/auth/logout", "/auth/session", "/screens")
-_PUBLIC_PREFIXES = ("/auth/login/", "/static/", "/output/", "/screens/", "/api/share/")
-
-# On tunnel access, only auth-related paths are public — everything else
-# requires an authenticated user with at least "user" role. Share tokens
-# are bearer-like (the token *is* the auth) so ``/api/share/`` is public
-# over the tunnel too, otherwise ``share_workspace_file(via_tunnel=True)``
-# would produce URLs that immediately redirect to /auth/login.
-_TUNNEL_PUBLIC_EXACT = ("/auth/login", "/auth/logout", "/auth/session", "/screens")
-_TUNNEL_PUBLIC_PREFIXES = (
+# Paths that bypass authentication when the visitor is unauthenticated.
+# Used both for tunnel access (always login-required) and for local
+# access when ``auth.allow_guests`` is off.
+#
+# These must include everything the login page itself needs to render:
+# the SPA bundle under ``/assets/``, ``/auth/me`` (so the auth provider
+# can determine the user is logged out), and ``/api/auth/methods`` (so
+# the login form knows which providers to display). Without these the
+# browser receives 302→HTML for what should be JS/JSON and the SPA
+# never mounts.
+#
+# Share tokens are bearer-like (the token *is* the auth), so
+# ``/api/share/`` is public too — otherwise
+# ``share_workspace_file(via_tunnel=True)`` would produce URLs that
+# immediately redirect to /auth/login.
+_PUBLIC_EXACT = (
+    "/auth/login",
+    "/auth/logout",
+    "/auth/session",
+    "/auth/me",
+    "/api/auth/methods",
+    "/screens",
+)
+_PUBLIC_PREFIXES = (
     "/auth/login/",
+    "/assets/",
     "/static/",
     "/screens/stream",
     "/screens/tmp/",
@@ -71,8 +83,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # - Local with guests enabled: treat as GUEST.
         if auth_enabled and user.user_id == "system":
             if is_tunnel or not allow_guests:
-                is_public = path in _TUNNEL_PUBLIC_EXACT or any(
-                    path.startswith(p) for p in _TUNNEL_PUBLIC_PREFIXES
+                is_public = path in _PUBLIC_EXACT or any(
+                    path.startswith(p) for p in _PUBLIC_PREFIXES
                 )
                 if not is_public:
                     return RedirectResponse(url="/auth/login", status_code=302)
