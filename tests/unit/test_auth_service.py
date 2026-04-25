@@ -10,6 +10,7 @@ from gilbert.core.services.users import UserService
 from gilbert.interfaces.auth import (
     AuthBackend,
     AuthInfo,
+    GuestPolicy,
     LoginMethod,
     OAuthLoginBackend,
 )
@@ -288,3 +289,40 @@ def test_oauth_login_backend_protocol_satisfied() -> None:
 
 def test_oauth_login_backend_protocol_not_satisfied_when_incomplete() -> None:
     assert not isinstance(_StubPartialBackend(), OAuthLoginBackend)
+
+
+# --- GuestPolicy ----------------------------------------------------
+
+
+def test_auth_service_satisfies_guest_policy(auth_service: AuthService) -> None:
+    """AuthService must satisfy the GuestPolicy protocol so the web
+    layer can ask whether unauthenticated visitors are allowed."""
+    assert isinstance(auth_service, GuestPolicy)
+
+
+def test_allow_guests_default_true(auth_service: AuthService) -> None:
+    """Default keeps the previous behavior — local guests allowed."""
+    assert auth_service.is_guest_allowed() is True
+
+
+@pytest.mark.asyncio
+async def test_on_config_changed_toggles_allow_guests(auth_service: AuthService) -> None:
+    """Setting ``allow_guests`` via the Settings UI must propagate
+    immediately — the web middleware reads this on every request, so
+    a stale value would leave the system open after an admin
+    explicitly turned guests off."""
+    await auth_service.on_config_changed({"allow_guests": False})
+    assert auth_service.is_guest_allowed() is False
+
+    await auth_service.on_config_changed({"allow_guests": True})
+    assert auth_service.is_guest_allowed() is True
+
+
+@pytest.mark.asyncio
+async def test_on_config_changed_ignores_unrelated_keys(auth_service: AuthService) -> None:
+    """A config payload that doesn't mention ``allow_guests`` must
+    leave the current value alone — otherwise tweaking, say,
+    ``session_ttl_seconds`` would silently flip the guest gate."""
+    await auth_service.on_config_changed({"allow_guests": False})
+    await auth_service.on_config_changed({"session_ttl_seconds": 1234})
+    assert auth_service.is_guest_allowed() is False

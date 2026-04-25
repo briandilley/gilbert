@@ -56,6 +56,11 @@ class AuthService(Service):
         self._user_service: Any = None
         self._resolver: ServiceResolver | None = None
         self._backends: dict[str, AuthBackend] = {}
+        # When False, the web layer redirects local unauthenticated
+        # visitors to /auth/login instead of granting GUEST access, and
+        # WebSocket connections without a valid session are refused.
+        # Tunnel access is unaffected (always requires login).
+        self._allow_guests: bool = True
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -89,6 +94,8 @@ class AuthService(Service):
         config_svc = resolver.get_capability("configuration")
         if isinstance(config_svc, ConfigurationReader):
             auth_section = config_svc.get_section("auth")
+
+        self._allow_guests = bool(auth_section.get("allow_guests", True))
 
         tunnel = resolver.get_capability("tunnel")
         registry = AuthBackend.registered_backends()
@@ -154,6 +161,16 @@ class AuthService(Service):
                 default=True,
             ),
             ConfigParam(
+                key="allow_guests",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Allow unauthenticated visitors on the local network to use "
+                    "Gilbert as a guest. When off, every request requires a login. "
+                    "Tunnel access always requires login regardless of this setting."
+                ),
+                default=True,
+            ),
+            ConfigParam(
                 key="root_password",
                 type=ToolParameterType.STRING,
                 description="Root admin password.",
@@ -199,6 +216,13 @@ class AuthService(Service):
         ttl = config.get("session_ttl_seconds")
         if ttl is not None:
             self._config.session_ttl_seconds = int(ttl)
+        if "allow_guests" in config:
+            self._allow_guests = bool(config["allow_guests"])
+
+    # --- GuestPolicy protocol ---
+
+    def is_guest_allowed(self) -> bool:
+        return self._allow_guests
 
     # --- ConfigActionProvider ---
     #

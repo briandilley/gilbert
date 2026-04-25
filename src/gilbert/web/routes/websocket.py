@@ -9,7 +9,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from gilbert.core.app import Gilbert
 from gilbert.interfaces.ai import SharedConversationProvider
-from gilbert.interfaces.auth import AccessControlProvider, SessionValidator, UserContext
+from gilbert.interfaces.auth import (
+    AccessControlProvider,
+    GuestPolicy,
+    SessionValidator,
+    UserContext,
+)
 from gilbert.web.ws_protocol import WsConnection, WsConnectionManager, dispatch_frame
 
 logger = logging.getLogger(__name__)
@@ -35,6 +40,9 @@ async def event_stream(websocket: WebSocket) -> None:
 
     # Authenticate — cookie or token query param
     user_ctx = await _authenticate(websocket, gilbert)
+    if user_ctx is None:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
 
     # Resolve user's effective role level
     user_level = 200  # everyone
@@ -105,21 +113,29 @@ async def event_stream(websocket: WebSocket) -> None:
         logger.debug("WebSocket disconnected: user=%s", user_ctx.user_id)
 
 
-async def _authenticate(websocket: WebSocket, gilbert: Gilbert) -> UserContext:
-    """Extract user context from cookie or token query param."""
+async def _authenticate(websocket: WebSocket, gilbert: Gilbert) -> UserContext | None:
+    """Extract user context from cookie or token query param.
+
+    Returns ``None`` if no valid session is provided and the auth
+    service has guests disabled — the caller should close the
+    connection. Returns ``UserContext.GUEST`` when guests are
+    permitted (or when the auth service isn't running at all).
+    """
     # Try session cookie first
     session_id = websocket.cookies.get("gilbert_session")
     # Fall back to token query param
     if not session_id:
         session_id = websocket.query_params.get("token")
 
-    if session_id:
-        auth_svc = gilbert.service_manager.get_by_capability("authentication")
-        if isinstance(auth_svc, SessionValidator):
-            ctx = await auth_svc.validate_session(session_id)
-            if isinstance(ctx, UserContext):
-                return ctx
+    auth_svc = gilbert.service_manager.get_by_capability("authentication")
 
+    if session_id and isinstance(auth_svc, SessionValidator):
+        ctx = await auth_svc.validate_session(session_id)
+        if isinstance(ctx, UserContext):
+            return ctx
+
+    if isinstance(auth_svc, GuestPolicy) and not auth_svc.is_guest_allowed():
+        return None
     return UserContext.GUEST
 
 

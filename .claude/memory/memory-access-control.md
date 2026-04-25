@@ -42,11 +42,13 @@ Hierarchical role-based access control with numeric levels, per-tool permissions
 - **everyone**: list_*, get_* (except get_configuration=admin), search_*, synthesize, check_presence, chat
 
 ### Local vs Tunnel Web Access
-- **Local unauthenticated**: assigned GUEST context (everyone role), can see Chat card, use chat
-- **Tunnel unauthenticated**: redirected to login (except auth flow + static files)
+- **Local unauthenticated**: assigned GUEST context (everyone role), can see Chat card, use chat — *only when the `auth.allow_guests` setting is true (the default)*. When admin turns it off, local unauthenticated requests are redirected to /auth/login the same way tunnel requests are, and WebSocket connections without a valid session are closed with code 1008.
+- **Tunnel unauthenticated**: redirected to login (except auth flow + static files) — independent of `allow_guests`.
 - **Tunnel authenticated**: full access based on roles
 - Dashboard cards and nav links filtered by user's effective role level
 - AI only describes capabilities matching available tools — won't claim it can do things the user's role doesn't allow
+
+The `allow_guests` toggle is exposed via the `GuestPolicy` runtime_checkable Protocol (`is_guest_allowed() -> bool`) so the web/WS layers query it without importing `AuthService`. `AuthService` reads it from the `auth` config section on start and refreshes via `on_config_changed`.
 
 ### Web Route Protection
 - `/` (dashboard) → public, cards filtered by role

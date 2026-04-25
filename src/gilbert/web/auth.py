@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import RedirectResponse, Response
 
 from gilbert.core.context import set_current_user
-from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.auth import GuestPolicy, UserContext
 
 # Paths that bypass authentication.
 # Exact matches checked first, then prefixes.
@@ -49,12 +49,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         gilbert = getattr(request.app.state, "gilbert", None)
         auth_enabled = False
         is_tunnel = False
+        allow_guests = True
 
         if gilbert is not None:
             is_tunnel = self._is_tunnel_request(request, gilbert)
             auth_svc = gilbert.service_manager.get_by_capability("authentication")
             if auth_svc is not None:
                 auth_enabled = True
+                if isinstance(auth_svc, GuestPolicy):
+                    allow_guests = auth_svc.is_guest_allowed()
                 session_id = _extract_session(request)
                 if session_id:
                     ctx = await auth_svc.validate_session(session_id)
@@ -62,10 +65,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         user = ctx
 
         # For unauthenticated visitors:
-        # - Local: treat as GUEST (has "everyone" role, can use chat etc.)
-        # - Tunnel: redirect to login (except auth flow and static files)
+        # - Tunnel, OR local with guests disabled: redirect to login
+        #   (the public path list still lets the auth flow + static
+        #   assets through so the login page itself is reachable).
+        # - Local with guests enabled: treat as GUEST.
         if auth_enabled and user.user_id == "system":
-            if is_tunnel:
+            if is_tunnel or not allow_guests:
                 is_public = path in _TUNNEL_PUBLIC_EXACT or any(
                     path.startswith(p) for p in _TUNNEL_PUBLIC_PREFIXES
                 )

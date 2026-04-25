@@ -242,6 +242,21 @@ class SessionValidator(Protocol):
 
 
 @runtime_checkable
+class GuestPolicy(Protocol):
+    """Protocol for the "are unauthenticated visitors allowed at all?" toggle.
+
+    The web layer queries this on each unauthenticated request: when
+    ``False``, local visitors are redirected to ``/auth/login`` instead
+    of being granted ``UserContext.GUEST``, and WebSocket connections
+    without a valid session are refused. Tunnel access is unaffected
+    — it always requires a logged-in user.
+    """
+
+    def is_guest_allowed(self) -> bool:
+        ...
+
+
+@runtime_checkable
 class AccessControlProvider(Protocol):
     """Protocol for role-based access control queries.
 
