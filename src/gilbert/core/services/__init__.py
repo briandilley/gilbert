@@ -8,9 +8,12 @@ from gilbert.core.services.doorbell import DoorbellService
 from gilbert.core.services.event_bus import EventBusService
 from gilbert.core.services.inbox import InboxService
 from gilbert.core.services.inbox_ai_chat import InboxAIChatService
+from gilbert.core.services.lights import LightsService
 from gilbert.core.services.music import MusicService
+from gilbert.core.services.shades import ShadesService
 from gilbert.core.services.speaker import SpeakerService
 from gilbert.core.services.storage import StorageService
+from gilbert.core.services.thermostat import ThermostatService
 from gilbert.core.services.tts import TTSService
 from gilbert.core.services.users import UserService
 
@@ -23,9 +26,12 @@ __all__ = [
     "EventBusService",
     "InboxService",
     "InboxAIChatService",
+    "LightsService",
     "MusicService",
+    "ShadesService",
     "SpeakerService",
     "StorageService",
+    "ThermostatService",
     "TTSService",
     "UserService",
 ]

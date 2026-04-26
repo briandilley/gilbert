@@ -1,6 +1,14 @@
 # Gilbert installation data (per-instance config, database, logs, plugin cache)
 .gilbert/
 
+# Nexia library auto-writes per-house config caches to the working
+# directory (named ``<brand>_config_<house_name>.conf``) — sometimes
+# bypassing the plugin's configured ``state_file`` path. Treat any
+# such file at the repo root as accidental + sensitive (contains
+# auth tokens) and never commit it.
+/nexia_config_*.conf
+/asair_config_*.conf
+
 # Plugin directories
 #
 # std-plugins/ — the first-party gilbert-plugins repository. Tracked as

@@ -10,17 +10,17 @@ resolution-markers = [
 [manifest]
 members = [
     "gilbert",
+    "gilbert-plugin-american-standard",
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
-    "gilbert-plugin-current-data-sync",
-    "gilbert-plugin-current-sales-assistant",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-gemini",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
@@ -184,6 +184,15 @@ wheels = [
 ]
 
 [[package]]
+name = "ansicon"
+version = "1.89.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/e2/1c866404ddbd280efedff4a9f15abfe943cb83cde6e895022370f3a61f85/ansicon-1.89.0.tar.gz", hash = "sha256:e4d039def5768a47e4afec8e89e83ec3ae5a26bf00ad851f914d1240b444d2b1", size = 67312, upload-time = "2019-04-29T20:23:57.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/f9/f1c10e223c7b56a38109a3f2eb4e7fe9a757ea3ed3a166754fb30f65e466/ansicon-1.89.0-py2.py3-none-any.whl", hash = "sha256:f1def52d17f65c2c9682cf8370c03f541f410c1752d6a14029f97318e4b9dfec", size = 63675, upload-time = "2019-04-29T20:23:53.83Z" },
+]
+
+[[package]]
 name = "anthropic"
 version = "0.94.1"
 source = { registry = "https://pypi.org/simple" }
@@ -331,6 +340,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/f6/688d2cd64bfd0b14d805ddb8a565e11ca1fb0fd6817175d58b10052b6d88/bcrypt-5.0.0-cp39-abi3-win32.whl", hash = "sha256:64d7ce196203e468c457c37ec22390f1a61c85c6f0b8160fd752940ccfb3a683", size = 153725, upload-time = "2025-09-25T19:50:34.384Z" },
     { url = "https://files.pythonhosted.org/packages/9f/b9/9d9a641194a730bda138b3dfe53f584d61c58cd5230e37566e83ec2ffa0d/bcrypt-5.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:64ee8434b0da054d830fa8e89e1c8bf30061d539044a39524ff7dec90481e5c2", size = 150912, upload-time = "2025-09-25T19:50:35.69Z" },
     { url = "https://files.pythonhosted.org/packages/27/44/d2ef5e87509158ad2187f4dd0852df80695bb1ee0cfe0a684727b01a69e0/bcrypt-5.0.0-cp39-abi3-win_arm64.whl", hash = "sha256:f2347d3534e76bf50bca5500989d6c1d05ed64b440408057a37673282c654927", size = 144953, upload-time = "2025-09-25T19:50:37.32Z" },
+]
+
+[[package]]
+name = "blessed"
+version = "1.38.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinxed", marker = "sys_platform == 'win32'" },
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/1f/f2535d0eb1fb8af7915f96b4d42810345c255bbbca39939a23e59c0695d8/blessed-1.38.0.tar.gz", hash = "sha256:89ce6ec6567f7aced0716b73577b7a1702eb23c667838bb46d7d9bd48c36d1b3", size = 14008103, upload-time = "2026-03-30T22:47:36.787Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/81/26113a258b8b4068a7ae528cb1c13f1af2acfa0702368312183013ddc4f4/blessed-1.38.0-py3-none-any.whl", hash = "sha256:905884ae650e41284fa4fd7d0c3eed5e5b4a42be8c2bfb24c90d79fbf26a1490", size = 121251, upload-time = "2026-03-30T22:47:34.138Z" },
 ]
 
 [[package]]
@@ -903,6 +925,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "chromadb" },
     { name = "fastapi" },
+    { name = "gilbert-plugin-american-standard" },
     { name = "gilbert-plugin-anthropic" },
     { name = "gilbert-plugin-arr" },
     { name = "gilbert-plugin-bedrock" },
@@ -912,6 +935,7 @@ dependencies = [
     { name = "gilbert-plugin-google" },
     { name = "gilbert-plugin-groq" },
     { name = "gilbert-plugin-guess-that-song" },
+    { name = "gilbert-plugin-lutron-radiora" },
     { name = "gilbert-plugin-mistral" },
     { name = "gilbert-plugin-ngrok" },
     { name = "gilbert-plugin-ollama" },
@@ -966,6 +990,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "chromadb", specifier = ">=1.5.5" },
     { name = "fastapi", specifier = ">=0.135.3" },
+    { name = "gilbert-plugin-american-standard", virtual = "std-plugins/american-standard" },
     { name = "gilbert-plugin-anthropic", virtual = "std-plugins/anthropic" },
     { name = "gilbert-plugin-arr", virtual = "std-plugins/arr" },
     { name = "gilbert-plugin-bedrock", virtual = "std-plugins/bedrock" },
@@ -975,6 +1000,7 @@ requires-dist = [
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
     { name = "gilbert-plugin-groq", virtual = "std-plugins/groq" },
     { name = "gilbert-plugin-guess-that-song", virtual = "std-plugins/guess-that-song" },
+    { name = "gilbert-plugin-lutron-radiora", virtual = "std-plugins/lutron-radiora" },
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
     { name = "gilbert-plugin-ollama", virtual = "std-plugins/ollama" },
@@ -1020,6 +1046,17 @@ dev = [
 ]
 
 [[package]]
+name = "gilbert-plugin-american-standard"
+version = "1.0.0"
+source = { virtual = "std-plugins/american-standard" }
+dependencies = [
+    { name = "nexia" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "nexia", specifier = ">=2.7.0" }]
+
+[[package]]
 name = "gilbert-plugin-anthropic"
 version = "1.0.0"
 source = { virtual = "std-plugins/anthropic" }
@@ -1045,16 +1082,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "boto3", specifier = ">=1.35" }]
-
-[[package]]
-name = "gilbert-plugin-current-data-sync"
-version = "1.0.0"
-source = { virtual = "local-plugins/current-data-sync" }
-
-[[package]]
-name = "gilbert-plugin-current-sales-assistant"
-version = "1.0.0"
-source = { virtual = "local-plugins/current-sales-assistant" }
 
 [[package]]
 name = "gilbert-plugin-deepseek"
@@ -1095,6 +1122,17 @@ source = { virtual = "std-plugins/groq" }
 name = "gilbert-plugin-guess-that-song"
 version = "1.0.0"
 source = { virtual = "std-plugins/guess-that-song" }
+
+[[package]]
+name = "gilbert-plugin-lutron-radiora"
+version = "1.0.0"
+source = { virtual = "std-plugins/lutron-radiora" }
+dependencies = [
+    { name = "pylutron" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pylutron", specifier = ">=0.4.1" }]
 
 [[package]]
 name = "gilbert-plugin-mistral"
@@ -1492,6 +1530,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "jinxed"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ansicon", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/e9/96633f12b6829eb1e91e70e5846704c0b1293ec47bd65a7b681e19c8eeff/jinxed-1.4.0.tar.gz", hash = "sha256:8f7801a10799de39e509eb5abc6d131ee169c1ce4fd5d568aa85b5f56ed58068", size = 37169, upload-time = "2026-03-26T01:49:38.337Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/b7/9ab2b79bcbcc53cf8772a19d26713dd9574d4d81ee4fea29678d8cadcec7/jinxed-1.4.0-py2.py3-none-any.whl", hash = "sha256:95876a8b270081b8e28a9bbcbabe4fa98327faa91102526f724ed1904f9a55ac", size = 34522, upload-time = "2026-03-26T01:49:36.762Z" },
 ]
 
 [[package]]
@@ -2057,6 +2107,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/6e/371856a3fb9d31ca8dac321cda606860fa4548858c0cc45d9d1d4ca2628b/mypy_extensions-1.1.0.tar.gz", hash = "sha256:52e68efc3284861e772bbcd66823fde5ae21fd2fdb51c62a211403730b916558", size = 6343, upload-time = "2025-04-22T14:54:24.164Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
+]
+
+[[package]]
+name = "nexia"
+version = "2.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "orjson" },
+    { name = "propcache" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5d/ee/a756dd7db7168cb84671de741db911dde4a73b0c5214654e34b6fb21792d/nexia-2.11.1.tar.gz", hash = "sha256:ac58e3cde58e57582186dd279d8a0ae2a57813cb2ed84bfa4eeeebd27765cb1a", size = 156870, upload-time = "2025-08-29T13:15:00.104Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/2c/754d0b2d9b3a160c36a2b0b490f9666b2b7eb72d98ab92307fcb01aed9e1/nexia-2.11.1-py3-none-any.whl", hash = "sha256:9f4db92c58a44b220a3cb96fee88f68be3442f4e89290d694ac80da3229bbe55", size = 30493, upload-time = "2025-08-29T13:14:58.873Z" },
 ]
 
 [[package]]
@@ -2790,6 +2854,18 @@ crypto = [
 ]
 
 [[package]]
+name = "pylutron"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "telnetlib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/b0/b43d029007a9c8b0668d58d74a101b25f33f5236351dc13b4ee50af58e51/pylutron-0.4.1.tar.gz", hash = "sha256:177a718a520fe06cd6ab3ff7145d237c5eb613f7435c81461bc30cdb4b925f11", size = 26679, upload-time = "2026-04-03T18:05:41.01Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/f8/9d3cff9c5bcaeb07fff27464508d6808f2de47d3ec7dc1cfa32ec6b2163a/pylutron-0.4.1-py3-none-any.whl", hash = "sha256:e93f284897182339837fa46d200f3492df13ad2635ddeb8fddf95b17c6c5053b", size = 15760, upload-time = "2026-04-03T18:05:39.85Z" },
+]
+
+[[package]]
 name = "pymupdf"
 version = "1.27.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3311,6 +3387,19 @@ wheels = [
 ]
 
 [[package]]
+name = "telnetlib3"
+version = "4.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "blessed", marker = "sys_platform == 'win32'" },
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/1f/a5de9f0f86976d299a439619417019a9674fa8662377659734dd6e067235/telnetlib3-4.0.2.tar.gz", hash = "sha256:76726d7a7a34163b5dbef461e9cbf8fb4bda8f4fe7fcb225f56cbb4dcf5fd16e", size = 355495, upload-time = "2026-04-10T19:16:46.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/0c/7f710109880afddcb407ce2dc21354a01c3332bc7f4494fd56214f067f9b/telnetlib3-4.0.2-py3-none-any.whl", hash = "sha256:7dfc9cf86a6ace90655689d4828aeda41c4c278ec8da1597756b4fd6df15d5d1", size = 361970, upload-time = "2026-04-10T19:16:45.302Z" },
+]
+
+[[package]]
 name = "tenacity"
 version = "9.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3562,6 +3651,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/55/2af26693fd15165c4ff7857e38330e1b61ab8c37d15dc79118cdba115b7a/watchfiles-1.1.1-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8c91ed27800188c2ae96d16e3149f199d62f86c7af5f5f4d2c61a3ed8cd3666c", size = 455072, upload-time = "2025-10-14T15:05:48.928Z" },
     { url = "https://files.pythonhosted.org/packages/66/1d/d0d200b10c9311ec25d2273f8aad8c3ef7cc7ea11808022501811208a750/watchfiles-1.1.1-cp314-cp314t-musllinux_1_1_aarch64.whl", hash = "sha256:311ff15a0bae3714ffb603e6ba6dbfba4065ab60865d15a6ec544133bdb21099", size = 629104, upload-time = "2025-10-14T15:05:49.908Z" },
     { url = "https://files.pythonhosted.org/packages/e3/bd/fa9bb053192491b3867ba07d2343d9f2252e00811567d30ae8d0f78136fe/watchfiles-1.1.1-cp314-cp314t-musllinux_1_1_x86_64.whl", hash = "sha256:a916a2932da8f8ab582f242c065f5c81bed3462849ca79ee357dd9551b0e9b01", size = 622112, upload-time = "2025-10-14T15:05:50.941Z" },
+]
+
+[[package]]
+name = "wcwidth"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/35/a2/8e3becb46433538a38726c948d3399905a4c7cabd0df578ede5dc51f0ec2/wcwidth-0.6.0.tar.gz", hash = "sha256:cdc4e4262d6ef9a1a57e018384cbeb1208d8abbc64176027e2c2455c81313159", size = 159684, upload-time = "2026-02-06T19:19:40.919Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/5a/199c59e0a824a3db2b89c5d2dade7ab5f9624dbf6448dc291b46d5ec94d3/wcwidth-0.6.0-py3-none-any.whl", hash = "sha256:1a3a1e510b553315f8e146c54764f4fb6264ffad731b3d78088cdb1478ffbdad", size = 94189, upload-time = "2026-02-06T19:19:39.646Z" },
 ]
 
 [[package]]

@@ -22,9 +22,12 @@ from gilbert.core.services import (
     AuthService,
     EventBusService,
     InboxService,
+    LightsService,
     MusicService,
+    ShadesService,
     SpeakerService,
     StorageService,
+    ThermostatService,
     TTSService,
     UserService,
 )
@@ -203,6 +206,9 @@ class Gilbert:
         self.service_manager.register(TTSService())
         self.service_manager.register(SpeakerService())
         self.service_manager.register(MusicService())
+        self.service_manager.register(LightsService())
+        self.service_manager.register(ShadesService())
+        self.service_manager.register(ThermostatService())
 
         from gilbert.core.services.audio_output import AudioOutputService
 
@@ -297,6 +303,9 @@ class Gilbert:
         config_svc.register_factory("ai", self._factory_ai)
         config_svc.register_factory("speaker", self._factory_speaker)
         config_svc.register_factory("music", self._factory_music)
+        config_svc.register_factory("lights", self._factory_lights)
+        config_svc.register_factory("shades", self._factory_shades)
+        config_svc.register_factory("thermostats", self._factory_thermostat)
         config_svc.register_factory("presence", self._factory_presence)
 
         # 9. Also register in old registry for backward compat.
@@ -528,6 +537,18 @@ class Gilbert:
     def _factory_music(self, config: dict[str, Any]) -> Service:
         """Create a MusicService from a config section."""
         return MusicService()
+
+    def _factory_lights(self, config: dict[str, Any]) -> Service:
+        """Create a LightsService from a config section."""
+        return LightsService()
+
+    def _factory_shades(self, config: dict[str, Any]) -> Service:
+        """Create a ShadesService from a config section."""
+        return ShadesService()
+
+    def _factory_thermostat(self, config: dict[str, Any]) -> Service:
+        """Create a ThermostatService from a config section."""
+        return ThermostatService()
 
     def _factory_presence(self, config: dict[str, Any]) -> Service:
         """Create a PresenceService from a config section."""
