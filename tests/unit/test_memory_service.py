@@ -279,6 +279,107 @@ class TestMemoryHelper:
         result = await started_helper.get_user_summaries("nobody@example.com")
         assert result == ""
 
+    # ── Global scope ────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_remember_global(self, started_helper: _MemoryHelper) -> None:
+        result = await started_helper.remember(
+            "brian@example.com",
+            {
+                "summary": "Office is on Main St",
+                "content": "The shop is at 123 Main Street",
+                "scope": "global",
+            },
+        )
+        assert "global" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_global_visible_to_other_user(
+        self, started_helper: _MemoryHelper
+    ) -> None:
+        await started_helper.remember(
+            "brian@example.com",
+            {
+                "summary": "Trash day is Tuesday",
+                "content": "City pickup runs Tuesday morning",
+                "scope": "global",
+            },
+        )
+        # Alice should see the global memory in her summaries even though
+        # she didn't write it. She'd see her own user memories too if she
+        # had any.
+        summaries = await started_helper.get_summaries_for_user("alice@example.com")
+        assert "Trash day is Tuesday" in summaries
+        assert "Global memories" in summaries
+
+    @pytest.mark.asyncio
+    async def test_global_list_separate_from_user(
+        self, started_helper: _MemoryHelper
+    ) -> None:
+        await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Personal A", "content": "user-only"},
+        )
+        await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Shared B", "content": "global", "scope": "global"},
+        )
+        user_listing = await started_helper.list_memories(
+            "brian@example.com", {"scope": "user"}
+        )
+        global_listing = await started_helper.list_memories(
+            "brian@example.com", {"scope": "global"}
+        )
+        assert "Personal A" in user_listing
+        assert "Shared B" not in user_listing
+        assert "Shared B" in global_listing
+        assert "Personal A" not in global_listing
+
+    @pytest.mark.asyncio
+    async def test_summaries_include_both_scopes(
+        self, started_helper: _MemoryHelper
+    ) -> None:
+        await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Personal A", "content": "user-only"},
+        )
+        await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Shared B", "content": "global", "scope": "global"},
+        )
+        summaries = await started_helper.get_summaries_for_user("brian@example.com")
+        assert "Personal A" in summaries
+        assert "Shared B" in summaries
+        assert "Global memories" in summaries
+        assert "Memories for this user" in summaries
+
+    @pytest.mark.asyncio
+    async def test_global_summaries_visible_to_guest(
+        self, started_helper: _MemoryHelper
+    ) -> None:
+        # Even unauthenticated callers should see global memories — only
+        # the per-user section is hidden for system/guest contexts.
+        await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Public hours: 9-5", "content": "open weekdays", "scope": "global"},
+        )
+        summaries = await started_helper.get_summaries_for_user("guest")
+        assert "Public hours: 9-5" in summaries
+        assert "Memories for this user" not in summaries
+
+    @pytest.mark.asyncio
+    async def test_forget_global(self, started_helper: _MemoryHelper) -> None:
+        result = await started_helper.remember(
+            "brian@example.com",
+            {"summary": "Temporary global", "content": "soon gone", "scope": "global"},
+        )
+        memory_id = result.split("memory ")[-1].rstrip(")")
+        forget_result = await started_helper.forget(
+            "brian@example.com",
+            {"id": memory_id, "scope": "global"},
+        )
+        assert "forgotten" in forget_result.lower()
+
 
 # ── Tool dispatcher tests ───────────────────────────────────
 #
@@ -373,3 +474,65 @@ class TestToolMemoryAction:
             from gilbert.core.context import set_current_user
 
             set_current_user(UserContext.SYSTEM)
+
+    @pytest.mark.asyncio
+    async def test_global_write_blocked_for_non_admin(
+        self,
+        ai_service_with_memory: AIService,
+    ) -> None:
+        result = await ai_service_with_memory._tool_memory_action(
+            {
+                "action": "remember",
+                "scope": "global",
+                "summary": "Trash day",
+                "content": "Tuesday",
+                "_user_id": "brian@example.com",
+                "_user_roles": ["user"],
+            }
+        )
+        assert "admin role" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_global_write_allowed_for_admin(
+        self,
+        ai_service_with_memory: AIService,
+    ) -> None:
+        result = await ai_service_with_memory._tool_memory_action(
+            {
+                "action": "remember",
+                "scope": "global",
+                "summary": "Trash day",
+                "content": "Tuesday",
+                "_user_id": "admin@example.com",
+                "_user_roles": ["admin"],
+            }
+        )
+        assert "admin role" not in result.lower()
+        assert "global memory" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_global_list_does_not_require_admin(
+        self,
+        ai_service_with_memory: AIService,
+    ) -> None:
+        # Admin writes a global memory…
+        await ai_service_with_memory._tool_memory_action(
+            {
+                "action": "remember",
+                "scope": "global",
+                "summary": "Office hours",
+                "content": "9-5 weekdays",
+                "_user_id": "admin@example.com",
+                "_user_roles": ["admin"],
+            }
+        )
+        # …a regular user should still be able to list global memories.
+        result = await ai_service_with_memory._tool_memory_action(
+            {
+                "action": "list",
+                "scope": "global",
+                "_user_id": "brian@example.com",
+                "_user_roles": ["user"],
+            }
+        )
+        assert "Office hours" in result

@@ -12,9 +12,10 @@
 - [User & Auth System](memory-user-auth-system.md) — multi-user support with local accounts, external providers, roles, sessions
 - [Speaker System](memory-speaker-system.md) — speaker control with Sonos/SoCo, aliases, grouping, TTS announcements
 - [Music Service](memory-music-service.md) — Sonos-backed browse/search/play with SMAPI auth flow and speaker integration
-- [Persona (AIService Internal)](memory-persona-service.md) — AI personality/behavior stored in entity system, merged into AIService as _PersonaHelper
 - [Lights & Shades Services](memory-lights-shades-services.md) — generic lights + shades core services with backend-pluggable architecture (Lutron RadioRA backend), capability-gated tools
 - [Thermostat Service](memory-thermostat-service.md) — generic thermostat core service with backend-pluggable architecture (Nexia / American Standard backend), capability-gated tools
+- [Soul & Identity](memory-soul-identity.md) — layered persona: admin soul + 3-layer identity (immutable / default / per-user) inside AIService
+- [Memory Scopes](memory-memory-scopes.md) — per-user (default) + global (admin-write-only) memories; AI tool branches on a `scope` arg
 - [Presence Service](memory-presence-service.md) — user presence via UniFi (WiFi, cameras, badges), polling + events
 - [Scheduler Service](memory-scheduler-service.md) — system and user timers/alarms with asyncio task loops
 - [Doorbell Service](memory-doorbell-service.md) — UniFi Protect ring detection, publishes doorbell.ring events

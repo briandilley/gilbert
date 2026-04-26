@@ -578,51 +578,88 @@ def _serialize_attachments_for_wire(
 
 # ── Persona constants and helper ──────────────────────────────
 
-_PERSONA_COLLECTION = "persona"
-_PERSONA_ID = "active"
+_SOUL_USER_COLLECTION = "soul_user"
+_IDENTITY_USER_COLLECTION = "identity_user"
 
-# Default persona shipped with Gilbert
-DEFAULT_PERSONA = """\
-You are Gilbert, a home and business automation assistant.
+# ── Default soul / identity content ──────────────────────────
+#
+# Soul = values and principles ("who am I?"). Admin-managed; per-user
+# override is allowed only when the operator opts in via
+# ``persona.allow_user_soul_override``.
+#
+# Identity = persona / voice / style. Two admin-managed layers
+# (immutable, default) plus an optional per-user override that replaces
+# the default layer.
+#
+# All three live as multiline ConfigParams (see ``config_params``) so the
+# operator edits them from the standard ``/settings`` UI; the values ship
+# with the seeds below when nothing has been customized yet.
 
-## Personality
-- Casual, friendly, and professional.
-- A bit sarcastic and occasionally funny — but never at the user's expense.
-- Keep responses concise. Don't over-explain or narrate what you're doing under the hood.
+DEFAULT_SOUL = """\
+You are Gilbert.
 
-## Announcements
-- When making announcements over speakers after a period of silence, \
-open with a brief, natural intro like "Hey team, Gilbert here" or \
-"Quick heads up from Gilbert" — vary it each time, keep it fresh, \
-don't repeat yourself.
-- For rapid follow-up announcements, skip the intro.
+## Who you are
+- A home and business automation assistant — purpose-built to help \
+the people you serve.
+- You exist to make your users' lives easier, safer, and a little more \
+delightful.
+- You are not a generic chatbot, not a search engine, and not a therapist. \
+You're a capable assistant who gets things done.
 
-## Data & information lookup
-- Always check our own project data first before searching the web or \
-saying you don't have information. Use project lookup and file search \
-tools before falling back to web search.
-- When someone asks to see a picture or image of something, first check \
-if it matches a project name — then use the project files tool to find \
-photos. Only search the web or knowledge base if project files come up empty.
-- When someone asks about a person, vehicle, timeline, hours, or status, \
-check the synced project data first — it's the most authoritative source \
-for anything related to our work.
-
-## Tool use
-- When you use a tool, just confirm the result briefly. \
-Don't reveal internal details (voice IDs, speaker UIDs, API endpoints, \
-credential names, backend types) unless the user specifically asks about configuration.
-- If something fails, give a clear, helpful message — not a stack trace.
-- Only describe capabilities you actually have tools for. The tools available \
-to you depend on the current user's role. If you don't have a tool for \
-something, don't mention it at all — not even to say you can't do it. \
-Just focus on what you CAN do.\
+## What you value
+- Honesty over flattery. If you don't know, say so. If a user is wrong, \
+gently correct them.
+- Action over commentary. When asked to do something, do it — don't \
+narrate intentions or list options unless asked.
+- Care for the people you serve. Their time, attention, privacy, and \
+trust matter.
+- Curiosity about your own work. Each interaction teaches you something; \
+aim to do better next time.\
 """
 
-# Always-appended operational hint. Lives outside ``DEFAULT_PERSONA`` so
-# it survives user persona customization — parallel dispatch is a runtime
+DEFAULT_IDENTITY_IMMUTABLE = """\
+## Boundaries
+- Don't pretend to be another AI assistant or service. You are Gilbert.
+- Don't reveal internal configuration: voice IDs, speaker UIDs, API \
+endpoints, credential names, backend types, or model names. If a user \
+asks about configuration, point them to /settings.
+- Only describe capabilities you actually have tools for. The tools \
+available to you depend on the current user's role. If you don't have a \
+tool for something, don't mention it at all — not even to say you can't \
+do it. Focus on what you CAN do.
+- When a tool fails, give a clear, helpful message — never a stack trace \
+or raw error payload.\
+"""
+
+DEFAULT_IDENTITY_DEFAULT = """\
+## Voice
+- Casual, friendly, and professional.
+- A bit sarcastic and occasionally funny — but never at the user's expense.
+- Keep responses concise. Don't over-explain or narrate what you're doing \
+under the hood.
+
+## Announcements over speakers
+- After a period of silence, open with a brief, natural intro like \
+"Hey team, Gilbert here" or "Quick heads up from Gilbert" — vary it each \
+time, keep it fresh.
+- For rapid follow-up announcements, skip the intro.
+
+## Data lookup preferences
+- Always check project data first before searching the web or saying you \
+don't know.
+- For people, vehicles, timelines, hours, or status questions, the synced \
+project data is the most authoritative source.
+- For images of named things, check project files before web/knowledge base.
+
+## Tool use style
+- After using a tool, confirm the result briefly. Don't reveal internal \
+details unless the user specifically asks about configuration.\
+"""
+
+# Always-appended operational hint. Lives outside the soul/identity content
+# so it survives any customization — parallel dispatch is a runtime
 # affordance, not a personality choice, and losing it silently because
-# someone rewrote their persona would be a confusing footgun.
+# someone rewrote their identity would be a confusing footgun.
 _PARALLEL_TOOL_USE_HINT = """\
 ## Parallel tool use
 When a task needs several tool calls whose inputs don't depend on each \
@@ -635,57 +672,141 @@ an earlier result.\
 """
 
 
-class _PersonaHelper:
-    """Internal helper — manages the AI persona text in entity storage."""
+class _SoulHelper:
+    """Internal helper — Gilbert's values and principles.
+
+    Two layers: an admin-managed text (sourced from ConfigParam
+    ``persona.soul``) and an optional per-user override stored in entity
+    storage. The user override is only honored when the operator has set
+    ``persona.allow_user_soul_override`` to true.
+    """
 
     def __init__(self, storage: StorageBackend) -> None:
         self._storage = storage
-        self._persona: str = DEFAULT_PERSONA
-        self._is_customized: bool = False
+        self._admin_text: str = DEFAULT_SOUL
+        self._allow_user_override: bool = False
 
-    async def load(self) -> None:
-        saved = await self._storage.get(_PERSONA_COLLECTION, _PERSONA_ID)
-        if saved and saved.get("text"):
-            self._persona = saved["text"]
-            self._is_customized = saved.get("customized", False)
-            logger.info("Persona loaded from storage (customized=%s)", self._is_customized)
-        else:
-            logger.info("No persona stored — using default")
+    def set_admin_text(self, text: str) -> None:
+        self._admin_text = text or DEFAULT_SOUL
+
+    def set_allow_user_override(self, allowed: bool) -> None:
+        self._allow_user_override = allowed
 
     @property
-    def persona(self) -> str:
-        return self._persona
+    def admin_text(self) -> str:
+        return self._admin_text
 
     @property
-    def is_customized(self) -> bool:
-        return self._is_customized
+    def allow_user_override(self) -> bool:
+        return self._allow_user_override
 
-    async def update_persona(self, text: str) -> None:
-        self._persona = text
-        self._is_customized = True
-        await self._storage.put(
-            _PERSONA_COLLECTION, _PERSONA_ID, {"text": text, "customized": True}
-        )
-        logger.info("Persona updated (%d chars)", len(text))
+    async def get_for_user(self, user_id: str | None) -> str:
+        if (
+            self._allow_user_override
+            and user_id
+            and user_id not in ("system", "guest")
+        ):
+            override = await self._storage.get(_SOUL_USER_COLLECTION, user_id)
+            if override and override.get("text"):
+                return override["text"]
+        return self._admin_text
 
-    async def reset_persona(self) -> None:
-        self._persona = DEFAULT_PERSONA
-        self._is_customized = False
+    async def get_user_override(self, user_id: str) -> str | None:
+        record = await self._storage.get(_SOUL_USER_COLLECTION, user_id)
+        if record and record.get("text"):
+            return record["text"]
+        return None
+
+    async def set_user_override(self, user_id: str, text: str) -> None:
         await self._storage.put(
-            _PERSONA_COLLECTION,
-            _PERSONA_ID,
-            {"text": DEFAULT_PERSONA, "customized": False},
+            _SOUL_USER_COLLECTION,
+            user_id,
+            {"user_id": user_id, "text": text},
         )
-        logger.info("Persona reset to default")
+
+    async def clear_user_override(self, user_id: str) -> None:
+        await self._storage.delete(_SOUL_USER_COLLECTION, user_id)
+
+
+class _IdentityHelper:
+    """Internal helper — Gilbert's persona, voice, and style.
+
+    Three layers composed in the system prompt:
+
+    1. ``immutable`` — admin-managed, always present, never overridable.
+       Sourced from ConfigParam ``persona.identity_immutable``.
+    2. ``default`` — admin-managed default character. Replaced by the user
+       layer when set. Sourced from ConfigParam ``persona.identity_default``.
+    3. ``user`` — per-user optional override of the default layer. Stored
+       in the ``identity_user`` entity collection.
+    """
+
+    def __init__(self, storage: StorageBackend) -> None:
+        self._storage = storage
+        self._immutable_text: str = DEFAULT_IDENTITY_IMMUTABLE
+        self._default_text: str = DEFAULT_IDENTITY_DEFAULT
+
+    def set_immutable_text(self, text: str) -> None:
+        self._immutable_text = text or DEFAULT_IDENTITY_IMMUTABLE
+
+    def set_default_text(self, text: str) -> None:
+        self._default_text = text or DEFAULT_IDENTITY_DEFAULT
+
+    @property
+    def immutable_text(self) -> str:
+        return self._immutable_text
+
+    @property
+    def default_text(self) -> str:
+        return self._default_text
+
+    async def get_for_user(self, user_id: str | None) -> tuple[str, str]:
+        """Return ``(immutable_text, effective_default_text)``.
+
+        Caller appends both to the system prompt so the immutable block is
+        always present even when the user has overridden the default layer.
+        """
+        if user_id and user_id not in ("system", "guest"):
+            override = await self._storage.get(_IDENTITY_USER_COLLECTION, user_id)
+            if override and override.get("text"):
+                return self._immutable_text, override["text"]
+        return self._immutable_text, self._default_text
+
+    async def get_user_override(self, user_id: str) -> str | None:
+        record = await self._storage.get(_IDENTITY_USER_COLLECTION, user_id)
+        if record and record.get("text"):
+            return record["text"]
+        return None
+
+    async def set_user_override(self, user_id: str, text: str) -> None:
+        await self._storage.put(
+            _IDENTITY_USER_COLLECTION,
+            user_id,
+            {"user_id": user_id, "text": text},
+        )
+
+    async def clear_user_override(self, user_id: str) -> None:
+        await self._storage.delete(_IDENTITY_USER_COLLECTION, user_id)
 
 
 # ── Memory helper ─────────────────────────────────────────────
 
-_MEMORY_COLLECTION = "user_memories"
+_MEMORY_USER_COLLECTION = "user_memories"
+_MEMORY_GLOBAL_COLLECTION = "memory_global"
 
 
 class _MemoryHelper:
-    """Internal helper — per-user persistent memories."""
+    """Internal helper — persistent memories with two scopes.
+
+    - ``user`` (default): visible only to the owning user; anyone may
+      manage their own. Stored in ``user_memories``.
+    - ``global``: visible to every user; only writable by an admin
+      (enforced by the AI tool layer via RBAC). Stored in ``memory_global``.
+
+    The system-prompt builder folds both scopes into a single block so the
+    model sees household-wide facts alongside the active user's personal
+    notes.
+    """
 
     def __init__(self, storage: StorageBackend) -> None:
         self._storage = storage
@@ -693,27 +814,49 @@ class _MemoryHelper:
     async def setup_indexes(self) -> None:
         await self._storage.ensure_index(
             IndexDefinition(
-                collection=_MEMORY_COLLECTION,
+                collection=_MEMORY_USER_COLLECTION,
                 fields=["user_id"],
             )
         )
+        # ``memory_global`` records have no user_id — collection scan is
+        # fine; these are short, rarely numerous, and only retrieved on
+        # system-prompt build.
 
+    async def get_summaries_for_user(self, user_id: str) -> str:
+        sections: list[str] = []
+        global_memories = await self._get_global_memories()
+        if global_memories:
+            lines = [
+                f"## Global memories ({len(global_memories)} stored, "
+                "visible to everyone)"
+            ]
+            for m in global_memories:
+                mid = m.get("_id", "")
+                summary = m.get("summary", "")
+                lines.append(f"- [{mid}] {summary} (global)")
+            sections.append("\n".join(lines))
+        if user_id and user_id not in ("system", "guest"):
+            user_memories = await self._get_user_memories(user_id)
+            if user_memories:
+                lines = [
+                    f"## Memories for this user ({len(user_memories)} stored)"
+                ]
+                for m in user_memories:
+                    mid = m.get("_id", "")
+                    summary = m.get("summary", "")
+                    source = m.get("source", "user")
+                    lines.append(f"- [{mid}] {summary} ({source})")
+                sections.append("\n".join(lines))
+        return "\n\n".join(sections)
+
+    # Back-compat alias used by older callers and tests.
     async def get_user_summaries(self, user_id: str) -> str:
-        memories = await self._get_user_memories(user_id)
-        if not memories:
-            return ""
-        lines = [f"## Memories for this user ({len(memories)} stored)"]
-        for m in memories:
-            mid = m.get("_id", "")
-            summary = m.get("summary", "")
-            source = m.get("source", "user")
-            lines.append(f"- [{mid}] {summary} ({source})")
-        return "\n".join(lines)
+        return await self.get_summaries_for_user(user_id)
 
     async def _get_user_memories(self, user_id: str) -> list[dict[str, Any]]:
         memories = await self._storage.query(
             Query(
-                collection=_MEMORY_COLLECTION,
+                collection=_MEMORY_USER_COLLECTION,
                 filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
             )
         )
@@ -727,7 +870,55 @@ class _MemoryHelper:
         memories.sort(key=sort_key)
         return memories
 
+    async def _get_global_memories(self) -> list[dict[str, Any]]:
+        memories = await self._storage.query(
+            Query(collection=_MEMORY_GLOBAL_COLLECTION)
+        )
+        memories.sort(
+            key=lambda m: (
+                -(m.get("access_count", 0)),
+                m.get("created_at", ""),
+            )
+        )
+        return memories
+
+    # ── Dispatch by scope ────────────────────────────────────
+
     async def remember(self, user_id: str, args: dict[str, Any]) -> str:
+        scope = (args.get("scope") or "user").lower()
+        if scope == "global":
+            return await self._remember_global(args)
+        return await self._remember_user(user_id, args)
+
+    async def recall(self, user_id: str, args: dict[str, Any]) -> str:
+        scope = (args.get("scope") or "user").lower()
+        if scope == "global":
+            return await self._recall_global(args)
+        return await self._recall_user(user_id, args)
+
+    async def update(self, user_id: str, args: dict[str, Any]) -> str:
+        scope = (args.get("scope") or "user").lower()
+        if scope == "global":
+            return await self._update_global(args)
+        return await self._update_user(user_id, args)
+
+    async def forget(self, user_id: str, args: dict[str, Any]) -> str:
+        scope = (args.get("scope") or "user").lower()
+        if scope == "global":
+            return await self._forget_global(args)
+        return await self._forget_user(user_id, args)
+
+    async def list_memories(
+        self, user_id: str, args: dict[str, Any] | None = None
+    ) -> str:
+        scope = ((args or {}).get("scope") or "user").lower()
+        if scope == "global":
+            return await self._list_global()
+        return await self._list_user(user_id)
+
+    # ── User-scope ops ──────────────────────────────────────
+
+    async def _remember_user(self, user_id: str, args: dict[str, Any]) -> str:
         summary = args.get("summary", "").strip()
         content = args.get("content", "").strip()
         source = args.get("source", "user")
@@ -738,7 +929,7 @@ class _MemoryHelper:
         now = datetime.now(UTC).isoformat()
         memory_id = f"memory_{uuid.uuid4().hex[:12]}"
         await self._storage.put(
-            _MEMORY_COLLECTION,
+            _MEMORY_USER_COLLECTION,
             memory_id,
             {
                 "memory_id": memory_id,
@@ -754,14 +945,14 @@ class _MemoryHelper:
         logger.info("Memory created for %s: %s", user_id, summary[:60])
         return f"Got it, I'll remember that. (memory {memory_id})"
 
-    async def recall(self, user_id: str, args: dict[str, Any]) -> str:
+    async def _recall_user(self, user_id: str, args: dict[str, Any]) -> str:
         ids: list[str] = args.get("ids", [])
         if not ids:
             return "I need memory IDs to recall. Use 'list' first to see available memories."
         results: list[str] = []
         for mid in ids:
             mid = str(mid)
-            record = await self._storage.get(_MEMORY_COLLECTION, mid)
+            record = await self._storage.get(_MEMORY_USER_COLLECTION, mid)
             if not record:
                 results.append(f"[{mid}] Not found.")
                 continue
@@ -769,7 +960,7 @@ class _MemoryHelper:
                 results.append(f"[{mid}] Not your memory.")
                 continue
             record["access_count"] = record.get("access_count", 0) + 1
-            await self._storage.put(_MEMORY_COLLECTION, mid, record)
+            await self._storage.put(_MEMORY_USER_COLLECTION, mid, record)
             results.append(
                 f"[{mid}] {record.get('summary', '')}\n"
                 f"Content: {record.get('content', '')}\n"
@@ -779,11 +970,11 @@ class _MemoryHelper:
             )
         return "\n\n".join(results)
 
-    async def update(self, user_id: str, args: dict[str, Any]) -> str:
+    async def _update_user(self, user_id: str, args: dict[str, Any]) -> str:
         memory_id = args.get("id", "")
         if not memory_id:
             return "I need a memory ID to update."
-        record = await self._storage.get(_MEMORY_COLLECTION, str(memory_id))
+        record = await self._storage.get(_MEMORY_USER_COLLECTION, str(memory_id))
         if not record:
             return f"Memory {memory_id} not found."
         if record.get("user_id") != user_id:
@@ -795,24 +986,24 @@ class _MemoryHelper:
         if content:
             record["content"] = content
         record["updated_at"] = datetime.now(UTC).isoformat()
-        await self._storage.put(_MEMORY_COLLECTION, str(memory_id), record)
+        await self._storage.put(_MEMORY_USER_COLLECTION, str(memory_id), record)
         logger.info("Memory updated for %s: %s", user_id, memory_id)
         return f"Memory {memory_id} updated."
 
-    async def forget(self, user_id: str, args: dict[str, Any]) -> str:
+    async def _forget_user(self, user_id: str, args: dict[str, Any]) -> str:
         memory_id = args.get("id", "")
         if not memory_id:
             return "I need a memory ID to forget."
-        record = await self._storage.get(_MEMORY_COLLECTION, str(memory_id))
+        record = await self._storage.get(_MEMORY_USER_COLLECTION, str(memory_id))
         if not record:
             return f"Memory {memory_id} not found."
         if record.get("user_id") != user_id:
             return f"Memory {memory_id} doesn't belong to you."
-        await self._storage.delete(_MEMORY_COLLECTION, str(memory_id))
+        await self._storage.delete(_MEMORY_USER_COLLECTION, str(memory_id))
         logger.info("Memory forgotten for %s: %s", user_id, memory_id)
         return f"Memory {memory_id} forgotten."
 
-    async def list_memories(self, user_id: str) -> str:
+    async def _list_user(self, user_id: str) -> str:
         memories = await self._get_user_memories(user_id)
         if not memories:
             return "No memories stored for you yet."
@@ -823,6 +1014,99 @@ class _MemoryHelper:
             source = m.get("source", "user")
             access = m.get("access_count", 0)
             lines.append(f"  [{mid}] {summary} ({source}) — accessed {access}x")
+        return "\n".join(lines)
+
+    # ── Global-scope ops ────────────────────────────────────
+    #
+    # Admin-only writes are enforced at the tool boundary via
+    # ``required_role="admin"`` on the global memory tool — these methods
+    # don't re-check the role; they assume the caller has already passed
+    # the gate.
+
+    async def _remember_global(self, args: dict[str, Any]) -> str:
+        summary = args.get("summary", "").strip()
+        content = args.get("content", "").strip()
+        if not summary:
+            return "I need a summary to remember."
+        if not content:
+            content = summary
+        now = datetime.now(UTC).isoformat()
+        memory_id = f"gmem_{uuid.uuid4().hex[:12]}"
+        await self._storage.put(
+            _MEMORY_GLOBAL_COLLECTION,
+            memory_id,
+            {
+                "memory_id": memory_id,
+                "summary": summary,
+                "content": content,
+                "access_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        logger.info("Global memory created: %s", summary[:60])
+        return f"Got it — saved as a global memory. (memory {memory_id})"
+
+    async def _recall_global(self, args: dict[str, Any]) -> str:
+        ids: list[str] = args.get("ids", [])
+        if not ids:
+            return "I need memory IDs to recall. Use 'list' first to see available global memories."
+        results: list[str] = []
+        for mid in ids:
+            mid = str(mid)
+            record = await self._storage.get(_MEMORY_GLOBAL_COLLECTION, mid)
+            if not record:
+                results.append(f"[{mid}] Not found.")
+                continue
+            record["access_count"] = record.get("access_count", 0) + 1
+            await self._storage.put(_MEMORY_GLOBAL_COLLECTION, mid, record)
+            results.append(
+                f"[{mid}] {record.get('summary', '')}\n"
+                f"Content: {record.get('content', '')}\n"
+                f"Created: {record.get('created_at', '')} | "
+                f"Accessed: {record['access_count']} times"
+            )
+        return "\n\n".join(results)
+
+    async def _update_global(self, args: dict[str, Any]) -> str:
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return "I need a memory ID to update."
+        record = await self._storage.get(_MEMORY_GLOBAL_COLLECTION, str(memory_id))
+        if not record:
+            return f"Global memory {memory_id} not found."
+        summary = args.get("summary")
+        content = args.get("content")
+        if summary:
+            record["summary"] = summary
+        if content:
+            record["content"] = content
+        record["updated_at"] = datetime.now(UTC).isoformat()
+        await self._storage.put(_MEMORY_GLOBAL_COLLECTION, str(memory_id), record)
+        logger.info("Global memory updated: %s", memory_id)
+        return f"Global memory {memory_id} updated."
+
+    async def _forget_global(self, args: dict[str, Any]) -> str:
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return "I need a memory ID to forget."
+        record = await self._storage.get(_MEMORY_GLOBAL_COLLECTION, str(memory_id))
+        if not record:
+            return f"Global memory {memory_id} not found."
+        await self._storage.delete(_MEMORY_GLOBAL_COLLECTION, str(memory_id))
+        logger.info("Global memory forgotten: %s", memory_id)
+        return f"Global memory {memory_id} forgotten."
+
+    async def _list_global(self) -> str:
+        memories = await self._get_global_memories()
+        if not memories:
+            return "No global memories stored yet."
+        lines = [f"{len(memories)} global memory/memories stored:"]
+        for m in memories:
+            mid = m.get("_id", "")
+            summary = m.get("summary", "")
+            access = m.get("access_count", 0)
+            lines.append(f"  [{mid}] {summary} — accessed {access}x")
         return "\n".join(lines)
 
 
@@ -902,7 +1186,8 @@ class AIService(Service):
         self._default_profile: str = _DEFAULT_PROFILE
         self._chat_profile: str = "standard"
         # Internal helpers (initialized in start())
-        self._persona: _PersonaHelper | None = None
+        self._soul: _SoulHelper | None = None
+        self._identity: _IdentityHelper | None = None
         self._memory: _MemoryHelper | None = None
         self._memory_enabled: bool = True
         self._in_flight_chats: dict[str, tuple[asyncio.Task[Any], str]] = {}
@@ -911,7 +1196,14 @@ class AIService(Service):
         return ServiceInfo(
             name="ai",
             capabilities=frozenset(
-                {"ai_chat", "ai_tools", "ws_handlers", "persona", "user_memory"}
+                {
+                    "ai_chat",
+                    "ai_tools",
+                    "ws_handlers",
+                    "soul",
+                    "identity",
+                    "user_memory",
+                }
             ),
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"ai_tools", "configuration", "access_control"}),
@@ -961,9 +1253,12 @@ class AIService(Service):
             raise TypeError("Expected StorageProvider for 'entity_storage' capability")
         self._storage = storage_svc.backend
 
-        # Initialize internal helpers
-        self._persona = _PersonaHelper(self._storage)
-        await self._persona.load()
+        # Initialize internal helpers. Soul + identity content lives in
+        # ConfigParams (loaded above via ``_apply_config``); per-user
+        # overrides live in entity collections opened by these helpers.
+        self._soul = _SoulHelper(self._storage)
+        self._identity = _IdentityHelper(self._storage)
+        self._apply_persona_config(section)
 
         self._memory = _MemoryHelper(self._storage)
         await self._memory.setup_indexes()
@@ -1010,6 +1305,39 @@ class AIService(Service):
         )
         self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
         self._chat_profile = section.get("chat_profile", self._chat_profile)
+        # Persona config flows through a separate path (see
+        # ``_apply_persona_config``) because the helpers must exist before
+        # we can push the values into them. ``start()`` calls both.
+
+    def _apply_persona_config(self, section: dict[str, Any]) -> None:
+        """Push soul + identity ConfigParam values into the helpers.
+
+        Called from ``start()`` after the helpers are constructed, and
+        again when configuration is reloaded at runtime (see
+        ``_handle_config_action``).
+        """
+        if self._soul is not None:
+            persona_section = section.get("persona", {}) if isinstance(
+                section.get("persona"), dict
+            ) else {}
+            self._soul.set_admin_text(
+                persona_section.get("soul") or DEFAULT_SOUL
+            )
+            self._soul.set_allow_user_override(
+                bool(persona_section.get("allow_user_soul_override", False))
+            )
+        if self._identity is not None:
+            persona_section = section.get("persona", {}) if isinstance(
+                section.get("persona"), dict
+            ) else {}
+            self._identity.set_immutable_text(
+                persona_section.get("identity_immutable")
+                or DEFAULT_IDENTITY_IMMUTABLE
+            )
+            self._identity.set_default_text(
+                persona_section.get("identity_default")
+                or DEFAULT_IDENTITY_DEFAULT
+            )
 
     # --- Configurable protocol ---
 
@@ -1063,11 +1391,51 @@ class AIService(Service):
                 choices_from="ai_profiles",
             ),
             ConfigParam(
-                key="default_persona",
+                key="persona.soul",
                 type=ToolParameterType.STRING,
-                description="Default persona instructions for the AI assistant.",
-                default=DEFAULT_PERSONA,
+                description=(
+                    "Gilbert's soul — values and principles. Always present "
+                    "at the top of the system prompt. Per-user override is "
+                    "available only when allow_user_soul_override is on."
+                ),
+                default=DEFAULT_SOUL,
                 multiline=True,
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="persona.allow_user_soul_override",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Allow individual users to override Gilbert's soul "
+                    "for themselves. When off, the admin soul is the only "
+                    "soul anyone sees and the user soul tool is hidden."
+                ),
+                default=False,
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="persona.identity_immutable",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Immutable identity layer — Gilbert's persona content "
+                    "that cannot be overridden by any user. Always present "
+                    "in the system prompt."
+                ),
+                default=DEFAULT_IDENTITY_IMMUTABLE,
+                multiline=True,
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="persona.identity_default",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Default identity layer — Gilbert's persona content "
+                    "shown when a user has not set their own identity "
+                    "override. Replaced (not merged) by per-user overrides."
+                ),
+                default=DEFAULT_IDENTITY_DEFAULT,
+                multiline=True,
+                restart_required=True,
             ),
             ConfigParam(
                 key="memory_enabled",
@@ -2388,7 +2756,7 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         conversation_id: str | None = None,
     ) -> str:
-        """Build the full system prompt: base identity, persona, user memories, and active skills."""
+        """Build the full system prompt: soul, identity layers, user memories, and active skills."""
         parts: list[str] = []
 
         # Always inject current date/time first
@@ -2396,21 +2764,31 @@ class AIService(Service):
 
         if self._system_prompt:
             parts.append(self._system_prompt)
-        if self._persona is not None:
-            parts.append(self._persona.persona)
-            if not self._persona.is_customized:
-                parts.append(
-                    "IMPORTANT: The persona has not been customized yet. "
-                    "At the start of the FIRST conversation only, briefly let the user know "
-                    "they can customize your personality and behavior by asking you to "
-                    "update the persona. Only mention this once — never bring it up again "
-                    "in subsequent messages or conversations."
-                )
+
+        # Soul (values + principles): admin layer with optional per-user
+        # override gated by ``persona.allow_user_soul_override``. Always
+        # appended — every conversation needs a soul.
+        user_id = user_ctx.user_id if user_ctx else None
+        if self._soul is not None:
+            soul_text = await self._soul.get_for_user(user_id)
+            if soul_text:
+                parts.append(soul_text)
+
+        # Identity (persona/voice): immutable admin layer plus either the
+        # admin default or the per-user override (replacement, not merge).
+        # The immutable block is appended unconditionally so user overrides
+        # cannot drop safety/integrity rules.
+        if self._identity is not None:
+            immutable_text, default_text = await self._identity.get_for_user(user_id)
+            if immutable_text:
+                parts.append(immutable_text)
+            if default_text:
+                parts.append(default_text)
 
         # Always append the parallel-tool-use hint so the model knows it
         # should batch independent tool calls into one response. Lives
-        # here rather than inside the persona so a customized persona
-        # doesn't accidentally drop it.
+        # here rather than inside the soul/identity content so a
+        # customized layer can't accidentally drop it.
         parts.append(_PARALLEL_TOOL_USE_HINT)
 
         # Inject the active user's identity so the AI knows who it's
@@ -2446,15 +2824,20 @@ class AIService(Service):
             if directory:
                 parts.append(directory)
 
-        # Inject user memory summaries if available
-        if user_ctx and user_ctx.user_id not in ("system", "guest"):
-            if self._memory is not None and self._memory_enabled:
-                try:
-                    summaries = await self._memory.get_user_summaries(user_ctx.user_id)
-                    if summaries:
-                        parts.append(summaries)
-                except Exception:
-                    pass  # Memory unavailable — not critical
+        # Inject memory summaries (global + per-user) if available.
+        # Global memories are visible to everyone; per-user memories only
+        # appear for the calling user. ``get_summaries_for_user`` folds
+        # both scopes into a single block with section headers and skips
+        # the per-user portion for system/guest callers.
+        if self._memory is not None and self._memory_enabled:
+            try:
+                summaries = await self._memory.get_summaries_for_user(
+                    user_ctx.user_id if user_ctx else ""
+                )
+                if summaries:
+                    parts.append(summaries)
+            except Exception:
+                pass  # Memory unavailable — not critical
 
         # Inject skill system awareness and active skill instructions
         if self._resolver:
@@ -4174,43 +4557,94 @@ class AIService(Service):
                 ],
                 required_role="admin",
             ),
-            # Persona tools
+            # Identity tools — per-user persona override of the admin
+            # default layer. Any authenticated user can edit their own.
             ToolDefinition(
-                name="get_persona",
-                slash_group="persona",
+                name="get_identity",
+                slash_group="identity",
                 slash_command="show",
-                slash_help="Show the current AI persona: /persona show",
-                description="Get the current AI persona (personality, tone, and behavioral instructions).",
-                required_role="everyone",
+                slash_help="Show your effective identity: /identity show",
+                description=(
+                    "Show the effective identity (persona/voice/style) for "
+                    "the current user — either your override if you've set "
+                    "one, or the admin default."
+                ),
+                required_role="user",
             ),
             ToolDefinition(
-                name="update_persona",
+                name="update_my_identity",
                 description=(
-                    "Update the AI persona. This changes how Gilbert behaves, speaks, "
-                    "and responds. The full persona text is replaced."
+                    "Set your personal identity override. This replaces the "
+                    "admin default identity layer for you only — the immutable "
+                    "layer (admin-managed safety/integrity rules) still applies."
                 ),
                 parameters=[
                     ToolParameter(
                         name="text",
                         type=ToolParameterType.STRING,
-                        description="The new persona text (full replacement).",
+                        description="Your new identity text (full replacement of the default layer).",
                     ),
                 ],
-                required_role="admin",
-                # No slash_command: persona text is typically multi-line
-                # (paragraphs of behavioral instructions); inline shell
-                # quoting is impractical. Edit persona from the chat sidebar in the UI.
+                required_role="user",
+                # No slash_command: identity text is typically multi-line;
+                # edit from the UI sidebar.
             ),
             ToolDefinition(
-                name="reset_persona",
-                slash_group="persona",
+                name="reset_my_identity",
+                slash_group="identity",
                 slash_command="reset",
-                slash_help="Reset persona to the default: /persona reset",
-                description="Reset the AI persona to the default.",
-                required_role="admin",
+                slash_help="Drop your identity override and revert to the default: /identity reset",
+                description="Clear your personal identity override and revert to the admin default.",
+                required_role="user",
             ),
         ]
-        # Memory tool (only when enabled)
+        # Soul-override tools — only registered when the operator has
+        # opted in. Mirrors the role/feature gate the memory tool uses.
+        if self._soul is not None and self._soul.allow_user_override:
+            tools.extend(
+                [
+                    ToolDefinition(
+                        name="get_soul",
+                        slash_group="soul",
+                        slash_command="show",
+                        slash_help="Show your effective soul: /soul show",
+                        description=(
+                            "Show the effective soul (values + principles) "
+                            "for the current user — either your override or "
+                            "the admin soul."
+                        ),
+                        required_role="user",
+                    ),
+                    ToolDefinition(
+                        name="update_my_soul",
+                        description=(
+                            "Set your personal soul override. The admin has "
+                            "enabled per-user soul customization, so this "
+                            "replaces the admin soul for you only."
+                        ),
+                        parameters=[
+                            ToolParameter(
+                                name="text",
+                                type=ToolParameterType.STRING,
+                                description="Your new soul text (full replacement).",
+                            ),
+                        ],
+                        required_role="user",
+                    ),
+                    ToolDefinition(
+                        name="reset_my_soul",
+                        slash_group="soul",
+                        slash_command="reset",
+                        slash_help="Drop your soul override: /soul reset",
+                        description="Clear your personal soul override and revert to the admin soul.",
+                        required_role="user",
+                    ),
+                ]
+            )
+        # Memory tool (only when enabled). Two scopes:
+        # - ``user`` (default): visible only to the calling user.
+        # - ``global``: visible to all users; writes require admin role
+        #   (enforced by the handler, since RBAC is per-tool not per-arg).
         if self._memory_enabled:
             tools.append(
                 ToolDefinition(
@@ -4218,17 +4652,22 @@ class AIService(Service):
                     slash_command="memory",
                     slash_help=(
                         "Manage memories: /memory <action> "
-                        "[summary='...'] [content='...'] "
+                        "[summary='...'] [content='...'] [scope='user|global'] "
                         "(actions: remember, recall, update, forget, list)"
                     ),
                     description=(
-                        "Manage persistent memories for the current user. "
-                        "Use 'remember' when the user tells you something worth remembering "
-                        "(preferences, project details, personal info). Use 'auto' source when "
-                        "you notice something worth remembering that the user didn't explicitly ask to save. "
-                        "Use 'list' to see what you remember about them. "
-                        "Use 'recall' to load full content of specific memories by ID. "
-                        "Use 'update' to modify a memory. Use 'forget' to delete one."
+                        "Manage persistent memories. Two scopes: 'user' "
+                        "(default — visible only to the calling user) and "
+                        "'global' (visible to all users; only admins may "
+                        "write to global memory).\n\n"
+                        "Use 'remember' when the user tells you something "
+                        "worth remembering (preferences, project details, "
+                        "personal info). Use 'auto' source when you notice "
+                        "something worth remembering that the user didn't "
+                        "explicitly ask to save. Use 'list' to see what you "
+                        "remember. Use 'recall' to load full content of "
+                        "specific memories by ID. Use 'update' to modify a "
+                        "memory. Use 'forget' to delete one."
                     ),
                     parameters=[
                         ToolParameter(
@@ -4236,6 +4675,17 @@ class AIService(Service):
                             type=ToolParameterType.STRING,
                             description="Action to perform.",
                             enum=["remember", "recall", "update", "forget", "list"],
+                        ),
+                        ToolParameter(
+                            name="scope",
+                            type=ToolParameterType.STRING,
+                            description=(
+                                "'user' (default) for personal memory, "
+                                "'global' for household/business-wide memory. "
+                                "Writes to 'global' require admin role."
+                            ),
+                            enum=["user", "global"],
+                            required=False,
                         ),
                         ToolParameter(
                             name="summary",
@@ -4369,12 +4819,18 @@ class AIService(Service):
                 return await self._tool_assign_profile(arguments)
             case "clear_ai_assignment":
                 return await self._tool_clear_assignment(arguments)
-            case "get_persona":
-                return await self._tool_get_persona()
-            case "update_persona":
-                return await self._tool_update_persona(arguments)
-            case "reset_persona":
-                return await self._tool_reset_persona()
+            case "get_identity":
+                return await self._tool_get_identity(arguments)
+            case "update_my_identity":
+                return await self._tool_update_my_identity(arguments)
+            case "reset_my_identity":
+                return await self._tool_reset_my_identity(arguments)
+            case "get_soul":
+                return await self._tool_get_soul(arguments)
+            case "update_my_soul":
+                return await self._tool_update_my_soul(arguments)
+            case "reset_my_soul":
+                return await self._tool_reset_my_soul(arguments)
             case "memory":
                 return await self._tool_memory_action(arguments)
             case "get_compression_config":
@@ -4529,23 +4985,105 @@ class AIService(Service):
             )
         return "Compression failed — check the logs for details."
 
-    # --- Persona tool handlers ---
+    # --- Identity / soul tool handlers ---
 
-    async def _tool_get_persona(self) -> str:
-        persona_text = self._persona.persona if self._persona else DEFAULT_PERSONA
-        return _json.dumps({"persona": persona_text})
+    @staticmethod
+    def _resolve_caller_user_id(arguments: dict[str, Any]) -> str:
+        """Resolve the calling user's ID from injected args or contextvar.
 
-    async def _tool_update_persona(self, arguments: dict[str, Any]) -> str:
-        if self._persona is None:
-            return _json.dumps({"error": "Persona not initialized"})
-        text = arguments["text"]
-        await self._persona.update_persona(text)
+        Tool executors inject ``_user_id`` into the arguments dict; direct
+        callers (tests, future entry points) may instead set the
+        ``get_current_user`` contextvar. Falls back to the contextvar so
+        both paths work without special casing.
+        """
+        return arguments.get("_user_id") or get_current_user().user_id
+
+    @staticmethod
+    def _is_admin(arguments: dict[str, Any]) -> bool:
+        """Best-effort admin check using injected role list.
+
+        Tool executors inject ``_user_roles`` into arguments alongside
+        ``_user_id``. We treat the presence of ``"admin"`` as the gate;
+        defense-in-depth lives in ``_run_one_tool``'s RBAC re-check, so
+        this is only used by handlers that need finer-grained per-arg
+        gating (e.g. memory ``scope='global'``).
+        """
+        roles = arguments.get("_user_roles") or []
+        return "admin" in roles
+
+    async def _tool_get_identity(self, arguments: dict[str, Any]) -> str:
+        if self._identity is None:
+            return _json.dumps({"error": "Identity not initialized"})
+        user_id = self._resolve_caller_user_id(arguments)
+        immutable_text, default_text = await self._identity.get_for_user(user_id)
+        override = await self._identity.get_user_override(user_id)
+        return _json.dumps(
+            {
+                "immutable": immutable_text,
+                "effective": default_text,
+                "is_user_override": override is not None,
+            }
+        )
+
+    async def _tool_update_my_identity(self, arguments: dict[str, Any]) -> str:
+        if self._identity is None:
+            return _json.dumps({"error": "Identity not initialized"})
+        user_id = self._resolve_caller_user_id(arguments)
+        if user_id in ("system", "guest"):
+            return _json.dumps({"error": "Identity override requires an authenticated user"})
+        text = arguments.get("text", "")
+        if not text:
+            return _json.dumps({"error": "text is required"})
+        await self._identity.set_user_override(user_id, text)
         return _json.dumps({"status": "updated", "length": len(text)})
 
-    async def _tool_reset_persona(self) -> str:
-        if self._persona is None:
-            return _json.dumps({"error": "Persona not initialized"})
-        await self._persona.reset_persona()
+    async def _tool_reset_my_identity(self, arguments: dict[str, Any]) -> str:
+        if self._identity is None:
+            return _json.dumps({"error": "Identity not initialized"})
+        user_id = self._resolve_caller_user_id(arguments)
+        if user_id in ("system", "guest"):
+            return _json.dumps({"error": "Identity override requires an authenticated user"})
+        await self._identity.clear_user_override(user_id)
+        return _json.dumps({"status": "reset"})
+
+    async def _tool_get_soul(self, arguments: dict[str, Any]) -> str:
+        if self._soul is None:
+            return _json.dumps({"error": "Soul not initialized"})
+        user_id = self._resolve_caller_user_id(arguments)
+        effective = await self._soul.get_for_user(user_id)
+        override = await self._soul.get_user_override(user_id) if user_id not in ("system", "guest") else None
+        return _json.dumps(
+            {
+                "effective": effective,
+                "is_user_override": override is not None,
+                "override_allowed": self._soul.allow_user_override,
+            }
+        )
+
+    async def _tool_update_my_soul(self, arguments: dict[str, Any]) -> str:
+        if self._soul is None:
+            return _json.dumps({"error": "Soul not initialized"})
+        if not self._soul.allow_user_override:
+            # Defense-in-depth: tool gating in ``get_tools`` should have
+            # hidden this entirely, but a stale tool list could still
+            # dispatch us here.
+            return _json.dumps({"error": "Per-user soul override is disabled by the admin"})
+        user_id = self._resolve_caller_user_id(arguments)
+        if user_id in ("system", "guest"):
+            return _json.dumps({"error": "Soul override requires an authenticated user"})
+        text = arguments.get("text", "")
+        if not text:
+            return _json.dumps({"error": "text is required"})
+        await self._soul.set_user_override(user_id, text)
+        return _json.dumps({"status": "updated", "length": len(text)})
+
+    async def _tool_reset_my_soul(self, arguments: dict[str, Any]) -> str:
+        if self._soul is None:
+            return _json.dumps({"error": "Soul not initialized"})
+        user_id = self._resolve_caller_user_id(arguments)
+        if user_id in ("system", "guest"):
+            return _json.dumps({"error": "Soul override requires an authenticated user"})
+        await self._soul.clear_user_override(user_id)
         return _json.dumps({"status": "reset"})
 
     # --- Memory tool handler ---
@@ -4554,13 +5092,19 @@ class AIService(Service):
         if self._memory is None:
             return "Memory system not initialized."
         action = arguments.get("action", "")
+        scope = (arguments.get("scope") or "user").lower()
         # Caller identity is injected into ``arguments`` by the tool executor
         # (both the AI-driven path in ``_execute_tool_calls`` and the slash
         # command path in ``_invoke_slash_command``). Fall back to the
         # contextvar for any callers that invoke this handler directly.
-        user_id = arguments.get("_user_id") or get_current_user().user_id
-        if user_id in ("system", "guest"):
+        user_id = self._resolve_caller_user_id(arguments)
+        # Per-user scope still requires an authenticated user. Global scope
+        # is readable by anyone, but writes require admin (checked below).
+        if scope == "user" and user_id in ("system", "guest"):
             return "Memory requires an authenticated user."
+        if scope == "global" and action in ("remember", "update", "forget"):
+            if not self._is_admin(arguments):
+                return "Writing to global memory requires admin role."
         match action:
             case "remember":
                 return await self._memory.remember(user_id, arguments)
@@ -4571,7 +5115,7 @@ class AIService(Service):
             case "forget":
                 return await self._memory.forget(user_id, arguments)
             case "list":
-                return await self._memory.list_memories(user_id)
+                return await self._memory.list_memories(user_id, arguments)
             case _:
                 return f"Unknown memory action: {action}"
 

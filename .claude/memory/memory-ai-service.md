@@ -10,12 +10,12 @@ Central AI service that orchestrates conversations with tool use. Uses the AIBac
 - **`interfaces/tools.py`** — `ToolProvider` protocol (runtime_checkable), `ToolDefinition`, `ToolCall`, `ToolResult` (with `attachments` tuple), `ToolParameterType`
 - **`interfaces/ai.py`** — `AIBackend` ABC (with registry pattern + default `generate_stream` fallback), `Message`, `MessageRole`, `AIRequest`, `AIResponse`, `StopReason`, `TokenUsage` (input/output + `cache_creation_tokens` + `cache_read_tokens`, fresh-input semantics), `ChatTurnResult` NamedTuple (7 fields including `rounds` and optional `turn_usage` dict), `StreamEventType` / `StreamEvent`, `AIBackendCapabilities`
 - **`interfaces/ui.py`** — `ToolOutput` (text + ui_blocks + attachments)
-- **`core/services/ai.py`** — `AIService(Service)` — the orchestrator, plus `_PersonaHelper` and `_MemoryHelper`
+- **`core/services/ai.py`** — `AIService(Service)` — the orchestrator, plus `_SoulHelper`, `_IdentityHelper`, and `_MemoryHelper`
 - **`std-plugins/anthropic/anthropic_ai.py`** — `AnthropicAI(AIBackend)` — Claude via httpx (lives in the `anthropic` std-plugin, not in core)
 - **`std-plugins/openai/openai_ai.py`** — `OpenAIAI(AIBackend)` — GPT via httpx (lives in the `openai` std-plugin, not in core). Talks Chat Completions; uses `max_completion_tokens` so it works for both classic and `o`-series reasoning models; omits `temperature` for `o1`/`o3` since those models reject non-default sampling. Image attachments ride as `image_url` content parts; PDFs become workspace-tool text stubs.
 
 ### AIService
-- **Capabilities:** `ai_chat`, `ai_tools`, `ws_handlers`, `persona`, `user_memory`
+- **Capabilities:** `ai_chat`, `ai_tools`, `ws_handlers`, `soul`, `identity`, `user_memory`
 - **Requires:** `entity_storage`
 - **Optional:** `ai_tools`, `configuration`, `access_control`
 - **Main method:** `chat(user_message, conversation_id=None, attachments=None) -> ChatTurnResult`
@@ -53,8 +53,9 @@ Central AI service that orchestrates conversations with tool use. Uses the AIBac
 - **No more `ThinkingPanel.tsx` / `MessageBubble.tsx`** — both were deleted. Tool activity now renders inline in each turn's thinking card; the user-message side of a turn is rendered directly inside `TurnBubble`.
 
 ### Internal Helpers (merged services)
-- **`_PersonaHelper`** — manages AI persona text in `persona` collection. Exposes tools: `get_persona`, `update_persona`, `reset_persona`
-- **`_MemoryHelper`** — per-user persistent memories in `user_memories` collection. Exposes tool: `memory` (actions: remember, recall, update, forget, list). The tool handler (`_tool_memory_action`) reads caller identity from the injected `_user_id` argument — the WS chat path does not set the `get_current_user` contextvar before dispatching tool calls.
+- **`_SoulHelper`** — Gilbert's values & principles. Admin-managed text from ConfigParam `persona.soul` plus optional per-user override in `soul_user` collection (gated by `persona.allow_user_soul_override`). Exposes tools: `get_soul`, `update_my_soul`, `reset_my_soul` (last two only registered when the override flag is on). See [Soul & Identity](memory-soul-identity.md).
+- **`_IdentityHelper`** — Gilbert's persona/voice/style. Three layers: immutable (admin, always present, never overridable), default (admin-managed, overridable), per-user override in `identity_user` collection (replaces the default layer when set). Exposes tools: `get_identity`, `update_my_identity`, `reset_my_identity`. See [Soul & Identity](memory-soul-identity.md).
+- **`_MemoryHelper`** — persistent memories with two scopes: `user` (per-user, in `user_memories`) and `global` (all-user-readable, admin-write-only, in `memory_global`). Exposes tool: `memory` (actions: remember, recall, update, forget, list; `scope` param: user|global). The tool handler (`_tool_memory_action`) reads caller identity from the injected `_user_id` and admin role from `_user_roles` — the WS chat path does not set the `get_current_user` contextvar before dispatching tool calls. See [Memory Scopes](memory-memory-scopes.md).
 
 ### History Replay (`_ws_history_load`)
 
@@ -84,7 +85,10 @@ AIService implements `Configurable` with `config_category = "Intelligence"`. Par
 - `max_continuation_rounds` — max "please continue" recoveries after a max_tokens cutoff per turn (default 2)
 - `default_profile` — fallback profile name when no explicit ai_call/ai_profile is set (default `standard`, choices_from `ai_profiles`)
 - `chat_profile` — profile for web + Slack human chat (default `standard`, choices_from `ai_profiles`)
-- `default_persona` — default persona text (multiline)
+- `persona.soul` — admin soul text — values & principles, multiline, restart-required (default `DEFAULT_SOUL`)
+- `persona.allow_user_soul_override` — boolean, default false. Gates per-user soul override AND the visibility of soul tools.
+- `persona.identity_immutable` — admin immutable identity layer, multiline, restart-required (default `DEFAULT_IDENTITY_IMMUTABLE`). Always present, never overridable.
+- `persona.identity_default` — admin default identity layer, multiline, restart-required (default `DEFAULT_IDENTITY_DEFAULT`). Replaced by per-user override when set.
 - `memory_enabled` — whether AI memory system is enabled (restart required)
 
 ### Multi-backend Setup
