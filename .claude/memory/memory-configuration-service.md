@@ -54,7 +54,7 @@ Services with swappable backends (AI, TTS, auth, etc.) use a registry pattern:
 ### Categories
 Services declare a `config_category` property. Standard categories:
 - Intelligence (ai, knowledge, websearch, skills)
-- Media (tts, speaker, music, radio_dj)
+- Media (tts, speaker, music)
 - Communication (inbox, inbox_ai_chat, slack, greeting, roast)
 - Security (auth, users)
 - Monitoring (presence, doorbell)

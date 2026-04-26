@@ -14,9 +14,13 @@ Search and browse are **Spotify concerns**, not Sonos concerns. The modern Sonos
 Both links coexist independently. Users typically link one Spotify account to Gilbert (usually the household's "music curator") and can still play on speakers linked to a different Spotify family-plan member's account — Spotify URIs are universal.
 
 ### Interface
-- `src/gilbert/interfaces/music.py` — `MusicBackend` ABC, `MusicItem`, `Playable`, `MusicItemKind` (TRACK / ALBUM / ARTIST / PLAYLIST / STATION / FAVORITE), `MusicSearchUnavailableError`.
-- Methods: `list_favorites`, `list_playlists`, `search(query, kind, limit)`, `resolve_playable(item)`.
-- `supports_queue: bool` class attribute (default `False`) — backends declare whether they can route resolved items through a speaker queue. `MusicService.supports_queue` mirrors it and gates the queue tools.
+- `src/gilbert/interfaces/music.py` — `MusicBackend` ABC, `MusicItem`, `Playable`, `MusicItemKind` (TRACK / ALBUM / ARTIST / PLAYLIST / STATION / FAVORITE), `MusicSearchUnavailableError`. Re-exports `LoopMode` from `interfaces/speaker.py`.
+- Required methods: `list_favorites`, `list_playlists`, `search(query, kind, limit)`, `resolve_playable(item)`.
+- Optional methods: `start_station(seed, limit) -> list[MusicItem]` — return tracks for a station seeded by a `MusicItem` or free-text. Default raises `NotImplementedError`. The service layer handles the play+queue orchestration.
+- Capability flags (class attributes, default `False`):
+  - `supports_queue` — backend can route resolved items through a speaker queue. Gates `add_to_queue` / `queue_item` / `play_queue` tools.
+  - `supports_stations` — backend implements `start_station`. Gates the `/music station` tool.
+  - `supports_loop` — backend wants a loop tool exposed. Combined at the service layer with `SpeakerBackend.supports_repeat` to decide whether to register `/music loop`. The actual repeat-mode application lives at the speaker (`SpeakerBackend.set_repeat`), not the music backend — `LoopMode` is defined on `interfaces/speaker.py`.
 - `LinkedMusicServiceLister` protocol — `list_linked_services()` used by `ConfigurationService` to drive the `preferred_service` dropdown.
 
 ### Backend (Spotify Web API)
@@ -30,6 +34,7 @@ Both links coexist independently. Users typically link one Spotify account to Gi
 - Item mappers (`_spotify_*_to_music_item`) normalize Spotify JSON into `MusicItem`. The returned `MusicItem.uri` is always a canonical `spotify:<kind>:<id>` string.
 - `resolve_playable(item)` passes the Spotify URI straight through as a `Playable(uri=…)`. The speaker backend's `play_uri` detects the spotify: scheme and routes to `playback.load_content` with a `MetadataId{serviceId: "9", objectId: uri}` — Sonos uses the household's default linked Spotify account.
 - Station queries (no such thing in Spotify proper) map to `type=playlist` so `/music search stations` surfaces editorial playlists, the closest analogue.
+- `start_station(seed, limit)` calls `GET /v1/recommendations` with seeds resolved from the input — `MusicItem` of kind TRACK/ARTIST → `seed_tracks`/`seed_artists` directly; a free-text seed is resolved by trying genre seeds (`/recommendations/available-genre-seeds`), then artist search, then track search. The result is a list of recommended tracks; the service layer plays the first and queues the rest. **Caveat:** Spotify deprecated `/recommendations` for *new* applications in late 2024 — apps registered after the cutoff get a 404, which the backend translates into `MusicSearchUnavailableError` with a clear message.
 - Apple Music / Amazon Music / etc. are **not supported** — they required SMAPI and went away with it.
 
 ### Link flow (manual-paste OAuth)
@@ -51,7 +56,7 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 - `src/gilbert/core/services/music.py` — `MusicService` implementing Service, Configurable, ToolProvider.
 - Wraps the backend; no direct Spotify knowledge lives here.
 - `play_item(item, speaker_names, volume, initiator="user")` calls `backend.resolve_playable(item)` then `speaker_svc.play_on_speakers(uri=playable.uri, ...)`. The speaker backend handles the Spotify-specific `load_content` dispatch.
-- Emits `music.playback_started` on each successful `play_item` / `add_to_queue` / `play_queue` (event bus optional — resolved in `start()`). Payload: `{uri, title, kind, initiator}`. `initiator` defaults to `"user"`; RadioDJ passes `"dj"` for its own plays so it can filter self-emissions and avoid disarming itself. The already-playing no-op path of `play_queue` intentionally does NOT emit — it doesn't represent a new user intent.
+- Emits `music.playback_started` on each successful `play_item` / `add_to_queue` / `play_queue` / `start_station` (event bus optional — resolved in `start()`). Payload: `{uri, title, kind, initiator}`. `initiator` defaults to `"user"` and is kept as a free-form string so future automation can identify itself. The already-playing no-op path of `play_queue` intentionally does NOT emit — it doesn't represent a new user intent.
 
 ### AI Tools Exposed
 - `list_favorites`, `list_playlists` — browse user's Spotify library.
@@ -61,6 +66,8 @@ Two `ConfigAction`s expose the flow to the Settings UI:
 - `add_to_queue` (+ `/music queue <title>`) — resolve + append to the speaker queue without stopping OR starting playback. **Only exposed when the active backend sets `supports_queue = True`.** Routes through `SpeakerService.enqueue_on_speakers` → `SpeakerBackend.enqueue_uri` → `SonosSmapiClient.enqueue_spotify`, which is a **pure `AddURIToQueue`** — no `SetAVTransportURI`, no Play. Switching the transport source in the middle of other playback was causing speakers to abruptly cut to the queue; the source-switch now only happens inside the explicit `resume_queue` path.
 - `queue_item` — button-invoked sibling of `add_to_queue` (same JSON payload shape as `play_item`).
 - `play_queue` (+ `/music play-queue`) — start or resume playback of the existing speaker queue without clearing/replacing it. `SpeakerService.play_queue_on_speakers` checks `get_playback_state` on the target first: **if already PLAYING, it's a no-op** (returns `False`; tool reports `already_playing`) to avoid the `SetAVTransportURI` + `Play` sequence resetting the queue back to track 1. Otherwise routes to `SonosSmapiClient.resume_queue` (`SetAVTransportURI` + `Play`). Tool descriptions use explicit "REPLACES / APPEND / does NOT clear" wording so the AI picks the right of the three playback verbs.
+- `start_station` (+ `/music station <seed>`) — only registered when `backend.supports_stations` is true. Asks the backend for ~30 station tracks, plays the first via `play_item` (clears queue + plays), queues the rest.
+- `set_loop` (+ `/music loop [off|track|all]`) — only registered when `backend.supports_loop` AND the speaker's `supports_repeat` are both true. Routes to `SpeakerService.set_repeat_on_speakers` → `SpeakerBackend.set_repeat`, which on Sonos calls `playback.setPlayModes` with `(repeat, repeat_one)` translated from `LoopMode`.
 - `now_playing` — queries the speaker backend for current track.
 
 ## Related

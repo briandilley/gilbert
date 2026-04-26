@@ -20,6 +20,7 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import (
+    LoopMode,
     NowPlaying,
     PlaybackState,
     PlayRequest,
@@ -529,6 +530,25 @@ class SpeakerService(Service):
 
         await backend.play_queue(target_ids)
         return True
+
+    async def set_repeat_on_speakers(
+        self,
+        mode: LoopMode,
+        speaker_names: list[str] | None = None,
+    ) -> None:
+        """Apply a queue repeat-mode to the given speakers.
+
+        Resolves speaker names the same way ``play_on_speakers`` does
+        (defaults to all speakers when none given) and forwards to the
+        backend's ``set_repeat``. Backends that don't advertise
+        ``supports_repeat`` raise ``NotImplementedError``; callers
+        should guard on ``backend.supports_repeat`` first so the
+        absence of support surfaces as a UI error rather than an
+        exception.
+        """
+        backend = self._require_backend()
+        target_ids = await self._resolve_target_ids(speaker_names)
+        await backend.set_repeat(mode, target_ids)
 
     async def stop_speakers(
         self,

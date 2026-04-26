@@ -17,6 +17,23 @@ class PlaybackState(StrEnum):
     TRANSITIONING = "transitioning"
 
 
+class LoopMode(StrEnum):
+    """Repeat-mode applied to a speaker's queue.
+
+    - ``OFF`` — play through and stop at the end of the queue.
+    - ``TRACK`` — repeat the current track indefinitely.
+    - ``ALL`` — repeat the entire queue when it reaches the end.
+
+    Modeled here (rather than on the music interface) because loop is
+    a queue-level setting enforced by the speaker firmware. Music
+    backends import and forward it.
+    """
+
+    OFF = "off"
+    TRACK = "track"
+    ALL = "all"
+
+
 @dataclass(frozen=True)
 class SpeakerInfo:
     """Information about a discovered speaker."""
@@ -94,6 +111,11 @@ class SpeakerBackend(ABC):
 
     _registry: dict[str, type["SpeakerBackend"]] = {}
     backend_name: str = ""
+    supports_repeat: bool = False
+    """Declares whether this backend can apply a repeat mode to a
+    speaker's queue. Sonos overrides to ``True``; backends with no
+    queue concept (one-shot players) leave it ``False`` and the music
+    service's loop tool stays hidden."""
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -171,6 +193,27 @@ class SpeakerBackend(ABC):
         """
         raise NotImplementedError(
             "This speaker backend does not support queue operations"
+        )
+
+    async def set_repeat(
+        self,
+        mode: LoopMode,
+        speaker_ids: list[str] | None = None,
+    ) -> None:
+        """Set the queue repeat-mode on the given speakers.
+
+        Default raises ``NotImplementedError``. Backends that own a
+        persistent queue with native repeat-mode support (Sonos)
+        override and set ``supports_repeat = True``. Callers should
+        guard on that flag rather than catching the exception.
+
+        ``speaker_ids`` of ``None`` means "wherever music is currently
+        playing". Backends are expected to apply the mode at the group
+        coordinator level so all members of a synchronized group repeat
+        together.
+        """
+        raise NotImplementedError(
+            "This speaker backend does not support repeat-mode control"
         )
 
     # --- Volume ---

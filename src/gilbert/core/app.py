@@ -232,10 +232,6 @@ class Gilbert:
 
         self.service_manager.register(BackupService())
 
-        from gilbert.core.services.radio_dj import RadioDJService
-
-        self.service_manager.register(RadioDJService())
-
         from gilbert.core.services.roast import RoastService
 
         self.service_manager.register(RoastService())

@@ -1042,9 +1042,9 @@ async def test_play_item_emits_playback_started_event(
     stub_backend: StubMusicBackend,
 ) -> None:
     """Anything that starts playback must emit music.playback_started
-    so RadioDJ (and future subscribers) can tell user-initiated plays
-    apart from their own. Missing emission is the exact thing that
-    made the DJ trample user-chosen music."""
+    so subscribers can tell user-initiated plays apart from
+    automation. Missing emission would break any future feature that
+    needs to react to "music started right now"."""
     service, _speaker, bus = _wire_service_with_events(stub_backend)
 
     item = MusicItem(
@@ -1067,9 +1067,9 @@ async def test_play_item_emits_playback_started_event(
 async def test_play_item_honors_explicit_initiator(
     stub_backend: StubMusicBackend,
 ) -> None:
-    """When RadioDJ calls play_item with initiator="dj", that value
-    must land in the event so the DJ's own subscription can filter
-    out its self-emission."""
+    """``initiator`` is a free-form string that whatever caller starts
+    playback can use to identify itself in the resulting event.
+    Verify a non-default value flows through to the event payload."""
     service, _speaker, bus = _wire_service_with_events(stub_backend)
 
     item = MusicItem(

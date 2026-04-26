@@ -18,6 +18,23 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+# LoopMode lives on the speaker interface — loop/repeat is a speaker
+# queue control that the music backend just relays. Re-exported from
+# this module so callers can keep importing it from a single ``music``
+# namespace alongside MusicItem / Playable.
+from gilbert.interfaces.speaker import LoopMode
+
+__all__ = [
+    "LinkedMusicServiceLister",
+    "LoopMode",
+    "MusicBackend",
+    "MusicItem",
+    "MusicItemKind",
+    "MusicSearchUnavailableError",
+    "Playable",
+    "SearchResults",
+]
+
 if TYPE_CHECKING:
     from gilbert.interfaces.configuration import ConfigParam
 
@@ -107,6 +124,18 @@ class MusicBackend(ABC):
     that owns a persistent queue (e.g. Sonos + SMAPI) override this to
     ``True``; backends that only support one-shot playback leave it
     ``False`` and the queue tools stay hidden."""
+    supports_stations: bool = False
+    """Declares whether this backend can start a station from a seed
+    (track, artist, genre name, or free-text query). Backends with a
+    recommendations API (Spotify) override to ``True``; the rest leave
+    it ``False`` and the ``/music station`` tool stays hidden."""
+    supports_loop: bool = False
+    """Declares the backend's intent to expose a loop/repeat tool. The
+    actual repeat-mode application lives at the speaker layer
+    (``SpeakerBackend.set_repeat``); the music service combines this
+    flag with the speaker's ``supports_repeat`` to decide whether to
+    register the ``/music loop`` tool. Backends backed by a queueing
+    speaker (e.g. Sonos) should set this to ``True``."""
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -182,6 +211,28 @@ class MusicBackend(ABC):
         """
         ...
 
+    # --- Optional capabilities ---
+
+    async def start_station(
+        self,
+        seed: MusicItem | str,
+        limit: int = 30,
+    ) -> list[MusicItem]:
+        """Resolve a station seed (track, artist, genre, free-text)
+        into a list of tracks that make up the station.
+
+        Returns the tracks in playback order. The service layer is
+        responsible for clearing/loading the speaker queue and starting
+        playback — this method only does the content discovery, mirroring
+        ``search``'s shape so callers handle the result the same way.
+
+        Backends opting in set ``supports_stations = True`` and override.
+        Default raises ``NotImplementedError``; callers should guard on
+        ``supports_stations`` rather than catching it.
+        """
+        raise NotImplementedError(
+            "This music backend does not support stations"
+        )
 
 class MusicSearchUnavailableError(RuntimeError):
     """Raised when the backend can't perform a search.

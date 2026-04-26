@@ -47,9 +47,6 @@ class TestEventVisibility:
         # filter restricts delivery to the affected user + admins.
         assert get_event_visibility_level("auth.user.roles.changed") == 100
 
-    def test_radio_dj_is_everyone(self) -> None:
-        assert get_event_visibility_level("radio_dj.started") == 200
-
     def test_service_is_admin(self) -> None:
         assert get_event_visibility_level("service.started") == 0
 

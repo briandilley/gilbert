@@ -20,7 +20,6 @@
 - [Knowledge Service](memory-knowledge-service.md) — document store with ChromaDB vector search, local + Google Drive backends
 - [Screen Service](memory-screen-service.md) — remote display screens controlled by AI via SSE push
 - [Inbox Service](memory-inbox-service.md) — email polling, persistence, events, and AI tools with Gmail backend
-- [Radio DJ Service](memory-radio-dj-service.md) — context-aware music DJ with presence-based genre selection and user preferences
 - [AI Context Profiles](memory-ai-context-profiles.md) — named profiles controlling tool access per AI interaction, with per-profile role overrides
 - [UI Blocks](memory-ui-blocks.md) — tools push interactive forms (inputs, selects, sliders, buttons) into chat via ToolOutput
 - [WebSocket Protocol](memory-websocket-protocol.md) — bidirectional WS with typed frames, role-filtered events, chat RPC, peer publishing

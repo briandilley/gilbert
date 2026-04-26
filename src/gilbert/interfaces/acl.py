@@ -27,7 +27,6 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "screen.": 200,
     "chat.": 200,
     "workspace.": 200,
-    "radio_dj.": 200,
     # user (100)
     "presence.": 100,
     "timer.": 100,

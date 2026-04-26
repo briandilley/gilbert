@@ -100,8 +100,8 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **AI chat** with tool use — ask Gilbert to play music, check who's home, search your documents, compose an email, or push content to a wall-mounted display. Claude is the default AI via the `anthropic` plugin; swap it for any other backend that implements `AIBackend`.
 - **Presence detection** — know who's home (and where) via WiFi clients, cameras with facial recognition, and badge readers. The `unifi` plugin aggregates UniFi Network, UniFi Protect, and UniFi Access signals into a single presence stream.
 - **Doorbell monitoring** — detect ring events from UniFi Protect cameras and announce visitors over your speakers with a custom TTS voice.
-- **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and exposes the Sonos-linked music services (Spotify, Apple Music, etc.) as playable backends for the Music service and Radio DJ.
-- **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, Radio DJ narration, and any AI-generated spoken output.
+- **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and uses Spotify's Web API for browse/search. The Music service exposes search, queue, station ("play more like this"), and loop/repeat tools — capabilities are gated per-backend so swappable backends only surface what they actually support.
+- **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, and any AI-generated spoken output.
 - **Email inbox** — multi-mailbox, multi-user. Every mailbox is owned by a user and can be shared with individual users or roles for full read/send access. Messages land in a per-mailbox persisted store; outbound drafts queue through a shared outbox with crash-resilient delayed sends. The `google` plugin's Gmail backend is the reference implementation — add more by implementing `EmailBackend`. Incoming mail can also be handed off to an AI chat loop via the Inbox AI Chat service.
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
@@ -110,7 +110,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Slack bridge** — the `slack` plugin connects a Socket Mode bot so users can chat with Gilbert from Slack DMs and mentions, with the same tool access as the web UI.
 - **MCP (Model Context Protocol)** — Gilbert is both an **MCP client** (connect to external MCP servers, per-server RBAC, OAuth 2.1 support, stdio + streamable HTTP + SSE transports, with the external tools merged into Gilbert's own AI pipeline) and an **MCP server** (expose Gilbert's own tools to external agents like Claude Desktop or Cursor over a bearer-authenticated endpoint at `/api/mcp`, with per-client owner identity and AI profile filtering).
 - **Remote screens** — push content (PDFs, images, HTML) to browser-based displays via SSE (core).
-- **Personalized greetings, Radio DJ, roasts, scheduled jobs, RBAC, interactive tool forms** — all core services.
+- **Personalized greetings, roasts, scheduled jobs, RBAC, interactive tool forms** — all core services.
 - **AI usage reporting** — every AI round's token consumption (input / output / cache creation / cache read) and USD cost is recorded to the `ai_token_usage` entity collection. Per-round and per-turn totals render inline in chat; an admin-only `/usage` page groups by user / backend / model / profile / tool / date with filterable bar and area charts.
 - **Plugin system** — add runtime integrations from any GitHub URL via `/plugin install`, with automatic dependency resolution through the uv workspace. Plugins that need new Python packages trigger a supervised restart; plugins without extra deps hot-load immediately.
 
@@ -158,12 +158,12 @@ Want to add support for a different speaker system, AI provider, or presence det
 Services are the building blocks of Gilbert. Each service declares its **capabilities** (what it provides) and **dependencies** (what it needs), and the service manager handles lifecycle, ordering, and discovery.
 
 ```python
-class RadioDJService(Service):
+class GreetingService(Service):
     def info(self) -> ServiceInfo:
         return ServiceInfo(
-            name="radio_dj",
-            capabilities=frozenset({"radio_dj", "ai_tools"}),
-            dependencies=frozenset({"music", "speaker_control", "presence"}),
+            name="greeting",
+            capabilities=frozenset({"greeting", "ai_tools"}),
+            dependencies=frozenset({"speaker_control", "presence", "tts"}),
         )
 ```
 
@@ -171,12 +171,10 @@ Services are started in dependency order and stopped in reverse. Any service can
 
 ### Event Bus
 
-Services communicate through a publish-subscribe event bus with pattern matching. When someone arrives home, the presence service publishes `presence.arrived`. The greeting service hears it and welcomes them. The Radio DJ hears it and adjusts the genre to their taste.
+Services communicate through a publish-subscribe event bus with pattern matching. When someone arrives home, the presence service publishes `presence.arrived`. The greeting service hears it and welcomes them.
 
 ```
 presence.arrived  →  GreetingService (personalized welcome)
-                  →  RadioDJService  (switch genre for this person)
-presence.departed →  RadioDJService  (stop if nobody's home)
 doorbell.ring     →  DoorbellService (announce visitor on speakers)
 email.received    →  InboxAIChatService (AI processes the email)
 ```
@@ -243,7 +241,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 |---|---|
 | **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
-| **elevenlabs** | High-quality TTS for announcements, greetings, Radio DJ narration |
+| **elevenlabs** | High-quality TTS for announcements and greetings |
 | **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |

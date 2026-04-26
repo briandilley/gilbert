@@ -211,25 +211,6 @@ class BackupConfig(BaseConfig):
     backup_minute: int = 0
 
 
-class RadioDJConfig(BaseConfig):
-    """Radio DJ service configuration."""
-
-    enabled: bool = False
-    default_genres: list[str] = [
-        "classic rock",
-        "90s hits",
-        "blues rock",
-        "indie rock",
-        "funk",
-        "80s hits",
-    ]
-    min_switch_interval: int = 15
-    default_volume: int = 35
-    speakers: list[str] = []
-    stop_when_empty: bool = True
-    poll_interval: int = 60
-
-
 class RoastConfig(BaseConfig):
     """Random roast service configuration."""
 
@@ -305,7 +286,6 @@ class GilbertConfig(BaseConfig):
     speaker: SpeakerConfig = SpeakerConfig()
     music: MusicConfig = MusicConfig()
     backup: BackupConfig = BackupConfig()
-    radio_dj: RadioDJConfig = RadioDJConfig()
     roast: RoastConfig = RoastConfig()
     websearch: WebSearchConfig = WebSearchConfig()
     skills: SkillsConfig = SkillsConfig()

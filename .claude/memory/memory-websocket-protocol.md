@@ -36,7 +36,7 @@ RPC handlers are split between core and service-owned:
 ### Event Visibility (Role-Based Filtering)
 Defaults in `ws_protocol.py` `_EVENT_VISIBILITY` dict — prefix → min role level:
 - **everyone (200)**: presence, doorbell, greeting, timer, alarm, screen
-- **user (100)**: chat, radio_dj, inbox, knowledge (also catch-all for unlisted)
+- **user (100)**: chat, inbox, knowledge (also catch-all for unlisted)
 - **admin (0)**: service, config, acl
 
 Longest prefix match. System user bypasses. Overrides stored in `acl_event_visibility` collection via AccessControlService.

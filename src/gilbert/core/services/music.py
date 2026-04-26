@@ -40,7 +40,7 @@ from gilbert.interfaces.music import (
     Playable,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import NowPlaying, PlaybackState
+from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -276,12 +276,10 @@ class MusicService(Service):
         """Publish ``music.playback_started`` when a play/queue action
         actually takes effect on the speaker.
 
-        ``initiator`` carries who triggered the playback: ``"user"`` for
-        anything driven by the AI, a slash command, or a button click;
-        ``"dj"`` when the RadioDJ's auto-rotation called in. Downstream
-        subscribers (notably RadioDJ) use this field to distinguish "I
-        did that" from "someone else did that" so they can stop
-        clobbering user-chosen music.
+        ``initiator`` carries who triggered the playback (``"user"`` for
+        anything driven by the AI, a slash command, or a button click).
+        Kept as a free-form string so future automation can identify
+        itself and subscribers can filter accordingly.
         """
         if self._event_bus is None:
             return
@@ -403,9 +401,9 @@ class MusicService(Service):
 
         ``initiator`` is carried through to the ``music.playback_started``
         event so subscribers can distinguish user-driven plays from
-        auto-rotation plays (RadioDJ passes ``"dj"``). Defaults to
-        ``"user"`` because all public call sites — AI tools, slash
-        commands, UI buttons — represent user intent.
+        anything else. Defaults to ``"user"`` because all public call
+        sites — AI tools, slash commands, UI buttons — represent user
+        intent.
         """
         speaker_svc = self._get_speaker_svc()
         if speaker_svc is None:
@@ -437,6 +435,106 @@ class MusicService(Service):
         silently succeeding. Mirrors ``MusicBackend.supports_queue``.
         """
         return bool(self._backend and self._backend.supports_queue)
+
+    @property
+    def supports_stations(self) -> bool:
+        """True when the active music backend can start a station from
+        a seed (e.g. Spotify's recommendations API). Hides the
+        ``/music station`` tool when ``False``."""
+        return bool(self._backend and self._backend.supports_stations)
+
+    @property
+    def supports_loop(self) -> bool:
+        """True when the music backend advertises loop support AND the
+        speaker backend can apply repeat-mode to its queue. Both have
+        to be true: the music backend declares the user-facing
+        capability, but the actual repeat is enforced at the speaker.
+        """
+        if not (self._backend and self._backend.supports_loop):
+            return False
+        speaker_svc = self._get_speaker_svc()
+        backend = getattr(speaker_svc, "backend", None)
+        return bool(backend and getattr(backend, "supports_repeat", False))
+
+    async def start_station(
+        self,
+        seed: MusicItem | str,
+        speaker_names: list[str] | None = None,
+        volume: int | None = None,
+        limit: int = 30,
+        initiator: str = "user",
+    ) -> Playable:
+        """Resolve a station seed into a list of tracks and play them.
+
+        Steps: ask the backend for ``limit`` station tracks; play the
+        first via ``play_item`` (which clears the queue and starts
+        playback); enqueue the rest in order if the backend supports a
+        queue. Returns the ``Playable`` for the first track. Raises
+        ``RuntimeError`` if the backend doesn't support stations.
+        """
+        if not self.supports_stations:
+            raise RuntimeError(
+                "Music backend does not support stations"
+            )
+
+        backend = self._require_backend()
+        items = await backend.start_station(seed, limit=limit)
+        if not items:
+            raise RuntimeError("Station returned no tracks for seed")
+
+        first, rest = items[0], items[1:]
+        playable = await self.play_item(
+            first,
+            speaker_names=speaker_names,
+            volume=volume,
+            initiator=initiator,
+        )
+
+        # Append the remaining station tracks behind the first when the
+        # backend can queue. Without a queue we just play the first
+        # track and stop — the caller still gets *something* playing,
+        # which beats a hard error on a single-shot backend.
+        if rest and self.supports_queue:
+            for item in rest:
+                try:
+                    await self.add_to_queue(
+                        item,
+                        speaker_names=speaker_names,
+                        initiator=initiator,
+                    )
+                except (RuntimeError, NotImplementedError):
+                    logger.exception(
+                        "Failed to enqueue station track %s; aborting fill",
+                        item.title,
+                    )
+                    break
+        return playable
+
+    async def set_loop(
+        self,
+        mode: LoopMode,
+        speaker_names: list[str] | None = None,
+    ) -> None:
+        """Apply a loop/repeat mode to the requested speakers.
+
+        Routes through the music backend's ``set_loop`` (which typically
+        just delegates to the speaker's repeat-mode API). Raises
+        ``RuntimeError`` if the backend or speaker doesn't support it.
+        """
+        if not self.supports_loop:
+            raise RuntimeError(
+                "Music backend does not support loop/repeat mode"
+            )
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None:
+            raise RuntimeError(
+                "Speaker service is not available — cannot set loop mode"
+            )
+        # Route through the speaker service's helper so name resolution
+        # and target defaulting stay consistent with play_on_speakers.
+        await speaker_svc.set_repeat_on_speakers(
+            mode=mode, speaker_names=speaker_names
+        )
 
     async def play_queue(
         self,
@@ -486,9 +584,9 @@ class MusicService(Service):
 
         Raises ``RuntimeError`` if the backend or speaker service doesn't
         support queueing. The caller is expected to have already guarded
-        on ``supports_queue``. Emits ``music.playback_started`` (with
-        kind=``queue_add``) so RadioDJ-style subscribers learn the user
-        is exerting manual control and can back off.
+        on ``supports_queue``. Emits ``music.playback_started`` with
+        ``kind="queue_add"`` so subscribers can distinguish a queue
+        append from a fresh play.
         """
         if not self.supports_queue:
             raise RuntimeError(
@@ -816,6 +914,91 @@ class MusicService(Service):
                     required_role="user",
                 ),
             )
+
+        # Station tool — opt-in via backend.supports_stations. Lets the
+        # user say "play a station based on …" / "play more like this"
+        # without us having to know the seed kind ahead of time.
+        if self.supports_stations:
+            tools.append(
+                ToolDefinition(
+                    name="start_station",
+                    slash_group="music",
+                    slash_command="station",
+                    slash_help=(
+                        "Start a station seeded by a track/artist/genre: "
+                        "/music station <seed> [speakers=...] [volume=N]"
+                    ),
+                    description=(
+                        "Start a recommendation-driven station/radio "
+                        "seeded by free-text (e.g. an artist name, song "
+                        "title, or genre). The backend (Spotify) returns "
+                        "a list of similar tracks; the first plays "
+                        "immediately and the rest queue up behind it. "
+                        "Use when the user wants ongoing music in a "
+                        "vibe rather than a specific item — phrases like "
+                        "'play some indie rock', 'something like Wilco', "
+                        "'a station based on this song'."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="seed",
+                            type=ToolParameterType.STRING,
+                            description=(
+                                "What to base the station on — an artist "
+                                "name, song title, or genre keyword."
+                            ),
+                        ),
+                        ToolParameter(
+                            name="speakers",
+                            type=ToolParameterType.ARRAY,
+                            description="Speaker names or aliases.",
+                            required=False,
+                        ),
+                        ToolParameter(
+                            name="volume",
+                            type=ToolParameterType.INTEGER,
+                            description="Volume level (0-100).",
+                            required=False,
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
+
+        # Loop tool — opt-in via supports_loop AND the speaker
+        # advertising ``supports_repeat``. The capability cross-check
+        # happens inside ``self.supports_loop``.
+        if self.supports_loop:
+            tools.append(
+                ToolDefinition(
+                    name="set_loop",
+                    slash_group="music",
+                    slash_command="loop",
+                    slash_help="Set repeat mode: /music loop [off|track|all]",
+                    description=(
+                        "Set the queue repeat mode on the speakers — "
+                        "``off`` plays through and stops, ``track`` "
+                        "repeats the current song, ``all`` repeats the "
+                        "whole queue. Use for 'play this on loop', "
+                        "'repeat this song', 'put it on repeat'."
+                    ),
+                    parameters=[
+                        ToolParameter(
+                            name="mode",
+                            type=ToolParameterType.STRING,
+                            description="Repeat mode.",
+                            enum=["off", "track", "all"],
+                        ),
+                        ToolParameter(
+                            name="speakers",
+                            type=ToolParameterType.ARRAY,
+                            description="Speaker names or aliases.",
+                            required=False,
+                        ),
+                    ],
+                    required_role="user",
+                ),
+            )
         return tools
 
     async def execute_tool(
@@ -842,6 +1025,10 @@ class MusicService(Service):
                 return await self._tool_play_queue(arguments)
             case "now_playing":
                 return await self._tool_now_playing(arguments)
+            case "start_station":
+                return await self._tool_start_station(arguments)
+            case "set_loop":
+                return await self._tool_set_loop(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -1134,3 +1321,43 @@ class MusicService(Service):
         except KeyError as e:
             return json.dumps({"error": str(e)})
         return json.dumps(_now_playing_to_dict(now))
+
+    async def _tool_start_station(self, arguments: dict[str, Any]) -> str:
+        seed = arguments.get("seed")
+        if not seed:
+            return json.dumps({"error": "Missing 'seed'"})
+        speakers = arguments.get("speakers") or None
+        volume = arguments.get("volume")
+        try:
+            playable = await self.start_station(
+                seed=str(seed),
+                speaker_names=speakers,
+                volume=volume,
+            )
+        except (RuntimeError, NotImplementedError) as exc:
+            return json.dumps({"error": str(exc)})
+        except MusicSearchUnavailableError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(
+            {
+                "status": "playing_station",
+                "seed": str(seed),
+                "title": playable.title,
+                "uri": playable.uri,
+            }
+        )
+
+    async def _tool_set_loop(self, arguments: dict[str, Any]) -> str:
+        mode_str = str(arguments.get("mode", "")).strip().lower()
+        try:
+            mode = LoopMode(mode_str)
+        except ValueError:
+            return json.dumps(
+                {"error": f"Invalid loop mode: {mode_str!r}. Use off, track, or all."}
+            )
+        speakers = arguments.get("speakers") or None
+        try:
+            await self.set_loop(mode=mode, speaker_names=speakers)
+        except (RuntimeError, NotImplementedError) as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"status": "loop_set", "mode": mode.value})
