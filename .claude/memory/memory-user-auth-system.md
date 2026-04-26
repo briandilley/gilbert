@@ -25,7 +25,7 @@ Multi-user support with local accounts, external provider syncing, role-based ac
 
 ### Storage
 - `StorageUserBackend` — implements `UserBackend` over `StorageBackend`. Collections: `users`, `provider_users`.
-- Root user: id="root", email="root@localhost", is_root=true, cannot be deleted or linked to external providers.
+- Root user: id="root", username="root", email="" (empty by default), is_root=true, roles=["admin"], cannot be deleted or linked to external providers. Password hash comes from `auth.root_password` config; if empty the user exists but local login is impossible — `UserService._warn_if_root_unusable` logs a WARNING on every boot in that state. Setting `auth.root_password` in `.gilbert/config.yaml` before the first start is the supported way to make root loggable (first-run seeding copies the value into entity storage, which then wins).
 
 ### Web Auth
 - `AuthMiddleware` — checks cookie/bearer token, validates session, redirects unauthenticated to login.

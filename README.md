@@ -13,9 +13,9 @@ Gilbert is a **multi-user system from the ground up** — every piece of state (
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (Python package and project manager)
 - Git (with submodule support — any recent version)
-- Node.js + npm (only if you want to rebuild the frontend; prebuilt assets ship under `src/gilbert/web/spa/`)
+- Node.js + npm — `gilbert.sh start` rebuilds the frontend SPA on every launch (the compiled bundle under `src/gilbert/web/spa/` is gitignored, so a fresh clone has to build it).
 
-Some plugins have additional OS-level prerequisites — e.g. the `tesseract` plugin needs the Tesseract binary (`apt install tesseract-ocr` or `brew install tesseract`). Check [`std-plugins/README.md`](std-plugins/README.md) for per-plugin requirements.
+Some plugins have additional OS-level prerequisites — e.g. the `tesseract` plugin needs the Tesseract binary (`apt install tesseract-ocr`, `brew install tesseract`, or `pacman -S tesseract tesseract-data-eng` on Arch — note that Arch ships language data as a separate package). Check [`std-plugins/README.md`](std-plugins/README.md) for per-plugin requirements.
 
 ### Clone and Install
 
@@ -45,12 +45,16 @@ If you need to override bootstrap values for this specific installation, create 
 mkdir -p .gilbert
 cat > .gilbert/config.yaml <<'EOF'
 # Only include values you're changing. Deep-merged on top of gilbert.yaml.
+auth:
+  root_password: "pick-a-strong-password"
 web:
   port: 9000
 EOF
 ```
 
 The `.gilbert/` directory is gitignored — your API keys, database, and logs stay local. Runtime config (AI backend selection, TTS API keys, plugin settings, etc.) is managed through the Settings UI, not this file.
+
+**Set a root password before the first boot.** On first run Gilbert seeds non-bootstrap YAML values into entity storage and from then on the database is the source of truth — so editing `.gilbert/config.yaml` after the first start has no effect on already-seeded keys. If you boot without `auth.root_password` set, the bootstrapped `root` user is created with no usable password and nobody can log in (local visitors get the `everyone` role, which can't reach Settings). To recover, stop Gilbert (`./gilbert.sh stop`), delete `.gilbert/gilbert.db*`, add `auth.root_password` to `.gilbert/config.yaml`, and start again. The admin username is `root`.
 
 At minimum, before Gilbert is useful, open the Settings UI and configure:
 
@@ -72,7 +76,7 @@ At minimum, before Gilbert is useful, open the Settings UI and configure:
 
 `gilbert.sh start` runs Gilbert under a supervisor loop that distinguishes normal stops from "please restart me" exits — when a runtime-installed plugin needs `uv sync` to pick up new Python deps, it sets an internal flag, Gilbert exits with code `75` (`EX_TEMPFAIL`), and the supervisor loop re-syncs and relaunches automatically. Ctrl+C and `./gilbert.sh stop` propagate cleanly and do **not** trigger a restart.
 
-On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000` — log in with the local admin account (bootstrapped automatically on first boot) and head to **Security → Users** to add more accounts.
+On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000` — log in as `root` with the password you set under `auth.root_password` in `.gilbert/config.yaml` (see [Configure](#configure)), then head to **Security → Users** to add more accounts.
 
 ## Multi-User & Access Control
 

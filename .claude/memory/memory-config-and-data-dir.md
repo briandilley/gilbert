@@ -13,7 +13,7 @@ Two-tier configuration: `gilbert.yaml` provides bootstrap-only defaults (storage
 - `logging` — level, file path, AI log file path
 - `web` — host, port, and related web server settings
 
-These are defined in `config.YAML_ONLY_SECTIONS`. Bootstrap config can also be overridden via `.gilbert/config.yaml` (deep-merged on top), but this is a legacy mechanism.
+These are defined in `config.YAML_ONLY_SECTIONS`. `.gilbert/config.yaml` (gitignored) is deep-merged over `gilbert.yaml` for every section, not just bootstrap ones — see `load_config()` in `src/gilbert/config.py`. For non-bootstrap sections that's only load-bearing on **first boot**: `seed_storage()` writes the merged YAML into entity storage once, and after that the DB is the source of truth (the Settings UI and WS RPCs edit the DB row, not the file). So editing `.gilbert/config.yaml` after first boot has no effect on already-seeded keys — to change those you edit the DB (Settings UI) or wipe `.gilbert/gilbert.db*` and re-seed. This ordering is why `auth.root_password` must go into `.gilbert/config.yaml` before the very first start.
 
 **Tier 2 — Entity Storage:**
 All non-bootstrap configuration (AI, TTS, auth, speakers, music, etc.) is stored in the `gilbert.config` entity storage collection, one entity per config namespace. This config is managed at runtime via the web UI settings page or AI tools — no file editing required.
@@ -28,7 +28,7 @@ On first run, `seed_storage()` migrates non-bootstrap sections from `gilbert.yam
 
 ### `.gilbert/` Directory
 Contains per-installation data (gitignored, auto-created on first start):
-- `config.yaml` — legacy user configuration overrides (bootstrap sections only)
+- `config.yaml` — per-installation YAML overrides, deep-merged over `gilbert.yaml`. Authoritative for bootstrap sections on every boot; for non-bootstrap sections only seeded on first boot (entity storage wins after that). Put pre-first-boot seed values (e.g. `auth.root_password`) here.
 - `gilbert.db` — SQLite database (entity storage)
 - `gilbert.log` — general application log
 - `ai_calls.log` — AI API call log
