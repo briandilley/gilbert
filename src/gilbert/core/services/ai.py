@@ -2325,6 +2325,64 @@ class AIService(Service):
         yesterday = (now - timedelta(days=1)).strftime("%A, %B %d, %Y")
         return f"Current date and time: {today} at {time_str}. Yesterday was {yesterday}."
 
+    async def _build_known_users_block(
+        self,
+        user_ctx: UserContext,
+        max_users: int = 50,
+    ) -> str:
+        """Format a directory of other users so the AI can resolve references by name.
+
+        Excludes the calling user (already in "You're talking to"), the
+        synthetic ``root`` admin, and any system/guest pseudo-users.
+        Returns an empty string if no usable directory is available
+        (no resolver, no users service, lookup failed, only one user).
+        """
+        if self._resolver is None:
+            return ""
+        users_svc = self._resolver.get_capability("users")
+        if users_svc is None:
+            return ""
+        from gilbert.interfaces.users import UserManagementProvider
+
+        if not isinstance(users_svc, UserManagementProvider):
+            return ""
+        try:
+            rows = await users_svc.list_users()
+        except Exception:
+            logger.exception("known-users block: list_users failed")
+            return ""
+
+        lines: list[str] = []
+        for row in rows:
+            uid = str(row.get("_id") or row.get("user_id") or "")
+            if not uid or uid in (user_ctx.user_id, "system", "guest", "root"):
+                continue
+            name = str(row.get("display_name") or row.get("username") or "").strip()
+            email = str(row.get("email") or "").strip()
+            if not name and not email:
+                continue
+            label = name or email
+            extras: list[str] = []
+            if email and email != name:
+                extras.append(email)
+            extras.append(uid)
+            lines.append(f"- **{label}** ({', '.join(extras)})")
+            if len(lines) >= max_users:
+                break
+
+        if not lines:
+            return ""
+        header = (
+            "## Other known users\n"
+            "When the user mentions someone by name, match against this list "
+            "first instead of asking who they mean. Use the listed user ID for "
+            "any tool that takes a user identifier (reminders, messages, "
+            "presence checks, etc.). Names may be informal — match on first "
+            "name, nickname, or partial match. Only ask for clarification if "
+            "no entry below plausibly matches.\n"
+        )
+        return header + "\n".join(lines)
+
     async def _build_system_prompt(
         self,
         user_ctx: UserContext | None = None,
@@ -2378,6 +2436,15 @@ class AIService(Service):
                 "listed here."
             )
             parts.append("\n".join(identity_lines))
+
+        # Inject the directory of other known users so the AI can resolve
+        # references like "remind Gaby" without having to call list_users
+        # or stop to ask "who's Gaby?". Skipped for system/guest callers
+        # (no real identity, no need for cross-user resolution).
+        if user_ctx and user_ctx.user_id not in ("system", "guest"):
+            directory = await self._build_known_users_block(user_ctx)
+            if directory:
+                parts.append(directory)
 
         # Inject user memory summaries if available
         if user_ctx and user_ctx.user_id not in ("system", "guest"):
@@ -2481,6 +2548,17 @@ class AIService(Service):
                             "in write_workspace_file content — it has a 512 KB cap and "
                             "wastes tokens. write_workspace_file is only for small scripts "
                             "and config files.\n"
+                            "- **Fetching files from the web**: when the user asks for "
+                            "something that lives at a URL (a sound effect, a PDF, an "
+                            "image, a dataset), DO NOT say you can't download things. You "
+                            "can. Use run_workspace_script with httpx/urllib/requests to "
+                            "GET the URL and write the bytes into outputs/, then call "
+                            "attach_workspace_file so the user can play / view / download "
+                            "it. If you need to find the URL first, use the web search "
+                            "tools (when available) or ask the user for one. The same "
+                            "pattern handles 'download X and email it', 'grab Y and play "
+                            "it on the speakers', etc. — fetch into the workspace, then "
+                            "hand the local file to the next tool.\n"
                             "- **File paths**: use flat filenames (e.g. 'analysis.csv', "
                             "'compare.py'), not nested subdirectories\n"
                             "- After generating output, call attach_workspace_file to "

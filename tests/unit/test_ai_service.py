@@ -762,6 +762,118 @@ async def test_system_prompt_includes_user_identity_block(
     assert "briandilley@current-la.com" in sent_prompt
 
 
+async def test_system_prompt_includes_known_users_directory(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+) -> None:
+    """The system prompt must list other users so the AI can resolve
+    references like 'remind Gaby' without stopping to ask who that is."""
+
+    class _StubUserSvc:
+        allow_user_creation = True
+        backend = None
+
+        async def list_users(self) -> list[dict[str, Any]]:
+            return [
+                {"_id": "usr_brian", "display_name": "Brian Dilley", "email": "brian@example.com"},
+                {"_id": "usr_gaby", "display_name": "Gaby Dilley", "email": "gaby@example.com"},
+                {"_id": "root", "display_name": "Root", "email": ""},
+                {"_id": "system", "display_name": "System", "email": ""},
+            ]
+
+    user_svc = _StubUserSvc()
+    mock_resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    def get_cap(cap: str) -> Any:
+        if cap == "users":
+            return user_svc
+        try:
+            return require_cap(cap)
+        except LookupError:
+            return None
+
+    mock_resolver.require_capability = require_cap
+    mock_resolver.get_capability = get_cap
+    mock_resolver.get_all = lambda cap: []
+
+    stub_backend.queue_response(
+        AIResponse(message=Message(role=MessageRole.ASSISTANT, content="ok"), model="stub")
+    )
+    await ai_service.start(mock_resolver)
+    user = UserContext(
+        user_id="usr_brian",
+        display_name="Brian Dilley",
+        email="brian@example.com",
+        roles=frozenset({"user"}),
+    )
+    await ai_service.chat("hi", user_ctx=user)
+
+    sent_prompt = stub_backend.requests[0].system_prompt
+    assert "Other known users" in sent_prompt
+    # The other user appears…
+    assert "Gaby Dilley" in sent_prompt
+    assert "usr_gaby" in sent_prompt
+    # …but the calling user themselves does NOT (they're already in
+    # "You're talking to" — listing them again is noise).
+    other_users_section = sent_prompt.split("## Other known users", 1)[1]
+    assert "usr_brian" not in other_users_section
+    # System / root pseudo-users are filtered out.
+    assert "Root" not in other_users_section
+    assert "System" not in other_users_section
+
+
+async def test_system_prompt_omits_known_users_when_alone(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+) -> None:
+    """If the calling user is the only real user on the system, the
+    'Other known users' block should be skipped entirely."""
+
+    class _LonelyUserSvc:
+        allow_user_creation = True
+        backend = None
+
+        async def list_users(self) -> list[dict[str, Any]]:
+            return [
+                {"_id": "usr_brian", "display_name": "Brian", "email": "brian@example.com"},
+                {"_id": "root", "display_name": "Root", "email": ""},
+            ]
+
+    user_svc = _LonelyUserSvc()
+    mock_resolver = AsyncMock(spec=ServiceResolver)
+    mock_resolver.require_capability = lambda cap: (
+        storage_service if cap == "entity_storage" else (_ for _ in ()).throw(LookupError(cap))
+    )
+    mock_resolver.get_capability = lambda cap: (
+        user_svc if cap == "users"
+        else storage_service if cap == "entity_storage"
+        else None
+    )
+    mock_resolver.get_all = lambda cap: []
+
+    stub_backend.queue_response(
+        AIResponse(message=Message(role=MessageRole.ASSISTANT, content="ok"), model="stub")
+    )
+    await ai_service.start(mock_resolver)
+    user = UserContext(
+        user_id="usr_brian",
+        display_name="Brian",
+        email="brian@example.com",
+        roles=frozenset({"user"}),
+    )
+    await ai_service.chat("hi", user_ctx=user)
+
+    sent_prompt = stub_backend.requests[0].system_prompt
+    assert "Other known users" not in sent_prompt
+
+
 async def test_system_prompt_omits_identity_block_for_system_calls(
     ai_service: AIService,
     stub_backend: StubAIBackend,
