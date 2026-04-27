@@ -373,11 +373,17 @@ export function ConfigSection({ section }: ConfigSectionProps) {
               <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
                 Actions
               </h4>
-              {backendChangedUnsaved && (
+              {backendChangedUnsaved ? (
                 <div className="text-xs text-amber-400 mb-3">
                   Save to enable actions for the new backend.
                 </div>
-              )}
+              ) : hasChanges ? (
+                <div className="text-xs text-amber-400 mb-3">
+                  Unsaved changes — actions run against the saved
+                  values, not the ones you just edited. Save first to
+                  test the new values.
+                </div>
+              ) : null}
               <div className="space-y-2">
                 {visible.map((action) => {
                   const state = actionStates[action.key];
