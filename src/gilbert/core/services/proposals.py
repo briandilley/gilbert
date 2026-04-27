@@ -303,6 +303,10 @@ class ProposalsService(Service):
 
         self._unsubscribers: list[Any] = []
         self._scheduler_job_registered: bool = False
+        # Background tasks we kicked off (e.g. fire-and-forget archive
+        # extraction). Tracked so they don't get GC'd mid-run and so
+        # ``stop()`` can cancel any still in flight.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -422,10 +426,43 @@ class ProposalsService(Service):
             except Exception:
                 logger.debug("Proposals: unsubscribe raised", exc_info=True)
         self._unsubscribers.clear()
+        # Let any in-flight background extractions finish briefly, then
+        # cancel anything still running so shutdown isn't held up.
+        if self._background_tasks:
+            pending = list(self._background_tasks)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+        self._background_tasks.clear()
         try:
             await self._flush_observations()
         except Exception:
             logger.debug("Proposals: final flush raised", exc_info=True)
+
+    def _spawn_background(self, coro: Any, *, label: str) -> None:
+        """Schedule a fire-and-forget task and track it for cleanup.
+
+        Used by event handlers that must NOT block their publisher (e.g.
+        the pre-delete archive handler — the user's deletion shouldn't
+        wait on an AI extraction round). The task self-removes from the
+        tracking set when it finishes so the set stays small.
+        """
+        try:
+            task = asyncio.create_task(coro, name=label)
+        except RuntimeError:
+            # No running loop — coro will not run. Caller is in a sync
+            # context that can't schedule async work; closing the
+            # coroutine prevents the un-awaited warning.
+            coro.close()
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _ensure_indexes(self) -> None:
         """Declare indexes for the queries we run."""
@@ -1739,9 +1776,11 @@ class ProposalsService(Service):
     async def _on_chat_archiving(self, event: Event) -> None:
         """Last-chance extraction before a conversation is destroyed.
 
-        AIService publishes ``chat.conversation.archiving`` *before* the
-        actual delete, with the conversation snapshot in the payload.
-        We kick off async extraction so the deletion isn't blocked.
+        Returns IMMEDIATELY after capturing the conversation snapshot —
+        the actual AI extraction runs in a background task so the
+        deletion path (and any other subscribers) aren't blocked by an
+        AI round. The extraction has up to ``stop()``'s shutdown grace
+        period to finish if a restart lands mid-flight.
         """
         if not self._enabled:
             return
@@ -1755,6 +1794,22 @@ class ProposalsService(Service):
         )
         if not isinstance(ai_svc, AISamplingProvider):
             return
+        # Snapshot the conversation now — the publisher is about to
+        # delete the underlying record and we don't want a reference
+        # to a dict that gets mutated underneath us.
+        conv_snapshot = dict(conv)
+        conv_id = conv_snapshot.get("_id", "?")
+        self._spawn_background(
+            self._archive_extraction_task(ai_svc, conv_snapshot),
+            label=f"proposals.archive.{conv_id}",
+        )
+
+    async def _archive_extraction_task(
+        self,
+        ai_svc: AISamplingProvider,
+        conv: dict[str, Any],
+    ) -> None:
+        """Background body for the archive extraction. Never raises."""
         try:
             await self._extract_observations_from_conversation(
                 ai_svc=ai_svc,

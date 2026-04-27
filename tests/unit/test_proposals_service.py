@@ -830,7 +830,62 @@ class TestConversationHarvest:
 
 class TestArchiveEventExtraction:
     @pytest.mark.asyncio
-    async def test_archiving_event_triggers_extraction(
+    async def test_archiving_event_returns_before_extraction(
+        self, resolver: FakeResolver
+    ) -> None:
+        """Handler must NOT block on the AI call — deletion path waits on it."""
+        import asyncio as _asyncio
+
+        slow_ai_started = _asyncio.Event()
+        slow_ai_release = _asyncio.Event()
+
+        class SlowAI:
+            calls: list[Any] = []
+
+            def has_profile(self, name: str) -> bool:
+                return True
+
+            async def complete_one_shot(self, **kwargs: Any) -> Any:
+                slow_ai_started.set()
+                await slow_ai_release.wait()
+                return AIResponse(
+                    message=Message(role=MessageRole.ASSISTANT, content='{"observations": []}'),
+                    model="test",
+                )
+
+        resolver.caps["ai_chat"] = SlowAI()
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        # Time the handler — it should return well before the AI call
+        # would have completed.
+        loop = _asyncio.get_event_loop()
+        t0 = loop.time()
+        await svc._on_chat_archiving(
+            Event(
+                event_type="chat.conversation.archiving",
+                data={
+                    "conversation_id": "deleted-slow",
+                    "conversation": {
+                        "_id": "deleted-slow",
+                        "messages": [{"role": "user", "content": "x"}],
+                    },
+                },
+                source="ai",
+                timestamp=datetime.now(UTC),
+            ),
+        )
+        elapsed = loop.time() - t0
+        assert elapsed < 0.1, f"handler should return immediately, took {elapsed}s"
+        # AI call has begun but is still pending.
+        await _asyncio.wait_for(slow_ai_started.wait(), timeout=1.0)
+        # Cleanup: release the AI and let the task finish.
+        slow_ai_release.set()
+        # Wait for the background task to drain.
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_archiving_event_eventually_records_observation(
         self, resolver: FakeResolver, fake_storage: FakeStorage
     ) -> None:
         resolver.caps["ai_chat"] = FakeAI(
@@ -861,6 +916,10 @@ class TestArchiveEventExtraction:
                 timestamp=datetime.now(UTC),
             ),
         )
+        # The handler returned immediately; wait for the background
+        # extraction to finish via stop()'s grace period.
+        await svc.stop()
+
         rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
         deleted = [r for r in rows if r["source_type"] == SOURCE_CONVERSATION_DELETED]
         assert len(deleted) == 1
