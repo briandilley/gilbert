@@ -150,6 +150,7 @@ class TTSService(Service):
                         restart_required=bp.restart_required,
                         sensitive=bp.sensitive,
                         choices=bp.choices,
+                        choices_from=bp.choices_from,
                         multiline=bp.multiline,
                         backend_param=True,
                     )
