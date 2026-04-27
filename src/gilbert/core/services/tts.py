@@ -48,6 +48,13 @@ class TTSService(Service):
         self._config: dict[str, object] = {}
         self._silence_padding: float = 3.0
         self._output_ttl_seconds: int = 3600
+        self._resolver: ServiceResolver | None = None
+        # ``ai_chat`` is an optional capability, but the service manager
+        # doesn't honor optional deps for start order — so the AI service
+        # may not be running yet when TTS starts and the at-start
+        # injection silently misses. We retry on every synthesize until
+        # it sticks (or the backend signals it doesn't care).
+        self._ai_injected: bool = False
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -63,6 +70,7 @@ class TTSService(Service):
         return self._backend
 
     async def start(self, resolver: ServiceResolver) -> None:
+        self._resolver = resolver
         config_svc = resolver.get_capability("configuration")
         section: dict[str, Any] = {}
         if config_svc is not None:
@@ -97,18 +105,38 @@ class TTSService(Service):
 
         # Hand the backend an AI sampling provider if it wants one
         # (currently used by ElevenLabs to inject v3 audio tags via a
-        # small model). The injection is best-effort — backends that
-        # don't satisfy ``AICapableTTSBackend``, or environments where
-        # no AI service is configured, run the same as before.
+        # small model). May miss if the AI service hasn't started yet —
+        # ``_ensure_ai_injection`` retries on each ``synthesize`` until
+        # the provider becomes available.
+        self._ensure_ai_injection()
+
+        logger.info("TTS service started")
+
+    def _ensure_ai_injection(self) -> None:
+        """Lazily wire an AISamplingProvider into the backend.
+
+        Idempotent. Retries each call until either (a) the backend
+        doesn't satisfy ``AICapableTTSBackend`` (nothing to do, mark
+        done) or (b) the AI service is up and we successfully inject.
+        Once done, becomes a no-op.
+        """
+        if self._ai_injected:
+            return
+        if self._backend is None or self._resolver is None:
+            return
+
         from gilbert.interfaces.ai import AISamplingProvider
         from gilbert.interfaces.tts import AICapableTTSBackend
 
-        if isinstance(self._backend, AICapableTTSBackend):
-            ai_svc = resolver.get_capability("ai_chat")
-            if isinstance(ai_svc, AISamplingProvider):
-                self._backend.set_ai_sampling(ai_svc)
+        if not isinstance(self._backend, AICapableTTSBackend):
+            self._ai_injected = True
+            return
 
-        logger.info("TTS service started")
+        ai_svc = self._resolver.get_capability("ai_chat")
+        if isinstance(ai_svc, AISamplingProvider):
+            self._backend.set_ai_sampling(ai_svc)
+            self._ai_injected = True
+            logger.info("TTS backend wired up with AI sampling provider")
 
     # --- Configurable protocol ---
 
@@ -186,6 +214,7 @@ class TTSService(Service):
         """Synthesize speech from text. Appends silence padding if configured."""
         if self._backend is None:
             raise RuntimeError("TTS service is not enabled")
+        self._ensure_ai_injection()
         result = await self._backend.synthesize(request)
         if self._silence_padding > 0:
             padded = append_silence(result.audio, result.format, self._silence_padding)
