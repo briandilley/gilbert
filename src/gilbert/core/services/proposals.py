@@ -66,27 +66,17 @@ logger = logging.getLogger(__name__)
 # so the user can't accidentally remove it from the scheduler page.
 _REFLECTION_JOB_NAME = "proposals.reflection"
 
-_DEFAULT_OBSERVATION_PATTERNS: tuple[str, ...] = (
-    "ai.tool_call.*",
-    "chat.user_message",
-    "chat.assistant_response",
-    "service.error",
-    "service.start.failed",
-    "scheduler.job.failed",
-    "doorbell.*",
-    "presence.*",
-    "knowledge.search.miss",
-    "inbox.message.received",
-    "alarm.fired",
-    "timer.fired",
-)
+_DEFAULT_OBSERVATION_PATTERNS: tuple[str, ...] = ("*",)
 """Default event patterns the observer subscribes to.
 
-Conservative on purpose — these are the signals most likely to reveal a
-capability gap (failed tool calls, errors, things the AI couldn't
-answer). Operators can broaden via the ``observation_event_patterns``
-config param when they want richer reflection input. The wildcard ``*``
-is supported by ``EventBus.subscribe_pattern``.
+Default is the ``*`` wildcard — every event flowing through the bus is
+summarized into the ring buffer so the reflector has the broadest
+possible signal to work with. Observation is synchronous and cheap
+(no AI cost per event), and the ring buffer is bounded by
+``observation_buffer_size``, so a chatty bus naturally evicts old
+events without unbounded memory growth. Operators can narrow via the
+``observation_event_patterns`` config param if they want to focus the
+reflector on specific signals.
 """
 
 _REFLECTION_SYSTEM_PROMPT = """You are Gilbert's self-improvement reflector.
@@ -209,7 +199,7 @@ class ProposalsService(Service):
     _DEFAULT_OBSERVATION_BUFFER_SIZE = 500
     _DEFAULT_MIN_OBSERVATIONS_PER_CYCLE = 25
     _DEFAULT_MAX_PENDING_PROPOSALS = 10
-    _DEFAULT_AI_PROFILE = "standard"
+    _DEFAULT_AI_PROFILE = "advanced"
     _DEFAULT_ENABLED = True
 
     def __init__(self) -> None:

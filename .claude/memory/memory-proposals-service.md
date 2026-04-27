@@ -49,8 +49,8 @@ Stored in entity collection `proposals` (also `PROPOSALS_COLLECTION` constant). 
 - `observation_buffer_size` (int, default 500)
 - `min_observations_per_cycle` (int, default 25) — skip the AI call when signal is too sparse
 - `max_pending_proposals` (int, default 10) — backlog cap
-- `ai_profile` (str, choices_from `ai_profiles`, default `standard`)
-- `observation_event_patterns` (array, default in `_DEFAULT_OBSERVATION_PATTERNS`, restart_required)
+- `ai_profile` (str, choices_from `ai_profiles`, default `advanced` — the reflector benefits from a stronger model since it's writing full implementation specs)
+- `observation_event_patterns` (array, default `["*"]` — observe everything; narrow only if you need to focus the reflector, restart_required)
 
 ### Frontend
 - `frontend/src/components/proposals/ProposalsPage.tsx` — list + collapsible detail with markdown-rendered implementation prompt and copy-to-clipboard
