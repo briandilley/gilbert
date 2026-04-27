@@ -57,8 +57,16 @@ class FakeSpeaker:
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        context: str = "",
     ) -> str:
-        self.calls.append({"text": text, "speaker_names": speaker_names, "volume": volume})
+        self.calls.append(
+            {
+                "text": text,
+                "speaker_names": speaker_names,
+                "volume": volume,
+                "context": context,
+            }
+        )
         if self.raise_exc is not None:
             raise self.raise_exc
         return self.result
@@ -112,7 +120,7 @@ def test_get_tools_has_audio_output_with_required_role_user() -> None:
     assert tool.name == "audio_output"
     assert tool.required_role == "user"
     param_names = {p.name for p in tool.parameters}
-    assert {"text", "destination", "volume", "speaker_names"} == param_names
+    assert {"text", "destination", "volume", "speaker_names", "context"} == param_names
     # text is the only required parameter
     text_param = next(p for p in tool.parameters if p.name == "text")
     assert text_param.required is True

@@ -599,6 +599,7 @@ class SpeakerService(Service):
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        context: str = "",
     ) -> str:
         """Announce text over speakers using TTS.
 
@@ -623,14 +624,14 @@ class SpeakerService(Service):
         target_ids = await self._resolve_target_ids(speaker_names)
         if not target_ids:
             return await self._announce_inner(
-                text, speaker_names, volume, target_ids=target_ids
+                text, speaker_names, volume, target_ids=target_ids, context=context
             )
         locks = await self._get_speaker_locks(target_ids)
         async with contextlib.AsyncExitStack() as stack:
             for lock in locks:
                 await stack.enter_async_context(lock)
             return await self._announce_inner(
-                text, speaker_names, volume, target_ids=target_ids
+                text, speaker_names, volume, target_ids=target_ids, context=context
             )
 
     async def _get_speaker_locks(
@@ -658,6 +659,7 @@ class SpeakerService(Service):
         speaker_names: list[str] | None = None,
         volume: int | None = None,
         target_ids: list[str] | None = None,
+        context: str = "",
     ) -> str:
         """Inner announce — must be called with the target speakers'
         per-speaker locks already held. Accepts a pre-resolved
@@ -676,7 +678,12 @@ class SpeakerService(Service):
         backend = self._require_backend()
 
         # Generate TTS audio
-        request = SynthesisRequest(text=text, voice_id="", output_format=AudioFormat.MP3)
+        request = SynthesisRequest(
+            text=text,
+            voice_id="",
+            output_format=AudioFormat.MP3,
+            context=context,
+        )
         result = await self._tts_svc.synthesize(request)
 
         # Save to a file so the speaker can access it via URI
@@ -989,6 +996,18 @@ class SpeakerService(Service):
                         description="Volume level (0-100) for the announcement.",
                         required=False,
                     ),
+                    ToolParameter(
+                        name="context",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional one-line description of the situation "
+                            "or mood (e.g. 'cheery good-morning greeting', "
+                            "'urgent shop alert', 'sarcastic reply'). "
+                            "Helps the TTS engine pick expressive delivery — "
+                            "ignored by backends that don't support it."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
                 # Safe to run in parallel with other announces targeting
@@ -1165,12 +1184,14 @@ class SpeakerService(Service):
         text = arguments["text"]
         speaker_names: list[str] = arguments.get("speakers", [])
         volume: int | None = arguments.get("volume")
+        context: str = arguments.get("context", "") or ""
 
         try:
             file_path = await self.announce(
                 text=text,
                 speaker_names=speaker_names or None,
                 volume=volume,
+                context=context,
             )
         except RuntimeError as e:
             return json.dumps({"error": str(e)})

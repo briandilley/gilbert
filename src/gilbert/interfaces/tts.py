@@ -76,6 +76,13 @@ class SynthesisRequest:
     speed: float = 1.0
     stability: float | None = None
     similarity_boost: float | None = None
+    # Optional caller-provided context describing the situation/mood
+    # of the text — e.g. "celebratory end-of-day announcement",
+    # "doorbell ring at the front door", "sarcastic reply to a
+    # customer email". Backends may use it to inform delivery
+    # decisions (the ElevenLabs backend feeds it to the audio-tag
+    # director). Backends that don't tag should ignore it.
+    context: str = ""
 
 
 @dataclass(frozen=True)

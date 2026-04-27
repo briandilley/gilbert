@@ -232,6 +232,10 @@ class RoastService(Service):
             return
 
         try:
-            await speaker_svc.announce(text, speaker_names=self._speakers or None)
+            await speaker_svc.announce(
+                text,
+                speaker_names=self._speakers or None,
+                context="Playful roast / good-natured ribbing — deliver with bite",
+            )
         except Exception:
             logger.warning("Failed to announce roast", exc_info=True)

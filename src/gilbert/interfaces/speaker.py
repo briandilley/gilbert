@@ -299,12 +299,18 @@ class SpeakerProvider(Protocol):
         text: str,
         speaker_names: list[str] | None = None,
         volume: int | None = None,
+        context: str = "",
     ) -> str:
         """Announce ``text`` over speakers via text-to-speech.
 
         If ``speaker_names`` is ``None``, the service's configured
         default speakers are used. If ``volume`` is ``None``, the
         service's configured default announce volume is used.
+        ``context`` is an optional caller-provided description of the
+        situation (e.g. "doorbell ring at front door", "celebratory
+        end-of-day recap") that the TTS backend may use to inform
+        delivery — currently consumed by the ElevenLabs audio-tag
+        director, ignored by other backends.
 
         Returns an implementation-defined confirmation string (typically
         the path or URL of the generated audio file).

@@ -135,6 +135,18 @@ class AudioOutputService(Service):
                         ),
                         required=False,
                     ),
+                    ToolParameter(
+                        name="context",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional one-line description of the situation "
+                            "or mood (e.g. 'celebratory end-of-day recap', "
+                            "'doorbell ring at front door'). Helps the TTS "
+                            "engine pick expressive delivery — ignored by "
+                            "backends that don't support it."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
             ),
@@ -148,16 +160,17 @@ class AudioOutputService(Service):
         if not text:
             return "No text provided to synthesize."
 
+        context = str(arguments.get("context") or "").strip()
         destination = str(arguments.get("destination") or "chat").lower()
         if destination == "speakers":
-            return await self._deliver_to_speakers(text, arguments)
+            return await self._deliver_to_speakers(text, arguments, context)
         if destination == "chat":
-            return await self._deliver_to_chat(text)
+            return await self._deliver_to_chat(text, context)
         return f"Unknown destination '{destination}'. Use 'chat' (default) or 'speakers'."
 
     # --- Delivery paths ---
 
-    async def _deliver_to_chat(self, text: str) -> str:
+    async def _deliver_to_chat(self, text: str, context: str = "") -> str:
         """Synthesize text to an MP3 file and return a markdown audio link."""
         if self._resolver is None:
             return "Audio output service is not ready."
@@ -168,7 +181,12 @@ class AudioOutputService(Service):
 
         # Voice ID "" tells the TTS service to use its configured default,
         # matching the convention in SpeakerService.announce().
-        request = SynthesisRequest(text=text, voice_id="", output_format=AudioFormat.MP3)
+        request = SynthesisRequest(
+            text=text,
+            voice_id="",
+            output_format=AudioFormat.MP3,
+            context=context,
+        )
         try:
             result = await tts_svc.synthesize(request)
         except Exception:
@@ -191,7 +209,9 @@ class AudioOutputService(Service):
         duration_str = f" ({result.duration_seconds:.0f}s)" if result.duration_seconds else ""
         return f"Audio ready{duration_str}. [▶ Play or download]({url})"
 
-    async def _deliver_to_speakers(self, text: str, arguments: dict[str, Any]) -> str:
+    async def _deliver_to_speakers(
+        self, text: str, arguments: dict[str, Any], context: str = ""
+    ) -> str:
         """Delegate to SpeakerProvider.announce()."""
         if self._resolver is None:
             return "Audio output service is not ready."
@@ -218,6 +238,7 @@ class AudioOutputService(Service):
                 text=text,
                 speaker_names=speaker_names,
                 volume=volume,
+                context=context,
             )
         except Exception:
             logger.exception("Speaker announcement failed from audio_output")

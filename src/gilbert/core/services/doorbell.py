@@ -287,6 +287,7 @@ class DoorbellService(Service):
             await speaker_svc.announce(
                 text,
                 speaker_names=self._speakers or None,
+                context=f"Doorbell ring at the {door_name} — alert tone",
             )
         except Exception:
             logger.warning("Failed to announce doorbell ring", exc_info=True)

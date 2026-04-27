@@ -173,6 +173,7 @@ class TestAnnouncement:
         mock_speaker.announce.assert_awaited_once_with(
             "Someone is at the G4 Doorbell Pro.",
             speaker_names=None,
+            context="Doorbell ring at the G4 Doorbell Pro — alert tone",
         )
 
     async def test_announce_uses_configured_speakers(
@@ -201,6 +202,7 @@ class TestAnnouncement:
         mock_speaker.announce.assert_awaited_once_with(
             "Someone is at the G4 Doorbell.",
             speaker_names=["Living Room", "Kitchen"],
+            context="Doorbell ring at the G4 Doorbell — alert tone",
         )
 
     async def test_no_speaker_service_no_crash(

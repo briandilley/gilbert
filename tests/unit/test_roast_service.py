@@ -362,7 +362,11 @@ class TestAnnounce:
         await roast_service.start(resolver)
         await roast_service._announce("Test roast")
 
-        fake_speaker.announce.assert_awaited_once_with("Test roast", speaker_names=None)
+        fake_speaker.announce.assert_awaited_once_with(
+            "Test roast",
+            speaker_names=None,
+            context="Playful roast / good-natured ribbing — deliver with bite",
+        )
 
     @pytest.mark.asyncio
     async def test_announce_without_speakers(

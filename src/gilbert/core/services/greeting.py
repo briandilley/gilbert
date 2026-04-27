@@ -550,6 +550,7 @@ class GreetingService(Service):
             await speaker_svc.announce(
                 text,
                 speaker_names=self._speakers or None,
+                context="Cheery welcome greeting for someone arriving at the shop",
             )
         except Exception:
             logger.warning("Failed to announce greeting", exc_info=True)
