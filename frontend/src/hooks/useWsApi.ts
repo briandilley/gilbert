@@ -56,6 +56,7 @@ import type {
   UsageDimensions,
   UsageQueryPayload,
 } from "@/types/usage";
+import type { Proposal, ProposalsListResult } from "@/types/proposals";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -772,6 +773,38 @@ export function useWsApi() {
         path,
         conversation_id: conversationId,
       }),
+
+    // ── Proposals ─────────────────────────────────────────────────
+
+    listProposals: (params?: { status?: string; kind?: string; limit?: number }) =>
+      rpc<ProposalsListResult>({ type: "proposals.list", ...params }),
+
+    getProposal: (proposalId: string) =>
+      rpc<{ proposal: Proposal }>({ type: "proposals.get", proposal_id: proposalId })
+        .then((r) => r.proposal),
+
+    updateProposalStatus: (proposalId: string, status: string) =>
+      rpc<{ proposal: Proposal }>({
+        type: "proposals.update_status",
+        proposal_id: proposalId,
+        status,
+      }).then((r) => r.proposal),
+
+    addProposalNote: (proposalId: string, note: string) =>
+      rpc<{ proposal: Proposal }>({
+        type: "proposals.add_note",
+        proposal_id: proposalId,
+        note,
+      }).then((r) => r.proposal),
+
+    deleteProposal: (proposalId: string) =>
+      rpc<{ proposal_id: string; status: string }>({
+        type: "proposals.delete",
+        proposal_id: proposalId,
+      }),
+
+    triggerProposalReflection: () =>
+      rpc<{ created: number }>({ type: "proposals.trigger_reflection" }),
 
   }), [rpc, rpcWithRef]);
 }

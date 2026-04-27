@@ -15,6 +15,7 @@ import { SystemPage } from "@/components/system/SystemPage";
 import { ScreensPage } from "@/components/screens/ScreensPage";
 import { SchedulerPage } from "@/components/scheduler/SchedulerPage";
 import { PluginsPage } from "@/components/plugins/PluginsPage";
+import { ProposalsPage } from "@/components/proposals/ProposalsPage";
 import { McpPage } from "@/components/mcp/McpPage";
 import { McpClientsPage } from "@/components/mcp/McpClientsPage";
 import { McpLocalPage } from "@/components/mcp/McpLocalPage";
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/mcp/local" element={<McpLocalPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/plugins" element={<PluginsPage />} />
+          <Route path="/proposals" element={<ProposalsPage />} />
           <Route path="/system" element={<SystemPage />} />
           <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />

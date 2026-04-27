@@ -242,6 +242,14 @@ class Gilbert:
 
         self.service_manager.register(RoastService())
 
+        # Proposals — autonomous self-improvement reflector. Registered
+        # alongside other optional services; depends on entity storage,
+        # event bus, scheduler, and AI for full functionality but
+        # degrades gracefully when any are missing.
+        from gilbert.core.services.proposals import ProposalsService
+
+        self.service_manager.register(ProposalsService())
+
         self.service_manager.register(InboxService())
 
         from gilbert.core.services.inbox_ai_chat import InboxAIChatService

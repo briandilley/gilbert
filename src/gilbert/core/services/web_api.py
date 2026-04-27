@@ -240,6 +240,14 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Proposals",
+                        "description": "Gilbert's autonomous improvement ideas",
+                        "url": "/proposals",
+                        "icon": "sparkles",
+                        "required_role": "admin",
+                        "requires_capability": "proposals",
+                    },
+                    {
                         "label": "Browser",
                         "description": "Service inspector",
                         "url": "/system",

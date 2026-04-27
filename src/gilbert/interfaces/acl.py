@@ -42,6 +42,8 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "service.": 0,
     "config.": 0,
     "acl.": 0,
+    # Self-improvement proposals — autonomously generated, admin triage.
+    "proposal.": 0,
 }
 DEFAULT_VISIBILITY_LEVEL: int = 100  # unlisted events → user role
 
@@ -106,6 +108,8 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "plugins.": 0,
     "gilbert.peer.publish": 0,
     "usage.": 0,
+    # Self-improvement proposals — admin-only browse + triage.
+    "proposals.": 0,
 }
 DEFAULT_RPC_LEVEL: int = 100  # unlisted frame types → user role
 
