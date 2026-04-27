@@ -119,16 +119,29 @@ _REFLECTION_SYSTEM_PROMPT = """You are Gilbert's self-improvement reflector.
 
 Your role: review what has been happening in this Gilbert installation
 recently and propose concrete, implementable changes that would make
-Gilbert more useful — new plugins, new core services, configuration
-changes, or removal of unused functionality.
+Gilbert more useful. Look at the activity through TWO lenses:
+
+A) GAPS — refusals, errors, things users asked for that Gilbert
+   couldn't do. Propose new capabilities to fill these.
+
+B) PATTERNS — things users are repeatedly DOING SUCCESSFULLY (across
+   multiple conversations or many recurring events). When you see a
+   pattern, ask: "could this be made faster, automated, or wrapped in
+   a higher-level workflow?" Even when nothing is broken, recurring
+   manual workflows are an opportunity for a tool, slash command,
+   scheduled job, or template that saves the user steps. Workflow
+   shortcuts are valid proposals.
+
+Proposals can be: new plugins, new core services, modifications to
+existing ones, configuration changes, or removal of unused functionality.
 
 CRITICAL RULES:
 
 1. PROPOSE ONLY WHAT THE EVIDENCE SUPPORTS. If the observed activity is
-   sparse, repetitive, or doesn't reveal a clear gap, return an empty
-   proposals list. It is correct and expected to return zero proposals
-   when there is nothing to propose. Do not invent needs that the
-   evidence doesn't show.
+   sparse, repetitive in a non-actionable way, or doesn't reveal a clear
+   gap or pattern, return an empty proposals list. It is correct and
+   expected to return zero proposals when there is nothing to propose.
+   Do not invent needs that the evidence doesn't show.
 
 2. ONE CONCEPT PER PROPOSAL. Don't bundle unrelated changes.
 
@@ -139,10 +152,43 @@ CRITICAL RULES:
    services and plugins is provided. If the gap can already be filled by
    something installed, don't propose adding it again.
 
-5. SPECIFICATIONS MUST BE COMPLETE. Every proposal you return must
-   include a fully-formed `spec` and an `implementation_prompt` that a
-   future engineer (human or AI) could pick up and implement WITHOUT
-   reading any of this conversation.
+5. THE `implementation_prompt` MUST BE COMPREHENSIVE. This field is the
+   most important thing you produce — an engineer (human or fresh AI
+   session) will paste it into a new Claude Code session with no other
+   context and expect to implement the entire proposal from it. It is
+   NOT a one-paragraph summary. It is a full, multi-section briefing.
+   Aim for 800–2000 words. It MUST include, in order:
+
+     a. A "Project context" header re-stating that this is the Gilbert
+        codebase (Python 3.12+, uv, layered architecture, plugin system),
+        and that the implementer should read /CLAUDE.md and
+        .claude/memory/MEMORIES.md before starting.
+     b. The motivation paragraph — why this is being built, with the
+        evidence summarized.
+     c. An architecture section naming where the new code lives (which
+        layer, plugin vs core, file paths to create, file paths to
+        modify).
+     d. Interfaces (ABCs / capability protocols) to define, with method
+        signatures and one-sentence purposes.
+     e. Data model (collection name, fields, indexes).
+     f. Configuration parameters (key, type, default, description).
+     g. WS RPC handlers (frame type, params, response shape, ACL level).
+     h. AI tools to expose (name, parameters, required_role, description).
+     i. Events published / subscribed.
+     j. Python dependencies to add via `uv add`.
+     k. External services / APIs touched (with auth model + scope).
+     l. Tests to write, by layer.
+     m. Risks + mitigations.
+     n. Acceptance criteria as a checklist.
+     o. An "Implementation checklist" section listing the steps to
+        follow (define ABCs first, follow layer rules, run uv run
+        pytest / mypy / ruff before declaring done, update memory
+        files, do not commit).
+
+   If you cannot fill in a section confidently from the evidence,
+   write "Open question:" plus the specific decision the operator
+   needs to make — don't fabricate. The implementation_prompt should
+   read like a self-contained PR brief, not a marketing summary.
 
 OUTPUT FORMAT: a single JSON object with one key, "proposals", whose
 value is an array of zero or more proposal objects. No prose, no
@@ -234,6 +280,31 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _action_status_result(status: str, *, kind: str) -> ConfigActionResult:
+    """Map a background-job kickoff status to a ConfigActionResult toast."""
+    if status == "started":
+        return ConfigActionResult(
+            status="ok",
+            message=(
+                f"{kind} started — running in the background. New results "
+                "will appear here as they're produced."
+            ),
+        )
+    if status == "already_running":
+        return ConfigActionResult(
+            status="error",
+            message=f"{kind} is already running. Please wait for it to finish.",
+        )
+    if status == "disabled":
+        return ConfigActionResult(
+            status="error",
+            message=(
+                f"{kind} could not start — the proposals service is disabled."
+            ),
+        )
+    return ConfigActionResult(status="error", message=f"Unknown status: {status}")
+
+
 class ProposalsService(Service):
     """Autonomously proposes self-improvements based on observed activity.
 
@@ -307,6 +378,13 @@ class ProposalsService(Service):
         # extraction). Tracked so they don't get GC'd mid-run and so
         # ``stop()`` can cancel any still in flight.
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Mutexes preventing overlapping reflection / harvest runs.
+        # Manual triggers and the scheduler share these — if the
+        # scheduled cycle is mid-flight when an admin clicks "Reflect
+        # now", we surface a clear "already running" instead of
+        # double-firing the AI call.
+        self._reflection_running: bool = False
+        self._harvest_running: bool = False
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -316,7 +394,14 @@ class ProposalsService(Service):
                 {"entity_storage", "event_bus", "scheduler", "ai_chat", "configuration"}
             ),
             ai_calls=frozenset({"record_observation"}),
-            events=frozenset({"proposal.created", "proposal.status_changed"}),
+            events=frozenset(
+                {
+                    "proposal.created",
+                    "proposal.status_changed",
+                    "proposal.reflection_completed",
+                    "proposal.harvest_completed",
+                },
+            ),
             toggleable=True,
             toggle_description="Autonomously proposes self-improvements (admin-only).",
         )
@@ -749,31 +834,11 @@ class ProposalsService(Service):
         payload: dict[str, Any],
     ) -> ConfigActionResult:
         if key == "trigger_reflection":
-            try:
-                created = await self.trigger_reflection()
-            except Exception as exc:
-                logger.exception("Manual reflection trigger failed")
-                return ConfigActionResult(status="error", message=str(exc))
-            return ConfigActionResult(
-                status="ok",
-                message=(
-                    f"Reflection complete — {created} new proposal"
-                    f"{'s' if created != 1 else ''} created."
-                ),
-            )
+            status = self.start_reflection_in_background()
+            return _action_status_result(status, kind="Reflection")
         if key == "trigger_harvest":
-            try:
-                created = await self.trigger_harvest()
-            except Exception as exc:
-                logger.exception("Manual harvest trigger failed")
-                return ConfigActionResult(status="error", message=str(exc))
-            return ConfigActionResult(
-                status="ok",
-                message=(
-                    f"Harvest complete — {created} new observation"
-                    f"{'s' if created != 1 else ''} recorded."
-                ),
-            )
+            status = self.start_harvest_in_background()
+            return _action_status_result(status, kind="Harvest")
         return ConfigActionResult(status="error", message=f"Unknown action: {key}")
 
     # ── Observation ──────────────────────────────────────────────────
@@ -990,14 +1055,47 @@ class ProposalsService(Service):
 
     async def _scheduled_reflection_callback(self) -> None:
         """Scheduler entry point — never raises."""
+        if self._reflection_running:
+            logger.debug("Proposals: scheduled reflection skipped — already running")
+            return
         try:
             await self._run_reflection(manual=False)
         except Exception:
             logger.exception("Proposals reflection cycle raised")
 
     async def trigger_reflection(self) -> int:
-        """Run a reflection cycle now. Returns the number of new proposals stored."""
+        """Run a reflection cycle now (synchronous — for tests / programmatic use).
+
+        Returns the number of new proposals stored. WS callers should
+        prefer ``start_reflection_in_background`` so the request doesn't
+        block on the AI round.
+        """
         return await self._run_reflection(manual=True)
+
+    def start_reflection_in_background(self) -> str:
+        """Kick off a reflection cycle as a background task.
+
+        Returns one of ``"started"`` / ``"already_running"`` / ``"disabled"``.
+        Used by the WS handler and config action so the user-facing
+        request returns immediately — the AI round can take 30+ seconds
+        on the advanced profile and would otherwise blow the RPC timeout.
+        """
+        if not self._enabled:
+            return "disabled"
+        if self._reflection_running:
+            return "already_running"
+        self._spawn_background(
+            self._run_reflection_safe(manual=True),
+            label="proposals.reflection.manual",
+        )
+        return "started"
+
+    async def _run_reflection_safe(self, *, manual: bool) -> None:
+        """Background-task wrapper — swallow exceptions, never propagate."""
+        try:
+            await self._run_reflection(manual=manual)
+        except Exception:
+            logger.exception("Proposals: background reflection raised")
 
     async def _run_reflection(self, *, manual: bool) -> int:
         """Build context, ask the AI for proposals, persist whatever comes back.
@@ -1005,6 +1103,11 @@ class ProposalsService(Service):
         ``manual=True`` bypasses the min-observations gate (the operator
         explicitly asked) but the pending-cap and per-cycle ceiling still
         apply so a manual trigger can't pile up runaway cost either.
+
+        The ``_reflection_running`` flag prevents overlapping cycles —
+        it's checked by callers, but also by the inner body as a
+        belt-and-suspenders guard so concurrent calls can't both pass
+        the check.
         """
         if not self._enabled:
             logger.info("Proposals: reflection skipped (service disabled)")
@@ -1012,7 +1115,29 @@ class ProposalsService(Service):
         if self._max_proposals_per_cycle <= 0:
             logger.info("Proposals: reflection skipped (max_proposals_per_cycle=0)")
             return 0
+        if self._reflection_running:
+            logger.info("Proposals: reflection skipped — already running")
+            return 0
 
+        self._reflection_running = True
+        created = 0
+        considered = 0
+        try:
+            created, considered = await self._run_reflection_inner(manual=manual)
+            return created
+        finally:
+            self._reflection_running = False
+            await self._publish(
+                "proposal.reflection_completed",
+                {
+                    "created": created,
+                    "observations_considered": considered,
+                    "manual": manual,
+                },
+            )
+
+    async def _run_reflection_inner(self, *, manual: bool) -> tuple[int, int]:
+        """Returns (proposals_created, observations_considered)."""
         # Drain the buffer and prune old observations before counting,
         # so the gate sees an accurate "new since last cycle" number.
         await self._flush_observations()
@@ -1025,7 +1150,7 @@ class ProposalsService(Service):
                 unconsumed,
                 self._min_observations_per_cycle,
             )
-            return 0
+            return 0, 0
 
         pending_count = await self._count_pending_proposals()
         if pending_count >= self._max_pending_proposals:
@@ -1034,14 +1159,14 @@ class ProposalsService(Service):
                 pending_count,
                 self._max_pending_proposals,
             )
-            return 0
+            return 0, 0
 
         ai_svc: Any = (
             self._resolver.get_capability("ai_chat") if self._resolver is not None else None
         )
         if not isinstance(ai_svc, AISamplingProvider):
             logger.warning("Proposals: reflection skipped — no AI service available")
-            return 0
+            return 0, 0
 
         # Pull the observations we'll cite, build the prompt, then call.
         observations = await self._load_unconsumed_observations()
@@ -1056,7 +1181,7 @@ class ProposalsService(Service):
             )
         except Exception:
             logger.exception("Proposals: AI call failed during reflection")
-            return 0
+            return 0, len(observations)
 
         text = (response.message.content or "").strip()
         proposals = self._parse_proposals_response(text)
@@ -1069,7 +1194,7 @@ class ProposalsService(Service):
 
         if not proposals:
             logger.info("Proposals: AI returned no proposals (cycle=%s)", cycle_id)
-            return 0
+            return 0, len(observations)
 
         # Cap to per-cycle ceiling and pending budget.
         capacity = max(0, self._max_pending_proposals - pending_count)
@@ -1092,7 +1217,18 @@ class ProposalsService(Service):
             created,
             len(observations),
         )
-        return created
+        return created, len(observations)
+
+    async def _publish(self, event_type: str, data: dict[str, Any]) -> None:
+        """Best-effort publish — never raises into the caller."""
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish(
+                Event(event_type=event_type, data=data, source="proposals"),
+            )
+        except Exception:
+            logger.debug("Proposals: publish %s failed", event_type, exc_info=True)
 
     async def _load_unconsumed_observations(self) -> list[dict[str, Any]]:
         """Return the observations the upcoming cycle will reason over."""
@@ -1509,14 +1645,39 @@ class ProposalsService(Service):
 
     async def _scheduled_harvest_callback(self) -> None:
         """Scheduler entry point — never raises."""
+        if self._harvest_running:
+            logger.debug("Proposals: scheduled harvest skipped — already running")
+            return
         try:
             await self._run_harvest()
         except Exception:
             logger.exception("Proposals: harvest cycle raised")
 
     async def trigger_harvest(self) -> int:
-        """Run the conversation harvest now. Returns observations created."""
+        """Run the conversation harvest now (synchronous — for tests).
+
+        WS callers should prefer ``start_harvest_in_background`` so the
+        request doesn't block on per-conversation AI calls.
+        """
         return await self._run_harvest()
+
+    def start_harvest_in_background(self) -> str:
+        """Kick off a harvest as a background task. See start_reflection_in_background."""
+        if not self._enabled:
+            return "disabled"
+        if self._harvest_running:
+            return "already_running"
+        self._spawn_background(
+            self._run_harvest_safe(),
+            label="proposals.harvest.manual",
+        )
+        return "started"
+
+    async def _run_harvest_safe(self) -> None:
+        try:
+            await self._run_harvest()
+        except Exception:
+            logger.exception("Proposals: background harvest raised")
 
     async def _run_harvest(self) -> int:
         """Walk conversations and extract observations from each.
@@ -1536,6 +1697,16 @@ class ProposalsService(Service):
             return 0
         if self._harvest_max_conversations_per_cycle <= 0:
             return 0
+        if self._harvest_running:
+            logger.info("Proposals: harvest skipped — already running")
+            return 0
+        self._harvest_running = True
+        try:
+            return await self._run_harvest_inner()
+        finally:
+            self._harvest_running = False
+
+    async def _run_harvest_inner(self) -> int:
         ai_svc: Any = (
             self._resolver.get_capability("ai_chat")
             if self._resolver is not None
@@ -1546,7 +1717,7 @@ class ProposalsService(Service):
             return 0
 
         try:
-            convs = await self._storage.query(
+            convs = await self._storage.query(  # type: ignore[union-attr]
                 Query(
                     collection=_AI_CONVERSATIONS_COLLECTION,
                     sort=[SortField(field="updated_at", descending=True)],
@@ -1590,6 +1761,10 @@ class ProposalsService(Service):
                 processed,
                 created,
             )
+        await self._publish(
+            "proposal.harvest_completed",
+            {"processed": processed, "observations_recorded": created},
+        )
         return created
 
     @staticmethod
@@ -2021,13 +2196,14 @@ class ProposalsService(Service):
     async def _ws_trigger_reflection(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         if (err := require_admin(conn, frame)) is not None:
             return err
-        try:
-            created = await self.trigger_reflection()
-        except Exception as exc:
-            logger.exception("Manual reflection via WS failed")
-            return self._err(frame, str(exc), 500)
+        # Spawn the cycle in the background and return immediately —
+        # the AI round can take 30+ seconds on the advanced profile,
+        # which would otherwise blow the WS RPC timeout. New proposals
+        # appear via the existing list refetch + ``proposal.created``
+        # events.
+        status = self.start_reflection_in_background()
         return {
             "type": "proposals.trigger_reflection.result",
             "ref": frame.get("id"),
-            "created": created,
+            "status": status,
         }

@@ -981,6 +981,97 @@ class TestReflectionConsumption:
         assert fake_ai.calls == []
 
 
+class TestBackgroundTrigger:
+    @pytest.mark.asyncio
+    async def test_ws_trigger_returns_started_immediately(
+        self, resolver: FakeResolver
+    ) -> None:
+        """The WS handler must NOT await the AI round — it would blow
+        the RPC timeout on the advanced profile."""
+        import asyncio as _asyncio
+
+        ai_started = _asyncio.Event()
+        ai_release = _asyncio.Event()
+
+        class SlowAI:
+            def has_profile(self, name: str) -> bool:
+                return True
+
+            async def complete_one_shot(self, **kwargs: Any) -> Any:
+                ai_started.set()
+                await ai_release.wait()
+                return AIResponse(
+                    message=Message(role=MessageRole.ASSISTANT, content='{"proposals": []}'),
+                    model="t",
+                )
+
+        resolver.caps["ai_chat"] = SlowAI()
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        loop = _asyncio.get_event_loop()
+        admin = _fake_conn(user_level=0)
+        t0 = loop.time()
+        result = await svc._ws_trigger_reflection(admin, {"id": "f1"})
+        elapsed = loop.time() - t0
+        assert result["status"] == "started"
+        assert elapsed < 0.1, f"WS handler should return immediately, took {elapsed}s"
+        await _asyncio.wait_for(ai_started.wait(), timeout=1.0)
+        ai_release.set()
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_already_running_when_in_flight(
+        self, resolver: FakeResolver
+    ) -> None:
+        import asyncio as _asyncio
+
+        ai_release = _asyncio.Event()
+
+        class SlowAI:
+            def has_profile(self, name: str) -> bool:
+                return True
+
+            async def complete_one_shot(self, **kwargs: Any) -> Any:
+                await ai_release.wait()
+                return AIResponse(
+                    message=Message(role=MessageRole.ASSISTANT, content='{"proposals": []}'),
+                    model="t",
+                )
+
+        resolver.caps["ai_chat"] = SlowAI()
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        first = svc.start_reflection_in_background()
+        # Yield once so the background task acquires the running flag
+        # (otherwise the second call races and also returns "started").
+        await _asyncio.sleep(0)
+        second = svc.start_reflection_in_background()
+        assert first == "started"
+        assert second == "already_running"
+        ai_release.set()
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_disabled(self, resolver: FakeResolver) -> None:
+        svc = ProposalsService()
+        await svc.on_config_changed({"enabled": False})
+        await svc.start(resolver)
+        assert svc.start_reflection_in_background() == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_completion_event_published(
+        self, resolver: FakeResolver, fake_bus: FakeBus
+    ) -> None:
+        resolver.caps["ai_chat"] = FakeAI(content='{"proposals": []}')
+        svc = ProposalsService()
+        await svc.start(resolver)
+        await svc.trigger_reflection()
+        types = [e.event_type for e in fake_bus.published]
+        assert "proposal.reflection_completed" in types
+
+
 class TestStatusTransitions:
     @pytest.mark.asyncio
     async def test_update_status_persists_and_publishes(

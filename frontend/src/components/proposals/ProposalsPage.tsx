@@ -100,14 +100,24 @@ export function ProposalsPage() {
   const triggerMutation = useMutation({
     mutationFn: () => api.triggerProposalReflection(),
     onSuccess: (result) => {
-      setReflectionMessage(
-        `Reflection complete — ${result.created} new proposal${
-          result.created === 1 ? "" : "s"
-        } created.`,
-      );
+      // The reflection runs in the background — the AI round can take
+      // tens of seconds, so the RPC returns immediately with a status.
+      // New proposals show up via the periodic refetch.
+      const message = (() => {
+        switch (result.status) {
+          case "started":
+            return "Reflection started — new proposals will appear here as Gilbert finishes thinking.";
+          case "already_running":
+            return "A reflection cycle is already running. Hold tight.";
+          case "disabled":
+            return "Proposals service is disabled — enable it in Settings.";
+          default:
+            return `Reflection: ${result.status}`;
+        }
+      })();
+      setReflectionMessage(message);
       invalidate();
-      // Auto-clear the toast-style banner after a few seconds.
-      window.setTimeout(() => setReflectionMessage(null), 6000);
+      window.setTimeout(() => setReflectionMessage(null), 8000);
     },
     onError: (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
@@ -334,14 +344,45 @@ function ProposalDetail({
     },
   });
 
+  const [copyError, setCopyError] = useState<string | null>(null);
   const copyImplementationPrompt = async () => {
+    setCopyError(null);
+    const text = proposal.implementation_prompt;
+    // Modern API — only available on HTTPS or localhost.
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+        return;
+      } catch (err) {
+        // Fall through to the legacy path below.
+        console.warn("clipboard.writeText failed, falling back", err);
+      }
+    }
+    // Fallback for non-secure contexts (LAN install over plain HTTP):
+    // a hidden textarea + document.execCommand("copy"). Deprecated but
+    // still works in every browser we care about.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(proposal.implementation_prompt);
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    if (ok) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Older browsers without clipboard API — ignore silently;
-      // the textarea below still lets the operator copy manually.
+    } else {
+      setCopyError(
+        "Couldn't copy automatically — select the text below and press Ctrl/Cmd+C.",
+      );
     }
   };
 
@@ -439,9 +480,26 @@ function ProposalDetail({
           Self-contained prompt — paste into a fresh Claude Code session
           to implement this proposal.
         </p>
+        {copyError && (
+          <div className="text-xs text-destructive mb-2">{copyError}</div>
+        )}
         <div className="rounded border bg-background p-3 max-h-96 overflow-auto">
           <MarkdownContent content={proposal.implementation_prompt} />
         </div>
+        {/* Always render the raw text in a hidden-but-selectable
+            textarea so users on insecure-context installs can manually
+            select-all and copy when the automatic copy is blocked. */}
+        <details className="mt-2 text-xs">
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+            Show raw text (for manual copy)
+          </summary>
+          <textarea
+            readOnly
+            value={proposal.implementation_prompt}
+            className="mt-2 w-full font-mono text-xs rounded border bg-background p-2 h-48"
+            onFocus={(e) => e.currentTarget.select()}
+          />
+        </details>
       </Section>
 
       {proposal.admin_notes?.length > 0 && (

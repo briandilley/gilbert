@@ -804,7 +804,9 @@ export function useWsApi() {
       }),
 
     triggerProposalReflection: () =>
-      rpc<{ created: number }>({ type: "proposals.trigger_reflection" }),
+      rpc<{ status: "started" | "already_running" | "disabled" }>({
+        type: "proposals.trigger_reflection",
+      }),
 
   }), [rpc, rpcWithRef]);
 }
