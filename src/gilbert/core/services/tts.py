@@ -53,7 +53,7 @@ class TTSService(Service):
         return ServiceInfo(
             name="tts",
             capabilities=frozenset({"text_to_speech", "ai_tools"}),
-            optional=frozenset({"configuration"}),
+            optional=frozenset({"configuration", "ai_chat"}),
             toggleable=True,
             toggle_description="Text-to-speech synthesis",
         )
@@ -94,6 +94,20 @@ class TTSService(Service):
         self._backend = backend_cls()
 
         await self._backend.initialize(self._config)
+
+        # Hand the backend an AI sampling provider if it wants one
+        # (currently used by ElevenLabs to inject v3 audio tags via a
+        # small model). The injection is best-effort — backends that
+        # don't satisfy ``AICapableTTSBackend``, or environments where
+        # no AI service is configured, run the same as before.
+        from gilbert.interfaces.ai import AISamplingProvider
+        from gilbert.interfaces.tts import AICapableTTSBackend
+
+        if isinstance(self._backend, AICapableTTSBackend):
+            ai_svc = resolver.get_capability("ai_chat")
+            if isinstance(ai_svc, AISamplingProvider):
+                self._backend.set_ai_sampling(ai_svc)
+
         logger.info("TTS service started")
 
     # --- Configurable protocol ---

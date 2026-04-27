@@ -17,7 +17,10 @@ Services resolve dependencies via `resolver.get_capability("name")`, which retur
 | `SkillsProvider` | `interfaces/skills.py` | `"skills"` | `get_active_skills()`, `get_active_allowed_tools()`, `build_skills_context()` |
 | `PresenceProvider` | `interfaces/presence.py` | `"presence"` | `who_is_here()` |
 | `TTSProvider` | `interfaces/tts.py` | `"text_to_speech"` | `synthesize()` |
+| `AICapableTTSBackend` | `interfaces/tts.py` | (backend-injection) | `set_ai_sampling()` — TTS service injects `AISamplingProvider` after `initialize()` for backends that opt in (currently ElevenLabs, for v3 audio-tag injection). Mirrors `UserBackendAware` / `TunnelAwareAuthBackend` in auth. |
+| `AISamplingProvider` | `interfaces/ai.py` | `"ai_chat"` | `complete_one_shot()` — single-round, no conversation, no tool loop. Used for one-shot AI calls (sampling, tag injection). Backend + model are picked by `profile_name` (or the default backend when omitted). |
 | `TunnelProvider` | `interfaces/tunnel.py` | `"tunnel"` | `public_url` property |
+| `GuestPolicy` | `interfaces/auth.py` | `"authentication"` | `is_guest_allowed()` — read by web/WS layers to decide whether unauthenticated visitors get GUEST or get redirected. |
 | `ServiceEnumerator` | `interfaces/service.py` | (resolver) | `list_services()`, `restart_service()`, `started_services`, `failed_services` |
 
 ### Usage Pattern

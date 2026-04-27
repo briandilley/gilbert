@@ -141,3 +141,23 @@ class TTSProvider(Protocol):
     async def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
         """Synthesize speech from text."""
         ...
+
+
+@runtime_checkable
+class AICapableTTSBackend(Protocol):
+    """Protocol for TTS backends that want an ``AISamplingProvider`` to
+    use for text preprocessing — e.g. injecting ElevenLabs v3 audio
+    tags via a small model. The TTS service injects the sampling
+    provider after ``initialize()`` on backends that satisfy this
+    protocol; backends that don't get nothing extra and their behavior
+    is unchanged.
+    """
+
+    def set_ai_sampling(self, ai: object) -> None:
+        """Receive the AI sampling provider for one-shot completions.
+
+        Typed as ``object`` to keep ``interfaces/tts.py`` from importing
+        ``interfaces/ai.py``; concrete implementations narrow at the
+        boundary with ``isinstance(ai, AISamplingProvider)``.
+        """
+        ...

@@ -209,16 +209,26 @@ export function ConfigSection({ section }: ConfigSectionProps) {
   // Resolve the current backend name for display
   const backendName = String(merged["backend"] ?? "");
 
-  /** Get the nested value for a dot-path key like "settings.api_key" */
+  /** Get the nested value for a dot-path key like "settings.api_key".
+   *
+   * Falls back to the param's declared ``default`` when no value has
+   * been persisted yet — without this, newly-added backend params
+   * show as blank fields until the user explicitly saves them, even
+   * though the backend already declares a sensible default. */
   const getValue = (key: string): unknown => {
-    // Check local edits first
     if (key in localValues) return localValues[key];
-    // Navigate dot-path in server values
     const parts = key.split(".");
     let cur: any = section.values;
     for (const part of parts) {
-      if (cur == null || typeof cur !== "object") return undefined;
+      if (cur == null || typeof cur !== "object") {
+        cur = undefined;
+        break;
+      }
       cur = cur[part];
+    }
+    if (cur === undefined) {
+      const param = section.params.find((p) => p.key === key);
+      return param?.default ?? undefined;
     }
     return cur;
   };
