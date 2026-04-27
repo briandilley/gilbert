@@ -15,6 +15,33 @@ from typing import Any, Protocol, runtime_checkable
 PROPOSALS_COLLECTION = "proposals"
 """Entity collection name for stored proposals."""
 
+OBSERVATIONS_COLLECTION = "proposal_observations"
+"""Entity collection name for stored observations.
+
+An observation is one piece of evidence that the reflector pulls from
+on each cycle. Observations come from multiple sources (event bus, AI
+chat tool, conversation harvest, pre-delete extraction) and are
+unified into a single collection so the reflection prompt can reason
+across them.
+"""
+
+# Observation source types — also used by the reflection prompt to
+# show the AI the *mix* of signals (so it can weight, e.g., an
+# in-chat note from Gilbert higher than a raw event count).
+SOURCE_EVENT = "event"
+SOURCE_AI_TOOL = "ai_tool"
+SOURCE_CONVERSATION_ACTIVE = "conversation_active"
+SOURCE_CONVERSATION_ABANDONED = "conversation_abandoned"
+SOURCE_CONVERSATION_DELETED = "conversation_deleted"
+
+OBSERVATION_SOURCES: tuple[str, ...] = (
+    SOURCE_EVENT,
+    SOURCE_AI_TOOL,
+    SOURCE_CONVERSATION_ACTIVE,
+    SOURCE_CONVERSATION_ABANDONED,
+    SOURCE_CONVERSATION_DELETED,
+)
+
 # Proposal lifecycle status values. ``proposed`` is the initial state
 # every autonomously-generated record lands in; the rest are admin-set.
 STATUS_PROPOSED = "proposed"

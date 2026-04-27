@@ -21,16 +21,17 @@ Design constraints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
-from collections import Counter, deque
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
     ConfigActionResult,
@@ -39,9 +40,16 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.proposals import (
+    OBSERVATION_SOURCES,
+    OBSERVATIONS_COLLECTION,
     PROPOSAL_KINDS,
     PROPOSAL_STATUSES,
     PROPOSALS_COLLECTION,
+    SOURCE_AI_TOOL,
+    SOURCE_CONVERSATION_ABANDONED,
+    SOURCE_CONVERSATION_ACTIVE,
+    SOURCE_CONVERSATION_DELETED,
+    SOURCE_EVENT,
     STATUS_PROPOSED,
 )
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
@@ -55,16 +63,44 @@ from gilbert.interfaces.storage import (
     StorageBackend,
     StorageProvider,
 )
-from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.tools import (
+    ToolDefinition,
+    ToolParameter,
+    ToolParameterType,
+)
 from gilbert.interfaces.ws import RpcHandler, require_admin
 
 logger = logging.getLogger(__name__)
 
 
-# Identifier for the scheduler job that runs the reflection cycle. The
-# scheduler treats this as a system job (re-registered on each startup)
-# so the user can't accidentally remove it from the scheduler page.
+# Scheduler job names. All registered as system jobs so they appear on
+# the scheduler page but can't be removed by users.
 _REFLECTION_JOB_NAME = "proposals.reflection"
+_HARVEST_JOB_NAME = "proposals.conversation_harvest"
+_FLUSH_JOB_NAME = "proposals.observation_flush"
+
+# Conversations live in this collection (owned by AIService). We read
+# from it during the harvest job to extract observations from active
+# and abandoned conversations.
+_AI_CONVERSATIONS_COLLECTION = "ai_conversations"
+
+# Pre-delete event AIService publishes right before destroying a
+# conversation. Carries the conversation snapshot so subscribers can
+# act before the data is gone (we use it for last-chance observation
+# extraction).
+_CHAT_ARCHIVING_EVENT = "chat.conversation.archiving"
+
+# Subscribing to "*" gives us the broadest possible signal, but a
+# handful of event types fire on hot paths (per-token streaming) and
+# would dominate the buffer with noise. We drop them at the handler
+# rather than narrowing the subscription pattern, so an operator who
+# does want them can simply remove the entry here.
+_NOISY_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "chat.stream.text_delta",
+        "chat.stream.round_complete",
+    },
+)
 
 _DEFAULT_OBSERVATION_PATTERNS: tuple[str, ...] = ("*",)
 """Default event patterns the observer subscribes to.
@@ -153,6 +189,41 @@ If there are no good proposals, return: {"proposals": []}
 """
 
 
+_CONVERSATION_EXTRACTION_SYSTEM_PROMPT = """You are extracting reflection-worthy observations from a Gilbert conversation transcript.
+
+Your output is fed into Gilbert's self-improvement reflector — it does NOT
+become a proposal directly. Pull out only signals that could later inform
+a proposal: capability gaps, recurring frustrations, requests Gilbert
+couldn't fulfill, knowledge gaps, ideas the user articulated, or
+patterns of usage that aren't yet served well.
+
+CRITICAL RULES:
+
+1. Return zero observations if the transcript doesn't reveal anything
+   worth reflecting on. Routine successful interactions should produce
+   no observations.
+
+2. Each observation must be a single short sentence — NOT a summary of
+   the whole conversation. One signal per entry.
+
+3. Don't restate what Gilbert already did successfully. Only flag
+   things that suggest Gilbert could be MORE useful.
+
+OUTPUT FORMAT: a JSON object with one key "observations":
+
+{
+  "observations": [
+    {
+      "summary": "Single short sentence capturing one signal.",
+      "category": "capability_gap | recurring_frustration | knowledge_gap | feature_request | usage_pattern | other"
+    }
+  ]
+}
+
+If nothing is worth recording, return: {"observations": []}
+"""
+
+
 def _slugify(value: str) -> str:
     """Lower-case, hyphen-joined slug for plugin/service ids in prompts."""
     cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
@@ -161,26 +232,6 @@ def _slugify(value: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-class _Observation:
-    """A summarized event in the reflection ring buffer."""
-
-    __slots__ = ("event_type", "source", "summary", "occurred_at")
-
-    def __init__(self, event_type: str, source: str, summary: str, occurred_at: str) -> None:
-        self.event_type = event_type
-        self.source = source
-        self.summary = summary
-        self.occurred_at = occurred_at
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "event_type": self.event_type,
-            "source": self.source,
-            "summary": self.summary,
-            "occurred_at": self.occurred_at,
-        }
 
 
 class ProposalsService(Service):
@@ -196,42 +247,71 @@ class ProposalsService(Service):
     # evidence doesn't support anything new.
     _DEFAULT_REFLECTION_INTERVAL_SECONDS = 21_600  # 6h
     _DEFAULT_MAX_PROPOSALS_PER_CYCLE = 3
-    _DEFAULT_OBSERVATION_BUFFER_SIZE = 500
     _DEFAULT_MIN_OBSERVATIONS_PER_CYCLE = 25
     _DEFAULT_MAX_PENDING_PROPOSALS = 10
     _DEFAULT_AI_PROFILE = "advanced"
     _DEFAULT_ENABLED = True
+
+    # New observation-system defaults.
+    _DEFAULT_HARVEST_INTERVAL_SECONDS = 21_600  # 6h
+    _DEFAULT_HARVEST_MAX_CONVERSATIONS_PER_CYCLE = 20
+    _DEFAULT_ABANDONMENT_THRESHOLD_SECONDS = 86_400  # 24h
+    _DEFAULT_OBSERVATION_CAP_TOTAL = 5_000
+    _DEFAULT_OBSERVATION_FLUSH_INTERVAL_SECONDS = 30
+    _DEFAULT_OBSERVATION_FLUSH_THRESHOLD = 50
+    _DEFAULT_REFLECTION_OBSERVATION_LIMIT = 400
 
     def __init__(self) -> None:
         # Configuration — populated in start() / on_config_changed().
         self._enabled: bool = self._DEFAULT_ENABLED
         self._reflection_interval_seconds: int = self._DEFAULT_REFLECTION_INTERVAL_SECONDS
         self._max_proposals_per_cycle: int = self._DEFAULT_MAX_PROPOSALS_PER_CYCLE
-        self._observation_buffer_size: int = self._DEFAULT_OBSERVATION_BUFFER_SIZE
         self._min_observations_per_cycle: int = self._DEFAULT_MIN_OBSERVATIONS_PER_CYCLE
         self._max_pending_proposals: int = self._DEFAULT_MAX_PENDING_PROPOSALS
         self._ai_profile: str = self._DEFAULT_AI_PROFILE
         self._observation_patterns: tuple[str, ...] = _DEFAULT_OBSERVATION_PATTERNS
+        self._harvest_interval_seconds: int = self._DEFAULT_HARVEST_INTERVAL_SECONDS
+        self._harvest_max_conversations_per_cycle: int = (
+            self._DEFAULT_HARVEST_MAX_CONVERSATIONS_PER_CYCLE
+        )
+        self._abandonment_threshold_seconds: int = (
+            self._DEFAULT_ABANDONMENT_THRESHOLD_SECONDS
+        )
+        self._observation_cap_total: int = self._DEFAULT_OBSERVATION_CAP_TOTAL
+        self._observation_flush_threshold: int = (
+            self._DEFAULT_OBSERVATION_FLUSH_THRESHOLD
+        )
+        self._observation_flush_interval_seconds: int = (
+            self._DEFAULT_OBSERVATION_FLUSH_INTERVAL_SECONDS
+        )
+        self._reflection_observation_limit: int = (
+            self._DEFAULT_REFLECTION_OBSERVATION_LIMIT
+        )
 
         # Runtime state.
         self._resolver: ServiceResolver | None = None
         self._storage: StorageBackend | None = None
         self._event_bus: Any = None
-        self._observations: deque[_Observation] = deque(
-            maxlen=self._DEFAULT_OBSERVATION_BUFFER_SIZE,
-        )
-        self._observations_seen_total: int = 0
-        self._observations_seen_at_last_cycle: int = 0
-        self._unsubscribers: list[Callable[[], None]] = []
+
+        # Pending observations not yet flushed to the DB. Each entry is
+        # a fully-formed observation row (matching ``OBSERVATIONS_COLLECTION``
+        # schema). Flushed on size-threshold, periodic timer, and stop.
+        self._observation_buffer: list[dict[str, Any]] = []
+        # Single lock guarding the buffer so concurrent event handlers
+        # and the periodic flusher don't trip over each other.
+        self._buffer_lock: asyncio.Lock | None = None
+
+        self._unsubscribers: list[Any] = []
         self._scheduler_job_registered: bool = False
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="proposals",
-            capabilities=frozenset({"proposals", "ws_handlers"}),
+            capabilities=frozenset({"proposals", "ws_handlers", "ai_tools"}),
             optional=frozenset(
                 {"entity_storage", "event_bus", "scheduler", "ai_chat", "configuration"}
             ),
+            ai_calls=frozenset({"record_observation"}),
             events=frozenset({"proposal.created", "proposal.status_changed"}),
             toggleable=True,
             toggle_description="Autonomously proposes self-improvements (admin-only).",
@@ -241,6 +321,7 @@ class ProposalsService(Service):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+        self._buffer_lock = asyncio.Lock()
 
         # Apply persisted configuration first so the storage indexes,
         # observation patterns, and reflection cadence pick up the
@@ -255,7 +336,7 @@ class ProposalsService(Service):
             logger.info("Proposals service disabled by config")
             return
 
-        # Wire up entity storage + indexes for the proposals collection.
+        # Wire up entity storage + indexes.
         storage_svc = resolver.get_capability("entity_storage")
         if storage_svc is not None and isinstance(storage_svc, StorageProvider):
             self._storage = storage_svc.backend
@@ -265,50 +346,86 @@ class ProposalsService(Service):
                 "Proposals service has no entity storage — list/get will return nothing",
             )
 
-        # Subscribe to events for the observation ring buffer.
+        # Subscribe to events for the observation buffer + the
+        # pre-delete archive event for last-chance conversation
+        # extraction.
         bus_svc = resolver.get_capability("event_bus")
         if bus_svc is not None and isinstance(bus_svc, EventBusProvider):
             self._event_bus = bus_svc.bus
             for pattern in self._observation_patterns:
                 unsub = self._event_bus.subscribe_pattern(pattern, self._on_event)
                 self._unsubscribers.append(unsub)
+            unsub = self._event_bus.subscribe(
+                _CHAT_ARCHIVING_EVENT, self._on_chat_archiving
+            )
+            self._unsubscribers.append(unsub)
         else:
             logger.warning(
-                "Proposals service has no event bus — reflection will run with empty observation buffer",
+                "Proposals service has no event bus — observations will be sparse",
             )
 
-        # Register the periodic reflection job.
+        # Register periodic jobs (reflection, conversation harvest,
+        # observation buffer flush).
         scheduler_svc = resolver.get_capability("scheduler")
         if scheduler_svc is not None and isinstance(scheduler_svc, SchedulerProvider):
-            try:
-                scheduler_svc.add_job(
-                    name=_REFLECTION_JOB_NAME,
-                    schedule=Schedule.every(self._reflection_interval_seconds),
-                    callback=self._scheduled_reflection_callback,
-                    system=True,
-                )
-                self._scheduler_job_registered = True
-            except ValueError:
-                # Already registered — happens after a hot-swap restart.
-                self._scheduler_job_registered = True
+            self._register_jobs(scheduler_svc)
         else:
             logger.warning(
-                "Proposals service has no scheduler — reflection only runs via manual trigger",
+                "Proposals service has no scheduler — reflection / harvest "
+                "only run via manual trigger; observations flush on threshold only",
             )
 
         logger.info(
-            "Proposals service started (reflection every %ds, max %d/cycle)",
+            "Proposals service started (reflection every %ds, harvest every %ds, max %d proposals/cycle)",
             self._reflection_interval_seconds,
+            self._harvest_interval_seconds,
             self._max_proposals_per_cycle,
         )
 
+    def _register_jobs(self, scheduler: SchedulerProvider) -> None:
+        """Register all our scheduler jobs, tolerating duplicates."""
+        for name, schedule, callback in (
+            (
+                _REFLECTION_JOB_NAME,
+                Schedule.every(self._reflection_interval_seconds),
+                self._scheduled_reflection_callback,
+            ),
+            (
+                _HARVEST_JOB_NAME,
+                Schedule.every(self._harvest_interval_seconds),
+                self._scheduled_harvest_callback,
+            ),
+            (
+                _FLUSH_JOB_NAME,
+                Schedule.every(self._observation_flush_interval_seconds),
+                self._scheduled_flush_callback,
+            ),
+        ):
+            try:
+                scheduler.add_job(
+                    name=name,
+                    schedule=schedule,
+                    callback=callback,
+                    system=True,
+                )
+            except ValueError:
+                # Already registered — happens after a hot-swap restart.
+                pass
+        self._scheduler_job_registered = True
+
     async def stop(self) -> None:
+        # Drop subscriptions first so no new events arrive while we
+        # flush the tail of the buffer.
         for unsub in self._unsubscribers:
             try:
                 unsub()
             except Exception:
                 logger.debug("Proposals: unsubscribe raised", exc_info=True)
         self._unsubscribers.clear()
+        try:
+            await self._flush_observations()
+        except Exception:
+            logger.debug("Proposals: final flush raised", exc_info=True)
 
     async def _ensure_indexes(self) -> None:
         """Declare indexes for the queries we run."""
@@ -322,6 +439,22 @@ class ProposalsService(Service):
             except Exception:
                 logger.debug(
                     "Proposals: ensure_index(%s) failed",
+                    fields,
+                    exc_info=True,
+                )
+        for fields in (
+            ["source_type"],
+            ["occurred_at"],
+            ["consumed_in_cycle"],
+            ["details.conversation_id"],
+        ):
+            try:
+                await self._storage.ensure_index(
+                    IndexDefinition(collection=OBSERVATIONS_COLLECTION, fields=fields),
+                )
+            except Exception:
+                logger.debug(
+                    "Proposals: ensure_index(observations,%s) failed",
                     fields,
                     exc_info=True,
                 )
@@ -364,12 +497,67 @@ class ProposalsService(Service):
                 default=self._DEFAULT_MAX_PROPOSALS_PER_CYCLE,
             ),
             ConfigParam(
-                key="observation_buffer_size",
+                key="harvest_interval_seconds",
                 type=ToolParameterType.INTEGER,
                 description=(
-                    "Ring buffer size for observed events. Older events are evicted when full."
+                    "How often the conversation-harvest job runs. The harvest "
+                    "walks active and abandoned conversations and asks the AI "
+                    "to extract observation candidates from each. Default "
+                    "21600 = 6h."
                 ),
-                default=self._DEFAULT_OBSERVATION_BUFFER_SIZE,
+                default=self._DEFAULT_HARVEST_INTERVAL_SECONDS,
+                restart_required=True,
+            ),
+            ConfigParam(
+                key="harvest_max_conversations_per_cycle",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Hard cap on conversations processed per harvest run. Each "
+                    "conversation is one AI extraction call, so this is the "
+                    "per-cycle cost ceiling."
+                ),
+                default=self._DEFAULT_HARVEST_MAX_CONVERSATIONS_PER_CYCLE,
+            ),
+            ConfigParam(
+                key="abandonment_threshold_seconds",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "A conversation is considered 'abandoned' once its "
+                    "updated_at is older than this. Active conversations "
+                    "produce 'conversation_active' observations; abandoned "
+                    "ones produce 'conversation_abandoned'. Default 86400 = 24h."
+                ),
+                default=self._DEFAULT_ABANDONMENT_THRESHOLD_SECONDS,
+            ),
+            ConfigParam(
+                key="observation_cap_total",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Total observation rows kept in the database. The oldest "
+                    "rows are pruned at the start of each reflection cycle "
+                    "once this cap is exceeded."
+                ),
+                default=self._DEFAULT_OBSERVATION_CAP_TOTAL,
+            ),
+            ConfigParam(
+                key="observation_flush_threshold",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Buffered observations flush to the DB once this many have "
+                    "queued (a periodic timer also flushes on a slower schedule)."
+                ),
+                default=self._DEFAULT_OBSERVATION_FLUSH_THRESHOLD,
+            ),
+            ConfigParam(
+                key="observation_flush_interval_seconds",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Periodic flush cadence for the observation buffer. Even if "
+                    "the size threshold isn't hit, the buffer is drained this "
+                    "often so observations don't sit unflushed."
+                ),
+                default=self._DEFAULT_OBSERVATION_FLUSH_INTERVAL_SECONDS,
+                restart_required=True,
             ),
             ConfigParam(
                 key="min_observations_per_cycle",
@@ -422,18 +610,60 @@ class ProposalsService(Service):
             0,
             int(config.get("max_proposals_per_cycle", self._DEFAULT_MAX_PROPOSALS_PER_CYCLE)),
         )
-        new_buffer_size = max(
-            10,
-            int(config.get("observation_buffer_size", self._DEFAULT_OBSERVATION_BUFFER_SIZE)),
+        self._harvest_interval_seconds = max(
+            60,
+            int(
+                config.get(
+                    "harvest_interval_seconds",
+                    self._DEFAULT_HARVEST_INTERVAL_SECONDS,
+                ),
+            ),
         )
-        if new_buffer_size != self._observation_buffer_size:
-            self._observation_buffer_size = new_buffer_size
-            # Resize the deque, preserving the most recent observations.
-            new_buffer: deque[_Observation] = deque(
-                self._observations,
-                maxlen=new_buffer_size,
-            )
-            self._observations = new_buffer
+        self._harvest_max_conversations_per_cycle = max(
+            0,
+            int(
+                config.get(
+                    "harvest_max_conversations_per_cycle",
+                    self._DEFAULT_HARVEST_MAX_CONVERSATIONS_PER_CYCLE,
+                ),
+            ),
+        )
+        self._abandonment_threshold_seconds = max(
+            60,
+            int(
+                config.get(
+                    "abandonment_threshold_seconds",
+                    self._DEFAULT_ABANDONMENT_THRESHOLD_SECONDS,
+                ),
+            ),
+        )
+        self._observation_cap_total = max(
+            100,
+            int(
+                config.get(
+                    "observation_cap_total",
+                    self._DEFAULT_OBSERVATION_CAP_TOTAL,
+                ),
+            ),
+        )
+        self._observation_flush_threshold = max(
+            1,
+            int(
+                config.get(
+                    "observation_flush_threshold",
+                    self._DEFAULT_OBSERVATION_FLUSH_THRESHOLD,
+                ),
+            ),
+        )
+        self._observation_flush_interval_seconds = max(
+            5,
+            int(
+                config.get(
+                    "observation_flush_interval_seconds",
+                    self._DEFAULT_OBSERVATION_FLUSH_INTERVAL_SECONDS,
+                ),
+            ),
+        )
         self._min_observations_per_cycle = max(
             0,
             int(
@@ -465,6 +695,15 @@ class ProposalsService(Service):
                     "max-pending-proposals cap."
                 ),
             ),
+            ConfigAction(
+                key="trigger_harvest",
+                label="Run conversation harvest now",
+                description=(
+                    "Manually walk all conversations and extract "
+                    "observation candidates. Subject to the per-cycle "
+                    "conversation cap."
+                ),
+            ),
         ]
 
     async def invoke_config_action(
@@ -485,31 +724,166 @@ class ProposalsService(Service):
                     f"{'s' if created != 1 else ''} created."
                 ),
             )
+        if key == "trigger_harvest":
+            try:
+                created = await self.trigger_harvest()
+            except Exception as exc:
+                logger.exception("Manual harvest trigger failed")
+                return ConfigActionResult(status="error", message=str(exc))
+            return ConfigActionResult(
+                status="ok",
+                message=(
+                    f"Harvest complete — {created} new observation"
+                    f"{'s' if created != 1 else ''} recorded."
+                ),
+            )
         return ConfigActionResult(status="error", message=f"Unknown action: {key}")
 
     # ── Observation ──────────────────────────────────────────────────
 
     async def _on_event(self, event: Event) -> None:
-        """Append an event to the observation ring buffer.
+        """Buffer an event observation.
 
         Synchronous summarization only — we never call the AI from this
-        path. The summary is a small string built from the event's data
-        dict so the reflection prompt can describe what happened without
-        carrying the full payload.
+        path. Noisy hot-path event types are dropped at the gate to
+        keep the buffer focused on signals worth reflecting on.
         """
+        if event.event_type in _NOISY_EVENT_TYPES:
+            return
+        # Avoid recording our own emissions — they'd be circular and
+        # would dominate the buffer once proposal activity picks up.
+        if event.event_type.startswith("proposal."):
+            return
         try:
             summary = self._summarize_event_data(event.data)
-            self._observations.append(
-                _Observation(
-                    event_type=event.event_type,
-                    source=event.source or "",
-                    summary=summary,
-                    occurred_at=event.timestamp.isoformat(),
-                ),
+            await self._record_observation(
+                source_type=SOURCE_EVENT,
+                summary=summary or event.event_type,
+                occurred_at=event.timestamp,
+                details={
+                    "event_type": event.event_type,
+                    "source": event.source or "",
+                    **{
+                        k: v
+                        for k, v in event.data.items()
+                        if isinstance(v, (str, int, float, bool))
+                    },
+                },
             )
-            self._observations_seen_total += 1
         except Exception:
             logger.debug("Proposals: failed to record observation", exc_info=True)
+
+    async def _record_observation(
+        self,
+        *,
+        source_type: str,
+        summary: str,
+        occurred_at: datetime,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Append an observation row to the in-memory buffer.
+
+        Flushes immediately when the buffer hits the size threshold so a
+        burst of events is bounded. Otherwise, the periodic flush job
+        drains it. Observations are stored with ``consumed_in_cycle=""``
+        until a reflection cycle marks them.
+        """
+        now = datetime.now(UTC)
+        obs_id = f"{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        row = {
+            "_id": obs_id,
+            "id": obs_id,
+            "source_type": source_type,
+            "summary": (summary or "")[:500],
+            "details": details or {},
+            "occurred_at": occurred_at.isoformat()
+            if isinstance(occurred_at, datetime)
+            else str(occurred_at),
+            "created_at": now.isoformat(),
+            "consumed_in_cycle": "",
+        }
+        if self._buffer_lock is None:
+            # Pre-start state — drop. We only buffer once the service
+            # is running so tests that exercise observation paths
+            # before start() don't accumulate cross-test state.
+            return
+        async with self._buffer_lock:
+            self._observation_buffer.append(row)
+            should_flush = len(self._observation_buffer) >= self._observation_flush_threshold
+        if should_flush:
+            await self._flush_observations()
+
+    async def _flush_observations(self) -> None:
+        """Move buffered observations into the entity store.
+
+        Best-effort: each row is written individually so a partial DB
+        failure doesn't lose the whole batch. The buffer is drained
+        BEFORE writes so concurrent record_observation calls always see
+        a fresh buffer to append to.
+        """
+        if self._storage is None or self._buffer_lock is None:
+            return
+        async with self._buffer_lock:
+            pending = self._observation_buffer
+            self._observation_buffer = []
+        if not pending:
+            return
+        for row in pending:
+            try:
+                await self._storage.put(OBSERVATIONS_COLLECTION, row["_id"], row)
+            except Exception:
+                logger.debug(
+                    "Proposals: failed to persist observation %s",
+                    row.get("_id"),
+                    exc_info=True,
+                )
+
+    async def _scheduled_flush_callback(self) -> None:
+        """Scheduler entry point — periodic buffer flush."""
+        try:
+            await self._flush_observations()
+        except Exception:
+            logger.exception("Proposals: scheduled flush raised")
+
+    async def _prune_observations(self) -> None:
+        """Drop the oldest observations once the cap is exceeded.
+
+        Runs at the start of each reflection cycle. Counts the total
+        rows; if over cap, queries the oldest and deletes them. Cheap
+        no-op when under the cap.
+        """
+        if self._storage is None:
+            return
+        try:
+            total = await self._storage.count(Query(collection=OBSERVATIONS_COLLECTION))
+        except Exception:
+            logger.debug("Proposals: count for prune failed", exc_info=True)
+            return
+        excess = total - self._observation_cap_total
+        if excess <= 0:
+            return
+        try:
+            oldest = await self._storage.query(
+                Query(
+                    collection=OBSERVATIONS_COLLECTION,
+                    sort=[SortField(field="occurred_at", descending=False)],
+                    limit=excess,
+                ),
+            )
+        except Exception:
+            logger.debug("Proposals: prune query failed", exc_info=True)
+            return
+        for row in oldest:
+            try:
+                await self._storage.delete(OBSERVATIONS_COLLECTION, row["_id"])
+            except Exception:
+                logger.debug(
+                    "Proposals: prune delete failed for %s",
+                    row.get("_id"),
+                    exc_info=True,
+                )
+        if oldest:
+            logger.info("Proposals: pruned %d old observations", len(oldest))
 
     @staticmethod
     def _summarize_event_data(data: dict[str, Any]) -> str:
@@ -541,9 +915,39 @@ class ProposalsService(Service):
             parts.append(f"{key}={text}")
         return " ".join(parts)
 
-    def observation_count(self) -> int:
-        """Public accessor for tests + diagnostics."""
-        return len(self._observations)
+    async def observation_count(self) -> int:
+        """Total observation rows currently in the DB (post-flush)."""
+        if self._storage is None:
+            return len(self._observation_buffer)
+        try:
+            persisted = await self._storage.count(
+                Query(collection=OBSERVATIONS_COLLECTION),
+            )
+        except Exception:
+            persisted = 0
+        return persisted + len(self._observation_buffer)
+
+    async def _count_unconsumed_observations(self) -> int:
+        """Count observations not yet attributed to a reflection cycle.
+
+        Includes the in-memory buffer (which is by definition unconsumed)
+        so the min-observations gate sees a faithful "new since last
+        cycle" number.
+        """
+        if self._storage is None:
+            return len(self._observation_buffer)
+        try:
+            persisted = await self._storage.count(
+                Query(
+                    collection=OBSERVATIONS_COLLECTION,
+                    filters=[
+                        Filter(field="consumed_in_cycle", op=FilterOp.EQ, value=""),
+                    ],
+                ),
+            )
+        except Exception:
+            persisted = 0
+        return persisted + len(self._observation_buffer)
 
     # ── Reflection ───────────────────────────────────────────────────
 
@@ -572,14 +976,18 @@ class ProposalsService(Service):
             logger.info("Proposals: reflection skipped (max_proposals_per_cycle=0)")
             return 0
 
-        delta = self._observations_seen_total - self._observations_seen_at_last_cycle
-        if not manual and delta < self._min_observations_per_cycle:
+        # Drain the buffer and prune old observations before counting,
+        # so the gate sees an accurate "new since last cycle" number.
+        await self._flush_observations()
+        await self._prune_observations()
+
+        unconsumed = await self._count_unconsumed_observations()
+        if not manual and unconsumed < self._min_observations_per_cycle:
             logger.info(
                 "Proposals: reflection skipped — only %d new observations (need %d)",
-                delta,
+                unconsumed,
                 self._min_observations_per_cycle,
             )
-            self._observations_seen_at_last_cycle = self._observations_seen_total
             return 0
 
         pending_count = await self._count_pending_proposals()
@@ -589,7 +997,6 @@ class ProposalsService(Service):
                 pending_count,
                 self._max_pending_proposals,
             )
-            self._observations_seen_at_last_cycle = self._observations_seen_total
             return 0
 
         ai_svc: Any = (
@@ -599,9 +1006,9 @@ class ProposalsService(Service):
             logger.warning("Proposals: reflection skipped — no AI service available")
             return 0
 
-        # Build the user message: observations + current capability
-        # snapshot + recent proposals (for dedup).
-        user_prompt = await self._build_reflection_user_prompt()
+        # Pull the observations we'll cite, build the prompt, then call.
+        observations = await self._load_unconsumed_observations()
+        user_prompt = await self._build_reflection_user_prompt(observations)
         cycle_id = uuid.uuid4().hex
         try:
             response = await ai_svc.complete_one_shot(
@@ -616,14 +1023,18 @@ class ProposalsService(Service):
 
         text = (response.message.content or "").strip()
         proposals = self._parse_proposals_response(text)
+        # Mark the observations we showed the AI as consumed regardless
+        # of whether it returned proposals — they've been "seen", so the
+        # next cycle should focus on what's NEW. Same signal won't be
+        # retried; the AI either already extracted what was useful or
+        # decided there was nothing.
+        await self._mark_consumed(observations, cycle_id)
+
         if not proposals:
             logger.info("Proposals: AI returned no proposals (cycle=%s)", cycle_id)
-            self._observations_seen_at_last_cycle = self._observations_seen_total
             return 0
 
-        # Cap to per-cycle ceiling and pending budget. The smaller of
-        # (per_cycle_max, pending_capacity_remaining) wins so a busy
-        # backlog narrows the per-cycle output.
+        # Cap to per-cycle ceiling and pending budget.
         capacity = max(0, self._max_pending_proposals - pending_count)
         cap = min(self._max_proposals_per_cycle, capacity)
         proposals = proposals[:cap]
@@ -633,58 +1044,74 @@ class ProposalsService(Service):
             try:
                 record = self._build_record(raw, cycle_id=cycle_id)
             except ValueError as exc:
-                logger.warning(
-                    "Proposals: discarding malformed AI proposal: %s",
-                    exc,
-                )
+                logger.warning("Proposals: discarding malformed AI proposal: %s", exc)
                 continue
             await self._persist_proposal(record)
             created += 1
 
-        self._observations_seen_at_last_cycle = self._observations_seen_total
         logger.info(
-            "Proposals: reflection cycle %s created %d proposal(s)",
+            "Proposals: reflection cycle %s created %d proposal(s) from %d observations",
             cycle_id,
             created,
+            len(observations),
         )
         return created
 
-    async def _build_reflection_user_prompt(self) -> str:
+    async def _load_unconsumed_observations(self) -> list[dict[str, Any]]:
+        """Return the observations the upcoming cycle will reason over."""
+        if self._storage is None:
+            return []
+        try:
+            return await self._storage.query(
+                Query(
+                    collection=OBSERVATIONS_COLLECTION,
+                    filters=[
+                        Filter(field="consumed_in_cycle", op=FilterOp.EQ, value=""),
+                    ],
+                    sort=[SortField(field="occurred_at", descending=True)],
+                    limit=self._reflection_observation_limit,
+                ),
+            )
+        except Exception:
+            logger.debug("Proposals: load observations failed", exc_info=True)
+            return []
+
+    async def _mark_consumed(
+        self, observations: list[dict[str, Any]], cycle_id: str
+    ) -> None:
+        if self._storage is None or not observations:
+            return
+        for row in observations:
+            row["consumed_in_cycle"] = cycle_id
+            try:
+                await self._storage.put(OBSERVATIONS_COLLECTION, row["_id"], row)
+            except Exception:
+                logger.debug(
+                    "Proposals: mark consumed failed for %s",
+                    row.get("_id"),
+                    exc_info=True,
+                )
+
+    async def _build_reflection_user_prompt(
+        self, observations: list[dict[str, Any]]
+    ) -> str:
         """Compose the user-side reflection prompt.
 
-        Three sections: observed events (deduplicated by event_type,
-        with counts), currently-active capabilities (so the AI doesn't
-        re-propose existing ones), and recent proposals (so the AI
-        doesn't re-propose pending ideas).
+        Sections: source-grouped observations (events vs in-chat notes
+        vs conversation extracts vs deletion extracts), currently-
+        active capabilities (so the AI doesn't re-propose existing
+        ones), and recent proposals (so the AI doesn't re-propose
+        pending ideas). The source breakdown helps the AI weight
+        signals differently — an in-chat note from Gilbert himself is
+        usually a stronger signal than 200 raw event firings.
         """
-        # Observed events — group by event_type so the same event firing
-        # 200 times reads as "200 occurrences" rather than 200 lines.
-        type_counts: Counter[str] = Counter()
-        latest_per_type: dict[str, _Observation] = {}
-        for obs in self._observations:
-            type_counts[obs.event_type] += 1
-            latest_per_type[obs.event_type] = obs
-        observed_lines: list[str] = []
-        for event_type, count in type_counts.most_common(40):
-            sample = latest_per_type[event_type]
-            sample_summary = sample.summary or "(no summary)"
-            observed_lines.append(
-                f"- {event_type} ({count}×, last {sample.occurred_at}): {sample_summary}"
-            )
-        observed_block = "\n".join(observed_lines) or "(no observations yet)"
-
-        # Active capabilities snapshot — concrete service + plugin names
-        # from the running service manager + plugin loader.
+        observations_block = self._format_observations_by_source(observations)
         capabilities_block = self._build_capabilities_snapshot()
-
-        # Recent proposals (last 50) — title + status so the AI can
-        # avoid duplicating in-flight ideas.
         recent_proposals_block = await self._build_recent_proposals_snapshot()
-
         return (
             "Reflect on the activity below and propose any improvements.\n\n"
-            "## Observed events (last buffer)\n"
-            f"{observed_block}\n\n"
+            "## Observations\n"
+            f"{observations_block}\n\n"
             "## Currently active capabilities\n"
             f"{capabilities_block}\n\n"
             "## Recent proposals (do not duplicate)\n"
@@ -693,6 +1120,65 @@ class ProposalsService(Service):
             f"as JSON. If nothing is worth proposing, return "
             '{"proposals": []}.\n'
         )
+
+    @staticmethod
+    def _format_observations_by_source(observations: list[dict[str, Any]]) -> str:
+        """Render observations grouped by source_type with per-group caps."""
+        if not observations:
+            return "(no observations yet)"
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for obs in observations:
+            by_source.setdefault(obs.get("source_type", "unknown"), []).append(obs)
+
+        sections: list[str] = []
+        for source in OBSERVATION_SOURCES:
+            rows = by_source.pop(source, [])
+            if not rows:
+                continue
+            sections.append(
+                ProposalsService._format_one_source_section(source, rows),
+            )
+        # Anything we didn't recognize, render last so we don't lose it.
+        for source, rows in by_source.items():
+            sections.append(ProposalsService._format_one_source_section(source, rows))
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _format_one_source_section(source: str, rows: list[dict[str, Any]]) -> str:
+        """Render one source's observations.
+
+        Events are grouped by event_type (since one type can fire
+        thousands of times); other sources list each row directly with
+        its summary, since they're already higher-signal entries.
+        """
+        if source == SOURCE_EVENT:
+            type_counts: Counter[str] = Counter()
+            latest: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                event_type = str(r.get("details", {}).get("event_type", "?"))
+                type_counts[event_type] += 1
+                latest[event_type] = r
+            lines = [f"### {source} ({len(rows)} total)"]
+            for event_type, count in type_counts.most_common(40):
+                sample = latest[event_type]
+                summary = sample.get("summary") or "(no summary)"
+                occurred = sample.get("occurred_at", "")
+                lines.append(
+                    f"- {event_type} ({count}×, last {occurred}): {summary}"
+                )
+            return "\n".join(lines)
+        # Non-event sources — one line per observation.
+        lines = [f"### {source} ({len(rows)} total)"]
+        for r in rows[:40]:
+            occurred = r.get("occurred_at", "")
+            details = r.get("details") or {}
+            extras: list[str] = []
+            for k in ("category", "conversation_id", "state"):
+                if k in details:
+                    extras.append(f"{k}={details[k]}")
+            extras_str = f" [{' '.join(extras)}]" if extras else ""
+            lines.append(f"- ({occurred}){extras_str} {r.get('summary', '')}")
+        return "\n".join(lines)
 
     def _build_capabilities_snapshot(self) -> str:
         """Render the running service-manager state as a flat list of names.
@@ -981,6 +1467,384 @@ class ProposalsService(Service):
             return False
         await self._storage.delete(PROPOSALS_COLLECTION, proposal_id)
         return True
+
+    # ── Conversation harvest ─────────────────────────────────────────
+
+    async def _scheduled_harvest_callback(self) -> None:
+        """Scheduler entry point — never raises."""
+        try:
+            await self._run_harvest()
+        except Exception:
+            logger.exception("Proposals: harvest cycle raised")
+
+    async def trigger_harvest(self) -> int:
+        """Run the conversation harvest now. Returns observations created."""
+        return await self._run_harvest()
+
+    async def _run_harvest(self) -> int:
+        """Walk conversations and extract observations from each.
+
+        - Pulls all conversations (capped per-cycle).
+        - Classifies each as ``active`` (recent ``updated_at``) or
+          ``abandoned`` (older than the threshold).
+        - Skips conversations where the most recent observation already
+          covers the current message_count — avoids re-summarizing the
+          same content.
+        - For each remaining conversation, asks the AI to extract
+          observation candidates and persists them.
+        """
+        if not self._enabled:
+            return 0
+        if self._storage is None:
+            return 0
+        if self._harvest_max_conversations_per_cycle <= 0:
+            return 0
+        ai_svc: Any = (
+            self._resolver.get_capability("ai_chat")
+            if self._resolver is not None
+            else None
+        )
+        if not isinstance(ai_svc, AISamplingProvider):
+            logger.warning("Proposals: harvest skipped — no AI service available")
+            return 0
+
+        try:
+            convs = await self._storage.query(
+                Query(
+                    collection=_AI_CONVERSATIONS_COLLECTION,
+                    sort=[SortField(field="updated_at", descending=True)],
+                    limit=self._harvest_max_conversations_per_cycle * 4,
+                ),
+            )
+        except Exception:
+            logger.exception("Proposals: harvest conversation query failed")
+            return 0
+
+        now = datetime.now(UTC)
+        threshold = now - timedelta(seconds=self._abandonment_threshold_seconds)
+        created = 0
+        processed = 0
+        for conv in convs:
+            if processed >= self._harvest_max_conversations_per_cycle:
+                break
+            try:
+                if await self._already_summarized(conv):
+                    continue
+                state_source = (
+                    SOURCE_CONVERSATION_ACTIVE
+                    if self._is_recent(conv, threshold)
+                    else SOURCE_CONVERSATION_ABANDONED
+                )
+                added = await self._extract_observations_from_conversation(
+                    ai_svc=ai_svc,
+                    conv=conv,
+                    source_type=state_source,
+                )
+                created += added
+                processed += 1
+            except Exception:
+                logger.exception(
+                    "Proposals: harvest of conversation %s failed",
+                    conv.get("_id"),
+                )
+        if processed:
+            logger.info(
+                "Proposals: harvest processed %d conversation(s), recorded %d observation(s)",
+                processed,
+                created,
+            )
+        return created
+
+    @staticmethod
+    def _is_recent(conv: dict[str, Any], threshold: datetime) -> bool:
+        """True when conv.updated_at is at or after the threshold."""
+        updated_at = conv.get("updated_at") or conv.get("created_at") or ""
+        if not updated_at:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt >= threshold
+
+    async def _already_summarized(self, conv: dict[str, Any]) -> bool:
+        """True when the latest observation matches the current message count.
+
+        Uses the most recent observation tagged with this conversation
+        id — if its ``details.message_count_at_summary`` equals the
+        conversation's current message count, no new content has
+        arrived since the last summary and we skip.
+        """
+        if self._storage is None:
+            return False
+        conv_id = conv.get("_id")
+        if not conv_id:
+            return False
+        current_count = len(conv.get("messages") or [])
+        try:
+            recent = await self._storage.query(
+                Query(
+                    collection=OBSERVATIONS_COLLECTION,
+                    filters=[
+                        Filter(
+                            field="details.conversation_id",
+                            op=FilterOp.EQ,
+                            value=conv_id,
+                        ),
+                    ],
+                    sort=[SortField(field="occurred_at", descending=True)],
+                    limit=1,
+                ),
+            )
+        except Exception:
+            return False
+        if not recent:
+            return False
+        last = recent[0].get("details", {}).get("message_count_at_summary")
+        return bool(last == current_count)
+
+    async def _extract_observations_from_conversation(
+        self,
+        *,
+        ai_svc: AISamplingProvider,
+        conv: dict[str, Any],
+        source_type: str,
+    ) -> int:
+        """Ask the AI to extract observation candidates from a conversation.
+
+        Returns the number of observations stored.
+        """
+        transcript = self._render_conversation_transcript(conv)
+        if not transcript.strip():
+            return 0
+        conv_id = str(conv.get("_id", ""))
+        message_count = len(conv.get("messages") or [])
+        user_prompt = (
+            f"Conversation id: {conv_id}\n"
+            f"State: {source_type}\n"
+            f"Message count: {message_count}\n\n"
+            "## Transcript\n"
+            f"{transcript}\n\n"
+            "Return any reflection-worthy observations as JSON, or "
+            '{"observations": []} if nothing stands out.'
+        )
+        try:
+            response = await ai_svc.complete_one_shot(
+                messages=[Message(role=MessageRole.USER, content=user_prompt)],
+                system_prompt=_CONVERSATION_EXTRACTION_SYSTEM_PROMPT,
+                profile_name=self._ai_profile,
+                tools_override=[],
+            )
+        except Exception:
+            logger.exception(
+                "Proposals: extraction call failed for conv %s", conv_id
+            )
+            return 0
+        observations = self._parse_observations_response(
+            response.message.content or ""
+        )
+        if not observations:
+            # Even a "nothing here" response counts as a summary —
+            # record a placeholder so we don't re-process the same
+            # message_count next cycle. The summary is intentionally
+            # dull so it doesn't influence the reflector.
+            await self._record_observation(
+                source_type=source_type,
+                summary=f"(no signals extracted from conv {conv_id[:8]})",
+                occurred_at=datetime.now(UTC),
+                details={
+                    "conversation_id": conv_id,
+                    "message_count_at_summary": message_count,
+                    "state": source_type,
+                    "empty_extraction": True,
+                },
+            )
+            return 0
+        now = datetime.now(UTC)
+        for obs in observations:
+            summary = str(obs.get("summary") or "").strip()
+            if not summary:
+                continue
+            await self._record_observation(
+                source_type=source_type,
+                summary=summary,
+                occurred_at=now,
+                details={
+                    "conversation_id": conv_id,
+                    "message_count_at_summary": message_count,
+                    "state": source_type,
+                    "category": str(obs.get("category") or "other"),
+                },
+            )
+        # Force a flush so subsequent _already_summarized checks within
+        # this same harvest run see the row we just wrote.
+        await self._flush_observations()
+        return len(observations)
+
+    @staticmethod
+    def _render_conversation_transcript(conv: dict[str, Any]) -> str:
+        """Build a compact transcript suitable for the extraction prompt.
+
+        Caps per-message text length and total message count so a
+        runaway conversation doesn't blow the context window.
+        """
+        messages = conv.get("messages") or []
+        if not messages:
+            return ""
+        # Keep the most recent ~60 messages — enough to capture intent
+        # but bounded.
+        slice_ = messages[-60:]
+        lines: list[str] = []
+        for m in slice_:
+            role = str(m.get("role", "?"))
+            content = str(m.get("content", "") or "")
+            if len(content) > 800:
+                content = content[:797] + "..."
+            lines.append(f"[{role}] {content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_observations_response(text: str) -> list[dict[str, Any]]:
+        """Extract the observations array from the model's JSON response."""
+        if not text:
+            return []
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
+            if stripped.endswith("```"):
+                stripped = stripped[: -len("```")]
+            stripped = stripped.strip()
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            start = stripped.find("{")
+            end = stripped.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return []
+            try:
+                payload = json.loads(stripped[start : end + 1])
+            except json.JSONDecodeError:
+                return []
+        if not isinstance(payload, dict):
+            return []
+        observations = payload.get("observations")
+        if not isinstance(observations, list):
+            return []
+        return [o for o in observations if isinstance(o, dict)]
+
+    # ── Pre-delete extraction (chat.conversation.archiving) ──────────
+
+    async def _on_chat_archiving(self, event: Event) -> None:
+        """Last-chance extraction before a conversation is destroyed.
+
+        AIService publishes ``chat.conversation.archiving`` *before* the
+        actual delete, with the conversation snapshot in the payload.
+        We kick off async extraction so the deletion isn't blocked.
+        """
+        if not self._enabled:
+            return
+        conv = event.data.get("conversation")
+        if not isinstance(conv, dict):
+            return
+        ai_svc: Any = (
+            self._resolver.get_capability("ai_chat")
+            if self._resolver is not None
+            else None
+        )
+        if not isinstance(ai_svc, AISamplingProvider):
+            return
+        try:
+            await self._extract_observations_from_conversation(
+                ai_svc=ai_svc,
+                conv=conv,
+                source_type=SOURCE_CONVERSATION_DELETED,
+            )
+        except Exception:
+            logger.exception(
+                "Proposals: archiving extraction failed for conv %s",
+                conv.get("_id"),
+            )
+
+    # ── ToolProvider (record_observation) ────────────────────────────
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "proposals"
+
+    def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
+        return [
+            ToolDefinition(
+                name="record_observation",
+                description=(
+                    "Record an observation about Gilbert himself for later "
+                    "review by the autonomous self-improvement reflector. "
+                    "Use this when, during a conversation, you notice something "
+                    "that could lead to a self-improvement: a recurring user "
+                    "frustration, a missing capability, a knowledge gap, a "
+                    "feature request, or a usage pattern that isn't well "
+                    "served. One observation per call; be concise and specific. "
+                    "These observations are batched into the next reflection "
+                    "cycle, where they may turn into a proposal for an admin "
+                    "to review. Admin-only — non-admin users cannot trigger "
+                    "this tool."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="summary",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "A single short sentence describing what you noticed."
+                        ),
+                    ),
+                    ToolParameter(
+                        name="category",
+                        type=ToolParameterType.STRING,
+                        description="What kind of signal this is.",
+                        required=False,
+                        enum=[
+                            "capability_gap",
+                            "recurring_frustration",
+                            "knowledge_gap",
+                            "feature_request",
+                            "usage_pattern",
+                            "other",
+                        ],
+                    ),
+                    ToolParameter(
+                        name="context",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional one-paragraph context — what was the user "
+                            "trying to do, what happened, why it matters."
+                        ),
+                        required=False,
+                    ),
+                ],
+                required_role="admin",
+                parallel_safe=True,
+            ),
+        ]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name != "record_observation":
+            raise KeyError(f"Unknown tool: {name}")
+        summary = str(arguments.get("summary") or "").strip()
+        if not summary:
+            return json.dumps({"error": "'summary' is required"})
+        category = str(arguments.get("category") or "other").strip()
+        context = str(arguments.get("context") or "").strip()
+        await self._record_observation(
+            source_type=SOURCE_AI_TOOL,
+            summary=summary,
+            occurred_at=datetime.now(UTC),
+            details={
+                "category": category,
+                "context": context[:1000],
+            },
+        )
+        return json.dumps({"status": "recorded", "category": category})
 
     # ── WS RPC handlers (admin-only via ACL defaults) ────────────────
 

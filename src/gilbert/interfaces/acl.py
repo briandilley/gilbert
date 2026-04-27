@@ -44,6 +44,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "acl.": 0,
     # Self-improvement proposals — autonomously generated, admin triage.
     "proposal.": 0,
+    # Conversation archive event carries the full message transcript
+    # for last-chance observation extraction; restrict it to admins so
+    # the transcript doesn't leak via the WS event stream.
+    "chat.conversation.archiving": 0,
 }
 DEFAULT_VISIBILITY_LEVEL: int = 100  # unlisted events → user role
 

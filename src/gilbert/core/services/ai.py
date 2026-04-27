@@ -6252,6 +6252,18 @@ class AIService(Service):
                 "code": 403,
             }
 
+        # Pre-delete archive event — carries the conversation snapshot
+        # so subscribers (e.g. ProposalsService) can extract last-chance
+        # observations before the data is gone. Admin-only visibility
+        # via ACL because the payload includes the message transcript.
+        await self._publish_event(
+            "chat.conversation.archiving",
+            {
+                "conversation_id": conversation_id,
+                "owner_id": conv_owner,
+                "conversation": data,
+            },
+        )
         await self._storage.delete(_COLLECTION, conversation_id)
         # Tell subscribers (SkillService for workspace cleanup, etc.)
         # that this conversation is gone. Same event name as the room
@@ -6439,6 +6451,16 @@ class AIService(Service):
 
         # Owner leaving destroys the room
         if data.get("user_id") == conn.user_id:
+            if gilbert is not None:
+                await publish_event(
+                    gilbert,
+                    "chat.conversation.archiving",
+                    {
+                        "conversation_id": conversation_id,
+                        "owner_id": data.get("user_id", ""),
+                        "conversation": data,
+                    },
+                )
             await self._storage.delete(_COLLECTION, conversation_id)
             if gilbert is not None:
                 await publish_event(

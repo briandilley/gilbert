@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,7 +13,13 @@ from gilbert.core.services.proposals import ProposalsService
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.proposals import (
+    OBSERVATIONS_COLLECTION,
     PROPOSALS_COLLECTION,
+    SOURCE_AI_TOOL,
+    SOURCE_CONVERSATION_ABANDONED,
+    SOURCE_CONVERSATION_ACTIVE,
+    SOURCE_CONVERSATION_DELETED,
+    SOURCE_EVENT,
     STATUS_APPROVED,
     STATUS_PROPOSED,
     STATUS_REJECTED,
@@ -100,8 +106,20 @@ class FakeStorage(StorageBackend):
         return []
 
 
+def _resolve_dotted(row: dict[str, Any], path: str) -> Any:
+    """Walk a dot-notation path through nested dicts (matches SQLite storage)."""
+    cur: Any = row
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
 def _matches(row: dict[str, Any], f: Filter) -> bool:
-    value = row.get(f.field)
+    value = _resolve_dotted(row, f.field)
     if f.op == FilterOp.EQ:
         return value == f.value
     if f.op == FilterOp.NEQ:
@@ -109,7 +127,7 @@ def _matches(row: dict[str, Any], f: Filter) -> bool:
     if f.op == FilterOp.IN:
         return value in (f.value or [])
     if f.op == FilterOp.EXISTS:
-        return f.field in row
+        return value is not None
     return False
 
 
@@ -354,7 +372,9 @@ class TestStartup:
 
 class TestObservation:
     @pytest.mark.asyncio
-    async def test_event_appended_to_buffer(self, started_service: ProposalsService) -> None:
+    async def test_event_buffered_then_flushed_to_storage(
+        self, started_service: ProposalsService, fake_storage: FakeStorage
+    ) -> None:
         await started_service._on_event(
             Event(
                 event_type="ai.tool_call.refused",
@@ -363,7 +383,64 @@ class TestObservation:
                 timestamp=datetime.now(UTC),
             ),
         )
-        assert started_service.observation_count() == 1
+        # Below the flush threshold, lives in the buffer only.
+        assert len(started_service._observation_buffer) == 1
+        rows_before = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        assert rows_before == []
+
+        await started_service._flush_observations()
+        rows_after = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        assert len(rows_after) == 1
+        assert rows_after[0]["source_type"] == SOURCE_EVENT
+        assert rows_after[0]["details"]["event_type"] == "ai.tool_call.refused"
+
+    @pytest.mark.asyncio
+    async def test_noisy_events_dropped(
+        self, started_service: ProposalsService
+    ) -> None:
+        await started_service._on_event(
+            Event(
+                event_type="chat.stream.text_delta",
+                data={"text": "hi"},
+                source="ai",
+                timestamp=datetime.now(UTC),
+            ),
+        )
+        assert started_service._observation_buffer == []
+
+    @pytest.mark.asyncio
+    async def test_self_emitted_proposal_events_dropped(
+        self, started_service: ProposalsService
+    ) -> None:
+        await started_service._on_event(
+            Event(
+                event_type="proposal.created",
+                data={"proposal_id": "x"},
+                source="proposals",
+                timestamp=datetime.now(UTC),
+            ),
+        )
+        assert started_service._observation_buffer == []
+
+    @pytest.mark.asyncio
+    async def test_threshold_triggers_immediate_flush(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        svc = ProposalsService()
+        await svc.on_config_changed({"observation_flush_threshold": 2})
+        await svc.start(resolver)
+        for i in range(2):
+            await svc._on_event(
+                Event(
+                    event_type=f"e{i}",
+                    data={"i": i},
+                    source="t",
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        assert len(rows) == 2
+        assert svc._observation_buffer == []
 
     def test_summarize_picks_informative_fields(self) -> None:
         summary = ProposalsService._summarize_event_data(
@@ -533,6 +610,316 @@ class TestReflectionHappyPath:
         await svc.start(resolver)
         created = await svc.trigger_reflection()
         assert created == 1
+
+
+class TestPruning:
+    @pytest.mark.asyncio
+    async def test_prune_drops_oldest_beyond_cap(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        svc = ProposalsService()
+        await svc.on_config_changed({"observation_cap_total": 100})
+        await svc.start(resolver)
+
+        # Seed 105 observations directly into storage with ascending
+        # occurred_at timestamps so the oldest are clearly identifiable.
+        base = datetime.now(UTC)
+        for i in range(105):
+            obs_id = f"obs-{i:03d}"
+            await fake_storage.put(
+                OBSERVATIONS_COLLECTION,
+                obs_id,
+                {
+                    "_id": obs_id,
+                    "occurred_at": (base + timedelta(seconds=i)).isoformat(),
+                    "source_type": SOURCE_EVENT,
+                    "summary": f"e{i}",
+                    "details": {},
+                    "consumed_in_cycle": "",
+                },
+            )
+
+        await svc._prune_observations()
+        remaining = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        assert len(remaining) == 100
+        # The first 5 (oldest) should have been pruned.
+        ids = {r["_id"] for r in remaining}
+        for i in range(5):
+            assert f"obs-{i:03d}" not in ids
+
+
+class TestRecordObservationTool:
+    @pytest.mark.asyncio
+    async def test_tool_definition_is_admin_only(
+        self, started_service: ProposalsService
+    ) -> None:
+        tools = started_service.get_tools()
+        assert len(tools) == 1
+        tool = tools[0]
+        assert tool.name == "record_observation"
+        assert tool.required_role == "admin"
+
+    @pytest.mark.asyncio
+    async def test_tool_records_observation(
+        self, started_service: ProposalsService, fake_storage: FakeStorage
+    ) -> None:
+        result = await started_service.execute_tool(
+            "record_observation",
+            {
+                "summary": "User asked about Spotify integration we don't have.",
+                "category": "capability_gap",
+                "context": "User said 'why can't you tell me what's playing?'",
+            },
+        )
+        parsed = json.loads(result)
+        assert parsed["status"] == "recorded"
+        assert parsed["category"] == "capability_gap"
+
+        await started_service._flush_observations()
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        assert len(rows) == 1
+        assert rows[0]["source_type"] == SOURCE_AI_TOOL
+        assert rows[0]["details"]["category"] == "capability_gap"
+
+    @pytest.mark.asyncio
+    async def test_tool_rejects_empty_summary(
+        self, started_service: ProposalsService
+    ) -> None:
+        result = await started_service.execute_tool(
+            "record_observation",
+            {"summary": "  "},
+        )
+        parsed = json.loads(result)
+        assert "error" in parsed
+
+
+class TestConversationHarvest:
+    @pytest.mark.asyncio
+    async def test_active_conversation_produces_active_observation(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        # Conversation updated 1h ago — well within the active window.
+        recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        await fake_storage.put(
+            "ai_conversations",
+            "c1",
+            {
+                "_id": "c1",
+                "title": "Music chat",
+                "messages": [
+                    {"role": "user", "content": "what is playing?"},
+                    {"role": "assistant", "content": "I don't have music state yet."},
+                ],
+                "updated_at": recent_iso,
+                "user_id": "u1",
+            },
+        )
+        resolver.caps["ai_chat"] = FakeAI(
+            content=json.dumps(
+                {
+                    "observations": [
+                        {"summary": "User wanted now-playing.", "category": "capability_gap"}
+                    ]
+                }
+            )
+        )
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        created = await svc.trigger_harvest()
+        assert created == 1
+
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        active = [r for r in rows if r["source_type"] == SOURCE_CONVERSATION_ACTIVE]
+        assert len(active) == 1
+        assert active[0]["details"]["conversation_id"] == "c1"
+        assert active[0]["details"]["message_count_at_summary"] == 2
+
+    @pytest.mark.asyncio
+    async def test_abandoned_conversation_produces_abandoned_observation(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        old_iso = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+        await fake_storage.put(
+            "ai_conversations",
+            "c2",
+            {
+                "_id": "c2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "updated_at": old_iso,
+            },
+        )
+        resolver.caps["ai_chat"] = FakeAI(
+            content=json.dumps(
+                {"observations": [{"summary": "abandoned-thought", "category": "other"}]}
+            )
+        )
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        await svc.trigger_harvest()
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        abandoned = [r for r in rows if r["source_type"] == SOURCE_CONVERSATION_ABANDONED]
+        assert len(abandoned) == 1
+
+    @pytest.mark.asyncio
+    async def test_skips_already_summarized_at_same_message_count(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        # Conversation with 2 messages.
+        recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        await fake_storage.put(
+            "ai_conversations",
+            "c3",
+            {
+                "_id": "c3",
+                "messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+                "updated_at": recent_iso,
+            },
+        )
+        # An existing observation already covers message_count=2.
+        await fake_storage.put(
+            OBSERVATIONS_COLLECTION,
+            "obs-prev",
+            {
+                "_id": "obs-prev",
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "source_type": SOURCE_CONVERSATION_ACTIVE,
+                "summary": "earlier",
+                "details": {
+                    "conversation_id": "c3",
+                    "message_count_at_summary": 2,
+                },
+                "consumed_in_cycle": "",
+            },
+        )
+        fake_ai = FakeAI(content=json.dumps({"observations": []}))
+        resolver.caps["ai_chat"] = fake_ai
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        await svc.trigger_harvest()
+        # AI was not called because the conversation was already
+        # summarized at the current message count.
+        assert fake_ai.calls == []
+
+    @pytest.mark.asyncio
+    async def test_caps_conversations_per_cycle(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        recent_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        for i in range(5):
+            await fake_storage.put(
+                "ai_conversations",
+                f"c{i}",
+                {
+                    "_id": f"c{i}",
+                    "messages": [{"role": "user", "content": f"m{i}"}],
+                    "updated_at": recent_iso,
+                },
+            )
+        fake_ai = FakeAI(content=json.dumps({"observations": []}))
+        resolver.caps["ai_chat"] = fake_ai
+        svc = ProposalsService()
+        await svc.on_config_changed({"harvest_max_conversations_per_cycle": 2})
+        await svc.start(resolver)
+
+        await svc.trigger_harvest()
+        assert len(fake_ai.calls) == 2
+
+
+class TestArchiveEventExtraction:
+    @pytest.mark.asyncio
+    async def test_archiving_event_triggers_extraction(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        resolver.caps["ai_chat"] = FakeAI(
+            content=json.dumps(
+                {
+                    "observations": [
+                        {"summary": "user gave up after 3 retries", "category": "recurring_frustration"}
+                    ]
+                }
+            )
+        )
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        await svc._on_chat_archiving(
+            Event(
+                event_type="chat.conversation.archiving",
+                data={
+                    "conversation_id": "deleted-1",
+                    "owner_id": "u1",
+                    "conversation": {
+                        "_id": "deleted-1",
+                        "messages": [{"role": "user", "content": "ugh"}],
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                },
+                source="ai",
+                timestamp=datetime.now(UTC),
+            ),
+        )
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        deleted = [r for r in rows if r["source_type"] == SOURCE_CONVERSATION_DELETED]
+        assert len(deleted) == 1
+
+
+class TestReflectionConsumption:
+    @pytest.mark.asyncio
+    async def test_observations_marked_consumed_after_reflection(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        # Seed observations.
+        for i in range(3):
+            obs_id = f"obs-{i}"
+            await fake_storage.put(
+                OBSERVATIONS_COLLECTION,
+                obs_id,
+                {
+                    "_id": obs_id,
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "source_type": SOURCE_EVENT,
+                    "summary": f"signal {i}",
+                    "details": {"event_type": f"e{i}"},
+                    "consumed_in_cycle": "",
+                },
+            )
+        resolver.caps["ai_chat"] = FakeAI(content='{"proposals": []}')
+        svc = ProposalsService()
+        await svc.start(resolver)
+        await svc.trigger_reflection()
+
+        rows = await fake_storage.query(Query(collection=OBSERVATIONS_COLLECTION))
+        for r in rows:
+            assert r["consumed_in_cycle"] != ""
+
+    @pytest.mark.asyncio
+    async def test_reflection_skips_when_no_new_observations(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        # Pre-consumed observation should not count toward the gate.
+        await fake_storage.put(
+            OBSERVATIONS_COLLECTION,
+            "old",
+            {
+                "_id": "old",
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "source_type": SOURCE_EVENT,
+                "summary": "stale",
+                "details": {},
+                "consumed_in_cycle": "previous-cycle",
+            },
+        )
+        fake_ai = FakeAI(content='{"proposals": []}')
+        resolver.caps["ai_chat"] = fake_ai
+        svc = ProposalsService()
+        await svc.on_config_changed({"min_observations_per_cycle": 5})
+        await svc.start(resolver)
+
+        await svc._run_reflection(manual=False)
+        assert fake_ai.calls == []
 
 
 class TestStatusTransitions:
