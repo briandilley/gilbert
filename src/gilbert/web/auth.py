@@ -24,6 +24,14 @@ from gilbert.interfaces.auth import GuestPolicy, UserContext
 # ``/api/share/`` is public too — otherwise
 # ``share_workspace_file(via_tunnel=True)`` would produce URLs that
 # immediately redirect to /auth/login.
+#
+# ``/output/`` serves TTS audio files (and other generated output)
+# whose URLs are handed to speakers (Sonos, etc.) over the LAN.
+# Speakers can't authenticate, so the random-UUID filename is the
+# only secret on the URL — same trust model as ``/api/share/``.
+# Without this, ``play_audio_clip`` "succeeds" (Sonos accepts the
+# request) but the speaker's HTTP fetch lands on /auth/login HTML
+# and no audio ever plays.
 _PUBLIC_EXACT = (
     "/auth/login",
     "/auth/logout",
@@ -39,6 +47,7 @@ _PUBLIC_PREFIXES = (
     "/screens/stream",
     "/screens/tmp/",
     "/api/share/",
+    "/output/",
 )
 
 
