@@ -29,7 +29,7 @@ CRASH_RESTART_DELAY=20
 # start Gilbert anyway.
 SUPERVISOR_STOP=false
 
-ensure_std_plugins() {
+refresh_std_plugins() {
     # If std-plugins/ is empty (or missing plugin.yaml files), initialize
     # the git submodule so we pick up the first-party plugin repo. This
     # makes a fresh clone of Gilbert one-step: ``git clone … && cd gilbert
@@ -43,7 +43,35 @@ ensure_std_plugins() {
     if ! compgen -G "$SCRIPT_DIR/std-plugins/*/plugin.yaml" > /dev/null; then
         echo "std-plugins/ is empty — initializing the git submodule..."
         cd "$SCRIPT_DIR" && git submodule update --init --recursive
+        return
     fi
+
+    # Already initialized — opportunistically pull the latest commits
+    # from the submodule's tracked branch so a routine ``./gilbert.sh
+    # start`` picks up plugin updates without an explicit
+    # ``git submodule update --remote`` step.
+    #
+    # Only auto-refresh when the parent (core) working tree is clean.
+    # If the user has WIP changes here, the recorded submodule SHA may
+    # be part of that WIP — silently bumping it would stomp deliberate
+    # local state. ``--untracked-files=no`` ignores untracked clutter
+    # (build outputs, scratch files); the ``grep -v`` filters out the
+    # submodule pointer itself, which is the line we're trying to
+    # advance.
+    local parent_dirty
+    parent_dirty=$(
+        git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no \
+            | grep -v '^.. std-plugins$' \
+            || true
+    )
+    if [ -n "$parent_dirty" ]; then
+        echo "Skipping std-plugins refresh — uncommitted changes in core:"
+        echo "$parent_dirty" | sed 's/^/  /'
+        return
+    fi
+
+    echo "Refreshing std-plugins submodule from remote..."
+    cd "$SCRIPT_DIR" && git submodule update --init --recursive --remote std-plugins
 }
 
 sync_python_deps() {
@@ -67,7 +95,7 @@ run_gilbert_supervised() {
     local stderr_log_abs="$SCRIPT_DIR/$STDERR_LOG"
     trap 'SUPERVISOR_STOP=true' INT TERM
 
-    ensure_std_plugins
+    refresh_std_plugins
     mkdir -p "$(dirname "$stderr_log_abs")"
 
     while true; do
