@@ -78,6 +78,14 @@ Stored in `proposals` (`PROPOSALS_COLLECTION`). Identity: `_id`/`id`, `title`, `
 - `max_pending_proposals` (int, default 10) — backlog cap
 - `ai_profile` (str, choices_from `ai_profiles`, default `advanced`)
 - `observation_event_patterns` (array, default `["*"]`, restart_required) — what the bus subscriber listens to (noisy types are still dropped at the handler)
+- `allow_core_modifications` (bool, default false) — when off, the reflection AI is told to never emit `modify_core` proposals; if it does anyway, `_build_record` downgrades the kind to `new_plugin` so the idea isn't lost
+- `reflection_max_tool_rounds` (int, default 8) — cap on tool-calling rounds the reflection AI may take before it must produce its final JSON
+
+### Source-grounded reflection
+Reflection is no longer single-shot. Each cycle resolves the `source_inspector` capability and injects its three tools (`gilbert_list_files`, `gilbert_read_file`, `gilbert_grep`) into the AI call regardless of the inspector's user-facing enabled flag (it uses `get_tool_definitions()` for the always-on path; normal AI profiles still use `get_tools()` which respects the flag). `_run_reflection_inner` runs a manual tool-calling loop up to `reflection_max_tool_rounds`, appending tool results as `MessageRole.TOOL_RESULT` rows just like `AIService.chat`. The system prompt instructs the AI to use these tools to ground proposals in actual code before emitting JSON. If the inspector service isn't registered, the loop still works — it just doesn't pass any tools and the AI returns JSON in one round.
+
+### Proposal kinds + architectural preference
+The system prompt now ranks proposal kinds: new plugin > modify a plugin the reflector previously created > config tweak > `modify_core` (last resort, gated). `modify_core` lands in `PROPOSAL_KINDS` (`interfaces/proposals.py`) but the prompt and `_build_record` both gate it on `allow_core_modifications`.
 
 ### `record_observation` AI tool
 Exposed by ProposalsService (it's a `ToolProvider`). Admin-only (`required_role="admin"`). Parameters: `summary` (required), `category` (enum: capability_gap / recurring_frustration / knowledge_gap / feature_request / usage_pattern / other), `context` (optional paragraph). Tool description tells Gilbert to use it during chats when he notices something that could become a self-improvement proposal. Each call records one observation.

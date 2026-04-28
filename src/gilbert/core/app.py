@@ -242,6 +242,13 @@ class Gilbert:
 
         self.service_manager.register(RoastService())
 
+        # Source inspector — read-only AI tools for inspecting Gilbert's
+        # own code. Registered before ProposalsService so the reflector
+        # can resolve it via the capability registry.
+        from gilbert.core.services.source_inspector import SourceInspectorService
+
+        self.service_manager.register(SourceInspectorService())
+
         # Proposals — autonomous self-improvement reflector. Registered
         # alongside other optional services; depends on entity storage,
         # event bus, scheduler, and AI for full functionality but

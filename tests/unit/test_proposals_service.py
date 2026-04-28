@@ -518,6 +518,28 @@ class TestBuildRecord:
         rec = started_service._build_record(bad, cycle_id="c1")
         assert rec["kind"] == "new_plugin"
 
+    def test_modify_core_downgraded_when_flag_off(
+        self, started_service: ProposalsService
+    ) -> None:
+        # Flag defaults to False — a modify_core proposal should land
+        # as new_plugin so the idea isn't lost but the gate holds.
+        blob = _valid_proposal_blob("Refactor service manager")
+        blob["kind"] = "modify_core"
+        rec = started_service._build_record(blob, cycle_id="c1")
+        assert rec["kind"] == "new_plugin"
+
+    @pytest.mark.asyncio
+    async def test_modify_core_kept_when_flag_on(
+        self, resolver: FakeResolver
+    ) -> None:
+        svc = ProposalsService()
+        await svc.on_config_changed({"allow_core_modifications": True})
+        await svc.start(resolver)
+        blob = _valid_proposal_blob("Refactor service manager")
+        blob["kind"] = "modify_core"
+        rec = svc._build_record(blob, cycle_id="c1")
+        assert rec["kind"] == "modify_core"
+
 
 class TestReflectionGuards:
     @pytest.mark.asyncio

@@ -67,6 +67,12 @@ KIND_REMOVE_PLUGIN = "remove_plugin"
 KIND_NEW_SERVICE = "new_service"
 KIND_REMOVE_SERVICE = "remove_service"
 KIND_CONFIG_CHANGE = "config_change"
+# Modifications to Gilbert's own core code (anything in src/gilbert/ that
+# isn't a plugin). Gated behind the proposals service's
+# ``allow_core_modifications`` flag so an installation can decide
+# whether the reflector is allowed to suggest changes that would land
+# inside Gilbert's checked-out tree rather than as a new plugin.
+KIND_MODIFY_CORE = "modify_core"
 
 PROPOSAL_KINDS: tuple[str, ...] = (
     KIND_NEW_PLUGIN,
@@ -75,6 +81,7 @@ PROPOSAL_KINDS: tuple[str, ...] = (
     KIND_NEW_SERVICE,
     KIND_REMOVE_SERVICE,
     KIND_CONFIG_CHANGE,
+    KIND_MODIFY_CORE,
 )
 
 

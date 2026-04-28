@@ -30,7 +30,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole, StopReason
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
@@ -40,6 +40,8 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.proposals import (
+    KIND_MODIFY_CORE,
+    KIND_NEW_PLUGIN,
     OBSERVATION_SOURCES,
     OBSERVATIONS_COLLECTION,
     PROPOSAL_KINDS,
@@ -67,6 +69,7 @@ from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
+    ToolResult,
 )
 from gilbert.interfaces.ws import RpcHandler, require_admin
 
@@ -135,6 +138,38 @@ B) PATTERNS — things users are repeatedly DOING SUCCESSFULLY (across
 Proposals can be: new plugins, new core services, modifications to
 existing ones, configuration changes, or removal of unused functionality.
 
+You have read-only access to Gilbert's own source tree via three
+tools — ``gilbert_list_files``, ``gilbert_read_file``, ``gilbert_grep``.
+USE THEM. Before proposing a change, look at what's actually there:
+verify the plugin you want to extend exists, check whether the gap is
+already partially solved, find the file paths and class names you'll
+cite in the implementation_prompt. Proposals grounded in real source
+read are far more useful than guesses, and the implementer will paste
+your prompt into a fresh session that does NOT have this codebase
+context — give them concrete file paths and symbol names you've
+verified.
+
+ARCHITECTURAL PREFERENCE — STRONGLY PREFER ADDITIVE CHANGES:
+
+- First choice: a NEW plugin under ``std-plugins/`` or
+  ``local-plugins/``. New capabilities almost always belong here —
+  plugins compose, can be uninstalled, and don't risk regressing core
+  behavior. Plugin scaffolding is well-trodden.
+- Second choice: modifying a plugin you can clearly see was added by
+  this same reflection system in a previous cycle (look for it in the
+  capabilities snapshot or the recent-proposals list).
+- Third choice: a small ``config_change`` to an existing service.
+- Last resort: ``modify_core`` (changes to ``src/gilbert/`` itself).
+  Use this kind ONLY when the evidence proves the change cannot live
+  in a plugin — for example, the change has to touch a core ABC, a
+  layer-dependency rule, the bootstrap path, or shared interfaces in
+  ``src/gilbert/interfaces/``. Most refusals and feature gaps do NOT
+  meet this bar.
+
+When ``allow_core_modifications`` is FALSE (the snapshot tells you the
+current value) you MUST NOT emit any proposal with kind
+``modify_core``. Reframe the idea as a plugin or skip it entirely.
+
 CRITICAL RULES:
 
 1. PROPOSE ONLY WHAT THE EVIDENCE SUPPORTS. If the observed activity is
@@ -198,7 +233,7 @@ must match the schema:
 {
   "title": "Short imperative title (under 80 chars)",
   "summary": "1-2 sentence pitch",
-  "kind": "new_plugin | modify_plugin | remove_plugin | new_service | remove_service | config_change",
+  "kind": "new_plugin | modify_plugin | remove_plugin | new_service | remove_service | config_change | modify_core",
   "target": "name of the plugin/service this affects, or empty string",
   "motivation": "WHY — the observed behavior that triggered this",
   "evidence": [
@@ -322,6 +357,17 @@ class ProposalsService(Service):
     _DEFAULT_MAX_PENDING_PROPOSALS = 10
     _DEFAULT_AI_PROFILE = "advanced"
     _DEFAULT_ENABLED = True
+    # Off by default: changes inside ``src/gilbert/`` carry more risk
+    # than a new plugin and must be opted into by the operator. When
+    # this is False, the reflection AI is told it must not emit
+    # ``modify_core`` proposals; if one slips through anyway, we
+    # downgrade it to ``new_plugin`` so the idea isn't lost but the
+    # implementer is steered toward the additive approach.
+    _DEFAULT_ALLOW_CORE_MODIFICATIONS = False
+    # Reflection AI may need a few rounds to read source before
+    # producing the proposals JSON. Cap the loop so a misbehaving
+    # model can't fan out unbounded reads.
+    _DEFAULT_REFLECTION_MAX_TOOL_ROUNDS = 8
 
     # New observation-system defaults.
     _DEFAULT_HARVEST_INTERVAL_SECONDS = 21_600  # 6h
@@ -358,6 +404,8 @@ class ProposalsService(Service):
         self._reflection_observation_limit: int = (
             self._DEFAULT_REFLECTION_OBSERVATION_LIMIT
         )
+        self._allow_core_modifications: bool = self._DEFAULT_ALLOW_CORE_MODIFICATIONS
+        self._reflection_max_tool_rounds: int = self._DEFAULT_REFLECTION_MAX_TOOL_ROUNDS
 
         # Runtime state.
         self._resolver: ServiceResolver | None = None
@@ -718,6 +766,30 @@ class ProposalsService(Service):
                 default=list(_DEFAULT_OBSERVATION_PATTERNS),
                 restart_required=True,
             ),
+            ConfigParam(
+                key="allow_core_modifications",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Allow the reflector to propose changes to Gilbert's "
+                    "own core code (``src/gilbert/``). When OFF (the "
+                    "default), proposals are limited to new plugins, "
+                    "modifications to plugins the reflector itself created "
+                    "previously, and configuration changes. Turn this ON "
+                    "only if you're comfortable letting Gilbert suggest "
+                    "edits to interfaces, services, and bootstrap code."
+                ),
+                default=self._DEFAULT_ALLOW_CORE_MODIFICATIONS,
+            ),
+            ConfigParam(
+                key="reflection_max_tool_rounds",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Maximum number of tool-calling rounds the reflection "
+                    "AI may take before it must emit its final JSON. "
+                    "Source-inspection tools count against this cap."
+                ),
+                default=self._DEFAULT_REFLECTION_MAX_TOOL_ROUNDS,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -803,6 +875,21 @@ class ProposalsService(Service):
         patterns = config.get("observation_event_patterns")
         if isinstance(patterns, (list, tuple)) and all(isinstance(p, str) for p in patterns):
             self._observation_patterns = tuple(patterns)
+        self._allow_core_modifications = bool(
+            config.get(
+                "allow_core_modifications",
+                self._DEFAULT_ALLOW_CORE_MODIFICATIONS,
+            ),
+        )
+        self._reflection_max_tool_rounds = max(
+            1,
+            int(
+                config.get(
+                    "reflection_max_tool_rounds",
+                    self._DEFAULT_REFLECTION_MAX_TOOL_ROUNDS,
+                ),
+            ),
+        )
 
     # ── ConfigActionProvider ─────────────────────────────────────────
 
@@ -1051,6 +1138,36 @@ class ProposalsService(Service):
             persisted = 0
         return persisted + len(self._observation_buffer)
 
+    def _resolve_inspector_tools(
+        self,
+    ) -> tuple[list[ToolDefinition], Any]:
+        """Return source-inspection tool defs + an executor coroutine.
+
+        Always-on for the reflection AI: even if an admin disabled the
+        inspector for normal AI profiles, the proposals reflector still
+        gets the tools so it can ground its proposals in the actual
+        source. Returns ``([], None)`` if the inspector service isn't
+        registered (e.g., unit-test resolver without it).
+        """
+        if self._resolver is None:
+            return [], None
+        inspector = self._resolver.get_capability("source_inspector")
+        if inspector is None:
+            return [], None
+        get_tool_definitions = getattr(inspector, "get_tool_definitions", None)
+        execute_tool = getattr(inspector, "execute_tool", None)
+        if get_tool_definitions is None or execute_tool is None:
+            return [], None
+        try:
+            tools = list(get_tool_definitions())
+        except Exception:
+            logger.debug(
+                "Proposals: inspector get_tool_definitions failed",
+                exc_info=True,
+            )
+            return [], None
+        return tools, execute_tool
+
     # ── Reflection ───────────────────────────────────────────────────
 
     async def _scheduled_reflection_callback(self) -> None:
@@ -1172,18 +1289,76 @@ class ProposalsService(Service):
         observations = await self._load_unconsumed_observations()
         user_prompt = await self._build_reflection_user_prompt(observations)
         cycle_id = uuid.uuid4().hex
+
+        # Source-inspection tools are ALWAYS injected here, regardless
+        # of the inspector service's user-facing enabled flag. The
+        # proposals service has already decided this call is happening
+        # and benefits from the AI being able to read source.
+        inspector_tools, inspector_executor = self._resolve_inspector_tools()
+
+        messages: list[Message] = [Message(role=MessageRole.USER, content=user_prompt)]
+        text = ""
         try:
-            response = await ai_svc.complete_one_shot(
-                messages=[Message(role=MessageRole.USER, content=user_prompt)],
-                system_prompt=_REFLECTION_SYSTEM_PROMPT,
-                profile_name=self._ai_profile,
-                tools_override=[],
-            )
+            for _round_num in range(self._reflection_max_tool_rounds):
+                response = await ai_svc.complete_one_shot(
+                    messages=messages,
+                    system_prompt=_REFLECTION_SYSTEM_PROMPT,
+                    profile_name=self._ai_profile,
+                    tools_override=inspector_tools,
+                )
+                # Always append the assistant's reply so the next round
+                # has the prior tool_calls in context.
+                messages.append(response.message)
+
+                if (
+                    response.stop_reason == StopReason.TOOL_USE
+                    and response.message.tool_calls
+                    and inspector_executor is not None
+                ):
+                    tool_results: list[ToolResult] = []
+                    for call in response.message.tool_calls:
+                        try:
+                            content = await inspector_executor(
+                                call.tool_name, call.arguments
+                            )
+                            is_error = False
+                        except Exception as exc:
+                            content = json.dumps({"error": str(exc)})
+                            is_error = True
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=call.tool_call_id,
+                                content=content,
+                                is_error=is_error,
+                            ),
+                        )
+                    messages.append(
+                        Message(
+                            role=MessageRole.TOOL_RESULT,
+                            tool_results=tool_results,
+                        ),
+                    )
+                    continue
+
+                # Either END_TURN, MAX_TOKENS, or a tool call we can't
+                # service — take whatever text we got and break out.
+                text = (response.message.content or "").strip()
+                break
+            else:
+                # Loop exhausted without END_TURN. Use the last message's
+                # text if there is any so we don't waste the round.
+                logger.warning(
+                    "Proposals: reflection hit tool-round cap (%d), "
+                    "using last assistant text",
+                    self._reflection_max_tool_rounds,
+                )
+                last = messages[-1] if messages else None
+                if last is not None and last.role == MessageRole.ASSISTANT:
+                    text = (last.content or "").strip()
         except Exception:
             logger.exception("Proposals: AI call failed during reflection")
             return 0, len(observations)
 
-        text = (response.message.content or "").strip()
         proposals = self._parse_proposals_response(text)
         # Mark the observations we showed the AI as consumed regardless
         # of whether it returned proposals — they've been "seen", so the
@@ -1281,15 +1456,22 @@ class ProposalsService(Service):
         observations_block = self._format_observations_by_source(observations)
         capabilities_block = self._build_capabilities_snapshot()
         recent_proposals_block = await self._build_recent_proposals_snapshot()
+        core_mods_state = "ON" if self._allow_core_modifications else "OFF"
         return (
             "Reflect on the activity below and propose any improvements.\n\n"
+            "## Settings snapshot\n"
+            f"- allow_core_modifications: {core_mods_state}\n\n"
             "## Observations\n"
             f"{observations_block}\n\n"
             "## Currently active capabilities\n"
             f"{capabilities_block}\n\n"
             "## Recent proposals (do not duplicate)\n"
             f"{recent_proposals_block}\n\n"
-            f"Return at most {self._max_proposals_per_cycle} proposal(s) "
+            "You may use the source-inspection tools "
+            "(``gilbert_list_files``, ``gilbert_read_file``, "
+            "``gilbert_grep``) to ground your proposals in the actual "
+            "current code before answering. When you're done inspecting, "
+            f"return at most {self._max_proposals_per_cycle} proposal(s) "
             f"as JSON. If nothing is worth proposing, return "
             '{"proposals": []}.\n'
         )
@@ -1458,7 +1640,18 @@ class ProposalsService(Service):
 
         kind = str(raw.get("kind") or "").strip()
         if kind not in PROPOSAL_KINDS:
-            kind = "new_plugin"  # safe default — no destructive action implied
+            kind = KIND_NEW_PLUGIN  # safe default — no destructive action implied
+        if kind == KIND_MODIFY_CORE and not self._allow_core_modifications:
+            # The system prompt told the AI not to emit this when the
+            # flag is off, but the model occasionally ignores that.
+            # Don't lose the idea — relabel as a plugin proposal so the
+            # human reviewer can decide whether the spec actually fits a
+            # plugin or warrants flipping the flag.
+            logger.info(
+                "Proposals: downgrading modify_core -> new_plugin "
+                "(allow_core_modifications is off)",
+            )
+            kind = KIND_NEW_PLUGIN
 
         proposal_id = (
             f"{int(datetime.now(UTC).timestamp())}-{_slugify(title)[:40]}-{uuid.uuid4().hex[:6]}"
