@@ -17,7 +17,8 @@ export type ProposalKind =
   | "remove_plugin"
   | "new_service"
   | "remove_service"
-  | "config_change";
+  | "config_change"
+  | "modify_core";
 
 export interface ProposalEvidence {
   event_type: string;
@@ -75,4 +76,26 @@ export interface ProposalsListResult {
   proposals: Proposal[];
   available_statuses: string[];
   available_kinds: string[];
+}
+
+/** One row in the cycle-history view: each manual or scheduled
+ *  reflection / harvest run records its outcome into ``proposal_cycles``. */
+export interface ProposalCycle {
+  _id: string;
+  id: string;
+  kind: "reflection" | "harvest";
+  manual: boolean;
+  status: "ok" | "error" | "skipped" | "running";
+  started_at: string;
+  ended_at: string;
+  skip_reason: string;
+  error: string;
+  observations_considered: number;
+  proposals_created: number;
+  conversations_processed: number;
+  observations_extracted: number;
+}
+
+export interface ProposalsListCyclesResult {
+  cycles: ProposalCycle[];
 }

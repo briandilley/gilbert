@@ -58,11 +58,15 @@ Stored in `proposals` (`PROPOSALS_COLLECTION`). Identity: `_id`/`id`, `title`, `
 - `proposals.update_status` — `{proposal_id, status}`
 - `proposals.add_note` — `{proposal_id, note}`
 - `proposals.delete` — `{proposal_id}`
-- `proposals.trigger_reflection` — `{}` → `{created}`
+- `proposals.trigger_reflection` — `{}` → `{status: "started"|"already_running"|"disabled"}`
+- `proposals.trigger_harvest` — `{}` → `{status: "started"|"already_running"|"disabled"}`
+- `proposals.list_cycles` — `{kind?, limit?}` → `{cycles}`
 
-### Config actions
-- `trigger_reflection` — manual reflection cycle
-- `trigger_harvest` — manual conversation-harvest run
+### Cycle history (`proposal_cycles`)
+Each manual or scheduled reflection / harvest run records its outcome into `proposal_cycles` (`CYCLES_COLLECTION`). Row shape: `{_id, kind: "reflection"|"harvest", manual, status: "ok"|"error"|"skipped"|"running", started_at, ended_at, skip_reason, error, observations_considered, proposals_created, conversations_processed, observations_extracted}`. The /proposals page surfaces these via `proposals.list_cycles` so admins can see what the reflector has been doing without scraping logs. The "running" status is written upfront so a long-running cycle ticks live in the panel; the outer wrapper (`_run_reflection`, `_run_harvest`) stamps the final status in a try/finally so a crash still leaves a complete record.
+
+### Manual triggers — moved off the Settings page
+Previously the service exposed two `ConfigAction`s (`trigger_reflection`, `trigger_harvest`) on its Settings page. Those are gone — they're not really settings, they're operational actions, so they live on `/proposals` itself as buttons that call the new `proposals.trigger_*` RPCs. The cycle-history panel is collapsed by default and polls every 5s while expanded so a running cycle shows progress.
 
 ### Configuration (namespace `proposals`, category `Intelligence`)
 - `enabled` (bool, default true)

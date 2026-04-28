@@ -25,6 +25,24 @@ unified into a single collection so the reflection prompt can reason
 across them.
 """
 
+CYCLES_COLLECTION = "proposal_cycles"
+"""Entity collection name for cycle run summaries.
+
+Each row records the outcome of one reflection or harvest run — start
+and end timestamps, whether it was manual or scheduled, what it
+considered, and what it produced. The /proposals page surfaces these
+so an admin can see what the reflector has been doing without having
+to scrape the logs.
+"""
+
+CYCLE_KIND_REFLECTION = "reflection"
+CYCLE_KIND_HARVEST = "harvest"
+
+CYCLE_STATUS_OK = "ok"
+CYCLE_STATUS_ERROR = "error"
+CYCLE_STATUS_SKIPPED = "skipped"
+CYCLE_STATUS_RUNNING = "running"
+
 # Observation source types — also used by the reflection prompt to
 # show the AI the *mix* of signals (so it can weight, e.g., an
 # in-chat note from Gilbert higher than a raw event count).
@@ -113,4 +131,13 @@ class ProposalsProvider(Protocol):
 
     async def trigger_reflection(self) -> int:
         """Run a reflection cycle now. Returns the number of new proposals created."""
+        ...
+
+    async def list_cycles(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return cycle run summaries, newest first."""
         ...

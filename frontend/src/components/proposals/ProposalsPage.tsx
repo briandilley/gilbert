@@ -15,8 +15,14 @@ import {
   Trash2Icon,
   CopyIcon,
   CheckIcon,
+  HistoryIcon,
+  MessagesSquareIcon,
+  AlertTriangleIcon,
+  CircleSlashIcon,
+  CheckCircle2Icon,
+  Loader2Icon,
 } from "lucide-react";
-import type { Proposal } from "@/types/proposals";
+import type { Proposal, ProposalCycle } from "@/types/proposals";
 
 /** Status → Tailwind badge variant for the row chip. */
 function statusVariant(
@@ -60,7 +66,24 @@ const KIND_OPTIONS = [
   "new_service",
   "remove_service",
   "config_change",
+  "modify_core",
 ] as const;
+
+function triggerStatusMessage(
+  kind: "Reflection" | "Harvest",
+  status: string,
+): string {
+  switch (status) {
+    case "started":
+      return `${kind} started — results will appear here as Gilbert finishes thinking.`;
+    case "already_running":
+      return `A ${kind.toLowerCase()} cycle is already running. Hold tight.`;
+    case "disabled":
+      return "Proposals service is disabled — enable it in Settings.";
+    default:
+      return `${kind}: ${status}`;
+  }
+}
 
 export function ProposalsPage() {
   const queryClient = useQueryClient();
@@ -70,7 +93,8 @@ export function ProposalsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [kindFilter, setKindFilter] = useState<string>("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [reflectionMessage, setReflectionMessage] = useState<string | null>(null);
+  const [triggerMessage, setTriggerMessage] = useState<string | null>(null);
+  const [showCycles, setShowCycles] = useState<boolean>(false);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["proposals", statusFilter, kindFilter],
@@ -83,8 +107,19 @@ export function ProposalsPage() {
     refetchInterval: 30_000,
   });
 
-  const invalidate = () =>
+  const cyclesQuery = useQuery({
+    queryKey: ["proposal-cycles"],
+    queryFn: () => api.listProposalCycles({ limit: 50 }),
+    enabled: connected,
+    // Light auto-refresh so a running cycle ticks live in the panel
+    // when expanded; stops when collapsed to keep traffic minimal.
+    refetchInterval: showCycles ? 5_000 : 60_000,
+  });
+
+  const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["proposals"] });
+    queryClient.invalidateQueries({ queryKey: ["proposal-cycles"] });
+  };
 
   const updateStatusMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) =>
@@ -97,31 +132,29 @@ export function ProposalsPage() {
     onSuccess: invalidate,
   });
 
-  const triggerMutation = useMutation({
+  const reflectMutation = useMutation({
     mutationFn: () => api.triggerProposalReflection(),
     onSuccess: (result) => {
-      // The reflection runs in the background — the AI round can take
-      // tens of seconds, so the RPC returns immediately with a status.
-      // New proposals show up via the periodic refetch.
-      const message = (() => {
-        switch (result.status) {
-          case "started":
-            return "Reflection started — new proposals will appear here as Gilbert finishes thinking.";
-          case "already_running":
-            return "A reflection cycle is already running. Hold tight.";
-          case "disabled":
-            return "Proposals service is disabled — enable it in Settings.";
-          default:
-            return `Reflection: ${result.status}`;
-        }
-      })();
-      setReflectionMessage(message);
+      setTriggerMessage(triggerStatusMessage("Reflection", result.status));
       invalidate();
-      window.setTimeout(() => setReflectionMessage(null), 8000);
+      window.setTimeout(() => setTriggerMessage(null), 8000);
     },
     onError: (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
-      setReflectionMessage(`Reflection failed: ${message}`);
+      setTriggerMessage(`Reflection failed: ${message}`);
+    },
+  });
+
+  const harvestMutation = useMutation({
+    mutationFn: () => api.triggerProposalHarvest(),
+    onSuccess: (result) => {
+      setTriggerMessage(triggerStatusMessage("Harvest", result.status));
+      invalidate();
+      window.setTimeout(() => setTriggerMessage(null), 8000);
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      setTriggerMessage(`Harvest failed: ${message}`);
     },
   });
 
@@ -144,16 +177,35 @@ export function ProposalsPage() {
             activity. Review the spec, then approve, reject, or archive.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
             size="sm"
-            onClick={() => triggerMutation.mutate()}
-            disabled={triggerMutation.isPending}
-            title="Run a reflection cycle now"
+            onClick={() => reflectMutation.mutate()}
+            disabled={reflectMutation.isPending}
+            title="Run a reflection cycle now (turns observations into new proposals)"
           >
             <SparklesIcon className="size-4 mr-1.5" />
-            {triggerMutation.isPending ? "Reflecting…" : "Reflect now"}
+            {reflectMutation.isPending ? "Reflecting…" : "Reflect now"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => harvestMutation.mutate()}
+            disabled={harvestMutation.isPending}
+            title="Walk recent conversations and extract observation candidates"
+          >
+            <MessagesSquareIcon className="size-4 mr-1.5" />
+            {harvestMutation.isPending ? "Harvesting…" : "Harvest now"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowCycles((v) => !v)}
+            title="Show recent reflection / harvest runs"
+          >
+            <HistoryIcon className="size-4 mr-1.5" />
+            {showCycles ? "Hide runs" : "Recent runs"}
           </Button>
           <Button variant="outline" size="sm" onClick={() => refetch()} title="Refresh">
             <RefreshCcwIcon className="size-4" />
@@ -161,10 +213,17 @@ export function ProposalsPage() {
         </div>
       </div>
 
-      {reflectionMessage && (
+      {triggerMessage && (
         <div className="mb-4 rounded border bg-muted/40 px-3 py-2 text-sm">
-          {reflectionMessage}
+          {triggerMessage}
         </div>
+      )}
+
+      {showCycles && (
+        <CyclesPanel
+          cycles={cyclesQuery.data?.cycles ?? []}
+          isLoading={cyclesQuery.isLoading}
+        />
       )}
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -589,6 +648,93 @@ function Section({ title, action, children }: SectionProps) {
         {action}
       </div>
       {children}
+    </div>
+  );
+}
+
+interface CyclesPanelProps {
+  cycles: ProposalCycle[];
+  isLoading: boolean;
+}
+
+function CyclesPanel({ cycles, isLoading }: CyclesPanelProps) {
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-3">
+        <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+          Recent runs
+        </div>
+        {isLoading ? (
+          <LoadingSpinner text="Loading runs..." className="py-4" />
+        ) : cycles.length === 0 ? (
+          <div className="text-sm text-muted-foreground py-2">
+            No runs yet. Use "Reflect now" or "Harvest now" above to kick one off.
+          </div>
+        ) : (
+          <div className="divide-y">
+            {cycles.map((c) => (
+              <CycleRow key={c._id} cycle={c} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CycleRow({ cycle }: { cycle: ProposalCycle }) {
+  const Icon =
+    cycle.status === "running"
+      ? Loader2Icon
+      : cycle.status === "ok"
+        ? CheckCircle2Icon
+        : cycle.status === "skipped"
+          ? CircleSlashIcon
+          : AlertTriangleIcon;
+  const iconClass =
+    cycle.status === "running"
+      ? "text-blue-500 animate-spin"
+      : cycle.status === "ok"
+        ? "text-emerald-500"
+        : cycle.status === "skipped"
+          ? "text-muted-foreground"
+          : "text-destructive";
+  const summary =
+    cycle.kind === "reflection"
+      ? `${cycle.proposals_created} proposal${
+          cycle.proposals_created === 1 ? "" : "s"
+        } from ${cycle.observations_considered} observation${
+          cycle.observations_considered === 1 ? "" : "s"
+        }`
+      : `${cycle.observations_extracted} observation${
+          cycle.observations_extracted === 1 ? "" : "s"
+        } from ${cycle.conversations_processed} conversation${
+          cycle.conversations_processed === 1 ? "" : "s"
+        }`;
+  const detail = cycle.error || cycle.skip_reason || "";
+  return (
+    <div className="flex items-start gap-2 py-2 text-sm">
+      <Icon className={`size-4 mt-0.5 shrink-0 ${iconClass}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Badge variant="outline" className="text-xs capitalize">
+            {cycle.kind}
+          </Badge>
+          <Badge variant="outline" className="text-xs">
+            {cycle.manual ? "manual" : "scheduled"}
+          </Badge>
+          <Badge variant="outline" className="text-xs capitalize">
+            {cycle.status}
+          </Badge>
+          <span className="text-xs text-muted-foreground">
+            {formatTimestamp(cycle.started_at)}
+          </span>
+        </div>
+        <div className="mt-0.5">{summary}</div>
+        {detail && (
+          <div className="text-xs text-muted-foreground mt-0.5">{detail}</div>
+        )}
+      </div>
     </div>
   );
 }

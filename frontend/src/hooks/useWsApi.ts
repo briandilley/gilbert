@@ -56,7 +56,11 @@ import type {
   UsageDimensions,
   UsageQueryPayload,
 } from "@/types/usage";
-import type { Proposal, ProposalsListResult } from "@/types/proposals";
+import type {
+  Proposal,
+  ProposalsListResult,
+  ProposalsListCyclesResult,
+} from "@/types/proposals";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -807,6 +811,14 @@ export function useWsApi() {
       rpc<{ status: "started" | "already_running" | "disabled" }>({
         type: "proposals.trigger_reflection",
       }),
+
+    triggerProposalHarvest: () =>
+      rpc<{ status: "started" | "already_running" | "disabled" }>({
+        type: "proposals.trigger_harvest",
+      }),
+
+    listProposalCycles: (params?: { kind?: string; limit?: number }) =>
+      rpc<ProposalsListCyclesResult>({ type: "proposals.list_cycles", ...params }),
 
   }), [rpc, rpcWithRef]);
 }

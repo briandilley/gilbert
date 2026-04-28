@@ -33,13 +33,18 @@ from typing import Any
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole, StopReason
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import (
-    ConfigAction,
-    ConfigActionResult,
     ConfigParam,
     ConfigurationReader,
 )
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.proposals import (
+    CYCLE_KIND_HARVEST,
+    CYCLE_KIND_REFLECTION,
+    CYCLE_STATUS_ERROR,
+    CYCLE_STATUS_OK,
+    CYCLE_STATUS_RUNNING,
+    CYCLE_STATUS_SKIPPED,
+    CYCLES_COLLECTION,
     KIND_MODIFY_CORE,
     KIND_NEW_PLUGIN,
     OBSERVATION_SOURCES,
@@ -313,31 +318,6 @@ def _slugify(value: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _action_status_result(status: str, *, kind: str) -> ConfigActionResult:
-    """Map a background-job kickoff status to a ConfigActionResult toast."""
-    if status == "started":
-        return ConfigActionResult(
-            status="ok",
-            message=(
-                f"{kind} started — running in the background. New results "
-                "will appear here as they're produced."
-            ),
-        )
-    if status == "already_running":
-        return ConfigActionResult(
-            status="error",
-            message=f"{kind} is already running. Please wait for it to finish.",
-        )
-    if status == "disabled":
-        return ConfigActionResult(
-            status="error",
-            message=(
-                f"{kind} could not start — the proposals service is disabled."
-            ),
-        )
-    return ConfigActionResult(status="error", message=f"Unknown status: {status}")
 
 
 class ProposalsService(Service):
@@ -628,6 +608,17 @@ class ProposalsService(Service):
                     fields,
                     exc_info=True,
                 )
+        for fields in (["kind"], ["started_at"], ["status"]):
+            try:
+                await self._storage.ensure_index(
+                    IndexDefinition(collection=CYCLES_COLLECTION, fields=fields),
+                )
+            except Exception:
+                logger.debug(
+                    "Proposals: ensure_index(cycles,%s) failed",
+                    fields,
+                    exc_info=True,
+                )
 
     # ── Configurable protocol ────────────────────────────────────────
 
@@ -890,43 +881,6 @@ class ProposalsService(Service):
                 ),
             ),
         )
-
-    # ── ConfigActionProvider ─────────────────────────────────────────
-
-    def config_actions(self) -> list[ConfigAction]:
-        return [
-            ConfigAction(
-                key="trigger_reflection",
-                label="Run reflection now",
-                description=(
-                    "Manually run the reflection cycle. Bypasses the "
-                    "min-observations gate but still respects the "
-                    "max-pending-proposals cap."
-                ),
-            ),
-            ConfigAction(
-                key="trigger_harvest",
-                label="Run conversation harvest now",
-                description=(
-                    "Manually walk all conversations and extract "
-                    "observation candidates. Subject to the per-cycle "
-                    "conversation cap."
-                ),
-            ),
-        ]
-
-    async def invoke_config_action(
-        self,
-        key: str,
-        payload: dict[str, Any],
-    ) -> ConfigActionResult:
-        if key == "trigger_reflection":
-            status = self.start_reflection_in_background()
-            return _action_status_result(status, kind="Reflection")
-        if key == "trigger_harvest":
-            status = self.start_harvest_in_background()
-            return _action_status_result(status, kind="Harvest")
-        return ConfigActionResult(status="error", message=f"Unknown action: {key}")
 
     # ── Observation ──────────────────────────────────────────────────
 
@@ -1237,23 +1191,50 @@ class ProposalsService(Service):
             return 0
 
         self._reflection_running = True
+        cycle_id = uuid.uuid4().hex
+        cycle_record = await self._start_cycle_record(
+            cycle_id=cycle_id,
+            kind=CYCLE_KIND_REFLECTION,
+            manual=manual,
+        )
         created = 0
         considered = 0
         try:
-            created, considered = await self._run_reflection_inner(manual=manual)
+            created, considered = await self._run_reflection_inner(
+                manual=manual,
+                cycle_record=cycle_record,
+                cycle_id=cycle_id,
+            )
             return created
+        except Exception as exc:
+            cycle_record["status"] = CYCLE_STATUS_ERROR
+            cycle_record["error"] = str(exc)[:500]
+            raise
         finally:
             self._reflection_running = False
+            cycle_record.setdefault("proposals_created", created)
+            cycle_record.setdefault("observations_considered", considered)
+            if cycle_record.get("status") == CYCLE_STATUS_RUNNING:
+                cycle_record["status"] = CYCLE_STATUS_OK
+            await self._finalize_cycle_record(cycle_record)
             await self._publish(
                 "proposal.reflection_completed",
                 {
+                    "cycle_id": cycle_id,
                     "created": created,
                     "observations_considered": considered,
                     "manual": manual,
+                    "status": cycle_record.get("status"),
                 },
             )
 
-    async def _run_reflection_inner(self, *, manual: bool) -> tuple[int, int]:
+    async def _run_reflection_inner(
+        self,
+        *,
+        manual: bool,
+        cycle_record: dict[str, Any],
+        cycle_id: str,
+    ) -> tuple[int, int]:
         """Returns (proposals_created, observations_considered)."""
         # Drain the buffer and prune old observations before counting,
         # so the gate sees an accurate "new since last cycle" number.
@@ -1267,6 +1248,11 @@ class ProposalsService(Service):
                 unconsumed,
                 self._min_observations_per_cycle,
             )
+            cycle_record["status"] = CYCLE_STATUS_SKIPPED
+            cycle_record["skip_reason"] = (
+                f"min_observations_per_cycle gate "
+                f"({unconsumed}/{self._min_observations_per_cycle})"
+            )
             return 0, 0
 
         pending_count = await self._count_pending_proposals()
@@ -1276,6 +1262,11 @@ class ProposalsService(Service):
                 pending_count,
                 self._max_pending_proposals,
             )
+            cycle_record["status"] = CYCLE_STATUS_SKIPPED
+            cycle_record["skip_reason"] = (
+                f"max_pending_proposals reached "
+                f"({pending_count}/{self._max_pending_proposals})"
+            )
             return 0, 0
 
         ai_svc: Any = (
@@ -1283,12 +1274,13 @@ class ProposalsService(Service):
         )
         if not isinstance(ai_svc, AISamplingProvider):
             logger.warning("Proposals: reflection skipped — no AI service available")
+            cycle_record["status"] = CYCLE_STATUS_SKIPPED
+            cycle_record["skip_reason"] = "no AI service available"
             return 0, 0
 
         # Pull the observations we'll cite, build the prompt, then call.
         observations = await self._load_unconsumed_observations()
         user_prompt = await self._build_reflection_user_prompt(observations)
-        cycle_id = uuid.uuid4().hex
 
         # Source-inspection tools are ALWAYS injected here, regardless
         # of the inspector service's user-facing enabled flag. The
@@ -1355,8 +1347,11 @@ class ProposalsService(Service):
                 last = messages[-1] if messages else None
                 if last is not None and last.role == MessageRole.ASSISTANT:
                     text = (last.content or "").strip()
-        except Exception:
+        except Exception as exc:
             logger.exception("Proposals: AI call failed during reflection")
+            cycle_record["status"] = CYCLE_STATUS_ERROR
+            cycle_record["error"] = str(exc)[:500]
+            cycle_record["observations_considered"] = len(observations)
             return 0, len(observations)
 
         proposals = self._parse_proposals_response(text)
@@ -1369,6 +1364,8 @@ class ProposalsService(Service):
 
         if not proposals:
             logger.info("Proposals: AI returned no proposals (cycle=%s)", cycle_id)
+            cycle_record["observations_considered"] = len(observations)
+            cycle_record["proposals_created"] = 0
             return 0, len(observations)
 
         # Cap to per-cycle ceiling and pending budget.
@@ -1392,6 +1389,8 @@ class ProposalsService(Service):
             created,
             len(observations),
         )
+        cycle_record["observations_considered"] = len(observations)
+        cycle_record["proposals_created"] = created
         return created, len(observations)
 
     async def _publish(self, event_type: str, data: dict[str, Any]) -> None:
@@ -1404,6 +1403,58 @@ class ProposalsService(Service):
             )
         except Exception:
             logger.debug("Proposals: publish %s failed", event_type, exc_info=True)
+
+    async def _start_cycle_record(
+        self,
+        *,
+        cycle_id: str,
+        kind: str,
+        manual: bool,
+    ) -> dict[str, Any]:
+        """Persist a "running" cycle row so the UI can show it live.
+
+        Returns the row dict (caller mutates it before
+        ``_finalize_cycle_record`` writes the final state).
+        """
+        record: dict[str, Any] = {
+            "_id": cycle_id,
+            "id": cycle_id,
+            "kind": kind,
+            "manual": bool(manual),
+            "status": CYCLE_STATUS_RUNNING,
+            "started_at": _now_iso(),
+            "ended_at": "",
+            "skip_reason": "",
+            "error": "",
+            "observations_considered": 0,
+            "proposals_created": 0,
+            "conversations_processed": 0,
+            "observations_extracted": 0,
+        }
+        if self._storage is not None:
+            try:
+                await self._storage.put(CYCLES_COLLECTION, cycle_id, record)
+            except Exception:
+                logger.debug(
+                    "Proposals: cycle start put(%s) failed",
+                    cycle_id,
+                    exc_info=True,
+                )
+        return record
+
+    async def _finalize_cycle_record(self, record: dict[str, Any]) -> None:
+        """Write the cycle's final state to the entity store."""
+        if self._storage is None:
+            return
+        record["ended_at"] = _now_iso()
+        try:
+            await self._storage.put(CYCLES_COLLECTION, record["_id"], record)
+        except Exception:
+            logger.debug(
+                "Proposals: cycle finalize put(%s) failed",
+                record.get("_id"),
+                exc_info=True,
+            )
 
     async def _load_unconsumed_observations(self) -> list[dict[str, Any]]:
         """Return the observations the upcoming cycle will reason over."""
@@ -1743,6 +1794,31 @@ class ProposalsService(Service):
             logger.exception("Proposals: get(%s) failed", proposal_id)
             return None
 
+    async def list_cycles(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return cycle run summaries, newest first."""
+        if self._storage is None:
+            return []
+        filters: list[Filter] = []
+        if kind:
+            filters.append(Filter(field="kind", op=FilterOp.EQ, value=kind))
+        try:
+            return await self._storage.query(
+                Query(
+                    collection=CYCLES_COLLECTION,
+                    filters=filters,
+                    sort=[SortField(field="started_at", descending=True)],
+                    limit=limit,
+                ),
+            )
+        except Exception:
+            logger.exception("Proposals: list_cycles query failed")
+            return []
+
     async def _count_pending_proposals(self) -> int:
         if self._storage is None:
             return 0
@@ -1846,13 +1922,13 @@ class ProposalsService(Service):
         except Exception:
             logger.exception("Proposals: harvest cycle raised")
 
-    async def trigger_harvest(self) -> int:
+    async def trigger_harvest(self, *, manual: bool = True) -> int:
         """Run the conversation harvest now (synchronous — for tests).
 
         WS callers should prefer ``start_harvest_in_background`` so the
         request doesn't block on per-conversation AI calls.
         """
-        return await self._run_harvest()
+        return await self._run_harvest(manual=manual)
 
     def start_harvest_in_background(self) -> str:
         """Kick off a harvest as a background task. See start_reflection_in_background."""
@@ -1861,18 +1937,18 @@ class ProposalsService(Service):
         if self._harvest_running:
             return "already_running"
         self._spawn_background(
-            self._run_harvest_safe(),
+            self._run_harvest_safe(manual=True),
             label="proposals.harvest.manual",
         )
         return "started"
 
-    async def _run_harvest_safe(self) -> None:
+    async def _run_harvest_safe(self, *, manual: bool) -> None:
         try:
-            await self._run_harvest()
+            await self._run_harvest(manual=manual)
         except Exception:
             logger.exception("Proposals: background harvest raised")
 
-    async def _run_harvest(self) -> int:
+    async def _run_harvest(self, *, manual: bool = False) -> int:
         """Walk conversations and extract observations from each.
 
         - Pulls all conversations (capped per-cycle).
@@ -1894,12 +1970,33 @@ class ProposalsService(Service):
             logger.info("Proposals: harvest skipped — already running")
             return 0
         self._harvest_running = True
+        cycle_id = uuid.uuid4().hex
+        cycle_record = await self._start_cycle_record(
+            cycle_id=cycle_id,
+            kind=CYCLE_KIND_HARVEST,
+            manual=manual,
+        )
+        created = 0
+        processed = 0
         try:
-            return await self._run_harvest_inner()
+            created, processed = await self._run_harvest_inner(cycle_record=cycle_record)
+            return created
+        except Exception as exc:
+            cycle_record["status"] = CYCLE_STATUS_ERROR
+            cycle_record["error"] = str(exc)[:500]
+            raise
         finally:
             self._harvest_running = False
+            cycle_record["conversations_processed"] = processed
+            cycle_record["observations_extracted"] = created
+            if cycle_record.get("status") == CYCLE_STATUS_RUNNING:
+                cycle_record["status"] = CYCLE_STATUS_OK
+            await self._finalize_cycle_record(cycle_record)
 
-    async def _run_harvest_inner(self) -> int:
+    async def _run_harvest_inner(
+        self, *, cycle_record: dict[str, Any]
+    ) -> tuple[int, int]:
+        """Returns (observations_extracted, conversations_processed)."""
         ai_svc: Any = (
             self._resolver.get_capability("ai_chat")
             if self._resolver is not None
@@ -1907,7 +2004,9 @@ class ProposalsService(Service):
         )
         if not isinstance(ai_svc, AISamplingProvider):
             logger.warning("Proposals: harvest skipped — no AI service available")
-            return 0
+            cycle_record["status"] = CYCLE_STATUS_SKIPPED
+            cycle_record["skip_reason"] = "no AI service available"
+            return 0, 0
 
         try:
             convs = await self._storage.query(  # type: ignore[union-attr]
@@ -1917,9 +2016,11 @@ class ProposalsService(Service):
                     limit=self._harvest_max_conversations_per_cycle * 4,
                 ),
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Proposals: harvest conversation query failed")
-            return 0
+            cycle_record["status"] = CYCLE_STATUS_ERROR
+            cycle_record["error"] = str(exc)[:500]
+            return 0, 0
 
         now = datetime.now(UTC)
         threshold = now - timedelta(seconds=self._abandonment_threshold_seconds)
@@ -1958,7 +2059,7 @@ class ProposalsService(Service):
             "proposal.harvest_completed",
             {"processed": processed, "observations_recorded": created},
         )
-        return created
+        return created, processed
 
     @staticmethod
     def _is_recent(conv: dict[str, Any], threshold: datetime) -> bool:
@@ -2279,6 +2380,8 @@ class ProposalsService(Service):
             "proposals.add_note": self._ws_add_note,
             "proposals.delete": self._ws_delete,
             "proposals.trigger_reflection": self._ws_trigger_reflection,
+            "proposals.trigger_harvest": self._ws_trigger_harvest,
+            "proposals.list_cycles": self._ws_list_cycles,
         }
 
     @staticmethod
@@ -2399,4 +2502,29 @@ class ProposalsService(Service):
             "type": "proposals.trigger_reflection.result",
             "ref": frame.get("id"),
             "status": status,
+        }
+
+    async def _ws_trigger_harvest(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if (err := require_admin(conn, frame)) is not None:
+            return err
+        status = self.start_harvest_in_background()
+        return {
+            "type": "proposals.trigger_harvest.result",
+            "ref": frame.get("id"),
+            "status": status,
+        }
+
+    async def _ws_list_cycles(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if (err := require_admin(conn, frame)) is not None:
+            return err
+        kind = frame.get("kind") or None
+        try:
+            limit = max(1, min(200, int(frame.get("limit", 50))))
+        except (TypeError, ValueError):
+            limit = 50
+        cycles = await self.list_cycles(kind=kind, limit=limit)
+        return {
+            "type": "proposals.list_cycles.result",
+            "ref": frame.get("id"),
+            "cycles": cycles,
         }

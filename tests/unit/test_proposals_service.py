@@ -13,6 +13,12 @@ from gilbert.core.services.proposals import ProposalsService
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.proposals import (
+    CYCLE_KIND_HARVEST,
+    CYCLE_KIND_REFLECTION,
+    CYCLE_STATUS_ERROR,
+    CYCLE_STATUS_OK,
+    CYCLE_STATUS_SKIPPED,
+    CYCLES_COLLECTION,
     OBSERVATIONS_COLLECTION,
     PROPOSALS_COLLECTION,
     SOURCE_AI_TOOL,
@@ -1197,3 +1203,207 @@ class _FakeConn:
 
 def _fake_conn(user_level: int = 0) -> _FakeConn:
     return _FakeConn(user_level=user_level)
+
+
+# ── New: cycle persistence + new RPC handlers ────────────────────────
+
+
+class TestConfigActionsRemoved:
+    def test_no_trigger_actions_in_settings(self) -> None:
+        # Settings page used to expose the Reflect / Harvest buttons
+        # via ConfigAction. Those are gone now (they live on /proposals).
+        svc = ProposalsService()
+        assert not hasattr(svc, "config_actions") or svc.config_actions() == []
+
+
+class TestCyclePersistence:
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_records_ok(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        ai_payload = json.dumps({"proposals": [_valid_proposal_blob("X")]})
+        resolver.caps["ai_chat"] = FakeAI(content=ai_payload)
+        svc = ProposalsService()
+        await svc.start(resolver)
+
+        await svc.trigger_reflection()
+
+        cycles = await fake_storage.query(Query(collection=CYCLES_COLLECTION))
+        assert len(cycles) == 1
+        c = cycles[0]
+        assert c["kind"] == CYCLE_KIND_REFLECTION
+        assert c["status"] == CYCLE_STATUS_OK
+        assert c["manual"] is True
+        assert c["proposals_created"] == 1
+        assert c["started_at"] and c["ended_at"]
+
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_records_skipped_on_pending_cap(
+        self,
+        resolver: FakeResolver,
+        fake_storage: FakeStorage,
+    ) -> None:
+        svc = ProposalsService()
+        await svc.start(resolver)
+        for i in range(svc._max_pending_proposals):
+            await fake_storage.put(
+                PROPOSALS_COLLECTION,
+                f"p{i}",
+                {"_id": f"p{i}", "status": STATUS_PROPOSED, "kind": "new_plugin"},
+            )
+        await svc.trigger_reflection()
+
+        cycles = await fake_storage.query(Query(collection=CYCLES_COLLECTION))
+        assert len(cycles) == 1
+        assert cycles[0]["status"] == CYCLE_STATUS_SKIPPED
+        assert "max_pending_proposals" in cycles[0]["skip_reason"]
+
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_records_error(
+        self, resolver: FakeResolver, fake_storage: FakeStorage
+    ) -> None:
+        class BoomAI:
+            def has_profile(self, name: str) -> bool:
+                return True
+
+            async def complete_one_shot(self, **kwargs: Any) -> Any:
+                raise RuntimeError("boom")
+
+        resolver.caps["ai_chat"] = BoomAI()
+        svc = ProposalsService()
+        await svc.start(resolver)
+        await svc.trigger_reflection()
+
+        cycles = await fake_storage.query(Query(collection=CYCLES_COLLECTION))
+        assert len(cycles) == 1
+        # The AI exception is caught inside _run_reflection_inner so
+        # the run finishes as ok-with-zero-results... wait, no — we
+        # explicitly stamp status=error in that path.
+        assert cycles[0]["status"] == CYCLE_STATUS_ERROR
+        assert "boom" in cycles[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_harvest_cycle_records_when_skipped_no_ai(
+        self, fake_storage: FakeStorage, fake_bus: FakeBus, fake_scheduler: FakeScheduler
+    ) -> None:
+        # Resolver without ai_chat — harvest should record skipped.
+        r = FakeResolver()
+        r.caps["entity_storage"] = FakeStorageProvider(fake_storage)
+        r.caps["event_bus"] = FakeBusProvider(fake_bus)
+        r.caps["scheduler"] = fake_scheduler
+        svc = ProposalsService()
+        await svc.start(r)
+
+        # Seed a conversation so the harvest at least gets to the
+        # ai_svc check.
+        await fake_storage.put(
+            "ai_conversations",
+            "c1",
+            {
+                "_id": "c1",
+                "messages": [{"role": "user", "content": "hi"}],
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        await svc.trigger_harvest()
+
+        cycles = await fake_storage.query(Query(collection=CYCLES_COLLECTION))
+        harvest_cycles = [c for c in cycles if c["kind"] == CYCLE_KIND_HARVEST]
+        assert len(harvest_cycles) == 1
+        assert harvest_cycles[0]["status"] == CYCLE_STATUS_SKIPPED
+        assert harvest_cycles[0]["skip_reason"] == "no AI service available"
+
+
+class TestNewWsHandlers:
+    @pytest.mark.asyncio
+    async def test_list_cycles_returns_persisted(
+        self,
+        started_service: ProposalsService,
+        fake_storage: FakeStorage,
+    ) -> None:
+        # Seed two cycle rows manually so we don't depend on a full
+        # reflection run.
+        for i, kind in enumerate([CYCLE_KIND_REFLECTION, CYCLE_KIND_HARVEST]):
+            await fake_storage.put(
+                CYCLES_COLLECTION,
+                f"c{i}",
+                {
+                    "_id": f"c{i}",
+                    "id": f"c{i}",
+                    "kind": kind,
+                    "manual": True,
+                    "status": CYCLE_STATUS_OK,
+                    "started_at": f"2026-04-2{i + 5}T10:00:00+00:00",
+                    "ended_at": f"2026-04-2{i + 5}T10:01:00+00:00",
+                    "skip_reason": "",
+                    "error": "",
+                    "observations_considered": i,
+                    "proposals_created": i,
+                    "conversations_processed": 0,
+                    "observations_extracted": 0,
+                },
+            )
+        admin = _fake_conn(user_level=0)
+        result = await started_service._ws_list_cycles(admin, {"id": "f1"})
+        assert result["type"] == "proposals.list_cycles.result"
+        assert len(result["cycles"]) == 2
+        # Newest first.
+        assert result["cycles"][0]["kind"] == CYCLE_KIND_HARVEST
+
+    @pytest.mark.asyncio
+    async def test_list_cycles_filters_by_kind(
+        self,
+        started_service: ProposalsService,
+        fake_storage: FakeStorage,
+    ) -> None:
+        for i, kind in enumerate([CYCLE_KIND_REFLECTION, CYCLE_KIND_HARVEST]):
+            await fake_storage.put(
+                CYCLES_COLLECTION,
+                f"c{i}",
+                {
+                    "_id": f"c{i}",
+                    "kind": kind,
+                    "status": CYCLE_STATUS_OK,
+                    "started_at": f"2026-04-2{i + 5}T10:00:00+00:00",
+                    "manual": False,
+                    "skip_reason": "",
+                    "error": "",
+                },
+            )
+        admin = _fake_conn(user_level=0)
+        result = await started_service._ws_list_cycles(
+            admin, {"id": "f1", "kind": CYCLE_KIND_REFLECTION}
+        )
+        assert len(result["cycles"]) == 1
+        assert result["cycles"][0]["kind"] == CYCLE_KIND_REFLECTION
+
+    @pytest.mark.asyncio
+    async def test_list_cycles_blocks_non_admin(
+        self, started_service: ProposalsService
+    ) -> None:
+        non_admin = _fake_conn(user_level=100)
+        result = await started_service._ws_list_cycles(non_admin, {"id": "f1"})
+        assert result["type"] == "gilbert.error"
+        assert result["code"] == 403
+
+    @pytest.mark.asyncio
+    async def test_trigger_harvest_returns_started(
+        self, resolver: FakeResolver
+    ) -> None:
+        svc = ProposalsService()
+        await svc.start(resolver)
+        admin = _fake_conn(user_level=0)
+        result = await svc._ws_trigger_harvest(admin, {"id": "f1"})
+        assert result["type"] == "proposals.trigger_harvest.result"
+        assert result["status"] == "started"
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_trigger_harvest_blocks_non_admin(
+        self, started_service: ProposalsService
+    ) -> None:
+        non_admin = _fake_conn(user_level=100)
+        result = await started_service._ws_trigger_harvest(non_admin, {"id": "f1"})
+        assert result["type"] == "gilbert.error"
+        assert result["code"] == 403
