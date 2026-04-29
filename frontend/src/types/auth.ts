@@ -4,6 +4,7 @@ export interface User {
   display_name: string;
   roles: string[];
   provider: string;
+  has_password: boolean;
 }
 
 export interface LoginMethod {

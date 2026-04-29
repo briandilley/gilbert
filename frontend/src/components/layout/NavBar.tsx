@@ -9,6 +9,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -95,6 +96,7 @@ export function NavBar() {
   const { connected } = useWebSocket();
   const api = useWsApi();
   const location = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
@@ -207,6 +209,10 @@ export function NavBar() {
                   {user?.email}
                 </div>
               </div>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => navigate("/account")}>
+                Account settings
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={logout}>Log out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

@@ -22,3 +22,20 @@ export async function loginLocal(
 export async function logout(): Promise<void> {
   await fetch("/auth/logout", { method: "POST" });
 }
+
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  await apiFetch<void>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({
+      old_password: oldPassword,
+      new_password: newPassword,
+    }),
+  });
+}
+
+export async function revokeAllSessions(): Promise<void> {
+  await apiFetch<void>("/auth/sessions/revoke-all", { method: "POST" });
+}

@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse, RedirectResponse
 
 from gilbert.core.app import Gilbert
 from gilbert.interfaces.auth import OAuthLoginBackend, UserContext
-from gilbert.web.auth import get_user_context
+from gilbert.web.auth import get_user_context, require_authenticated
 
 logger = logging.getLogger(__name__)
 
@@ -238,14 +238,82 @@ async def logout(
 
 
 @router.get("/me")
-async def me(user: UserContext = Depends(get_user_context)) -> dict[str, Any]:  # noqa: B008
+async def me(
+    request: Request,
+    user: UserContext = Depends(get_user_context),  # noqa: B008
+) -> dict[str, Any]:
+    # ``has_password`` lets the account page decide whether to show a
+    # "Change password" form. SYSTEM/GUEST never have one.
+    has_password = False
+    if user.user_id not in ("system", "guest"):
+        try:
+            auth_svc = _get_auth_service(request)
+        except HTTPException:
+            auth_svc = None
+        if auth_svc is not None:
+            has_password = await auth_svc.user_has_password(user.user_id)
     return {
         "user_id": user.user_id,
         "email": user.email,
         "display_name": user.display_name,
         "roles": sorted(user.roles),
         "provider": user.provider,
+        "has_password": has_password,
     }
+
+
+# ---- Account self-service (require an authenticated user) ----
+
+
+@router.post("/password")
+async def change_password(
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> Response:
+    """Change the calling user's password.
+
+    Verifies the old password, writes a new argon2 hash to the user
+    entity, and invalidates every other session for the user — the
+    caller's current session stays alive so they don't get bounced
+    to the login page mid-form.
+    """
+    auth_svc = _get_auth_service(request)
+    body = await request.json()
+    old_password = body.get("old_password", "")
+    new_password = body.get("new_password", "")
+    if not old_password or not new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Both old_password and new_password are required.",
+        )
+    try:
+        await auth_svc.change_password(
+            user.user_id,
+            old_password,
+            new_password,
+            keep_session_id=user.session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(status_code=204)
+
+
+@router.post("/sessions/revoke-all")
+async def revoke_all_sessions(
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> Response:
+    """Revoke every session for the calling user, including this one.
+
+    The SPA should treat the 204 as "you've been signed out" and
+    redirect to ``/auth/login``; the cookie is cleared here so the
+    next request lands as an unauthenticated visitor.
+    """
+    auth_svc = _get_auth_service(request)
+    await auth_svc.revoke_user_sessions(user.user_id)
+    response = Response(status_code=204)
+    response.delete_cookie("gilbert_session")
+    return response
 
 
 # ---- Helpers ----

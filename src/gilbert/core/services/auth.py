@@ -26,7 +26,13 @@ from gilbert.interfaces.configuration import (
     ConfigParam,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.storage import StorageBackend
+from gilbert.interfaces.storage import (
+    Filter,
+    FilterOp,
+    IndexDefinition,
+    Query,
+    StorageBackend,
+)
 from gilbert.interfaces.tools import ToolParameterType
 
 # Name of the built-in local auth backend — always enabled, no toggle,
@@ -80,6 +86,13 @@ class AuthService(Service):
             raise RuntimeError("entity_storage capability does not provide StorageProvider")
         self._storage = storage_svc.backend
         self._resolver = resolver
+
+        # ``revoke_user_sessions`` and "list this user's sessions" both
+        # filter on ``user_id`` — without an index that's a full scan
+        # of every active session.
+        await self._storage.ensure_index(
+            IndexDefinition(collection=_SESSIONS, fields=["user_id"])
+        )
 
         # Register local auth backend (bundled with core).
         # Other auth backends register themselves via plugins.
@@ -455,3 +468,99 @@ class AuthService(Service):
     async def invalidate_session(self, session_id: str) -> None:
         if self._storage is not None:
             await self._storage.delete(_SESSIONS, session_id)
+
+    async def revoke_user_sessions(
+        self, user_id: str, except_session_id: str | None = None
+    ) -> int:
+        """Delete every active session for ``user_id``.
+
+        Pass ``except_session_id`` to keep one session alive — used by
+        ``change_password`` so the caller stays logged in on the
+        device they just changed the password from.
+
+        Returns the number of sessions revoked.
+        """
+        if self._storage is None or not user_id:
+            return 0
+        sessions = await self._storage.query(
+            Query(
+                collection=_SESSIONS,
+                filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
+            )
+        )
+        revoked = 0
+        for s in sessions:
+            sid = s.get("_id")
+            if not sid or sid == except_session_id:
+                continue
+            await self._storage.delete(_SESSIONS, sid)
+            revoked += 1
+        return revoked
+
+    async def change_password(
+        self,
+        user_id: str,
+        old_password: str,
+        new_password: str,
+        keep_session_id: str | None = None,
+    ) -> None:
+        """Change a local user's password after verifying the old one.
+
+        Only works for users who already have a ``password_hash`` —
+        i.e., users created or seeded with local-auth credentials.
+        Users authenticated solely through an external provider (e.g.
+        Google) get a clear error and must set up a password through
+        an admin reset first.
+
+        On success, every session for the user is invalidated except
+        ``keep_session_id`` (typically the caller's current session).
+
+        Raises ``ValueError`` with a user-safe message on any failure.
+        """
+        from gilbert.interfaces.auth import UserBackendAware
+
+        if not new_password or len(new_password) < 8:
+            raise ValueError("New password must be at least 8 characters.")
+
+        local = self._backends.get(_LOCAL_BACKEND)
+        if local is None or not isinstance(local, UserBackendAware):
+            raise ValueError("Local authentication is not available.")
+
+        backend = self._user_service.backend
+        user = await backend.get_user(user_id)
+        if user is None:
+            raise ValueError("User not found.")
+
+        stored_hash = user.get("password_hash", "")
+        if not stored_hash:
+            raise ValueError(
+                "This account has no password set — sign in with the "
+                "external provider you originally used, or ask an admin "
+                "to set an initial password."
+            )
+
+        # ``hash_password`` and ``_verify_password`` live on the local
+        # backend; reach through the runtime instance rather than
+        # re-importing the class so a future swap of the local backend
+        # implementation still works.
+        if not local._verify_password(stored_hash, old_password):  # type: ignore[attr-defined]
+            raise ValueError("Current password is incorrect.")
+
+        new_hash = local.hash_password(new_password)  # type: ignore[attr-defined]
+        await backend.update_user(user_id, {"password_hash": new_hash})
+
+        await self.revoke_user_sessions(user_id, except_session_id=keep_session_id)
+        logger.info("Password changed for user %s", user_id)
+
+    async def user_has_password(self, user_id: str) -> bool:
+        """True if ``user_id`` has a local password set.
+
+        Used by ``/auth/me`` so the SPA can decide whether to surface
+        a "Change password" form for the current user.
+        """
+        if not user_id or self._user_service is None:
+            return False
+        user = await self._user_service.backend.get_user(user_id)
+        if user is None:
+            return False
+        return bool(user.get("password_hash"))

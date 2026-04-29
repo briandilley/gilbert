@@ -326,3 +326,166 @@ async def test_on_config_changed_ignores_unrelated_keys(auth_service: AuthServic
     await auth_service.on_config_changed({"allow_guests": False})
     await auth_service.on_config_changed({"session_ttl_seconds": 1234})
     assert auth_service.is_guest_allowed() is False
+
+
+# --- revoke_user_sessions / change_password / user_has_password ----
+
+
+async def _seed_local_user(
+    auth_svc: AuthService,
+    user_service: UserService,
+    user_id: str = "u1",
+    email: str = "alice@example.com",
+    password: str = "correct horse battery staple",
+) -> None:
+    """Create a user with a real argon2 password_hash via the local backend.
+
+    A unique ``username`` is required: ``users.username`` is a UNIQUE
+    index and SQLite's ``INSERT OR REPLACE`` semantics mean two rows
+    with the same (empty) username silently overwrite each other.
+    """
+    from gilbert.integrations.local_auth import LocalAuthBackend
+
+    local = auth_svc._backends["local"]
+    assert isinstance(local, LocalAuthBackend)
+    await user_service.create_user(
+        user_id,
+        {
+            "username": user_id,
+            "email": email,
+            "display_name": "Alice",
+            "password_hash": local.hash_password(password),
+        },
+    )
+
+
+async def test_revoke_user_sessions_deletes_all(
+    auth_service_with_provider: AuthService, user_service: UserService
+) -> None:
+    """All sessions for a user are gone after revoke_user_sessions."""
+    a = await auth_service_with_provider.authenticate("stub", {"email": "test@example.com"})
+    b = await auth_service_with_provider.authenticate("stub", {"email": "test@example.com"})
+    assert a and b and a.session_id and b.session_id and a.session_id != b.session_id
+
+    revoked = await auth_service_with_provider.revoke_user_sessions(a.user_id)
+    assert revoked == 2
+    assert await auth_service_with_provider.validate_session(a.session_id) is None
+    assert await auth_service_with_provider.validate_session(b.session_id) is None
+
+
+async def test_revoke_user_sessions_keeps_excepted(
+    auth_service_with_provider: AuthService,
+) -> None:
+    """except_session_id is preserved so a 'change-password' caller
+    isn't bounced from the device they just used to update it."""
+    a = await auth_service_with_provider.authenticate("stub", {"email": "test@example.com"})
+    b = await auth_service_with_provider.authenticate("stub", {"email": "test@example.com"})
+    assert a and b and a.session_id and b.session_id
+
+    revoked = await auth_service_with_provider.revoke_user_sessions(
+        a.user_id, except_session_id=a.session_id
+    )
+    assert revoked == 1
+    assert await auth_service_with_provider.validate_session(a.session_id) is not None
+    assert await auth_service_with_provider.validate_session(b.session_id) is None
+
+
+async def test_revoke_user_sessions_other_users_untouched(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    """Revoking sessions for one user must not affect anyone else."""
+    await user_service.create_user("u_mine", {"email": "mine@example.com"})
+    await user_service.create_user("u_other", {"email": "other@example.com"})
+    mine = await auth_service._create_session("u_mine", "local")
+    other = await auth_service._create_session("u_other", "local")
+
+    revoked = await auth_service.revoke_user_sessions("u_mine")
+    assert revoked == 1
+    assert await auth_service.validate_session(mine) is None
+    assert await auth_service.validate_session(other) is not None
+
+
+async def test_change_password_success(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    """Happy path: old password verifies, new password takes effect."""
+    await _seed_local_user(auth_service, user_service, password="oldpass12")
+
+    await auth_service.change_password("u1", "oldpass12", "newpass12345")
+
+    info = await auth_service._backends["local"].authenticate(  # type: ignore[attr-defined]
+        {"email": "alice@example.com", "password": "newpass12345"}
+    )
+    assert info is not None
+    bad = await auth_service._backends["local"].authenticate(  # type: ignore[attr-defined]
+        {"email": "alice@example.com", "password": "oldpass12"}
+    )
+    assert bad is None
+
+
+async def test_change_password_wrong_old(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    await _seed_local_user(auth_service, user_service, password="oldpass12")
+
+    with pytest.raises(ValueError, match="incorrect"):
+        await auth_service.change_password("u1", "WRONG", "newpass12345")
+
+
+async def test_change_password_too_short(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    """Length check runs BEFORE password verification so we don't
+    waste an argon2 verify on something we'd reject anyway."""
+    await _seed_local_user(auth_service, user_service, password="oldpass12")
+
+    with pytest.raises(ValueError, match="at least 8"):
+        await auth_service.change_password("u1", "oldpass12", "short")
+
+
+async def test_change_password_no_existing_hash(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    """A user with no password_hash (e.g. OAuth-only) gets a clear
+    error rather than a silent 'wrong old password'."""
+    await user_service.create_user(
+        "oauth_user",
+        {"email": "oauth@example.com", "display_name": "OAuth"},
+    )
+
+    with pytest.raises(ValueError, match="no password set"):
+        await auth_service.change_password("oauth_user", "anything", "newpass12345")
+
+
+async def test_change_password_revokes_other_sessions(
+    auth_service_with_provider: AuthService, user_service: UserService
+) -> None:
+    """Changing the password kills every other session — the device
+    you changed it from stays signed in via keep_session_id."""
+    await _seed_local_user(
+        auth_service_with_provider, user_service, user_id="u1", password="oldpass12"
+    )
+    s1 = await auth_service_with_provider._create_session("u1", "local")
+    s2 = await auth_service_with_provider._create_session("u1", "local")
+
+    await auth_service_with_provider.change_password(
+        "u1", "oldpass12", "newpass12345", keep_session_id=s1
+    )
+
+    assert await auth_service_with_provider.validate_session(s1) is not None
+    assert await auth_service_with_provider.validate_session(s2) is None
+
+
+async def test_user_has_password(
+    auth_service: AuthService, user_service: UserService
+) -> None:
+    await _seed_local_user(auth_service, user_service, user_id="u1", password="x" * 12)
+    await user_service.create_user(
+        "u2",
+        {"username": "u2", "email": "no-pw@example.com", "display_name": "No Password"},
+    )
+
+    assert await auth_service.user_has_password("u1") is True
+    assert await auth_service.user_has_password("u2") is False
+    assert await auth_service.user_has_password("nonexistent") is False
+    assert await auth_service.user_has_password("") is False

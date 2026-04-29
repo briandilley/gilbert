@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 import { LoginPage } from "@/components/auth/LoginPage";
+import { AccountPage } from "@/components/account/AccountPage";
 import { DashboardPage } from "@/components/dashboard/DashboardPage";
 import { ChatPage } from "@/components/chat/ChatPage";
 import { DocumentsPage } from "@/components/documents/DocumentsPage";
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/system" element={<SystemPage />} />
           <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />
+          <Route path="/account" element={<AccountPage />} />
         </Route>
       </Route>
     </Routes>
