@@ -151,6 +151,11 @@ class UserMemoryService(Service):
         self._user_svc: Any = None  # UserService (optional, for self-opt-out)
         self._unsubscribe_archiving: Any = None
 
+        # Fire-and-forget tasks spawned from event handlers. Tracking
+        # them avoids the GC-cancels-an-unreferenced-task gotcha and
+        # gives ``stop()`` a chance to drain them on shutdown.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
         # Per-user lock so concurrent synthesises don't race on the
         # same memory list. Created lazily on first use.
         self._user_locks: dict[str, asyncio.Lock] = {}
@@ -240,6 +245,40 @@ class UserMemoryService(Service):
                 self._scheduler.remove_job(_SWEEP_JOB_NAME)
             except Exception:
                 pass
+        # Drain in-flight synthesises briefly, then cancel anything
+        # still running so shutdown isn't held up by a slow AI call.
+        if self._background_tasks:
+            pending = list(self._background_tasks)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+        self._background_tasks.clear()
+
+    def _spawn_background(self, coro: Any, *, label: str) -> None:
+        """Schedule a fire-and-forget task and track it for cleanup.
+
+        Used by event handlers that MUST NOT block their publisher —
+        ``EventBus.publish`` awaits every subscriber via ``gather``, so a
+        synchronous-await on a multi-second AI call inside the handler
+        would block the chat-delete RPC return. The task self-removes
+        from the tracking set when it finishes so the set stays small;
+        ``stop()`` drains anything still pending.
+        """
+        try:
+            task = asyncio.create_task(coro, name=label)
+        except RuntimeError:
+            # No running loop — coro can't run. Close it so we don't
+            # leak an unawaited-coroutine warning.
+            coro.close()
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # ── Configurable protocol ────────────────────────────────────
 
@@ -249,7 +288,10 @@ class UserMemoryService(Service):
 
     @property
     def config_category(self) -> str:
-        return "AI"
+        # Sits next to ``ai``, ``knowledge``, ``mcp``, ``vision``, etc.
+        # in the Settings UI — every other AI-adjacent service uses
+        # ``Intelligence``, not ``AI``.
+        return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
         return [
@@ -379,8 +421,15 @@ class UserMemoryService(Service):
     async def _on_chat_archiving(self, event: Event) -> None:
         """Handler for ``chat.conversation.archiving`` — payload still
         carries the full conversation snapshot (the row is deleted right
-        after this event fires), so we synthesize from the in-event copy
-        rather than re-fetching."""
+        after this event fires).
+
+        ``EventBus.publish`` awaits every handler via ``gather``, so the
+        whole delete RPC waits for whatever this returns. Synthesis is a
+        multi-second AI call, so we hand it off to a tracked background
+        task and return immediately — same pattern as
+        ``ProposalsService._spawn_background``. The chat row gets
+        deleted on schedule and synthesis runs on its own time.
+        """
         if not self._enabled:
             return
         conversation = event.data.get("conversation")
@@ -391,13 +440,23 @@ class UserMemoryService(Service):
         # graft it on for the gating code below.
         conversation = dict(conversation)
         conversation["_id"] = str(event.data.get("conversation_id") or "")
+        self._spawn_background(
+            self._safe_synthesize(conversation, source="delete"),
+            label=f"user_memory.synth.{conversation['_id']}",
+        )
+
+    async def _safe_synthesize(
+        self, conversation: dict[str, Any], source: str
+    ) -> None:
+        """Background-task wrapper around ``_maybe_synthesize`` — never
+        let synthesis errors escape the task and pollute the global
+        unhandled-exception logs."""
         try:
-            await self._maybe_synthesize(conversation, source="delete")
+            await self._maybe_synthesize(conversation, source=source)
         except Exception as exc:
-            # Never let memory synthesis break the deletion path. The
-            # event handler is fire-and-forget from the publisher's POV.
             logger.warning(
-                "user_memory: synthesis on delete failed for %s: %s",
+                "user_memory: synthesis (%s) failed for %s: %s",
+                source,
                 conversation.get("_id", "?"),
                 exc,
             )

@@ -14,8 +14,10 @@ from typing import Any
 
 import pytest
 
+from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.user_memory import UserMemoryService
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole, StopReason
+from gilbert.interfaces.events import Event
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
     StorageBackend,
@@ -508,3 +510,151 @@ async def test_synthesis_prompt_passed_through(memory_service) -> None:
     ai.queue('{"ops": []}')
     await svc._maybe_synthesize(_conv(), source="delete")
     assert ai.calls[0][0] == "CUSTOM PROMPT MARKER"
+
+
+# ── Non-blocking event handler ────────────────────────────────────
+
+
+class SlowAIService(Service):
+    """AIService stand-in whose synthesis call only finishes when a
+    test-controlled event is set. Used to prove the archiving handler
+    doesn't await the AI call inside the publisher's call frame."""
+
+    def __init__(self) -> None:
+        self.released = asyncio.Event()
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="ai", capabilities=frozenset({"ai_chat"}))
+
+    async def complete_one_shot(self, **kwargs: Any) -> AIResponse:
+        self.started.set()
+        await self.released.wait()
+        self.finished.set()
+        return AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content='{"ops": []}'),
+            model="test-model",
+            stop_reason=StopReason.END_TURN,
+            usage=None,
+        )
+
+
+class StubEventBusService(Service):
+    """EventBusProvider that wraps the in-memory bus."""
+
+    def __init__(self, bus: InMemoryEventBus) -> None:
+        self._bus = bus
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="event_bus", capabilities=frozenset({"event_bus"}))
+
+    @property
+    def bus(self) -> InMemoryEventBus:
+        return self._bus
+
+
+async def test_archiving_handler_is_non_blocking(
+    sqlite_storage: StorageBackend,
+) -> None:
+    """The chat.conversation.archiving handler MUST hand synthesis off
+    to a background task — ``EventBus.publish`` awaits every handler
+    via ``gather``, so a synchronous-await on a multi-second AI call
+    would block the chat-delete RPC. Regression check for that.
+    """
+    bus = InMemoryEventBus()
+    slow_ai = SlowAIService()
+    user_backend = StubUserBackend()
+    svc = UserMemoryService()
+    resolver = StubResolver(
+        {
+            "ai_chat": slow_ai,
+            "entity_storage": StubStorageService(sqlite_storage),
+            "event_bus": StubEventBusService(bus),
+            "users": StubUserService(user_backend),
+        }
+    )
+    await svc.start(resolver)
+
+    conversation = {
+        "user_id": "u1",
+        "messages": _conv()["messages"],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    # Publish — must return promptly even though the AI call hasn't released.
+    publish_done = asyncio.Event()
+
+    async def do_publish() -> None:
+        await bus.publish(
+            Event(
+                event_type="chat.conversation.archiving",
+                data={
+                    "conversation_id": "chat1",
+                    "owner_id": "u1",
+                    "conversation": conversation,
+                },
+            )
+        )
+        publish_done.set()
+
+    asyncio.create_task(do_publish())
+
+    # The proof is in the ordering: publish must return BEFORE the AI
+    # call finishes. We wait for both ``publish_done`` and ``started``
+    # (the AI call has begun) and then verify the AI call is still
+    # blocked. If the handler had awaited the AI call inline, publish
+    # would only complete after ``finished`` — we'd time out here.
+    await asyncio.wait_for(publish_done.wait(), timeout=1.0)
+    await asyncio.wait_for(slow_ai.started.wait(), timeout=1.0)
+    assert not slow_ai.finished.is_set(), (
+        "publish returned before synthesis blocked, but synthesis "
+        "completed too — the handler isn't using the background path"
+    )
+
+    # Release the AI and let the background task finish; ``stop`` will
+    # drain it.
+    slow_ai.released.set()
+    await asyncio.wait_for(slow_ai.finished.wait(), timeout=1.0)
+    await svc.stop()
+
+
+async def test_stop_drains_background_tasks(
+    sqlite_storage: StorageBackend,
+) -> None:
+    """``stop()`` must wait for in-flight background synthesises before
+    returning, so a quick shutdown doesn't strand half-applied ops."""
+    bus = InMemoryEventBus()
+    slow_ai = SlowAIService()
+    svc = UserMemoryService()
+    resolver = StubResolver(
+        {
+            "ai_chat": slow_ai,
+            "entity_storage": StubStorageService(sqlite_storage),
+            "event_bus": StubEventBusService(bus),
+            "users": StubUserService(StubUserBackend()),
+        }
+    )
+    await svc.start(resolver)
+
+    # Kick off a synthesis via a direct background spawn — same code
+    # path the event handler uses.
+    svc._spawn_background(
+        svc._safe_synthesize(
+            {
+                "_id": "chat1",
+                "user_id": "u1",
+                "messages": _conv()["messages"],
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            source="delete",
+        ),
+        label="test.synth",
+    )
+    await asyncio.wait_for(slow_ai.started.wait(), timeout=1.0)
+    assert len(svc._background_tasks) == 1
+
+    # Release immediately so stop's drain wins on the happy path.
+    slow_ai.released.set()
+    await svc.stop()
+    assert svc._background_tasks == set()

@@ -104,6 +104,11 @@ class NowPlaying:
     uri: str = ""
     duration_seconds: float = 0.0
     position_seconds: float = 0.0
+    #: Source descriptor when track-level metadata is missing — e.g.
+    #: ``"linein"``, ``"audioBroadcast"`` (radio), ``"airplay"``,
+    #: ``"playlist"``. Lets callers phrase a useful answer ("playing
+    #: from line-in") for sources that don't expose track info.
+    source: str = ""
 
 
 class SpeakerBackend(ABC):

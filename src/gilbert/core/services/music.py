@@ -132,6 +132,11 @@ def _now_playing_to_dict(np: NowPlaying) -> dict[str, Any]:
         "uri": np.uri,
         "duration_seconds": np.duration_seconds,
         "position_seconds": np.position_seconds,
+        # Source descriptor for non-track playback (e.g. ``"linein"``,
+        # ``"audioBroadcast"``). Empty for normal queued tracks. Lets
+        # the AI distinguish "Spotify is playing X" from "playing from
+        # line-in" instead of just seeing empty fields.
+        "source": np.source,
     }
 
 
