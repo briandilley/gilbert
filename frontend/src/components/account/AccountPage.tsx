@@ -1,7 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { changePassword, revokeAllSessions } from "@/api/auth";
+import {
+  type UserMemory,
+  clearMemories,
+  deleteMemory,
+  getMemoryOptOut,
+  listMemories,
+  setMemoryOptOut,
+} from "@/api/account";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -49,6 +57,8 @@ export function AccountPage() {
       </Card>
 
       {user?.has_password && <ChangePasswordCard />}
+
+      <MemoriesCard />
 
       <RevokeAllSessionsCard />
     </div>
@@ -223,5 +233,184 @@ function RevokeAllSessionsCard() {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function MemoriesCard() {
+  const [memories, setMemories] = useState<UserMemory[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [optedOut, setOptedOut] = useState<boolean | null>(null);
+  const [optOutBusy, setOptOutBusy] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  async function refresh() {
+    try {
+      const [list, optOut] = await Promise.all([
+        listMemories(),
+        getMemoryOptOut(),
+      ]);
+      setMemories(list);
+      setOptedOut(optOut.opted_out);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load memories");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function handleDelete(memoryId: string) {
+    try {
+      await deleteMemory(memoryId);
+      setMemories((curr) => curr?.filter((m) => m.memory_id !== memoryId) ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete memory");
+    }
+  }
+
+  async function handleClear() {
+    setClearing(true);
+    try {
+      await clearMemories();
+      setMemories([]);
+      setClearOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not clear memories");
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  async function handleToggleOptOut() {
+    if (optedOut === null) return;
+    setOptOutBusy(true);
+    try {
+      await setMemoryOptOut(!optedOut);
+      setOptedOut(!optedOut);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update setting");
+    } finally {
+      setOptOutBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>What Gilbert remembers about you</CardTitle>
+        <CardDescription>
+          After a chat ends or sits idle, Gilbert may save short notes
+          about your preferences and style so future conversations feel
+          more natural. You can delete any of these at any time.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {error && (
+          <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="text-sm text-muted-foreground">Loading…</div>
+        ) : memories && memories.length > 0 ? (
+          <ul className="space-y-2">
+            {memories.map((m) => (
+              <li
+                key={m.memory_id}
+                className="rounded-md border bg-muted/30 px-3 py-2 text-sm"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium">{m.summary}</div>
+                    {m.content && m.content !== m.summary && (
+                      <div className="text-muted-foreground text-xs mt-0.5">
+                        {m.content}
+                      </div>
+                    )}
+                    <div className="text-muted-foreground text-xs mt-1">
+                      {m.source === "auto" ? "Auto-captured" : "Saved by you"}
+                      {" · "}
+                      {new Date(m.updated_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleDelete(m.memory_id)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-sm text-muted-foreground">
+            No memories saved yet.
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2 pt-2">
+          {memories && memories.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setClearOpen(true)}
+            >
+              Delete all
+            </Button>
+          )}
+          {optedOut !== null && (
+            <Button
+              variant={optedOut ? "default" : "outline"}
+              size="sm"
+              onClick={handleToggleOptOut}
+              disabled={optOutBusy}
+            >
+              {optedOut
+                ? "Resume auto-capture"
+                : "Stop auto-capturing memories"}
+            </Button>
+          )}
+        </div>
+      </CardContent>
+
+      <Dialog open={clearOpen} onOpenChange={(o) => !clearing && setClearOpen(o)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete all memories?</DialogTitle>
+            <DialogDescription>
+              This removes everything Gilbert has remembered about you,
+              including notes you saved manually. Auto-capture stays
+              {" "}
+              {optedOut ? "off" : "on"} unless you change it above.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setClearOpen(false)}
+              disabled={clearing}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleClear}
+              disabled={clearing}
+            >
+              {clearing ? "Deleting…" : "Delete all"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }

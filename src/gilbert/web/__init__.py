@@ -61,6 +61,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
     # Routes
+    from gilbert.web.routes.account import router as account_router
     from gilbert.web.routes.auth import router as auth_router
     from gilbert.web.routes.chat import router as chat_router
     from gilbert.web.routes.chat_uploads import router as chat_uploads_router
@@ -75,6 +76,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(account_router)
     app.include_router(auth_router)
     app.include_router(chat_router)
     app.include_router(chat_uploads_router)

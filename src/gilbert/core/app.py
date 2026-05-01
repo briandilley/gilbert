@@ -313,6 +313,13 @@ class Gilbert:
 
         self.service_manager.register(AIService())
 
+        # Auto-captures user memories from chat transcripts. Registered
+        # AFTER AIService so it can resolve the ``ai_chat`` capability
+        # at start.
+        from gilbert.core.services.user_memory import UserMemoryService
+
+        self.service_manager.register(UserMemoryService())
+
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
         config_svc.register_factory("ai", self._factory_ai)

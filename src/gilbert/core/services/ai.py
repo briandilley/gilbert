@@ -1146,6 +1146,7 @@ _BUILTIN_ASSIGNMENTS: dict[str, str] = {
     "guess_song_validate": "light",
     "mcp_sampling": "standard",
     "mcp_server_client": "standard",
+    "user_memory_synthesis": "standard",
 }
 
 
