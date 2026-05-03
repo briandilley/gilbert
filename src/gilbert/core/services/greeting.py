@@ -175,6 +175,7 @@ class GreetingService(Service):
                 description="Custom style instructions for AI greeting generation.",
                 default="",
                 multiline=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="speakers",

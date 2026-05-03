@@ -366,6 +366,8 @@ class ProposalsService(Service):
         self._min_observations_per_cycle: int = self._DEFAULT_MIN_OBSERVATIONS_PER_CYCLE
         self._max_pending_proposals: int = self._DEFAULT_MAX_PENDING_PROPOSALS
         self._ai_profile: str = self._DEFAULT_AI_PROFILE
+        self._reflection_prompt: str = _REFLECTION_SYSTEM_PROMPT
+        self._extraction_prompt: str = _CONVERSATION_EXTRACTION_SYSTEM_PROMPT
         self._observation_patterns: tuple[str, ...] = _DEFAULT_OBSERVATION_PATTERNS
         self._harvest_interval_seconds: int = self._DEFAULT_HARVEST_INTERVAL_SECONDS
         self._harvest_max_conversations_per_cycle: int = (
@@ -781,6 +783,32 @@ class ProposalsService(Service):
                 ),
                 default=self._DEFAULT_REFLECTION_MAX_TOOL_ROUNDS,
             ),
+            ConfigParam(
+                key="reflection_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt for the reflection AI call. Drives what "
+                    "kinds of proposals get emitted, the JSON output format, "
+                    "and the proposal-quality bar. Leave blank to use the "
+                    "bundled default."
+                ),
+                default=_REFLECTION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="extraction_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt for the per-conversation observation "
+                    "extraction call. Controls what counts as a "
+                    "reflection-worthy observation. Leave blank to use the "
+                    "bundled default."
+                ),
+                default=_CONVERSATION_EXTRACTION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -880,6 +908,13 @@ class ProposalsService(Service):
                     self._DEFAULT_REFLECTION_MAX_TOOL_ROUNDS,
                 ),
             ),
+        )
+        self._reflection_prompt = (
+            str(config.get("reflection_prompt", "") or "") or _REFLECTION_SYSTEM_PROMPT
+        )
+        self._extraction_prompt = (
+            str(config.get("extraction_prompt", "") or "")
+            or _CONVERSATION_EXTRACTION_SYSTEM_PROMPT
         )
 
     # ── Observation ──────────────────────────────────────────────────
@@ -1294,7 +1329,7 @@ class ProposalsService(Service):
             for _round_num in range(self._reflection_max_tool_rounds):
                 response = await ai_svc.complete_one_shot(
                     messages=messages,
-                    system_prompt=_REFLECTION_SYSTEM_PROMPT,
+                    system_prompt=self._reflection_prompt,
                     profile_name=self._ai_profile,
                     tools_override=inspector_tools,
                 )
@@ -2139,7 +2174,7 @@ class ProposalsService(Service):
         try:
             response = await ai_svc.complete_one_shot(
                 messages=[Message(role=MessageRole.USER, content=user_prompt)],
-                system_prompt=_CONVERSATION_EXTRACTION_SYSTEM_PROMPT,
+                system_prompt=self._extraction_prompt,
                 profile_name=self._ai_profile,
                 tools_override=[],
             )

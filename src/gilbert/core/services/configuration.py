@@ -47,6 +47,19 @@ ServiceFactory = Callable[[dict[str, Any]], Service]
 # Entity storage collection names (within the gilbert. namespace)
 _CONFIG_COLLECTION = "gilbert.config"
 _META_COLLECTION = "gilbert.config_meta"
+
+
+_DEFAULT_PROMPT_AUTHOR_SYSTEM_PROMPT = (
+    "You are a prompt-authoring assistant. The user is editing an "
+    "AI system prompt and wants you to revise it. Apply the user's "
+    "instruction to the prompt and return ONLY the complete revised "
+    "prompt — no commentary, no markdown fences, no preamble. "
+    "Preserve the original prompt's style, structure, and any "
+    "literal placeholders (e.g. tokens like `{{name}}`) unless the "
+    "user's instruction explicitly asks otherwise. If the "
+    "instruction would harm the prompt's purpose, apply the most "
+    "reasonable interpretation rather than refusing."
+)
 _SCHEMA_ENTITY_ID = "_schema"
 _SCHEMA_VERSION = 1
 
@@ -70,6 +83,7 @@ class ConfigurationService(Service):
         self._service_manager: Any = None  # ServiceManager, set during start
         self._factories: dict[str, ServiceFactory] = {}
         self._storage: StorageBackend | None = None
+        self._prompt_author_system_prompt: str = _DEFAULT_PROMPT_AUTHOR_SYSTEM_PROMPT
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -451,6 +465,7 @@ class ConfigurationService(Service):
             "choices": choices,
             "multiline": p.multiline,
             "backend_param": p.backend_param,
+            "ai_prompt": p.ai_prompt,
         }
 
     def _serialize_action(self, a: ConfigAction) -> dict[str, Any]:
@@ -868,6 +883,40 @@ class ConfigurationService(Service):
             ]
         return json.dumps(result)
 
+    # --- Configurable protocol ---
+
+    @property
+    def config_namespace(self) -> str:
+        return "configuration"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="prompt_author_system_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt used by the 'Author with AI' button on "
+                    "AI-prompt config fields. The user's natural-language "
+                    "instruction and the current prompt go in as the user "
+                    "message; this controls how the meta-AI rewrites them. "
+                    "Leave blank to use the bundled default."
+                ),
+                default=_DEFAULT_PROMPT_AUTHOR_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._prompt_author_system_prompt = (
+            str(config.get("prompt_author_system_prompt", "") or "")
+            or _DEFAULT_PROMPT_AUTHOR_SYSTEM_PROMPT
+        )
+
     # --- WsHandlerProvider protocol ---
 
     def get_ws_handlers(self) -> dict[str, Any]:
@@ -877,6 +926,7 @@ class ConfigurationService(Service):
             "config.section.set": self._ws_section_set,
             "config.section.reset": self._ws_section_reset,
             "config.action.invoke": self._ws_action_invoke,
+            "config.prompt.author": self._ws_prompt_author,
         }
 
     async def _ws_describe_list(
@@ -1058,6 +1108,143 @@ class ConfigurationService(Service):
             "namespace": namespace,
             "key": key,
             "result": self._serialize_action_result(result),
+        }
+
+    async def _ws_prompt_author(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Rewrite an AI-prompt config field via the AI.
+
+        Frame fields:
+          ``namespace`` — the configurable namespace
+          ``key`` — the param key (must be marked ``ai_prompt=True``)
+          ``current_text`` — the current prompt to revise
+          ``instruction`` — the user's natural-language change request
+          ``ai_profile`` — optional AI profile name (defaults to "standard")
+        """
+        namespace = str(frame.get("namespace", "") or "")
+        key = str(frame.get("key", "") or "")
+        current_text = str(frame.get("current_text", "") or "")
+        instruction = str(frame.get("instruction", "") or "").strip()
+        ai_profile = str(frame.get("ai_profile", "") or "").strip()
+
+        if not namespace or not key or not instruction:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "namespace, key, and instruction required",
+                "code": 400,
+            }
+
+        # RBAC: same admin gate as the rest of the settings page.
+        if self._resolver is not None:
+            acl = self._resolver.get_capability("access_control")
+            from gilbert.interfaces.auth import AccessControlProvider
+
+            if isinstance(acl, AccessControlProvider):
+                required_level = acl.get_role_level("admin")
+                user_level = getattr(conn, "user_level", 999)
+                if user_level > required_level:
+                    return {
+                        "type": "gilbert.error",
+                        "ref": frame.get("id"),
+                        "error": "Admin role required",
+                        "code": 403,
+                    }
+
+        # Verify the param exists and is marked as an AI prompt — refuse
+        # to rewrite arbitrary string fields.
+        configurable = self._find_configurable(namespace)
+        if configurable is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"No configurable service for '{namespace}'",
+                "code": 404,
+            }
+        try:
+            params = list(configurable.config_params())
+        except Exception:
+            logger.exception("Error listing params for %s", namespace)
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Failed to list params",
+                "code": 500,
+            }
+        param = next((p for p in params if p.key == key), None)
+        if param is None or not param.ai_prompt:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"'{key}' is not an AI-prompt field",
+                "code": 400,
+            }
+
+        # Resolve AI capability.
+        if self._resolver is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Service resolver unavailable",
+                "code": 503,
+            }
+        ai_svc = self._resolver.get_capability("ai_chat")
+        from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+
+        if not isinstance(ai_svc, AISamplingProvider):
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "AI service unavailable",
+                "code": 503,
+            }
+
+        profile_name = ai_profile or "standard"
+        if not ai_svc.has_profile(profile_name):
+            profile_name = "standard"
+
+        meta_system = self._prompt_author_system_prompt
+        user_message = (
+            f"=== CURRENT PROMPT ===\n{current_text}\n=== END CURRENT PROMPT ===\n\n"
+            f"=== INSTRUCTION ===\n{instruction}\n=== END INSTRUCTION ===\n\n"
+            "Return the complete revised prompt below."
+        )
+
+        try:
+            response = await ai_svc.complete_one_shot(
+                messages=[Message(role=MessageRole.USER, content=user_message)],
+                system_prompt=meta_system,
+                profile_name=profile_name,
+                tools_override=[],
+            )
+        except Exception as exc:
+            logger.exception("config.prompt.author AI call failed")
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"AI call failed: {exc}",
+                "code": 500,
+            }
+
+        new_text = (response.message.content or "").strip()
+        if not new_text:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "AI returned an empty prompt",
+                "code": 502,
+            }
+
+        return {
+            "type": "config.prompt.author.result",
+            "ref": frame.get("id"),
+            "namespace": namespace,
+            "key": key,
+            "new_text": new_text,
+            "profile_used": profile_name,
         }
 
     async def _ws_section_reset(

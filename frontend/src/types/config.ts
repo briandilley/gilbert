@@ -16,6 +16,9 @@ export interface ConfigParamMeta {
   choices: ConfigChoice[] | null;
   multiline: boolean;
   backend_param: boolean;
+  /** True when the field stores an AI prompt — the Settings UI renders an
+   *  "Author with AI" button next to the textarea. */
+  ai_prompt: boolean;
 }
 
 /** Normalize a ConfigChoice to its {value, label} form. */

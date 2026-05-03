@@ -519,6 +519,32 @@ export function useWsApi() {
         payload,
       }),
 
+    authorPrompt: (args: {
+      namespace: string;
+      key: string;
+      currentText: string;
+      instruction: string;
+      aiProfile?: string;
+    }) =>
+      rpc<{
+        namespace: string;
+        key: string;
+        new_text: string;
+        profile_used: string;
+      }>({
+        type: "config.prompt.author",
+        namespace: args.namespace,
+        key: args.key,
+        current_text: args.currentText,
+        instruction: args.instruction,
+        ai_profile: args.aiProfile ?? "",
+      }),
+
+    listAiProfiles: () =>
+      rpc<{ profiles: { name: string; description: string }[] }>({
+        type: "ai.profiles.list",
+      }).then((r) => r.profiles),
+
     // ── Plugins ───────────────────────────────────────────────────
 
     listPlugins: () =>

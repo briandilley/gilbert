@@ -222,6 +222,7 @@ class SpeakerService(Service):
                     choices=bp.choices,
                     multiline=bp.multiline,
                     backend_param=True,
+                    ai_prompt=bp.ai_prompt,
                 )
             )
         return params

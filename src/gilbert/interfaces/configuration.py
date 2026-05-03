@@ -31,6 +31,11 @@ class ConfigParam:
     """Dynamic choices resolved at runtime (e.g., ``"speakers"`` to list speaker names)."""
     backend_param: bool = False
     """True if this param is declared by a backend, not the service itself."""
+    ai_prompt: bool = False
+    """True if this field holds an AI prompt. The Settings UI renders an
+    "Author with AI" button next to the field that lets the user describe
+    a desired change; the backend rewrites the prompt via the AI and the
+    UI shows a side-by-side diff before applying."""
 
 
 @dataclass(frozen=True)

@@ -123,6 +123,7 @@ gotchas, etc.
 - **Use the backend registry, not direct imports.** Discover backends via `Backend.registered_backends()` after a side-effect import. Never directly import and instantiate a concrete backend class from `integrations/`. See [Backend Pattern](.claude/memory/memory-backend-pattern.md).
 - **Keep business logic out of web routes.** Routes parse requests, call services, and format responses. Authorization, AI prompt construction, backend resolution, and third-party API URL building belong in services or backends.
 - **Shared data lives in `interfaces/`.** If two integrations or two layers need the same constant/mapping/policy data, put it in the appropriate `interfaces/` module.
+- **AI prompts are always configurable.** Every non-trivial string passed to `complete_one_shot(system_prompt=...)` / `chat(system_prompt=...)` / `Message(role=SYSTEM, content=...)` MUST be exposed as a `ConfigParam(multiline=True, ai_prompt=True)` on the owning service, with the bundled string as `default`. Read the active value from `self._foo_prompt` (cached in `on_config_changed`), never from the `_DEFAULT_*` constant. See [AI Prompts Are Always Configurable](.claude/memory/memory-ai-prompts-configurable.md).
 
 ## Architecture Violation Checklist
 

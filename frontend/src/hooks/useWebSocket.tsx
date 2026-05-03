@@ -84,6 +84,7 @@ const LONG_TIMEOUT = 600_000; // 10 minutes
 const LONG_TIMEOUT_TYPES = new Set([
   "chat.message.send",
   "chat.form.submit",
+  "config.prompt.author",
 ]);
 
 /** Bus events whose arrival means an AI turn is still progressing.

@@ -33,6 +33,15 @@ Scan imports in each layer:
 - **Web routes** implementing authorization logic, AI prompt construction, backend resolution, or third-party API URL building. Routes should only parse requests, call services, and format responses.
 - **Shared constants/mappings** defined in `core/`, `integrations/`, or `web/` that are used by multiple layers — these belong in `interfaces/`.
 
+### Hardcoded AI Prompts
+
+Every AI prompt MUST be exposed as `ConfigParam(multiline=True, ai_prompt=True)` on the owning service — see [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md). Audit procedure:
+
+- **Grep for AI call sites:** `system_prompt=` and `Message(role=MessageRole.SYSTEM` across `src/gilbert/core/services/`, `src/gilbert/integrations/`, `std-plugins/`, and `local-plugins/`. Any literal string (not a `self._foo_prompt` attribute reference) on the right-hand side is a violation, except for short connection-test probes.
+- **Grep for `_DEFAULT_*PROMPT` constants and similar.** Each one must be the `default=` of a `ConfigParam(ai_prompt=True)` declared on the same service, and must NOT be referenced at the call site directly — the call site reads `self._foo_prompt`, set in `on_config_changed`.
+- **Backend wrappers must forward `ai_prompt=bp.ai_prompt`** when wrapping `backend_config_params()` into the parent service's params (`ai.py`, `tts.py`, `ocr.py`, `vision.py`, `lights.py`, `shades.py`, `speaker.py`, `users.py`, `knowledge.py`, `thermostat.py`, `auth.py`, `doorbell.py`, `websearch.py`, `presence.py`, `music.py`, `tunnel.py`).
+- **Dead config fields** — a `ConfigParam(ai_prompt=True)` whose configured value is never actually consumed in any AI call. Either wire it or remove it.
+
 ### Multi-User Isolation
 
 Services are singletons shared across every user and in-flight request. Per-request state stored on `self` will race under concurrent users and leak events/data between conversations. Audit procedure:

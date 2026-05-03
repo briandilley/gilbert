@@ -25,14 +25,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon } from "lucide-react";
+import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, SparklesIcon } from "lucide-react";
 import type { ConfigParamMeta } from "@/types/config";
 import { normalizeChoice } from "@/types/config";
+import { AuthorPromptDialog } from "./AuthorPromptDialog";
 
 interface ConfigFieldProps {
   param: ConfigParamMeta;
   value: unknown;
   onChange: (key: string, value: unknown) => void;
+  /** Owning section's config namespace — required by the "Author with AI"
+   *  modal so it can call ``config.prompt.author`` against the right field. */
+  namespace?: string;
 }
 
 function humanize(key: string): string {
@@ -43,26 +47,44 @@ function humanize(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function ConfigField({ param, value, onChange }: ConfigFieldProps) {
+export function ConfigField({ param, value, onChange, namespace }: ConfigFieldProps) {
   const [showPassword, setShowPassword] = useState(false);
+  const [authorOpen, setAuthorOpen] = useState(false);
 
   const handleReset = () => onChange(param.key, param.default);
+  const label = humanize(param.key);
+
+  // "Author with AI" is only available for multiline AI-prompt fields and
+  // when the parent provided the namespace (always true in the Settings UI).
+  const canAuthor = param.ai_prompt && param.multiline && !!namespace;
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
         <Label htmlFor={param.key} className="text-sm font-medium">
-          {humanize(param.key)}
+          {label}
         </Label>
         {param.restart_required && (
           <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-amber-500 border-amber-500/40">
             restart
           </Badge>
         )}
+        {canAuthor && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto h-6 gap-1 px-2 text-xs"
+            onClick={() => setAuthorOpen(true)}
+            title="Edit this prompt with AI assistance"
+          >
+            <SparklesIcon className="size-3" />
+            Author with AI
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="sm"
-          className="h-5 w-5 p-0 ml-auto opacity-40 hover:opacity-100"
+          className={`h-5 w-5 p-0 opacity-40 hover:opacity-100 ${canAuthor ? "" : "ml-auto"}`}
           onClick={handleReset}
           title="Reset to default"
         >
@@ -79,6 +101,18 @@ export function ConfigField({ param, value, onChange }: ConfigFieldProps) {
       />
 
       <p className="text-xs text-muted-foreground">{param.description}</p>
+
+      {canAuthor && namespace && (
+        <AuthorPromptDialog
+          open={authorOpen}
+          onClose={() => setAuthorOpen(false)}
+          namespace={namespace}
+          paramKey={param.key}
+          paramLabel={label}
+          currentText={String(value ?? "")}
+          onApply={(newText) => onChange(param.key, newText)}
+        />
+      )}
     </div>
   );
 }

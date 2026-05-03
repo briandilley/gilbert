@@ -122,6 +122,7 @@ class RoastService(Service):
                 description="AI prompt template for generating roasts. Use {name} as placeholder.",
                 default="Generate a playful, friendly roast of {name}. Be funny and teasing but never mean or hurtful. Keep it to 1-2 sentences.",
                 multiline=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="speakers",

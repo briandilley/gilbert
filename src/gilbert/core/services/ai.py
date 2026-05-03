@@ -1171,6 +1171,7 @@ class AIService(Service):
         self._compression_threshold: int = 40
         self._compression_keep_recent: int = 20
         self._compression_summary_max_tokens: int = 1500
+        self._compression_prompt: str = _COMPRESSION_SYSTEM_PROMPT
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
@@ -1304,6 +1305,10 @@ class AIService(Service):
         self._compression_summary_max_tokens = section.get(
             "compression_summary_max_tokens", self._compression_summary_max_tokens
         )
+        self._compression_prompt = (
+            str(section.get("compression_prompt", "") or "")
+            or _COMPRESSION_SYSTEM_PROMPT
+        )
         self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
         self._chat_profile = section.get("chat_profile", self._chat_profile)
         # Persona config flows through a separate path (see
@@ -1402,6 +1407,7 @@ class AIService(Service):
                 default=DEFAULT_SOUL,
                 multiline=True,
                 restart_required=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="persona.allow_user_soul_override",
@@ -1425,6 +1431,7 @@ class AIService(Service):
                 default=DEFAULT_IDENTITY_IMMUTABLE,
                 multiline=True,
                 restart_required=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="persona.identity_default",
@@ -1437,6 +1444,7 @@ class AIService(Service):
                 default=DEFAULT_IDENTITY_DEFAULT,
                 multiline=True,
                 restart_required=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="memory_enabled",
@@ -1478,6 +1486,19 @@ class AIService(Service):
                 ),
                 default=1500,
             ),
+            ConfigParam(
+                key="compression_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt for the conversation-summarization call. "
+                    "Drives what gets preserved vs. dropped when older "
+                    "messages are compressed. Leave blank to use the bundled "
+                    "default."
+                ),
+                default=_COMPRESSION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
         # Include per-backend config params under backends.<name>.*
         for name, cls in sorted(AIBackend.registered_backends().items()):
@@ -1494,6 +1515,7 @@ class AIService(Service):
                         choices_from=bp.choices_from,
                         multiline=bp.multiline,
                         backend_param=True,
+                        ai_prompt=bp.ai_prompt,
                     )
                 )
         return params
@@ -4347,7 +4369,7 @@ class AIService(Service):
                     content="\n".join(chunk_text_parts),
                 )
             ],
-            system_prompt=_COMPRESSION_SYSTEM_PROMPT,
+            system_prompt=self._compression_prompt,
         )
 
         try:
@@ -5286,6 +5308,7 @@ class AIService(Service):
             "chat.user.list": self._ws_chat_list_users,
             "slash.commands.list": self._ws_slash_commands_list,
             "chat.models.list": self._ws_models_list,
+            "ai.profiles.list": self._ws_profiles_list,
         }
 
     async def _ws_slash_commands_list(
@@ -5344,6 +5367,24 @@ class AIService(Service):
             "type": "chat.models.list.result",
             "ref": frame.get("id"),
             "backends": self.get_backends_with_models(),
+        }
+
+    async def _ws_profiles_list(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return the AI context profiles available for selection.
+
+        Used by clients (e.g. the Settings UI's "Author with AI" dialog)
+        that need to populate a profile dropdown without going through
+        the configuration service's dynamic-choices path.
+        """
+        return {
+            "type": "ai.profiles.list.result",
+            "ref": frame.get("id"),
+            "profiles": [
+                {"name": p.name, "description": p.description}
+                for p in self.list_profiles()
+            ],
         }
 
     async def _ws_chat_send(

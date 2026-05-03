@@ -223,6 +223,7 @@ class SchedulerService(Service):
             window_seconds=self._DEFAULT_AI_WINDOW_SECONDS,
         )
         self._ai_profile: str = "standard"
+        self._scheduled_action_prompt: str = _SCHEDULED_ACTION_SYSTEM_PROMPT
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -308,6 +309,19 @@ class SchedulerService(Service):
                 default="standard",
                 choices_from="ai_profiles",
             ),
+            ConfigParam(
+                key="scheduled_action_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt for AI-driven scheduled actions. The "
+                    "stored instruction goes in as the user message; this "
+                    "controls the AI's framing and confirmation style. "
+                    "Leave blank to use the bundled default."
+                ),
+                default=_SCHEDULED_ACTION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -315,6 +329,10 @@ class SchedulerService(Service):
         window = float(config.get("alarm_ai_window_seconds", self._DEFAULT_AI_WINDOW_SECONDS))
         self._ai_rate_limiter.update_config(max_calls, window)
         self._ai_profile = config.get("ai_profile", self._ai_profile)
+        self._scheduled_action_prompt = (
+            str(config.get("scheduled_action_prompt", "") or "")
+            or _SCHEDULED_ACTION_SYSTEM_PROMPT
+        )
         logger.info(
             "Scheduler AI rate limit set to %d per %.0fs window",
             max_calls,
@@ -824,7 +842,7 @@ class SchedulerService(Service):
             response_text, *_ = await ai_svc.chat(
                 user_message=action.ai_prompt,
                 user_ctx=UserContext.SYSTEM,
-                system_prompt=_SCHEDULED_ACTION_SYSTEM_PROMPT,
+                system_prompt=self._scheduled_action_prompt,
                 ai_profile=self._ai_profile,
             )
             logger.info(

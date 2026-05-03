@@ -292,7 +292,7 @@ export function ConfigSection({ section }: ConfigSectionProps) {
           {serviceParams.length > 0 && (
             <div className="space-y-4 mb-4">
               {serviceParams.map((p) => (
-                <ConfigField key={p.key} param={p} value={merged[p.key]} onChange={handleFieldChange} />
+                <ConfigField key={p.key} param={p} value={merged[p.key]} onChange={handleFieldChange} namespace={section.namespace} />
               ))}
             </div>
           )}
@@ -300,7 +300,7 @@ export function ConfigSection({ section }: ConfigSectionProps) {
           {/* Backend selector — last service-level option, before backend settings */}
           {backendParam && (
             <div className="mb-4">
-              <ConfigField param={backendParam} value={merged["backend"]} onChange={handleFieldChange} />
+              <ConfigField param={backendParam} value={merged["backend"]} onChange={handleFieldChange} namespace={section.namespace} />
             </div>
           )}
 
@@ -333,14 +333,14 @@ export function ConfigSection({ section }: ConfigSectionProps) {
                     {/* Show enable toggle if present */}
                     {enableParam && (
                       <div className={isEnabled && otherParams.length > 0 ? "mb-3" : ""}>
-                        <ConfigField param={enableParam} value={getValue(enableParam.key)} onChange={handleFieldChange} />
+                        <ConfigField param={enableParam} value={getValue(enableParam.key)} onChange={handleFieldChange} namespace={section.namespace} />
                       </div>
                     )}
                     {/* Only show other params if enabled */}
                     {isEnabled && otherParams.length > 0 && (
                       <div className="space-y-4">
                         {otherParams.map((p) => (
-                          <ConfigField key={p.key} param={p} value={getValue(p.key)} onChange={handleFieldChange} />
+                          <ConfigField key={p.key} param={p} value={getValue(p.key)} onChange={handleFieldChange} namespace={section.namespace} />
                         ))}
                       </div>
                     )}

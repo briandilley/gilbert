@@ -119,6 +119,7 @@ class OCRService(Service):
                         choices=bp.choices,
                         choices_from=bp.choices_from,
                         multiline=bp.multiline,
+                        ai_prompt=bp.ai_prompt,
                         backend_param=True,
                     )
                 )

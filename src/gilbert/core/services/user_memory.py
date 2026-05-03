@@ -326,6 +326,7 @@ class UserMemoryService(Service):
                 ),
                 default=_DEFAULT_SYNTHESIS_PROMPT,
                 multiline=True,
+                ai_prompt=True,
             ),
             ConfigParam(
                 key="min_user_turns",

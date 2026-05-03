@@ -21,6 +21,7 @@ Runtime configuration management backed by entity storage, with web UI, hot-swap
 - `multiline` — render as textarea instead of single-line input
 - `choices_from` — dynamic choices resolved at runtime (e.g., `"speakers"`)
 - `backend_param` — True if declared by a backend, not the service itself
+- `ai_prompt` — True if the field stores an AI prompt; the Settings UI then renders an "Author with AI" button next to the textarea (see [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md))
 
 ### Configurable Protocol
 Services implement `Configurable` to participate in configuration:
@@ -42,7 +43,7 @@ Services with swappable backends (AI, TTS, auth, etc.) use a registry pattern:
 - Backend ABCs declare `backend_name: str = ""` and `_registry: dict`
 - `__init_subclass__` auto-registers concrete backends by name
 - `backend_config_params()` classmethod lets backends declare their own ConfigParams
-- Service `config_params()` merges its own params with backend params (prefixed as `settings.*`, marked `backend_param=True`)
+- Service `config_params()` merges its own params with backend params (prefixed as `settings.*`, marked `backend_param=True`). **When wrapping backend params, forward every flag the backend declared — including `ai_prompt=bp.ai_prompt`** — otherwise prompt fields declared by backends won't get the "Author with AI" button. Affected wrappers: `ai.py`, `tts.py`, `ocr.py`, `vision.py`, `lights.py`, `shades.py`, `speaker.py`, `users.py`, `knowledge.py`, `thermostat.py`, `auth.py`, `doorbell.py`, `websearch.py`, `presence.py`, `music.py`, `tunnel.py`.
 
 ### ConfigurationService
 - **Read:** `get(path)` for dot-path access, `get_section(namespace)` for a service's full config
@@ -65,6 +66,8 @@ Services declare a `config_category` property. Standard categories:
 - `config.section.get` — single namespace's params + values
 - `config.section.set` — set values in a namespace
 - `config.section.reset` — reset namespace to defaults
+- `config.action.invoke` — fire a `ConfigAction` button on a service's settings page (see `ConfigActionProvider`)
+- `config.prompt.author` — rewrite an `ai_prompt=True` field via the AI; takes `(namespace, key, current_text, instruction, ai_profile)` and returns the proposed new text. The meta-prompt that drives this call is itself a ConfigParam (`configuration.prompt_author_system_prompt`).
 
 ### Web UI
 - Settings page at `/settings` with category tabs
