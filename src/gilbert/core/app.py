@@ -320,6 +320,10 @@ class Gilbert:
 
         self.service_manager.register(UserMemoryService())
 
+        from gilbert.core.services.notifications import NotificationService
+
+        self.service_manager.register(NotificationService())
+
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
         config_svc.register_factory("ai", self._factory_ai)
