@@ -123,9 +123,20 @@ async def run_loop(
             model=model,
         )
         response = None
-        async for ev in backend.generate_stream(request):
-            if ev.type == StreamEventType.MESSAGE_COMPLETE:
-                response = ev.response
+        try:
+            async for ev in backend.generate_stream(request):
+                if ev.type == StreamEventType.MESSAGE_COMPLETE:
+                    response = ev.response
+        except Exception as exc:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.ERROR,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                error=exc,
+            )
         if response is None:
             return LoopResult(
                 final_message=final_message,
