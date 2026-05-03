@@ -161,7 +161,9 @@ class NotificationService(Service):
                 limit=limit,
             )
         )
-        # Compute unread count for this user (independent of filter)
+        # Approximation: cap the count fetch so a user with thousands of
+        # unread notifications doesn't blow up the server. The frontend
+        # treats unread_count >= cap as "lots".
         unread_raw = await self._storage.query(
             Query(
                 collection=_COLLECTION,
@@ -169,6 +171,7 @@ class NotificationService(Service):
                     Filter(field="user_id", op=FilterOp.EQ, value=user_id),
                     Filter(field="read", op=FilterOp.EQ, value=False),
                 ],
+                limit=10_000,
             )
         )
 
