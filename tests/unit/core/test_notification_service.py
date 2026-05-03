@@ -8,13 +8,12 @@ from typing import Any
 import pytest
 
 from gilbert.core.services.notifications import NotificationService
-from gilbert.interfaces.events import Event, EventBus, EventBusProvider
+from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.notifications import (
     Notification,
     NotificationUrgency,
 )
-from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.storage import StorageBackend, StorageProvider
+from gilbert.interfaces.storage import StorageBackend
 
 pytestmark = pytest.mark.asyncio
 
@@ -164,7 +163,8 @@ async def test_can_see_notification_event_filters_by_user_id() -> None:
     """The WsConnection filter should only allow notification events whose
     data.user_id matches the connection's user.
     """
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     from gilbert.interfaces.auth import UserContext
     from gilbert.web.ws_protocol import WsConnection, WsConnectionManager
@@ -231,6 +231,7 @@ async def test_notification_list_returns_user_notifications_with_unread_count(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             # Match whatever fields UserContext requires (see Task 6 for the working set)
             self.user_ctx = UserContext(
                 user_id=user_id,
@@ -266,6 +267,7 @@ async def test_notification_mark_read_sets_read_and_read_at(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             self.user_ctx = UserContext(
                 user_id=user_id,
                 email=f"{user_id}@example.com",
@@ -295,6 +297,7 @@ async def test_notification_mark_read_rejects_other_users_notifications(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             self.user_ctx = UserContext(
                 user_id=user_id,
                 email=f"{user_id}@example.com",
@@ -329,6 +332,7 @@ async def test_notification_mark_all_read_marks_all_user_notifications(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             self.user_ctx = UserContext(
                 user_id=user_id,
                 email=f"{user_id}@example.com",
@@ -361,6 +365,7 @@ async def test_notification_delete_removes_user_notification(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             self.user_ctx = UserContext(
                 user_id=user_id,
                 email=f"{user_id}@example.com",
@@ -388,6 +393,7 @@ async def test_notification_delete_rejects_other_users(
     class _Conn:
         def __init__(self, user_id: str) -> None:
             from gilbert.interfaces.auth import UserContext
+
             self.user_ctx = UserContext(
                 user_id=user_id,
                 email=f"{user_id}@example.com",

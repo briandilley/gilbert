@@ -129,9 +129,7 @@ class NotificationService(Service):
             "notification.delete": self._ws_delete,
         }
 
-    async def _ws_list(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """Handler for ``notification.list`` frames.
 
         Args (in ``frame``):
@@ -149,17 +147,11 @@ class NotificationService(Service):
 
         filters = [Filter(field="user_id", op=FilterOp.EQ, value=user_id)]
         if "read" in filt:
-            filters.append(
-                Filter(field="read", op=FilterOp.EQ, value=bool(filt["read"]))
-            )
+            filters.append(Filter(field="read", op=FilterOp.EQ, value=bool(filt["read"])))
         if "source" in filt:
-            filters.append(
-                Filter(field="source", op=FilterOp.EQ, value=str(filt["source"]))
-            )
+            filters.append(Filter(field="source", op=FilterOp.EQ, value=str(filt["source"])))
         if "since" in filt:
-            filters.append(
-                Filter(field="created_at", op=FilterOp.GT, value=str(filt["since"]))
-            )
+            filters.append(Filter(field="created_at", op=FilterOp.GT, value=str(filt["since"])))
 
         items_raw = await self._storage.query(
             Query(
@@ -187,9 +179,7 @@ class NotificationService(Service):
             "unread_count": len(unread_raw),
         }
 
-    async def _ws_mark_read(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_mark_read(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """Mark one notification as read. Owner-only."""
         if self._storage is None:
             raise RuntimeError("NotificationService.start() not called")
@@ -225,9 +215,7 @@ class NotificationService(Service):
             "ok": True,
         }
 
-    async def _ws_mark_all_read(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_mark_all_read(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """Mark every unread notification for this user as read."""
         if self._storage is None:
             raise RuntimeError("NotificationService.start() not called")
@@ -255,9 +243,7 @@ class NotificationService(Service):
             "count": len(unread),
         }
 
-    async def _ws_delete(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         """Delete one of the calling user's notifications."""
         if self._storage is None:
             raise RuntimeError("NotificationService.start() not called")
