@@ -132,3 +132,29 @@ async def test_notify_user_persists_a_notification(
     assert raw is not None
     assert raw["user_id"] == "u_alice"
     assert raw["message"] == "hello"
+
+
+async def test_notify_user_publishes_notification_received_event(
+    service: NotificationService,
+) -> None:
+    n = await service.notify_user(
+        user_id="u_bob",
+        message="ping",
+        urgency=NotificationUrgency.URGENT,
+        source="agent",
+        source_ref={"goal_id": "g_42", "run_id": "r_99"},
+    )
+
+    bus: _FakeEventBus = service._test_bus  # type: ignore[attr-defined]
+    assert len(bus.published) == 1
+    ev = bus.published[0]
+
+    assert ev.event_type == "notification.received"
+    assert ev.source == "notifications"
+    assert ev.data["id"] == n.id
+    assert ev.data["user_id"] == "u_bob"
+    assert ev.data["message"] == "ping"
+    assert ev.data["urgency"] == "urgent"
+    assert ev.data["source"] == "agent"
+    assert ev.data["source_ref"] == {"goal_id": "g_42", "run_id": "r_99"}
+    assert ev.data["read"] is False
