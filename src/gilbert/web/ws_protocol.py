@@ -128,6 +128,17 @@ class WsConnection:
             return False
         return True
 
+    def can_see_notification_event(self, event: Event) -> bool:
+        """Content-level filter for notification events.
+
+        Notifications are 1:1 — addressed to a specific user via the
+        ``user_id`` field on ``event.data``. Connections only see
+        notification events for their own user.
+        """
+        if not event.event_type.startswith("notification."):
+            return True
+        return event.data.get("user_id") == self.user_id
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -359,6 +370,8 @@ class WsConnectionManager:
             if not conn.can_see_auth_event(event):
                 continue
             if not conn.can_see_workspace_event(event):
+                continue
+            if not conn.can_see_notification_event(event):
                 continue
             conn.send_event(event)
 
