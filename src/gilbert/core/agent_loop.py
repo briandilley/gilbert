@@ -156,9 +156,14 @@ async def run_loop(
             )
 
         if response.stop_reason == StopReason.TOOL_USE and response.message.tool_calls:
-            tool_results = await _execute_tool_calls_sequential(
-                response.message.tool_calls, tools
-            )
+            if backend.capabilities().parallel_tool_calls and len(response.message.tool_calls) > 1:
+                tool_results = await _execute_tool_calls_parallel(
+                    response.message.tool_calls, tools
+                )
+            else:
+                tool_results = await _execute_tool_calls_sequential(
+                    response.message.tool_calls, tools
+                )
             history.append(
                 Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results)
             )
@@ -218,4 +223,18 @@ async def _invoke_one_tool(
         tool_call_id=tc.tool_call_id,
         content=content,
         is_error=False,
+    )
+
+
+async def _execute_tool_calls_parallel(
+    tool_calls: list[ToolCall],
+    tools: dict[str, tuple[ToolDefinition, ToolHandler]],
+) -> list[ToolResult]:
+    """Execute tool calls concurrently. Each invocation is independently
+    wrapped in error handling so one failure doesn't poison the others.
+    Result order matches the input order so ``zip(tool_calls, results)``
+    is meaningful.
+    """
+    return await asyncio.gather(
+        *(_invoke_one_tool(tc, tools) for tc in tool_calls)
     )

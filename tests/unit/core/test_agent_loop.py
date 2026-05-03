@@ -215,3 +215,58 @@ async def test_max_rounds_terminates_loop() -> None:
 
     assert result.stop_reason == LoopStopReason.MAX_ROUNDS
     assert result.rounds_used == 3
+
+
+async def test_parallel_tool_calls_dispatched_concurrently() -> None:
+    tool_def = ToolDefinition(name="slow", description="slow", parameters=[])
+    invocation_log: list[str] = []
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def slow_handler(args: dict[str, Any]) -> str:
+        invocation_log.append(f"start:{args['n']}")
+        started.set()
+        await proceed.wait()
+        invocation_log.append(f"end:{args['n']}")
+        return f"r{args['n']}"
+
+    round0 = [
+        _msg_complete(
+            tool_calls=[
+                ToolCall(tool_call_id="t1", tool_name="slow", arguments={"n": 1}),
+                ToolCall(tool_call_id="t2", tool_name="slow", arguments={"n": 2}),
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    round1 = [_msg_complete(text="ok")]
+
+    backend = FakeAIBackend(
+        scripts=[round0, round1],
+        parallel_tool_calls=True,
+    )
+
+    async def driver() -> LoopResult:
+        return await run_loop(
+            backend=backend,
+            system_prompt="x",
+            messages=[Message(role=MessageRole.USER, content="go")],
+            tools={"slow": (tool_def, slow_handler)},
+            max_rounds=10,
+        )
+
+    task = asyncio.create_task(driver())
+    # Give run_loop a chance to enter the tool dispatch and start both
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    # Both should be started before either ends
+    assert sorted(x for x in invocation_log if x.startswith("start:")) == [
+        "start:1",
+        "start:2",
+    ]
+    assert not any(x.startswith("end:") for x in invocation_log)
+    proceed.set()
+    result = await asyncio.wait_for(task, timeout=2.0)
+
+    assert result.stop_reason == LoopStopReason.END_TURN
+    # Both ends recorded; order between them is non-deterministic
+    assert {x for x in invocation_log if x.startswith("end:")} == {"end:1", "end:2"}
