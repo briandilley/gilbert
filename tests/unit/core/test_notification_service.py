@@ -206,3 +206,51 @@ async def test_can_see_notification_event_filters_by_user_id() -> None:
     )
     assert alice_conn.can_see_notification_event(other_event) is True
     assert bob_conn.can_see_notification_event(other_event) is True
+
+
+async def test_notification_list_returns_user_notifications_with_unread_count(
+    service: NotificationService,
+) -> None:
+    # Three notifications for alice (one read), one for bob
+    a1 = await service.notify_user(user_id="u_alice", message="m1", source="t")
+    a2 = await service.notify_user(user_id="u_alice", message="m2", source="t")
+    a3 = await service.notify_user(user_id="u_alice", message="m3", source="t")
+    b1 = await service.notify_user(user_id="u_bob", message="b1", source="t")
+
+    # Mark a1 as read by directly editing storage to skip mark_read coupling
+    raw = await service._storage.get("notifications", a1.id)
+    assert raw is not None
+    raw["read"] = True
+    raw["read_at"] = a1.created_at.isoformat()
+    await service._storage.put("notifications", a1.id, raw)
+
+    # Build a fake WsConnection-like context for the RPC handler
+    handlers = service.get_ws_handlers()
+    list_handler = handlers["notification.list"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            # Match whatever fields UserContext requires (see Task 6 for the working set)
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+        @property
+        def user_id(self) -> str:
+            return self.user_ctx.user_id
+
+    alice_conn = _Conn("u_alice")
+    result = await list_handler(alice_conn, {"id": "frame-1"})
+
+    assert result is not None
+    assert result["unread_count"] == 2  # a2, a3 are unread
+    items = result["items"]
+    assert len(items) == 3  # all of alice's, regardless of read state
+    item_ids = {i["id"] for i in items}
+    assert item_ids == {a1.id, a2.id, a3.id}
+    assert b1.id not in item_ids  # bob's notification not visible to alice

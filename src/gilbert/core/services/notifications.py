@@ -24,6 +24,7 @@ from gilbert.interfaces.storage import (
     FilterOp,
     IndexDefinition,
     Query,
+    SortField,
     StorageBackend,
     StorageProvider,
 )
@@ -114,6 +115,111 @@ class NotificationService(Service):
             )
         )
         return notification
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        """Return the frame-type → handler map for this service.
+
+        Implements ``WsHandlerProvider`` (structurally — the protocol is
+        runtime-checkable, so explicit inheritance isn't required).
+        """
+        return {
+            "notification.list": self._ws_list,
+            "notification.mark_read": self._ws_mark_read,
+            "notification.mark_all_read": self._ws_mark_all_read,
+            "notification.delete": self._ws_delete,
+        }
+
+    async def _ws_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Handler for ``notification.list`` frames.
+
+        Args (in ``frame``):
+        - ``filter``: ``{read?: bool, source?: str, since?: ISO8601 str}``
+        - ``limit``: int (default 100)
+
+        Returns ``{type, ref, items: [...], unread_count: int}``.
+        """
+        if self._storage is None:
+            raise RuntimeError("NotificationService.start() not called")
+
+        user_id = conn.user_ctx.user_id
+        filt = frame.get("filter") or {}
+        limit = int(frame.get("limit") or 100)
+
+        filters = [Filter(field="user_id", op=FilterOp.EQ, value=user_id)]
+        if "read" in filt:
+            filters.append(
+                Filter(field="read", op=FilterOp.EQ, value=bool(filt["read"]))
+            )
+        if "source" in filt:
+            filters.append(
+                Filter(field="source", op=FilterOp.EQ, value=str(filt["source"]))
+            )
+        if "since" in filt:
+            filters.append(
+                Filter(field="created_at", op=FilterOp.GT, value=str(filt["since"]))
+            )
+
+        items_raw = await self._storage.query(
+            Query(
+                collection=_COLLECTION,
+                filters=filters,
+                sort=[SortField(field="created_at", descending=True)],
+                limit=limit,
+            )
+        )
+        # Compute unread count for this user (independent of filter)
+        unread_raw = await self._storage.query(
+            Query(
+                collection=_COLLECTION,
+                filters=[
+                    Filter(field="user_id", op=FilterOp.EQ, value=user_id),
+                    Filter(field="read", op=FilterOp.EQ, value=False),
+                ],
+            )
+        )
+
+        return {
+            "type": "notification.list.result",
+            "ref": frame.get("id"),
+            "items": items_raw,
+            "unread_count": len(unread_raw),
+        }
+
+    async def _ws_mark_read(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Handler for ``notification.mark_read`` frames.
+
+        Implementation comes in Task 8.
+        """
+        return {
+            "type": "notification.mark_read.result",
+            "ref": frame.get("id"),
+            "ok": False,
+            "error": "not_implemented",
+        }
+
+    async def _ws_mark_all_read(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return {
+            "type": "notification.mark_all_read.result",
+            "ref": frame.get("id"),
+            "ok": False,
+            "error": "not_implemented",
+        }
+
+    async def _ws_delete(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return {
+            "type": "notification.delete.result",
+            "ref": frame.get("id"),
+            "ok": False,
+            "error": "not_implemented",
+        }
 
 
 def _serialize(n: Notification) -> dict[str, Any]:
