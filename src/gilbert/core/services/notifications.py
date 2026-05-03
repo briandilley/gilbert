@@ -290,19 +290,3 @@ def _serialize(n: Notification) -> dict[str, Any]:
         "read_at": n.read_at.isoformat() if n.read_at else None,
         "source_ref": n.source_ref,
     }
-
-
-def _deserialize(d: dict[str, Any]) -> Notification:
-    """Reverse of ``_serialize``."""
-    read_at_raw = d.get("read_at")
-    return Notification(
-        id=d["id"],
-        user_id=d["user_id"],
-        source=d.get("source", "system"),
-        message=d["message"],
-        urgency=NotificationUrgency(d.get("urgency", "normal")),
-        created_at=datetime.fromisoformat(d["created_at"]),
-        read=bool(d.get("read", False)),
-        read_at=datetime.fromisoformat(read_at_raw) if read_at_raw else None,
-        source_ref=d.get("source_ref"),
-    )
