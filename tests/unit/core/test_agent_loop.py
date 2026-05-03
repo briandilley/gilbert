@@ -1,0 +1,113 @@
+"""Unit tests for ``gilbert.core.agent_loop.run_loop``.
+
+The fake backend takes a scripted list of ``(events, capabilities_kwargs)``
+tuples — one per ``generate_stream`` call. Tests assemble scripts that
+exercise specific loop behaviors (END_TURN, tool calls, budget hits,
+etc.) and assert against the returned ``LoopResult``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
+import pytest
+
+from gilbert.core.agent_loop import (
+    LoopResult,
+    LoopStopReason,
+    ToolHandler,
+    run_loop,
+)
+from gilbert.interfaces.ai import (
+    AIBackend,
+    AIBackendCapabilities,
+    AIRequest,
+    AIResponse,
+    Message,
+    MessageRole,
+    StopReason,
+    StreamEvent,
+    StreamEventType,
+    TokenUsage,
+)
+from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolResult
+
+
+def _msg_complete(
+    *,
+    text: str = "",
+    tool_calls: list[ToolCall] | None = None,
+    stop_reason: StopReason = StopReason.END_TURN,
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+) -> StreamEvent:
+    """Build a single MESSAGE_COMPLETE event for the fake backend script."""
+    return StreamEvent(
+        type=StreamEventType.MESSAGE_COMPLETE,
+        response=AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content=text,
+                tool_calls=tool_calls or [],
+            ),
+            model="fake",
+            stop_reason=stop_reason,
+            usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        ),
+    )
+
+
+class FakeAIBackend(AIBackend):
+    """Backend that replays a pre-scripted list of stream events per round."""
+
+    backend_name = ""  # don't register
+
+    def __init__(
+        self,
+        scripts: list[list[StreamEvent]],
+        *,
+        parallel_tool_calls: bool = False,
+        streaming: bool = True,
+        raise_on_round: int | None = None,
+    ) -> None:
+        self._scripts = scripts
+        self._round = 0
+        self._caps = AIBackendCapabilities(
+            streaming=streaming,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+        self._raise_on_round = raise_on_round
+        self.requests_seen: list[AIRequest] = []
+
+    async def initialize(self, config: dict[str, Any]) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    def capabilities(self) -> AIBackendCapabilities:
+        return self._caps
+
+    async def generate(self, request: AIRequest) -> AIResponse:
+        # Not used — run_loop calls generate_stream.
+        raise NotImplementedError
+
+    async def generate_stream(self, request: AIRequest) -> AsyncIterator[StreamEvent]:
+        if self._raise_on_round is not None and self._round == self._raise_on_round:
+            raise RuntimeError("scripted backend failure")
+        self.requests_seen.append(request)
+        if self._round >= len(self._scripts):
+            raise AssertionError(
+                f"FakeAIBackend out of script: round {self._round}, only "
+                f"{len(self._scripts)} round(s) scripted"
+            )
+        events = self._scripts[self._round]
+        self._round += 1
+        for ev in events:
+            yield ev
+
+
+# pytest-asyncio convention used elsewhere in the repo
+pytestmark = pytest.mark.asyncio
