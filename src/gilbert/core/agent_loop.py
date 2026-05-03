@@ -154,7 +154,19 @@ async def run_loop(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
             )
-        # Tool use, max-tokens, and budgets get added in subsequent tasks.
+
+        if response.stop_reason == StopReason.TOOL_USE and response.message.tool_calls:
+            tool_results = await _execute_tool_calls_sequential(
+                response.message.tool_calls, tools
+            )
+            history.append(
+                Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results)
+            )
+            continue
+
+        # No other stop reasons handled yet — break out of the loop and
+        # let the post-loop fallthrough mark this MAX_ROUNDS. Subsequent
+        # tasks add MAX_TOKENS / budget handling.
         break
 
     return LoopResult(
@@ -164,4 +176,46 @@ async def run_loop(
         rounds_used=rounds_used,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+    )
+
+
+async def _execute_tool_calls_sequential(
+    tool_calls: list[ToolCall],
+    tools: dict[str, tuple[ToolDefinition, ToolHandler]],
+) -> list[ToolResult]:
+    """Execute tool calls one at a time, in order. Errors are caught and
+    formatted as error tool results so the loop continues with whatever
+    the agent decides to do next.
+    """
+    results: list[ToolResult] = []
+    for tc in tool_calls:
+        result = await _invoke_one_tool(tc, tools)
+        results.append(result)
+    return results
+
+
+async def _invoke_one_tool(
+    tc: ToolCall,
+    tools: dict[str, tuple[ToolDefinition, ToolHandler]],
+) -> ToolResult:
+    pair = tools.get(tc.tool_name)
+    if pair is None:
+        return ToolResult(
+            tool_call_id=tc.tool_call_id,
+            content=f"tool not found: {tc.tool_name}",
+            is_error=True,
+        )
+    _, handler = pair
+    try:
+        content = await handler(tc.arguments)
+    except Exception as exc:  # tools failing must not crash the loop
+        return ToolResult(
+            tool_call_id=tc.tool_call_id,
+            content=f"tool failed: {exc!r}",
+            is_error=True,
+        )
+    return ToolResult(
+        tool_call_id=tc.tool_call_id,
+        content=content,
+        is_error=False,
     )

@@ -135,3 +135,52 @@ async def test_single_end_turn_round_terminates_immediately() -> None:
     assert len(result.full_message_history) == 2
     assert result.full_message_history[0] is initial[0]
     assert result.full_message_history[1].role == MessageRole.ASSISTANT
+
+
+async def test_tool_call_round_then_end_turn() -> None:
+    tool_def = ToolDefinition(
+        name="echo",
+        description="Echo the input",
+        parameters=[],
+    )
+    invocations: list[dict[str, Any]] = []
+
+    async def echo_handler(args: dict[str, Any]) -> str:
+        invocations.append(args)
+        return f"echoed: {args.get('text', '')}"
+
+    round0 = [
+        _msg_complete(
+            text="let me echo",
+            tool_calls=[
+                ToolCall(tool_call_id="t1", tool_name="echo", arguments={"text": "hi"})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    round1 = [_msg_complete(text="done")]
+
+    backend = FakeAIBackend(scripts=[round0, round1])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="you are a test bot",
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        tools={"echo": (tool_def, echo_handler)},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.END_TURN
+    assert result.rounds_used == 2
+    assert invocations == [{"text": "hi"}]
+
+    # History: user, assistant(tool_call), tool_result, assistant(end_turn)
+    assert len(result.full_message_history) == 4
+    assert result.full_message_history[1].role == MessageRole.ASSISTANT
+    assert result.full_message_history[1].tool_calls[0].tool_name == "echo"
+    assert result.full_message_history[2].role == MessageRole.TOOL_RESULT
+    tr = result.full_message_history[2].tool_results[0]
+    assert tr.tool_call_id == "t1"
+    assert tr.content == "echoed: hi"
+    assert tr.is_error is False
+    assert result.full_message_history[3].content == "done"
