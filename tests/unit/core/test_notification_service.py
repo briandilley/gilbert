@@ -158,3 +158,51 @@ async def test_notify_user_publishes_notification_received_event(
     assert ev.data["source"] == "agent"
     assert ev.data["source_ref"] == {"goal_id": "g_42", "run_id": "r_99"}
     assert ev.data["read"] is False
+
+
+async def test_can_see_notification_event_filters_by_user_id() -> None:
+    """The WsConnection filter should only allow notification events whose
+    data.user_id matches the connection's user.
+    """
+    from datetime import UTC, datetime as _dt
+
+    from gilbert.interfaces.auth import UserContext
+    from gilbert.web.ws_protocol import WsConnection, WsConnectionManager
+
+    # Build minimal connection objects bound to two different users
+    manager = WsConnectionManager()
+    alice_ctx = UserContext(
+        user_id="u_alice",
+        email="alice@example.com",
+        display_name="Alice",
+        roles=frozenset({"user"}),
+    )
+    bob_ctx = UserContext(
+        user_id="u_bob",
+        email="bob@example.com",
+        display_name="Bob",
+        roles=frozenset({"user"}),
+    )
+    alice_conn = WsConnection(user_ctx=alice_ctx, user_level=1, manager=manager)
+    bob_conn = WsConnection(user_ctx=bob_ctx, user_level=1, manager=manager)
+
+    notif_event = Event(
+        event_type="notification.received",
+        data={"user_id": "u_alice", "message": "hi"},
+        source="notifications",
+        timestamp=_dt.now(UTC),
+    )
+
+    # Alice's connection accepts; Bob's rejects
+    assert alice_conn.can_see_notification_event(notif_event) is True
+    assert bob_conn.can_see_notification_event(notif_event) is False
+
+    # Non-notification events pass through unfiltered (returns True)
+    other_event = Event(
+        event_type="chat.message.created",
+        data={"user_id": "u_alice"},
+        source="chat",
+        timestamp=_dt.now(UTC),
+    )
+    assert alice_conn.can_see_notification_event(other_event) is True
+    assert bob_conn.can_see_notification_event(other_event) is True
