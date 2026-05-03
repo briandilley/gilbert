@@ -417,3 +417,30 @@ async def test_backend_max_tokens_terminates_with_max_tokens() -> None:
     assert result.stop_reason == LoopStopReason.MAX_TOKENS
     assert result.rounds_used == 1
     assert result.final_message.content == "cut off here"
+
+
+async def test_unknown_tool_name_becomes_error_tool_result() -> None:
+    round0 = [
+        _msg_complete(
+            tool_calls=[
+                ToolCall(tool_call_id="t1", tool_name="ghost", arguments={})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    round1 = [_msg_complete(text="ok")]
+    backend = FakeAIBackend(scripts=[round0, round1])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={},  # no tools registered, but the agent calls "ghost"
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.END_TURN
+    tr = result.full_message_history[2].tool_results[0]
+    assert tr.is_error is True
+    assert "ghost" in tr.content
+    assert "tool not found" in tr.content
