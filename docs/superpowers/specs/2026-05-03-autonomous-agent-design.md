@@ -606,10 +606,16 @@ Workspaces are inherited via the materialized conversation. `WorkspaceProvider` 
 
 ## Implementation Phases
 
-Five increments. Each phase ends in a working state; the feature is incremental but releasable per phase.
+> **Update 2026-05-03 (post-Phase-1):** During Phase 1 implementation, reading `AIService.chat()` end-to-end revealed that the chat loop is interleaved with concerns that don't fit `run_loop`'s pure-primitive shape — per-round prompt mutation (conversation state, compression summaries), streaming text-deltas to the EventBus, per-round usage recording, max-tokens continuation, tool argument sanitization for UI, `ui_blocks` / `turn_rounds` accumulation, cancellation, attachment collection. To make `chat()` call `run_loop` byte-identically would require either baking all of that into `run_loop` (turning it into a hook-laden monster), passing them as callbacks (the design explicitly said "rather than callbacks"), or extracting a much larger set of shared helpers than originally scoped.
+>
+> **Decision:** Switch from Approach 3 (shared primitive) back to **Approach 1** (standalone `AgentService`). `run_loop` remains a tested primitive used by the new `AutonomousAgentService`. `AIService.chat()` keeps its existing loop unchanged. This is not duplication — chat's loop has chat-specific concerns that don't apply to autonomous-agent runs (and vice versa). If the two loops ever genuinely converge enough that a refactor pays for itself, we revisit then with concrete production requirements.
+>
+> **Phase numbering as built:** Phase 1 (`run_loop` primitive) shipped. Phase 2 (chat refactor) is **deferred indefinitely**. The remaining phases shift down: what was Phase 3 becomes Phase 2, etc.
 
-1. **`agent_loop.run_loop()` primitive + tests.** Pure function, no service, fake-backend tests. No production caller yet.
-2. **Refactor `AIService.chat()` to use `agent_loop`.** Behavior-preserving. Verified by the byte-identical replay test. Ships before any new agent code is wired.
+Original five-phase plan, with Phase 2 deferred:
+
+1. **`agent_loop.run_loop()` primitive + tests.** Pure function, no service, fake-backend tests. No production caller yet. ✅ **Shipped.**
+2. ~~**Refactor `AIService.chat()` to use `agent_loop`.**~~ **Deferred indefinitely** (see update note above).
 3. **`NotificationService` + WS push + UI bell.** Useful on its own (scheduler/ingest can call it). Ships independently.
 4. **`AutonomousAgentService` core.** Entities, CRUD WS RPCs, trigger plumbing, `_run_goal`, materialized conversation per goal, digest updates. Goals creatable via raw RPC; runs persist and live-tail in the existing chat UI pointed at the goal's `conversation_id`.
 5. **UI.** `<ConversationView>` extraction; `/agents` list; goal detail with all four tabs; goal-specific composer (with queued user input → next run consumption); `/agents/:id/runs/:run_id`; "Author with AI" on `Goal.instruction`.
