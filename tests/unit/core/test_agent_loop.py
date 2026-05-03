@@ -270,3 +270,40 @@ async def test_parallel_tool_calls_dispatched_concurrently() -> None:
     assert result.stop_reason == LoopStopReason.END_TURN
     # Both ends recorded; order between them is non-deterministic
     assert {x for x in invocation_log if x.startswith("end:")} == {"end:1", "end:2"}
+
+
+async def test_tool_exception_becomes_error_tool_result_and_loop_continues() -> None:
+    tool_def = ToolDefinition(name="boom", description="boom", parameters=[])
+
+    async def boom_handler(args: dict[str, Any]) -> str:
+        raise RuntimeError("kaboom")
+
+    round0 = [
+        _msg_complete(
+            tool_calls=[
+                ToolCall(tool_call_id="t1", tool_name="boom", arguments={})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    round1 = [_msg_complete(text="recovered")]
+
+    backend = FakeAIBackend(scripts=[round0, round1])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={"boom": (tool_def, boom_handler)},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.END_TURN
+    assert result.error is None
+    # The tool result message has is_error=True and a "tool failed" content
+    tr_msg = result.full_message_history[2]
+    assert tr_msg.role == MessageRole.TOOL_RESULT
+    tr = tr_msg.tool_results[0]
+    assert tr.is_error is True
+    assert "tool failed" in tr.content
+    assert "kaboom" in tr.content
