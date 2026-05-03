@@ -26,11 +26,11 @@ Companion to `2026-05-03-autonomous-agent-design.md`. Each section captures the 
 **Findings:** `src/gilbert/core/services/ai.py:6302` publishes archiving in the `_ws_conversation_delete` RPC handler (user-initiated delete), and `src/gilbert/core/services/ai.py:6499` publishes archiving from `_ws_room_leave` when the conversation owner leaves a shared conversation room. No scheduler jobs or time-based archive logic exists in AIService. Conversations persist indefinitely unless explicitly deleted by the owner.
 **Follow-up:** None — agent goal conversations stay forever unless explicitly deleted. Phase 4 plan adds a `pinned: bool = False` flag on conversations (set to True for goal conversations) to prevent accidental deletion via future bulk-cleanup features, but no such cleanup currently exists.
 
-## 5. Workspace cleanup hooks via chat.conversation.archiving
+## 5. Workspace cleanup hooks via chat.conversation.destroyed
 
-**Status:** TBD
-**Findings:** TBD
-**Follow-up:** TBD
+**Status:** Subscribed and cleans
+**Findings:** `src/gilbert/core/services/workspace.py:209-211` — WorkspaceService subscribes to `chat.conversation.destroyed` with handler `_on_conversation_destroyed`. Handler confirmed on lines 285-376 to: (1) delete all entries from `_WORKSPACE_FILES_COLLECTION` for the conversation_id via storage.query/delete loop (lines 293-316), (2) delete the workspace directory under `.gilbert/workspaces/users/<user_id>/conversations/<conversation_id>/` by resolving both new and legacy layout paths (lines 318-375), with defense-in-depth path validation to prevent directory traversal (lines 359-366) and `shutil.rmtree` cleanup (line 370).
+**Follow-up:** None — workspace cleanup is already wired and working.
 
 ## 6. Conversation auth model — shared read access
 
