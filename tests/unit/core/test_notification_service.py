@@ -314,3 +314,38 @@ async def test_notification_mark_read_rejects_other_users_notifications(
     raw = await service._storage.get("notifications", n.id)
     assert raw is not None
     assert raw["read"] is False
+
+
+async def test_notification_mark_all_read_marks_all_user_notifications(
+    service: NotificationService,
+) -> None:
+    a1 = await service.notify_user(user_id="u_alice", message="1", source="t")
+    a2 = await service.notify_user(user_id="u_alice", message="2", source="t")
+    b1 = await service.notify_user(user_id="u_bob", message="3", source="t")
+
+    handlers = service.get_ws_handlers()
+    handler = handlers["notification.mark_all_read"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+    result = await handler(_Conn("u_alice"), {"id": "f1"})
+
+    assert result is not None
+    assert result["count"] == 2
+
+    a1_raw = await service._storage.get("notifications", a1.id)
+    a2_raw = await service._storage.get("notifications", a2.id)
+    b1_raw = await service._storage.get("notifications", b1.id)
+    assert a1_raw is not None and a1_raw["read"] is True
+    assert a2_raw is not None and a2_raw["read"] is True
+    # Bob's notification is untouched
+    assert b1_raw is not None and b1_raw["read"] is False

@@ -228,11 +228,31 @@ class NotificationService(Service):
     async def _ws_mark_all_read(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
+        """Mark every unread notification for this user as read."""
+        if self._storage is None:
+            raise RuntimeError("NotificationService.start() not called")
+
+        user_id = conn.user_ctx.user_id
+        unread = await self._storage.query(
+            Query(
+                collection=_COLLECTION,
+                filters=[
+                    Filter(field="user_id", op=FilterOp.EQ, value=user_id),
+                    Filter(field="read", op=FilterOp.EQ, value=False),
+                ],
+            )
+        )
+
+        now_iso = datetime.now(UTC).isoformat()
+        for raw in unread:
+            raw["read"] = True
+            raw["read_at"] = now_iso
+            await self._storage.put(_COLLECTION, raw["id"], raw)
+
         return {
             "type": "notification.mark_all_read.result",
             "ref": frame.get("id"),
-            "ok": False,
-            "error": "not_implemented",
+            "count": len(unread),
         }
 
     async def _ws_delete(
