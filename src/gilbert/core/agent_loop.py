@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -166,9 +166,7 @@ async def run_loop(
                 rounds_used=rounds_used,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                error=RuntimeError(
-                    "backend stream ended without MESSAGE_COMPLETE"
-                ),
+                error=RuntimeError("backend stream ended without MESSAGE_COMPLETE"),
             )
 
         if response.usage:
@@ -206,9 +204,7 @@ async def run_loop(
                 tool_results = await _execute_tool_calls_sequential(
                     response.message.tool_calls, tools
                 )
-            history.append(
-                Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results)
-            )
+            history.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
             continue
 
         # No other stop reasons handled yet — break out of the loop and
@@ -277,6 +273,4 @@ async def _execute_tool_calls_parallel(
     Result order matches the input order so ``zip(tool_calls, results)``
     is meaningful.
     """
-    return await asyncio.gather(
-        *(_invoke_one_tool(tc, tools) for tc in tool_calls)
-    )
+    return await asyncio.gather(*(_invoke_one_tool(tc, tools) for tc in tool_calls))

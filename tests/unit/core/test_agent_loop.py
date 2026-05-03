@@ -17,7 +17,6 @@ import pytest
 from gilbert.core.agent_loop import (
     LoopResult,
     LoopStopReason,
-    ToolHandler,
     run_loop,
 )
 from gilbert.interfaces.ai import (
@@ -32,7 +31,7 @@ from gilbert.interfaces.ai import (
     StreamEventType,
     TokenUsage,
 )
-from gilbert.interfaces.tools import ToolCall, ToolDefinition, ToolResult
+from gilbert.interfaces.tools import ToolCall, ToolDefinition
 
 
 def _msg_complete(
@@ -152,9 +151,7 @@ async def test_tool_call_round_then_end_turn() -> None:
     round0 = [
         _msg_complete(
             text="let me echo",
-            tool_calls=[
-                ToolCall(tool_call_id="t1", tool_name="echo", arguments={"text": "hi"})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t1", tool_name="echo", arguments={"text": "hi"})],
             stop_reason=StopReason.TOOL_USE,
         )
     ]
@@ -197,9 +194,7 @@ async def test_max_rounds_terminates_loop() -> None:
     round_with_tool = [
         _msg_complete(
             text="",
-            tool_calls=[
-                ToolCall(tool_call_id=f"t", tool_name="loop", arguments={})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t", tool_name="loop", arguments={})],
             stop_reason=StopReason.TOOL_USE,
         )
     ]
@@ -280,9 +275,7 @@ async def test_tool_exception_becomes_error_tool_result_and_loop_continues() -> 
 
     round0 = [
         _msg_complete(
-            tool_calls=[
-                ToolCall(tool_call_id="t1", tool_name="boom", arguments={})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t1", tool_name="boom", arguments={})],
             stop_reason=StopReason.TOOL_USE,
         )
     ]
@@ -340,9 +333,7 @@ async def test_wall_clock_budget_exceeded_between_rounds() -> None:
 
     round_with_tool = [
         _msg_complete(
-            tool_calls=[
-                ToolCall(tool_call_id="t", tool_name="slow", arguments={})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t", tool_name="slow", arguments={})],
             stop_reason=StopReason.TOOL_USE,
         )
     ]
@@ -374,9 +365,7 @@ async def test_token_budget_exceeded_between_rounds() -> None:
 
     round_with_tool = [
         _msg_complete(
-            tool_calls=[
-                ToolCall(tool_call_id="t", tool_name="loop", arguments={})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t", tool_name="loop", arguments={})],
             stop_reason=StopReason.TOOL_USE,
             input_tokens=40,
             output_tokens=20,
@@ -401,9 +390,7 @@ async def test_token_budget_exceeded_between_rounds() -> None:
 
 async def test_backend_max_tokens_terminates_with_max_tokens() -> None:
     backend = FakeAIBackend(
-        scripts=[
-            [_msg_complete(text="cut off here", stop_reason=StopReason.MAX_TOKENS)]
-        ]
+        scripts=[[_msg_complete(text="cut off here", stop_reason=StopReason.MAX_TOKENS)]]
     )
 
     result = await run_loop(
@@ -422,9 +409,7 @@ async def test_backend_max_tokens_terminates_with_max_tokens() -> None:
 async def test_unknown_tool_name_becomes_error_tool_result() -> None:
     round0 = [
         _msg_complete(
-            tool_calls=[
-                ToolCall(tool_call_id="t1", tool_name="ghost", arguments={})
-            ],
+            tool_calls=[ToolCall(tool_call_id="t1", tool_name="ghost", arguments={})],
             stop_reason=StopReason.TOOL_USE,
         )
     ]
