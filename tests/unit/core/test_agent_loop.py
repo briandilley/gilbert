@@ -184,3 +184,34 @@ async def test_tool_call_round_then_end_turn() -> None:
     assert tr.content == "echoed: hi"
     assert tr.is_error is False
     assert result.full_message_history[3].content == "done"
+
+
+async def test_max_rounds_terminates_loop() -> None:
+    tool_def = ToolDefinition(name="loop", description="loop forever", parameters=[])
+
+    async def loop_handler(args: dict[str, Any]) -> str:
+        return "ok"
+
+    # Every round emits another tool call — never END_TURN — so the loop
+    # must terminate via MAX_ROUNDS.
+    round_with_tool = [
+        _msg_complete(
+            text="",
+            tool_calls=[
+                ToolCall(tool_call_id=f"t", tool_name="loop", arguments={})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    backend = FakeAIBackend(scripts=[round_with_tool] * 3)
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={"loop": (tool_def, loop_handler)},
+        max_rounds=3,
+    )
+
+    assert result.stop_reason == LoopStopReason.MAX_ROUNDS
+    assert result.rounds_used == 3
