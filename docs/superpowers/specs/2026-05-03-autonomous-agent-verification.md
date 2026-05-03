@@ -4,9 +4,9 @@ Companion to `2026-05-03-autonomous-agent-design.md`. Each section captures the 
 
 ## 1. push_to_user capability in web layer
 
-**Status:** Missing
-**Findings:** No per-user push helper exists. Connections are tracked in `src/gilbert/web/ws_protocol.py:286` as `_connections: set[WsConnection]` keyed only by the connection object itself. Adding `push_to_user(user_id, frame)` requires: (1) maintain `dict[user_id, set[WsConnection]]` updated on `register`/`unregister` in `WsConnectionManager`, (2) expose a `push_to_user` method on the `WsConnectionManager`, (3) declare a `user_ws_pusher` capability so other services can resolve it via `service_manager.get_by_capability("user_ws_pusher")`.
-**Follow-up:** Phase 3 plan must include a task to add `push_to_user`. Tag this verification finding in the Phase 3 plan's pre-flight section.
+**Status:** Not needed — existing dispatch handles it
+**Findings:** `WsConnectionManager._dispatch_event` at `src/gilbert/web/ws_protocol.py:350` already routes every published bus event to every connection, applying per-event-type content filters (`can_see_chat_event`, `can_see_auth_event`, `can_see_workspace_event` on `WsConnection`). The original finding's prescription to add a `push_to_user` helper plus a `dict[user_id, set[WsConnection]]` registry was overengineering: notifications are bus events with `user_id` in `data`, and a single `can_see_notification_event` filter (matching the existing pattern) restricts delivery to the target user. No new registry, no new capability declaration, no separate push API needed.
+**Follow-up:** Phase 3 NotificationService publishes a `notification.received` event with `user_id` in the data. Phase 3 also adds `WsConnection.can_see_notification_event` and wires it into `_dispatch_event`. That's the entire delivery path.
 
 ## 2. SchedulerService.add_job idempotency on name
 
