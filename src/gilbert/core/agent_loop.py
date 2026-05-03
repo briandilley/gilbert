@@ -127,6 +127,15 @@ async def run_loop(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
             )
+        if max_tokens is not None and (tokens_in + tokens_out) >= max_tokens:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.TOKEN_BUDGET,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
         rounds_used += 1
         request = AIRequest(
             messages=history,

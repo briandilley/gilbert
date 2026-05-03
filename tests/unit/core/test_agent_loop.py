@@ -360,3 +360,40 @@ async def test_wall_clock_budget_exceeded_between_rounds() -> None:
 
     assert result.stop_reason == LoopStopReason.WALL_CLOCK
     assert result.rounds_used == 1
+
+
+async def test_token_budget_exceeded_between_rounds() -> None:
+    """Round 1 records 60 tokens (10+5 default usage from `_msg_complete` is
+    overridden here); the loop checks the cumulative total before the next
+    round and terminates with TOKEN_BUDGET.
+    """
+    tool_def = ToolDefinition(name="loop", description="loop", parameters=[])
+
+    async def handler(args: dict[str, Any]) -> str:
+        return "ok"
+
+    round_with_tool = [
+        _msg_complete(
+            tool_calls=[
+                ToolCall(tool_call_id="t", tool_name="loop", arguments={})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+            input_tokens=40,
+            output_tokens=20,
+        )
+    ]
+    backend = FakeAIBackend(scripts=[round_with_tool, round_with_tool])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={"loop": (tool_def, handler)},
+        max_rounds=10,
+        max_tokens=50,  # 60 cumulative > 50 → bail before round 2
+    )
+
+    assert result.stop_reason == LoopStopReason.TOKEN_BUDGET
+    assert result.rounds_used == 1
+    assert result.tokens_in == 40
+    assert result.tokens_out == 20
