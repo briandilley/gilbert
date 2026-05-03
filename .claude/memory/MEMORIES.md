@@ -41,3 +41,4 @@
 - [Usage Service](memory-usage-service.md) — per-round AI token/cost recording, pricing config, grouped reporting queries
 - [Proposals Service](memory-proposals-service.md) — autonomous self-improvement proposals from observed activity, admin triage via `/proposals`
 - [Source Inspector Service](memory-source-inspector-service.md) — read-only source-tree AI tools (list/read/grep), always injected into the proposals reflection AI
+- [run_loop primitive](memory-agent-loop.md) — pure async loop; budgets, tool dispatch, error handling
