@@ -89,3 +89,23 @@ class LoopResult:
 
     error: Exception | None = None
     """Set when ``stop_reason == LoopStopReason.ERROR``. Otherwise None."""
+
+
+async def run_loop(
+    *,
+    backend: AIBackend,
+    system_prompt: str,
+    messages: list[Message],
+    tools: dict[str, tuple[ToolDefinition, ToolHandler]],
+    max_rounds: int,
+    max_wall_clock_s: float | None = None,
+    max_tokens: int | None = None,
+    model: str = "",
+) -> LoopResult:
+    """Drive one AI tool-use loop end-to-end.
+
+    See module docstring for the contract. All arguments are keyword-only —
+    every additional knob in the future should also be keyword-only so the
+    call sites stay readable.
+    """
+    raise NotImplementedError
