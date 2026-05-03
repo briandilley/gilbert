@@ -258,11 +258,33 @@ class NotificationService(Service):
     async def _ws_delete(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
+        """Delete one of the calling user's notifications."""
+        if self._storage is None:
+            raise RuntimeError("NotificationService.start() not called")
+
+        notification_id = frame.get("notification_id")
+        if not isinstance(notification_id, str) or not notification_id:
+            return {
+                "type": "notification.delete.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "missing notification_id",
+            }
+
+        raw = await self._storage.get(_COLLECTION, notification_id)
+        if raw is None or raw.get("user_id") != conn.user_ctx.user_id:
+            return {
+                "type": "notification.delete.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+
+        await self._storage.delete(_COLLECTION, notification_id)
         return {
             "type": "notification.delete.result",
             "ref": frame.get("id"),
-            "ok": False,
-            "error": "not_implemented",
+            "ok": True,
         }
 
 

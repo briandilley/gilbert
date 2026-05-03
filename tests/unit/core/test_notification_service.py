@@ -349,3 +349,58 @@ async def test_notification_mark_all_read_marks_all_user_notifications(
     assert a2_raw is not None and a2_raw["read"] is True
     # Bob's notification is untouched
     assert b1_raw is not None and b1_raw["read"] is False
+
+
+async def test_notification_delete_removes_user_notification(
+    service: NotificationService,
+) -> None:
+    n = await service.notify_user(user_id="u_alice", message="m", source="t")
+    handlers = service.get_ws_handlers()
+    handler = handlers["notification.delete"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+    result = await handler(_Conn("u_alice"), {"id": "f1", "notification_id": n.id})
+
+    assert result is not None
+    assert result["ok"] is True
+
+    raw = await service._storage.get("notifications", n.id)
+    assert raw is None
+
+
+async def test_notification_delete_rejects_other_users(
+    service: NotificationService,
+) -> None:
+    n = await service.notify_user(user_id="u_alice", message="m", source="t")
+    handlers = service.get_ws_handlers()
+    handler = handlers["notification.delete"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+    result = await handler(_Conn("u_bob"), {"id": "f1", "notification_id": n.id})
+
+    assert result is not None
+    assert result["ok"] is False
+
+    # Notification still exists
+    raw = await service._storage.get("notifications", n.id)
+    assert raw is not None
