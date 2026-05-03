@@ -325,3 +325,38 @@ async def test_backend_exception_returns_error_loop_result() -> None:
     assert "scripted backend failure" in str(result.error)
     # Loop ran one round (the failing one) and bailed
     assert result.rounds_used == 1
+
+
+async def test_wall_clock_budget_exceeded_between_rounds() -> None:
+    """The first round completes; the loop checks wall-clock before the
+    next round starts and terminates with WALL_CLOCK.
+    """
+    tool_def = ToolDefinition(name="slow", description="slow", parameters=[])
+
+    async def slow_handler(args: dict[str, Any]) -> str:
+        # Burn at least 0.05s so the deadline check after this round trips
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    round_with_tool = [
+        _msg_complete(
+            tool_calls=[
+                ToolCall(tool_call_id="t", tool_name="slow", arguments={})
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    # Two scripted rounds — but wall-clock should kill us before round 2.
+    backend = FakeAIBackend(scripts=[round_with_tool, round_with_tool])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={"slow": (tool_def, slow_handler)},
+        max_rounds=10,
+        max_wall_clock_s=0.01,  # already exceeded after round 1's tool ran
+    )
+
+    assert result.stop_reason == LoopStopReason.WALL_CLOCK
+    assert result.rounds_used == 1

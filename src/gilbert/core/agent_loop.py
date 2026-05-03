@@ -113,8 +113,20 @@ async def run_loop(
     tokens_out = 0
     final_message = Message(role=MessageRole.ASSISTANT, content="")
     rounds_used = 0
+    deadline: float | None = (
+        time.monotonic() + max_wall_clock_s if max_wall_clock_s is not None else None
+    )
 
     for _ in range(max_rounds):
+        if deadline is not None and time.monotonic() >= deadline:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.WALL_CLOCK,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
         rounds_used += 1
         request = AIRequest(
             messages=history,
