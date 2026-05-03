@@ -444,3 +444,23 @@ async def test_unknown_tool_name_becomes_error_tool_result() -> None:
     assert tr.is_error is True
     assert "ghost" in tr.content
     assert "tool not found" in tr.content
+
+
+async def test_stream_ends_without_message_complete_returns_error() -> None:
+    # Only a TEXT_DELTA, no MESSAGE_COMPLETE — backend bug.
+    bad_round = [
+        StreamEvent(type=StreamEventType.TEXT_DELTA, text="partial"),
+    ]
+    backend = FakeAIBackend(scripts=[bad_round])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.ERROR
+    assert isinstance(result.error, RuntimeError)
+    assert "MESSAGE_COMPLETE" in str(result.error)
