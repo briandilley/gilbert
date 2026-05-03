@@ -34,9 +34,9 @@ Companion to `2026-05-03-autonomous-agent-design.md`. Each section captures the 
 
 ## 6. Conversation auth model — shared read access
 
-**Status:** TBD
-**Findings:** TBD
-**Follow-up:** TBD
+**Status:** Owner-only (no ACL extension for personal conversations)
+**Findings:** Conversations have two access models: (1) **Personal conversations** (`shared=false`, the default) — owned by a single user via `user_id` field at `src/gilbert/core/services/ai.py:3938`. Access is NOT enforced at message load (`_load_conversation` at line 4002 returns unconditionally). (2) **Shared rooms** (`shared=true`) — room members listed in `members: list[dict]` array (line 3871) can read/write. Per-message visibility control exists (`Message.visible_to` at `src/gilbert/interfaces/ai.py:137`), but is for hiding messages *within* a shared room, not a conversation-level ACL for non-shared conversations. No per-conversation read-access list exists for personal conversations — the conversation is either owned or private.
+**Follow-up:** Phase 4 plan must either: (a) Add per-conversation read-access ACL (new `read_access: list[str]` field on conversation entity + access-check refactor in `_load_conversation` and `_ws_chat_send` at line 5430-5439), OR (b) Scope agents to single-user goals only in v1 (`notify_user_ids` constrained to `[owner_user_id]` to avoid multi-user sharing). Flag as a scope decision for Phase 4 pre-flight review.
 
 ## 7. AI-call log named-call mechanism
 
