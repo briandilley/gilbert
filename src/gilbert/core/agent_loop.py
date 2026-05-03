@@ -108,4 +108,60 @@ async def run_loop(
     every additional knob in the future should also be keyword-only so the
     call sites stay readable.
     """
-    raise NotImplementedError
+    history = list(messages)
+    tokens_in = 0
+    tokens_out = 0
+    final_message = Message(role=MessageRole.ASSISTANT, content="")
+    rounds_used = 0
+
+    for _ in range(max_rounds):
+        rounds_used += 1
+        request = AIRequest(
+            messages=history,
+            system_prompt=system_prompt,
+            tools=[t[0] for t in tools.values()],
+            model=model,
+        )
+        response = None
+        async for ev in backend.generate_stream(request):
+            if ev.type == StreamEventType.MESSAGE_COMPLETE:
+                response = ev.response
+        if response is None:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.ERROR,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                error=RuntimeError(
+                    "backend stream ended without MESSAGE_COMPLETE"
+                ),
+            )
+
+        if response.usage:
+            tokens_in += response.usage.input_tokens
+            tokens_out += response.usage.output_tokens
+        final_message = response.message
+        history.append(response.message)
+
+        if response.stop_reason == StopReason.END_TURN:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.END_TURN,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
+        # Tool use, max-tokens, and budgets get added in subsequent tasks.
+        break
+
+    return LoopResult(
+        final_message=final_message,
+        full_message_history=history,
+        stop_reason=LoopStopReason.MAX_ROUNDS,
+        rounds_used=rounds_used,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+    )

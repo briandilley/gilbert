@@ -111,3 +111,27 @@ class FakeAIBackend(AIBackend):
 
 # pytest-asyncio convention used elsewhere in the repo
 pytestmark = pytest.mark.asyncio
+
+
+async def test_single_end_turn_round_terminates_immediately() -> None:
+    backend = FakeAIBackend(scripts=[[_msg_complete(text="hello")]])
+    initial = [Message(role=MessageRole.USER, content="hi")]
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="you are a test bot",
+        messages=initial,
+        tools={},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.END_TURN
+    assert result.final_message.content == "hello"
+    assert result.rounds_used == 1
+    assert result.tokens_in == 10
+    assert result.tokens_out == 5
+    assert result.error is None
+    # full_message_history = initial + assistant
+    assert len(result.full_message_history) == 2
+    assert result.full_message_history[0] is initial[0]
+    assert result.full_message_history[1].role == MessageRole.ASSISTANT
