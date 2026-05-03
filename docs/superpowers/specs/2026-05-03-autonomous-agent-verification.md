@@ -10,9 +10,9 @@ Companion to `2026-05-03-autonomous-agent-design.md`. Each section captures the 
 
 ## 2. SchedulerService.add_job idempotency on name
 
-**Status:** TBD
-**Findings:** TBD
-**Follow-up:** TBD
+**Status:** Not idempotent
+**Findings:** `src/gilbert/core/services/scheduler.py:379-380` — `add_job` raises `ValueError(f"Job '{name}' already registered")` if a job with the same name exists. Re-arming on goal update must call `remove_job(name)` first (best-effort, swallow not-found) then `add_job`.
+**Follow-up:** Phase 4 plan: `_arm_trigger` does `remove_job` (best-effort, swallow KeyError) then `add_job`.
 
 ## 3. event_types registry / dynamic choices
 
