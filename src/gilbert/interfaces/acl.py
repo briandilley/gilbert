@@ -35,6 +35,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # The WS layer applies a per-event mailbox-access filter on top of
     # this, so a user only sees events for mailboxes they can access.
     "inbox.": 100,
+    # Notifications are user-level events; the WS layer's
+    # can_see_notification_event filter narrows delivery to the
+    # specific recipient by matching event.data["user_id"].
+    "notification.": 100,
     # auth.user.roles.changed fires on role mutation. The WS layer
     # restricts delivery to admins + the affected user themselves.
     "auth.": 100,
