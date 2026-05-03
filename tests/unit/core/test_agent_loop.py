@@ -464,3 +464,28 @@ async def test_stream_ends_without_message_complete_returns_error() -> None:
     assert result.stop_reason == LoopStopReason.ERROR
     assert isinstance(result.error, RuntimeError)
     assert "MESSAGE_COMPLETE" in str(result.error)
+
+
+async def test_tool_definitions_are_passed_to_backend_request() -> None:
+    tool_def = ToolDefinition(name="echo", description="echo", parameters=[])
+
+    async def handler(args: dict[str, Any]) -> str:
+        return "x"
+
+    backend = FakeAIBackend(scripts=[[_msg_complete(text="done")]])
+
+    await run_loop(
+        backend=backend,
+        system_prompt="sp",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={"echo": (tool_def, handler)},
+        max_rounds=10,
+        model="some-model",
+    )
+
+    assert len(backend.requests_seen) == 1
+    req = backend.requests_seen[0]
+    assert req.system_prompt == "sp"
+    assert req.model == "some-model"
+    assert len(req.tools) == 1
+    assert req.tools[0].name == "echo"
