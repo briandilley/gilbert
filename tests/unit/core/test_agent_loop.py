@@ -474,3 +474,30 @@ async def test_tool_definitions_are_passed_to_backend_request() -> None:
     assert req.model == "some-model"
     assert len(req.tools) == 1
     assert req.tools[0].name == "echo"
+
+
+async def test_tool_use_stop_with_no_tool_calls_returns_error() -> None:
+    """A malformed backend response: TOOL_USE stop reason but no tool_calls.
+    Should return ERROR rather than silently terminating as MAX_ROUNDS.
+    """
+    bad_round = [
+        _msg_complete(
+            text="",
+            tool_calls=[],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    ]
+    backend = FakeAIBackend(scripts=[bad_round])
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.ERROR
+    assert isinstance(result.error, RuntimeError)
+    assert "TOOL_USE" in str(result.error)
+    assert "tool_calls" in str(result.error)

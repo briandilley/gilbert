@@ -195,7 +195,19 @@ async def run_loop(
                 tokens_out=tokens_out,
             )
 
-        if response.stop_reason == StopReason.TOOL_USE and response.message.tool_calls:
+        if response.stop_reason == StopReason.TOOL_USE:
+            if not response.message.tool_calls:
+                return LoopResult(
+                    final_message=final_message,
+                    full_message_history=history,
+                    stop_reason=LoopStopReason.ERROR,
+                    rounds_used=rounds_used,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    error=RuntimeError(
+                        "backend returned TOOL_USE stop reason with no tool_calls"
+                    ),
+                )
             if backend.capabilities().parallel_tool_calls and len(response.message.tool_calls) > 1:
                 tool_results = await _execute_tool_calls_parallel(
                     response.message.tool_calls, tools
@@ -207,9 +219,8 @@ async def run_loop(
             history.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
             continue
 
-        # No other stop reasons handled yet — break out of the loop and
-        # let the post-loop fallthrough mark this MAX_ROUNDS. Subsequent
-        # tasks add MAX_TOKENS / budget handling.
+        # Any other stop_reason (e.g. an enum we don't yet handle) falls
+        # through to MAX_ROUNDS via the post-loop return.
         break
 
     return LoopResult(
