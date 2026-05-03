@@ -254,3 +254,63 @@ async def test_notification_list_returns_user_notifications_with_unread_count(
     item_ids = {i["id"] for i in items}
     assert item_ids == {a1.id, a2.id, a3.id}
     assert b1.id not in item_ids  # bob's notification not visible to alice
+
+
+async def test_notification_mark_read_sets_read_and_read_at(
+    service: NotificationService,
+) -> None:
+    n = await service.notify_user(user_id="u_alice", message="m", source="t")
+    handlers = service.get_ws_handlers()
+    handler = handlers["notification.mark_read"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+    result = await handler(_Conn("u_alice"), {"id": "f1", "notification_id": n.id})
+
+    assert result is not None
+    assert result["ok"] is True
+
+    raw = await service._storage.get("notifications", n.id)
+    assert raw is not None
+    assert raw["read"] is True
+    assert raw["read_at"] is not None
+
+
+async def test_notification_mark_read_rejects_other_users_notifications(
+    service: NotificationService,
+) -> None:
+    n = await service.notify_user(user_id="u_alice", message="m", source="t")
+    handlers = service.get_ws_handlers()
+    handler = handlers["notification.mark_read"]
+
+    class _Conn:
+        def __init__(self, user_id: str) -> None:
+            from gilbert.interfaces.auth import UserContext
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = 1
+
+    # Bob tries to mark Alice's notification as read
+    result = await handler(_Conn("u_bob"), {"id": "f1", "notification_id": n.id})
+
+    assert result is not None
+    assert result["ok"] is False
+    assert "not_found" in result.get("error", "") or "forbidden" in result.get("error", "")
+
+    # Confirm the notification is still unread
+    raw = await service._storage.get("notifications", n.id)
+    assert raw is not None
+    assert raw["read"] is False

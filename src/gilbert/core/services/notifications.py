@@ -190,15 +190,39 @@ class NotificationService(Service):
     async def _ws_mark_read(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Handler for ``notification.mark_read`` frames.
+        """Mark one notification as read. Owner-only."""
+        if self._storage is None:
+            raise RuntimeError("NotificationService.start() not called")
 
-        Implementation comes in Task 8.
-        """
+        notification_id = frame.get("notification_id")
+        if not isinstance(notification_id, str) or not notification_id:
+            return {
+                "type": "notification.mark_read.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "missing notification_id",
+            }
+
+        raw = await self._storage.get(_COLLECTION, notification_id)
+        if raw is None or raw.get("user_id") != conn.user_ctx.user_id:
+            # Treat "not yours" the same as "doesn't exist" so we don't leak
+            # the existence of other users' notifications.
+            return {
+                "type": "notification.mark_read.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+
+        if not raw.get("read"):
+            raw["read"] = True
+            raw["read_at"] = datetime.now(UTC).isoformat()
+            await self._storage.put(_COLLECTION, notification_id, raw)
+
         return {
             "type": "notification.mark_read.result",
             "ref": frame.get("id"),
-            "ok": False,
-            "error": "not_implemented",
+            "ok": True,
         }
 
     async def _ws_mark_all_read(
