@@ -187,6 +187,16 @@ async def run_loop(
                 tokens_out=tokens_out,
             )
 
+        if response.stop_reason == StopReason.MAX_TOKENS:
+            return LoopResult(
+                final_message=final_message,
+                full_message_history=history,
+                stop_reason=LoopStopReason.MAX_TOKENS,
+                rounds_used=rounds_used,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
+
         if response.stop_reason == StopReason.TOOL_USE and response.message.tool_calls:
             if backend.capabilities().parallel_tool_calls and len(response.message.tool_calls) > 1:
                 tool_results = await _execute_tool_calls_parallel(

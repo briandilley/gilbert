@@ -397,3 +397,23 @@ async def test_token_budget_exceeded_between_rounds() -> None:
     assert result.rounds_used == 1
     assert result.tokens_in == 40
     assert result.tokens_out == 20
+
+
+async def test_backend_max_tokens_terminates_with_max_tokens() -> None:
+    backend = FakeAIBackend(
+        scripts=[
+            [_msg_complete(text="cut off here", stop_reason=StopReason.MAX_TOKENS)]
+        ]
+    )
+
+    result = await run_loop(
+        backend=backend,
+        system_prompt="x",
+        messages=[Message(role=MessageRole.USER, content="go")],
+        tools={},
+        max_rounds=10,
+    )
+
+    assert result.stop_reason == LoopStopReason.MAX_TOKENS
+    assert result.rounds_used == 1
+    assert result.final_message.content == "cut off here"
