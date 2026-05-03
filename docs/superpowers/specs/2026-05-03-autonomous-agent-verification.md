@@ -22,9 +22,9 @@ Companion to `2026-05-03-autonomous-agent-design.md`. Each section captures the 
 
 ## 4. Conversation auto-archive policy
 
-**Status:** TBD
-**Findings:** TBD
-**Follow-up:** TBD
+**Status:** Explicit-only
+**Findings:** `src/gilbert/core/services/ai.py:6302` publishes archiving in the `_ws_conversation_delete` RPC handler (user-initiated delete), and `src/gilbert/core/services/ai.py:6499` publishes archiving from `_ws_room_leave` when the conversation owner leaves a shared conversation room. No scheduler jobs or time-based archive logic exists in AIService. Conversations persist indefinitely unless explicitly deleted by the owner.
+**Follow-up:** None — agent goal conversations stay forever unless explicitly deleted. Phase 4 plan adds a `pinned: bool = False` flag on conversations (set to True for goal conversations) to prevent accidental deletion via future bulk-cleanup features, but no such cleanup currently exists.
 
 ## 5. Workspace cleanup hooks via chat.conversation.archiving
 
