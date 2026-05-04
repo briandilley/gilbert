@@ -931,5 +931,19 @@ export function useWsApi() {
         run_id: runId,
       }),
 
+    authorGoalInstruction: (
+      goalId: string,
+      currentText: string,
+      instruction: string,
+      aiProfile?: string,
+    ) =>
+      rpc<{ ok: boolean; new_text?: string; profile_used?: string; error?: string }>({
+        type: "agent.goal.author_instruction",
+        goal_id: goalId,
+        current_text: currentText,
+        instruction,
+        ai_profile: aiProfile ?? "",
+      }),
+
   }), [rpc, rpcWithRef]);
 }
