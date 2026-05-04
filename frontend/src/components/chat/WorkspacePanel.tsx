@@ -27,6 +27,12 @@ import type { WorkspaceFile } from "@/types/workspace";
 
 interface WorkspacePanelProps {
   conversationId: string | null;
+  /** When set (and the file with that ``rel_path`` is in the current
+   *  workspace), open the FileViewerModal on it as soon as the file
+   *  list loads. Used by the agent UI when the user clicks an
+   *  attachment chip — we want the panel to open directly to the
+   *  file rather than make them hunt for it in the list. */
+  initialFilePath?: string | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -242,7 +248,10 @@ function FileSection({
   );
 }
 
-export function WorkspacePanelContent({ conversationId }: WorkspacePanelProps) {
+export function WorkspacePanelContent({
+  conversationId,
+  initialFilePath,
+}: WorkspacePanelProps) {
   const api = useWsApi();
   const { connected } = useWebSocket();
 
@@ -336,6 +345,17 @@ export function WorkspacePanelContent({ conversationId }: WorkspacePanelProps) {
   const handleView = useCallback((file: WorkspaceFile) => {
     setViewerFile(file);
   }, []);
+
+  // When the parent passes an ``initialFilePath`` and the file list
+  // includes a matching entry, auto-open the viewer on it. Re-runs
+  // when the path changes so a second click on a different
+  // attachment switches the viewer to that file.
+  useEffect(() => {
+    if (!initialFilePath) return;
+    const all = [...uploads, ...outputs, ...scratch];
+    const match = all.find((f) => f.rel_path === initialFilePath);
+    if (match) setViewerFile(match);
+  }, [initialFilePath, uploads, outputs, scratch]);
 
   const hasFiles = uploads.length > 0 || outputs.length > 0 || scratch.length > 0;
 

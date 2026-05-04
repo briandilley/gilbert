@@ -10,6 +10,7 @@ import {
   ZapIcon,
   Trash2Icon,
   MenuIcon,
+  FolderOpenIcon,
 } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -25,6 +26,8 @@ import {
 import { CreateGoalDialog } from "@/components/agent/AgentsPage";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { AttachmentChip } from "@/components/chat/TurnBubble";
+import { WorkspacePanelContent } from "@/components/chat/WorkspacePanel";
+import type { FileAttachment } from "@/types/chat";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
 import type {
@@ -303,6 +306,16 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
   const [composerText, setComposerText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  // When the user clicks an attachment chip, open the workspace
+  // panel and remember which file's rel_path to focus on so the
+  // FileViewer can pre-select it.
+  const [focusedFilePath, setFocusedFilePath] = useState<string | null>(null);
+
+  const handleAttachmentOpen = useCallback((att: FileAttachment) => {
+    setFocusedFilePath(att.workspace_path || null);
+    setWorkspaceOpen(true);
+  }, []);
 
   // Fetch runs so we can fall back to the most recent run's
   // conversation_id when goal.conversation_id is empty (stateless goals
@@ -588,7 +601,8 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full">
+      <div className="flex flex-col h-full flex-1 min-w-0">
       {/* Header */}
       <div className="border-b px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3">
         {onOpenSidebar ? (
@@ -618,6 +632,20 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
         <span className="hidden sm:inline text-xs text-muted-foreground shrink-0">
           {goal.run_count} run{goal.run_count === 1 ? "" : "s"}
         </span>
+        {conversationId ? (
+          <Button
+            variant={workspaceOpen ? "secondary" : "ghost"}
+            size="icon-sm"
+            onClick={() => {
+              setFocusedFilePath(null);
+              setWorkspaceOpen((o) => !o);
+            }}
+            title="Workspace files"
+            className="shrink-0"
+          >
+            <FolderOpenIcon className="size-4" />
+          </Button>
+        ) : null}
       </div>
 
       {/* Messages */}
@@ -645,13 +673,18 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
         ) : (
           <>
             {(conversation?.turns ?? []).map((turn, i) => (
-              <FlatTurnBlock key={i} turn={turn} />
+              <FlatTurnBlock
+                key={i}
+                turn={turn}
+                onAttachmentOpen={handleAttachmentOpen}
+              />
             ))}
             {streamingTurn ? (
               <FlatTurnBlock
                 key="__streaming"
                 turn={streamingTurn}
                 streaming
+                onAttachmentOpen={handleAttachmentOpen}
               />
             ) : null}
             {pendingUserMessages.map((text, idx) => (
@@ -722,6 +755,40 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
           <div className="text-xs text-red-600 mt-1">{sendError}</div>
         ) : null}
       </div>
+      </div>
+
+      {/* Desktop workspace panel */}
+      {workspaceOpen && conversationId ? (
+        <div className="hidden md:block w-72 shrink-0 border-l overflow-hidden">
+          <WorkspacePanelContent
+            conversationId={conversationId}
+            initialFilePath={focusedFilePath}
+          />
+        </div>
+      ) : null}
+
+      {/* Mobile workspace sheet */}
+      <Sheet
+        open={
+          workspaceOpen &&
+          !!conversationId &&
+          typeof window !== "undefined" &&
+          window.innerWidth < 768
+        }
+        onOpenChange={setWorkspaceOpen}
+      >
+        <SheetContent side="right" className="w-72 p-0">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Workspace files</SheetTitle>
+          </SheetHeader>
+          {conversationId ? (
+            <WorkspacePanelContent
+              conversationId={conversationId}
+              initialFilePath={focusedFilePath}
+            />
+          ) : null}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
@@ -729,6 +796,7 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
 interface FlatTurnBlockProps {
   turn: ChatTurn;
   streaming?: boolean;
+  onAttachmentOpen?: (attachment: FileAttachment) => void;
 }
 
 /** Optimistic echo for a message the user just typed, before the
@@ -758,7 +826,7 @@ function PendingUserBubble({ text }: { text: string }) {
  * When `streaming` is true a pulsing indicator is shown and a subtle
  * left border marks the turn as in-flight.
  */
-function FlatTurnBlock({ turn, streaming }: FlatTurnBlockProps) {
+function FlatTurnBlock({ turn, streaming, onAttachmentOpen }: FlatTurnBlockProps) {
   return (
     <div
       className={`space-y-2${streaming ? " border-l-2 border-blue-400 pl-3" : ""}`}
@@ -790,7 +858,12 @@ function FlatTurnBlock({ turn, streaming }: FlatTurnBlockProps) {
           {turn.final_attachments && turn.final_attachments.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {turn.final_attachments.map((att, idx) => (
-                <AttachmentChip key={idx} attachment={att} index={idx} />
+                <AttachmentChip
+                  key={idx}
+                  attachment={att}
+                  index={idx}
+                  onOpen={onAttachmentOpen}
+                />
               ))}
             </div>
           )}

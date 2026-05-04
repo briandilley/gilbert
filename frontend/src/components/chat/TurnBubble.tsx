@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
@@ -560,14 +560,60 @@ function sumTurnUsage(turn: ChatTurn) {
 export function AttachmentChip({
   attachment,
   index,
+  onOpen,
 }: {
   attachment: FileAttachment;
   index: number;
+  /** When set, clicking a reference-mode attachment calls this
+   *  instead of triggering the default browser-download flow.
+   *  Used by the agent UI to open the file in the workspace
+   *  viewer. */
+  onOpen?: (attachment: FileAttachment) => void;
 }) {
   const api = useWsApi();
   const [busy, setBusy] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [refImageDataUrl, setRefImageDataUrl] = useState<string | null>(null);
   const isReference = isReferenceAttachment(attachment);
+
+  // For reference-mode images, fetch the bytes via the WS RPC and
+  // build a ``data:`` URL so the image can render inline. Tool-
+  // produced screenshots and assistant-attached photos all flow
+  // through here. Skip for non-image kinds (those keep the chip
+  // download flow).
+  useEffect(() => {
+    let cancelled = false;
+    if (!isReference || attachment.kind !== "image") return;
+    if (refImageDataUrl) return;
+    (async () => {
+      try {
+        const resp = await api.downloadSkillWorkspaceFile(
+          attachment.workspace_skill ?? "",
+          attachment.workspace_path ?? "",
+          attachment.workspace_conv || undefined,
+        );
+        const mediaType =
+          resp.media_type || attachment.media_type || "image/png";
+        if (!cancelled) {
+          setRefImageDataUrl(`data:${mediaType};base64,${resp.content_base64}`);
+        }
+      } catch {
+        // Fall back to chip on any error — the chip's own click
+        // handler will show a friendly message. No need to surface
+        // here.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    isReference,
+    attachment.kind,
+    attachment.workspace_skill,
+    attachment.workspace_path,
+    attachment.workspace_conv,
+  ]);
 
   async function handleReferenceDownload(): Promise<void> {
     if (!isReference || busy) return;
@@ -621,7 +667,11 @@ export function AttachmentChip({
     <div className="flex flex-col gap-1 max-w-xs">
       <button
         type="button"
-        onClick={handleReferenceDownload}
+        onClick={
+          onOpen
+            ? () => onOpen(attachment)
+            : handleReferenceDownload
+        }
         disabled={busy}
         className={cn(
           "flex items-center gap-2 rounded-lg border bg-muted/50 px-3 py-2 text-left hover:bg-muted disabled:opacity-60",
@@ -654,27 +704,54 @@ export function AttachmentChip({
   );
 
   if (attachment.kind === "image") {
-    if (isReference) {
-      return refChip(
-        attachment.name || `image ${index + 1}`,
-        `${attachment.media_type} · workspace file`,
-        <FileIcon className="size-5 text-muted-foreground" />,
-      );
-    }
-    const src = `data:${attachment.media_type};base64,${attachment.data ?? ""}`;
-    return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="block overflow-hidden rounded-lg border bg-muted"
-      >
+    // Resolve the source: inline data, or fetched-via-WS reference
+    // bytes. For reference-mode images we always try inline render
+    // first; if the fetch failed (refImageDataUrl is null and the
+    // effect already finished), fall back to the chip.
+    const inlineSrc = !isReference
+      ? `data:${attachment.media_type};base64,${attachment.data ?? ""}`
+      : refImageDataUrl;
+
+    if (inlineSrc) {
+      const img = (
         <img
-          src={src}
+          src={inlineSrc}
           alt={attachment.name || `attachment ${index + 1}`}
           className="max-h-60 max-w-[16rem] object-cover"
         />
-      </a>
+      );
+      // Clickable shell — onOpen lets parent components hijack the
+      // click (e.g. the agent UI opens the workspace viewer instead
+      // of opening the image in a new tab).
+      if (onOpen) {
+        return (
+          <button
+            type="button"
+            onClick={() => onOpen(attachment)}
+            className="block overflow-hidden rounded-lg border bg-muted hover:bg-muted/70"
+            title={attachment.name || `attachment ${index + 1}`}
+          >
+            {img}
+          </button>
+        );
+      }
+      return (
+        <a
+          href={inlineSrc}
+          target="_blank"
+          rel="noreferrer"
+          className="block overflow-hidden rounded-lg border bg-muted"
+        >
+          {img}
+        </a>
+      );
+    }
+    // Reference-mode image whose fetch hasn't completed (or failed):
+    // render the chip as a fallback.
+    return refChip(
+      attachment.name || `image ${index + 1}`,
+      `${attachment.media_type} · workspace file`,
+      <FileIcon className="size-5 text-muted-foreground" />,
     );
   }
 
