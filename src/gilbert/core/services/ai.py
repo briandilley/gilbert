@@ -2003,6 +2003,7 @@ class AIService(Service):
         backend_override: str = "",
         ai_profile: str = "",
         max_tool_rounds: int | None = None,
+        between_rounds_callback: Any = None,
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -2022,6 +2023,13 @@ class AIService(Service):
             backend: Specific backend override (from chat UI).
             ai_profile: Profile name to use directly, bypassing the
                 assignment table.
+            between_rounds_callback: Optional async callable
+                ``() -> list[Message]`` invoked between each tool round
+                (after round 0). May return a list of ``Message`` objects
+                to inject into the in-memory message list before the next
+                round. Used by the autonomous-agent service to deliver
+                mid-run user messages so the model sees them immediately
+                rather than waiting for the run to finish.
         """
         if not self._backends:
             raise RuntimeError("No AI backends initialized")
@@ -2243,6 +2251,23 @@ class AIService(Service):
                 else self._max_tool_rounds
             )
             for round_num in range(effective_max_rounds):
+                # Mid-run injection: pull any messages the caller wants
+                # to add since the previous round (skipped on round 0
+                # because the initial user_message is already in messages).
+                if round_num > 0 and between_rounds_callback is not None:
+                    try:
+                        injected = await between_rounds_callback()
+                    except Exception:
+                        logger.exception("between_rounds_callback raised")
+                        injected = []
+                    if injected:
+                        messages.extend(injected)
+                        logger.info(
+                            "Injected %d mid-run message(s) into chat for "
+                            "conversation %s",
+                            len(injected),
+                            conversation_id,
+                        )
                 truncated = self._truncate_history(
                     messages, compression_state=compression_state
                 )

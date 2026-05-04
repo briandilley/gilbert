@@ -447,6 +447,7 @@ class AIProvider(Protocol):
         backend_override: str = "",
         ai_profile: str = "",
         max_tool_rounds: int | None = None,
+        between_rounds_callback: Any = None,
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
 
@@ -460,6 +461,15 @@ class AIProvider(Protocol):
         ``ai.settings.max_tool_rounds`` for this call only — useful for
         autonomous-agent runs that need a higher cap than the
         human-in-the-loop default.
+
+        ``between_rounds_callback`` is an optional async callable
+        ``() -> list[Message]`` invoked between each tool round (after
+        round 0). It may return a list of ``Message`` objects to inject
+        into the in-memory message list at that point. Used by the
+        autonomous-agent service to deliver mid-run user messages the
+        user typed while the run was already in flight, so the model
+        sees them on the next round rather than waiting for the run to
+        finish.
         """
         ...
 
