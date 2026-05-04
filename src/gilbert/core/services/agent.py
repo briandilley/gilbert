@@ -398,6 +398,85 @@ class AutonomousAgentService(Service):
         self._drain_and_follow_up(goal_id)
         return run
 
+    async def start_goal_run(
+        self,
+        goal_id: str,
+        *,
+        user_message: str | None = None,
+    ) -> Run:
+        """Spawn a goal run as a background task and return the Run entity
+        as soon as it's persisted (status=RUNNING).
+
+        This is the right entry point for WS RPCs and other callers who
+        shouldn't block on the entire chat loop. Use ``run_goal_now`` only
+        when you actually want to await full completion (e.g. tests).
+
+        Mid-run behaviour is identical to ``run_goal_now``: a queued user
+        message returns a synthetic stub Run with id="queued"; calling
+        without a user_message while a run is in flight raises ValueError.
+        """
+        if self._storage is None or self._ai is None:
+            raise RuntimeError("not started")
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            raise ValueError(f"goal not found: {goal_id}")
+        if goal.status == GoalStatus.COMPLETED:
+            raise ValueError(f"goal {goal_id} is completed")
+        if goal.status == GoalStatus.DISABLED:
+            raise ValueError(f"goal {goal_id} is disabled")
+
+        # Mid-run user message — same handling as run_goal_now.
+        if goal_id in self._running_goals:
+            if user_message:
+                await self._append_user_message_to_conversation(goal, user_message)
+                self._pending_user_messages.setdefault(goal_id, []).append(user_message)
+                return Run(
+                    id="queued",
+                    goal_id=goal_id,
+                    triggered_by="user_message",
+                    started_at=datetime.now(UTC),
+                    status=RunStatus.RUNNING,
+                    conversation_id=goal.conversation_id or "",
+                )
+            raise ValueError(
+                f"goal {goal_id} has a run in progress; wait for it to finish"
+            )
+
+        self._running_goals.add(goal_id)
+        started_future: asyncio.Future[Run] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        async def _do_run() -> None:
+            try:
+                await self._run_goal_internal(
+                    goal_id,
+                    "manual",
+                    {
+                        "user_message": user_message,
+                        "_started_future": started_future,
+                    },
+                )
+            except Exception as exc:
+                if not started_future.done():
+                    started_future.set_exception(exc)
+                logger.exception("background agent run failed: goal=%s", goal_id)
+            finally:
+                self._running_goals.discard(goal_id)
+                self._drain_and_follow_up(goal_id)
+                # If _run_goal_internal returned early without setting the
+                # future (e.g. goal not in ENABLED state), surface that.
+                if not started_future.done():
+                    started_future.set_exception(
+                        RuntimeError("run did not start (goal state changed)")
+                    )
+
+        asyncio.create_task(_do_run())
+        # Block briefly until the Run entity has been created and persisted —
+        # this is fast (single storage put) and gives the caller a real
+        # Run id to subscribe to.
+        return await started_future
+
     def _drain_and_follow_up(self, goal_id: str) -> None:
         """Drain any user messages queued while goal_id was running and
         spawn a follow-up run if there are any. Must be called AFTER
@@ -720,7 +799,11 @@ class AutonomousAgentService(Service):
             else None
         )
         try:
-            run = await self.run_goal_now(goal_id, user_message=user_message)
+            # Use start_goal_run (not run_goal_now) so the WS RPC returns
+            # immediately with the Run entity, instead of blocking on the
+            # full chat loop and timing out the WS RPC. The frontend
+            # tracks completion via streaming events + agent.run.completed.
+            run = await self.start_goal_run(goal_id, user_message=user_message)
         except ValueError as exc:
             return {
                 "type": "agent.goal.run_now.result",
@@ -1240,6 +1323,16 @@ class AutonomousAgentService(Service):
                 timestamp=run.started_at,
             )
         )
+        # Signal "run started" to any caller who's waiting (start_goal_run
+        # uses this to return the Run entity immediately while the chat
+        # call continues in the background).
+        started_future = (trigger_context or {}).get("_started_future")
+        if (
+            started_future is not None
+            and isinstance(started_future, asyncio.Future)
+            and not started_future.done()
+        ):
+            started_future.set_result(run)
 
         # Track the active run for this goal so the complete_goal tool
         # can flag the right Run entity (the tool dispatcher only gets

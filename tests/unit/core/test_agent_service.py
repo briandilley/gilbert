@@ -581,6 +581,10 @@ async def test_ws_agent_goal_delete_owner_only(
 async def test_ws_agent_goal_run_now_triggers_a_run(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
+    """The WS RPC returns the Run as RUNNING (background task continues
+    after the RPC returns). Tests waiting for completion should poll
+    the run id or subscribe to agent.run.completed.
+    """
     svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
@@ -592,8 +596,22 @@ async def test_ws_agent_goal_run_now_triggers_a_run(
 
     assert result is not None
     assert result["ok"] is True
-    assert result["run"]["status"] == "completed"
+    assert result["run"]["status"] == "running"
     assert result["run"]["goal_id"] == g.id
+    run_id = result["run"]["id"]
+    assert run_id
+
+    # Wait for the background task to complete so storage is in a
+    # consistent state when the fixture tears down.
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline:
+        raw = await svc._storage.get("agent_runs", run_id)
+        if raw and raw["status"] != "running":
+            break
+        await asyncio.sleep(0.01)
+    raw = await svc._storage.get("agent_runs", run_id)
+    assert raw is not None
+    assert raw["status"] == "completed"
 
 
 async def test_ws_agent_run_list_filters_by_goal(
