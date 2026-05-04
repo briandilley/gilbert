@@ -2002,6 +2002,7 @@ class AIService(Service):
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        max_tool_rounds: int | None = None,
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -2236,7 +2237,12 @@ class AIService(Service):
             ``continuation_count``) are declared ``nonlocal``.
             """
             nonlocal response, continuation_count, current_round_usage
-            for round_num in range(self._max_tool_rounds):
+            effective_max_rounds = (
+                max_tool_rounds
+                if max_tool_rounds is not None
+                else self._max_tool_rounds
+            )
+            for round_num in range(effective_max_rounds):
                 truncated = self._truncate_history(
                     messages, compression_state=compression_state
                 )
@@ -2527,7 +2533,7 @@ class AIService(Service):
             else:
                 logger.warning(
                     "Agentic loop hit max rounds (%d) for conversation %s",
-                    self._max_tool_rounds,
+                    effective_max_rounds,
                     conversation_id,
                 )
 

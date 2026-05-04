@@ -148,6 +148,7 @@ class _FakeAIService:
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        max_tool_rounds: int | None = None,
     ) -> ChatTurnResult:
         self.calls.append(
             {

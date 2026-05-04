@@ -446,6 +446,7 @@ class AIProvider(Protocol):
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        max_tool_rounds: int | None = None,
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
 
@@ -454,6 +455,11 @@ class AIProvider(Protocol):
         fall through to default". The distinct name keeps the method
         body free of shadowing between the external-facing string and
         the internal resolved ``AIBackend`` instance.
+
+        ``max_tool_rounds`` overrides the service-level
+        ``ai.settings.max_tool_rounds`` for this call only — useful for
+        autonomous-agent runs that need a higher cap than the
+        human-in-the-loop default.
         """
         ...
 

@@ -1016,6 +1016,11 @@ class AutonomousAgentService(Service):
                         user_ctx=None,
                         ai_call=_AI_CALL_NAME,
                         ai_profile=goal.profile_id,
+                        max_tool_rounds=(
+                            goal.max_rounds_override
+                            if goal.max_rounds_override is not None
+                            else _DEFAULT_MAX_ROUNDS
+                        ),
                     ),
                     timeout=max_wall_clock_s,
                 )
