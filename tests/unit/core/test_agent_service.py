@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -584,3 +585,153 @@ async def test_ws_agent_run_list_filters_by_goal(
     assert len(result["runs"]) == 2
     for r in result["runs"]:
         assert r["goal_id"] == g.id
+
+
+# ── Trigger tests ─────────────────────────────────────────────────
+
+
+async def test_create_time_trigger_goal_arms_scheduler_job(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="Hourly check",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 3600},
+    )
+
+    assert len(scheduler.added) == 1
+    job = scheduler.added[0]
+    assert job["name"] == f"agent_goal_{g.id}"
+    assert job["owner"] == "u_alice"
+
+
+async def test_create_daily_at_time_trigger_arms_scheduler_job(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="Morning brief",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "daily_at", "hour": 7, "minute": 0},
+    )
+
+    assert len(scheduler.added) == 1
+    assert scheduler.added[0]["name"] == f"agent_goal_{g.id}"
+
+
+async def test_disable_goal_disarms_scheduler_job(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 600},
+    )
+    assert len(scheduler.added) == 1
+
+    await svc.update_goal(g.id, status=GoalStatus.DISABLED)
+
+    assert scheduler.removed == [f"agent_goal_{g.id}"]
+
+
+async def test_delete_goal_disarms_trigger(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 600},
+    )
+
+    await svc.delete_goal(g.id)
+
+    assert scheduler.removed == [f"agent_goal_{g.id}"]
+
+
+async def test_time_trigger_callback_spawns_a_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 60},
+    )
+
+    # Invoke the registered callback to simulate the scheduler firing
+    await scheduler.run_now(f"agent_goal_{g.id}")
+
+    # Allow the spawned task to complete
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+    assert fetched.last_run_status == RunStatus.COMPLETED
+
+
+async def test_skip_while_running_drops_concurrent_trigger(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """If a trigger fires while a previous run is still in flight,
+    the second tick is silently skipped (no duplicate Run entity).
+    """
+    svc, ai, _bus, scheduler = service
+
+    # Make chat() block until we release it
+    proceed = asyncio.Event()
+    original_chat = ai.chat
+
+    async def slow_chat(*args: Any, **kwargs: Any) -> Any:
+        await proceed.wait()
+        return await original_chat(*args, **kwargs)
+
+    ai.chat = slow_chat  # type: ignore[method-assign]
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 60},
+    )
+
+    job_name = f"agent_goal_{g.id}"
+
+    # Fire twice in quick succession
+    task1 = asyncio.create_task(scheduler.run_now(job_name))
+    await asyncio.sleep(0)  # let task1 enter _spawn_run and add to running set
+    task2 = asyncio.create_task(scheduler.run_now(job_name))
+
+    # Release the slow chat so task1 finishes
+    proceed.set()
+    await asyncio.gather(task1, task2)
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1  # second trigger was skipped

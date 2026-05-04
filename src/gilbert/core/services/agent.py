@@ -144,6 +144,7 @@ class AutonomousAgentService(Service):
             trigger_config=trigger_config,
         )
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        await self._arm_trigger(goal)
         return goal
 
     async def get_goal(self, goal_id: str) -> Goal | None:
@@ -203,6 +204,9 @@ class AutonomousAgentService(Service):
             goal.trigger_config = trigger_config
         goal.updated_at = datetime.now(UTC)
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        # Re-arm: cheapest correct policy is always disarm then arm
+        await self._disarm_trigger(goal)
+        await self._arm_trigger(goal)
         return goal
 
     async def delete_goal(self, goal_id: str) -> bool:
@@ -211,6 +215,8 @@ class AutonomousAgentService(Service):
         raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
         if raw is None:
             return False
+        existing_goal = _goal_from_dict(raw)
+        await self._disarm_trigger(existing_goal)
         await self._storage.delete(_GOAL_COLLECTION, goal_id)
         # Also delete associated runs
         runs = await self._storage.query(
@@ -233,7 +239,6 @@ class AutonomousAgentService(Service):
         """
         if self._storage is None or self._ai is None:
             raise RuntimeError("not started")
-
         goal = await self.get_goal(goal_id)
         if goal is None:
             raise ValueError(f"goal not found: {goal_id}")
@@ -241,55 +246,9 @@ class AutonomousAgentService(Service):
             raise ValueError(f"goal {goal_id} is completed")
         if goal.status == GoalStatus.DISABLED:
             raise ValueError(f"goal {goal_id} is disabled")
-
-        run = Run(
-            id=str(uuid.uuid4()),
-            goal_id=goal_id,
-            triggered_by="manual",
-            started_at=datetime.now(UTC),
-            status=RunStatus.RUNNING,
-        )
-        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
-
-        # Build the user message that kicks the loop
-        user_message = self._build_initial_user_message(goal)
-
-        try:
-            from gilbert.interfaces.auth import UserContext
-
-            user_ctx = UserContext.SYSTEM if goal.owner_user_id == "system" else None
-            # When user_ctx is None, AIService treats the call as system-driven.
-            # A future task can fetch the actual UserContext for the owner.
-            result = await self._ai.chat(
-                user_message=user_message,
-                conversation_id=None,  # fresh conversation per run
-                user_ctx=user_ctx,
-                ai_call=_AI_CALL_NAME,
-                ai_profile=goal.profile_id,
-            )
-            run.status = RunStatus.COMPLETED
-            run.final_message_text = result.response_text
-            run.conversation_id = result.conversation_id
-            if result.turn_usage:
-                run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
-                run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
-            run.rounds_used = len(result.rounds) + 1
-        except Exception as exc:
-            run.status = RunStatus.FAILED
-            run.error = repr(exc)
-            logger.exception("agent run failed: goal=%s run=%s", goal_id, run.id)
-
-        run.ended_at = datetime.now(UTC)
-        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
-
-        # Update goal counters
-        goal.run_count += 1
-        goal.last_run_at = run.ended_at
-        goal.last_run_status = run.status
-        goal.updated_at = datetime.now(UTC)
-        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
-
-        return run
+        # run_goal_now runs synchronously and returns the completed run
+        # (not via _spawn_run — manual triggers want the result back).
+        return await self._run_goal_internal(goal_id, "manual", {})
 
     async def declare_goal_complete(
         self,
@@ -314,6 +273,7 @@ class AutonomousAgentService(Service):
         goal.completed_reason = reason
         goal.updated_at = goal.completed_at
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        await self._disarm_trigger(goal)
 
         # Mark the most-recent run as having declared completion
         run_raw = await self._storage.get(_RUN_COLLECTION, run_id)
@@ -569,16 +529,156 @@ class AutonomousAgentService(Service):
             self._disarm_event_trigger(goal.id)
 
     def _arm_time_trigger(self, goal: Goal) -> None:
-        raise NotImplementedError  # Task 3
+        if self._scheduler is None or goal.trigger_config is None:
+            return
+        cfg = goal.trigger_config
+        kind = cfg.get("kind", "interval")
+        if kind == "interval":
+            schedule = Schedule.every(seconds=float(cfg.get("seconds", 3600)))
+        elif kind == "daily_at":
+            schedule = Schedule.daily_at(
+                hour=int(cfg.get("hour", 0)),
+                minute=int(cfg.get("minute", 0)),
+            )
+        elif kind == "hourly_at":
+            schedule = Schedule.hourly_at(minute=int(cfg.get("minute", 0)))
+        else:
+            logger.warning("unknown TIME trigger kind: %s", kind)
+            return
+        name = self._scheduler_job_name(goal.id)
+        # add_job is not idempotent on name — remove first if present.
+        if self._scheduler.get_job(name) is not None:
+            self._scheduler.remove_job(name)
+        callback = self._make_trigger_callback(goal.id, "time", {})
+        self._scheduler.add_job(
+            name=name,
+            schedule=schedule,
+            callback=callback,
+            owner=goal.owner_user_id,
+        )
 
     def _disarm_time_trigger(self, goal_id: str) -> None:
-        raise NotImplementedError  # Task 3
+        if self._scheduler is None:
+            return
+        name = self._scheduler_job_name(goal_id)
+        if self._scheduler.get_job(name) is not None:
+            self._scheduler.remove_job(name)
 
     def _arm_event_trigger(self, goal: Goal) -> None:
         raise NotImplementedError  # Task 4
 
     def _disarm_event_trigger(self, goal_id: str) -> None:
         raise NotImplementedError  # Task 4
+
+    def _make_trigger_callback(
+        self,
+        goal_id: str,
+        triggered_by: str,
+        trigger_context: dict[str, Any],
+    ) -> JobCallback:
+        async def _fire() -> None:
+            await self._spawn_run(goal_id, triggered_by, trigger_context)
+
+        return _fire
+
+    async def _spawn_run(
+        self,
+        goal_id: str,
+        triggered_by: str,
+        trigger_context: dict[str, Any],
+    ) -> None:
+        """Spawn a tracked background task that runs the goal once.
+
+        Skip-while-running: if the goal is already running, log and
+        return without creating a new Run.
+        """
+        if goal_id in self._running_goals:
+            logger.info(
+                "skipping %s trigger for goal %s; previous run still active",
+                triggered_by,
+                goal_id,
+            )
+            return
+        self._running_goals.add(goal_id)
+
+        async def _do_run() -> None:
+            try:
+                await self._run_goal_internal(goal_id, triggered_by, trigger_context)
+            finally:
+                self._running_goals.discard(goal_id)
+
+        import asyncio
+
+        asyncio.create_task(_do_run())
+
+    async def _run_goal_internal(
+        self,
+        goal_id: str,
+        triggered_by: str,
+        trigger_context: dict[str, Any],
+    ) -> Run:
+        """Internal run path used by triggers; mirrors run_goal_now but
+        respects the trigger context.
+        """
+        # The trigger_context is currently unused beyond logging; future
+        # phases may include it in the prompt for EVENT-triggered runs.
+        if trigger_context:
+            logger.info(
+                "agent run for goal %s triggered by %s with context %s",
+                goal_id,
+                triggered_by,
+                trigger_context,
+            )
+        if self._storage is None or self._ai is None:
+            raise RuntimeError("not started")
+        goal = await self.get_goal(goal_id)
+        if goal is None or goal.status != GoalStatus.ENABLED:
+            return Run(
+                id="",
+                goal_id=goal_id,
+                triggered_by=triggered_by,
+                started_at=datetime.now(UTC),
+                status=RunStatus.FAILED,
+                error="goal not in ENABLED state at run-start time",
+            )
+        run = Run(
+            id=str(uuid.uuid4()),
+            goal_id=goal_id,
+            triggered_by=triggered_by,
+            started_at=datetime.now(UTC),
+            status=RunStatus.RUNNING,
+        )
+        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+        try:
+            user_message = self._build_initial_user_message(goal)
+            result = await self._ai.chat(
+                user_message=user_message,
+                conversation_id=None,
+                user_ctx=None,
+                ai_call=_AI_CALL_NAME,
+                ai_profile=goal.profile_id,
+            )
+            run.status = RunStatus.COMPLETED
+            run.final_message_text = result.response_text
+            run.conversation_id = result.conversation_id
+            if result.turn_usage:
+                run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
+                run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
+            run.rounds_used = len(result.rounds) + 1
+        except Exception as exc:
+            run.status = RunStatus.FAILED
+            run.error = repr(exc)
+            logger.exception("agent run failed: goal=%s run=%s", goal_id, run.id)
+
+        run.ended_at = datetime.now(UTC)
+        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+
+        goal.run_count += 1
+        goal.last_run_at = run.ended_at
+        goal.last_run_status = run.status
+        goal.updated_at = datetime.now(UTC)
+        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        return run
 
     def _build_initial_user_message(self, goal: Goal) -> str:
         """Synthesize the user message that drives the AI loop.
