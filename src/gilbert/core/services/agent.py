@@ -46,6 +46,34 @@ _RUN_COLLECTION = "agent_runs"
 _AI_CALL_NAME = "agent.run"
 
 
+# TODO: Per CLAUDE.md "AI prompts are always configurable", this default
+# should be exposed as a ``ConfigParam(multiline=True, ai_prompt=True)``
+# on AutonomousAgentService once service config infrastructure is added
+# (currently AgentService isn't ``Configurable``). For now it's a
+# module constant — same shape ConfigurationService used pre-Configurable.
+_DEFAULT_AUTHOR_INSTRUCTION_PROMPT = """\
+You are helping a user write a clear, effective instruction for an
+autonomous AI agent. The instruction tells the agent what to do, how
+to know it has succeeded, and any constraints to respect.
+
+You will receive:
+1. The current draft of the instruction (may be empty for a new goal).
+2. A natural-language change request describing what the user wants
+   different about the instruction.
+
+Return the complete revised instruction text — not a diff, not a
+commentary, just the new full instruction text. The output will replace
+the user's current draft directly.
+
+Aim for:
+- Plain language a capable person could follow without re-reading.
+- Concrete success criteria when possible (e.g., "stop after notifying
+  me, regardless of whether anything was found").
+- Brevity — multiple paragraphs only when genuinely needed.
+- Explicit mention of any tools the agent should prefer or avoid.
+"""
+
+
 class AutonomousAgentService(Service):
     """The autonomous-agent service.
 
@@ -320,6 +348,7 @@ class AutonomousAgentService(Service):
             "agent.goal.run_now": self._ws_goal_run_now,
             "agent.run.list": self._ws_run_list,
             "agent.run.get": self._ws_run_get,
+            "agent.goal.author_instruction": self._ws_goal_author_instruction,
         }
 
     async def _ws_goal_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -528,6 +557,107 @@ class AutonomousAgentService(Service):
             "ref": frame.get("id"),
             "ok": True,
             "run": raw,
+        }
+
+    async def _ws_goal_author_instruction(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Rewrite a goal's instruction text via AI based on a user
+        change request.
+
+        Frame fields:
+          ``goal_id`` — optional. When non-empty, owner-only auth is
+            applied. When empty, the request is treated as drafting for
+            a new (unsaved) goal — any logged-in user can call.
+          ``current_text`` — the current instruction draft (may be empty)
+          ``instruction`` — natural-language change request
+          ``ai_profile`` — optional profile name (default: "standard")
+        """
+        if self._resolver is None:
+            return {
+                "type": "agent.goal.author_instruction.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "service not started",
+            }
+
+        goal_id = str(frame.get("goal_id", "") or "")
+        current_text = str(frame.get("current_text", "") or "")
+        instruction = str(frame.get("instruction", "") or "").strip()
+        ai_profile = str(frame.get("ai_profile", "") or "").strip()
+
+        if not instruction:
+            return {
+                "type": "agent.goal.author_instruction.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "instruction is required",
+            }
+
+        # Ownership check (only when authoring an existing goal)
+        if goal_id:
+            existing = await self.get_goal(goal_id)
+            if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
+                return {
+                    "type": "agent.goal.author_instruction.result",
+                    "ref": frame.get("id"),
+                    "ok": False,
+                    "error": "not_found",
+                }
+
+        # Resolve AI sampling capability
+        from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+
+        ai_svc = self._resolver.get_capability("ai_chat")
+        if not isinstance(ai_svc, AISamplingProvider):
+            return {
+                "type": "agent.goal.author_instruction.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "AI service unavailable",
+            }
+
+        profile_name = ai_profile or "standard"
+        if not ai_svc.has_profile(profile_name):
+            profile_name = "standard"
+
+        user_message = (
+            f"=== CURRENT INSTRUCTION ===\n{current_text}\n=== END CURRENT INSTRUCTION ===\n\n"
+            f"=== CHANGE REQUEST ===\n{instruction}\n=== END CHANGE REQUEST ===\n\n"
+            "Return the complete revised instruction below."
+        )
+
+        try:
+            response = await ai_svc.complete_one_shot(
+                messages=[Message(role=MessageRole.USER, content=user_message)],
+                system_prompt=_DEFAULT_AUTHOR_INSTRUCTION_PROMPT,
+                profile_name=profile_name,
+                tools_override=[],
+            )
+        except Exception as exc:
+            logger.exception("agent.goal.author_instruction AI call failed")
+            return {
+                "type": "agent.goal.author_instruction.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": f"AI call failed: {exc}",
+            }
+
+        new_text = (response.message.content or "").strip()
+        if not new_text:
+            return {
+                "type": "agent.goal.author_instruction.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "AI returned empty instruction",
+            }
+
+        return {
+            "type": "agent.goal.author_instruction.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "new_text": new_text,
+            "profile_used": profile_name,
         }
 
     # ── Restart safety ────────────────────────────────────────────

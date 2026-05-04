@@ -1047,3 +1047,128 @@ async def test_subsequent_runs_reuse_goal_conversation_id(
     await svc.run_goal_now(g.id)
     # Second call passes the captured conversation_id
     assert ai.calls[-1]["conversation_id"] == "conv-fake"
+
+
+# ── author_instruction tests ──────────────────────────────────────
+
+
+async def test_author_instruction_rewrites_via_complete_one_shot(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+
+    # The fake AIService needs to expose has_profile + complete_one_shot
+    # to satisfy the AISamplingProvider isinstance check. Patch them on
+    # the shared fake.
+    from gilbert.interfaces.ai import AIResponse, Message, MessageRole, StopReason, TokenUsage
+
+    ai.has_profile = lambda name: True  # type: ignore[attr-defined]
+    captured_calls: list[dict[str, Any]] = []
+
+    async def fake_complete(
+        *,
+        messages: list[Message],
+        system_prompt: str = "",
+        profile_name: str | None = None,
+        max_tokens: int | None = None,
+        tools_override: list[Any] | None = None,
+    ) -> AIResponse:
+        captured_calls.append(
+            {
+                "system_prompt": system_prompt,
+                "profile_name": profile_name,
+                "user_message_content": messages[0].content if messages else "",
+            }
+        )
+        return AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="Revised: do X better."),
+            model="fake",
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        )
+
+    ai.complete_one_shot = fake_complete  # type: ignore[attr-defined]
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.author_instruction"]
+
+    # No goal_id — drafting a new goal
+    result = await handler(
+        _make_conn("u_alice"),
+        {
+            "id": "f1",
+            "goal_id": "",
+            "current_text": "do X",
+            "instruction": "be more specific",
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["new_text"] == "Revised: do X better."
+
+    assert len(captured_calls) == 1
+    call = captured_calls[0]
+    assert "be more specific" in call["user_message_content"]
+    assert "do X" in call["user_message_content"]
+    assert call["profile_name"] == "standard"
+
+
+async def test_author_instruction_owner_only_for_existing_goal(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+
+    # Wire up complete_one_shot stub
+    from gilbert.interfaces.ai import AIResponse, Message, MessageRole, StopReason, TokenUsage
+
+    ai.has_profile = lambda name: True  # type: ignore[attr-defined]
+
+    async def fake_complete(**kwargs: Any) -> AIResponse:
+        return AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="fake",
+            stop_reason=StopReason.END_TURN,
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+    ai.complete_one_shot = fake_complete  # type: ignore[attr-defined]
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.author_instruction"]
+
+    # Bob tries to author Alice's goal — should be rejected
+    bob_result = await handler(
+        _make_conn("u_bob"),
+        {"id": "f1", "goal_id": g.id, "current_text": "i", "instruction": "rewrite"},
+    )
+    assert bob_result is not None
+    assert bob_result["ok"] is False
+    assert "not_found" in str(bob_result.get("error", ""))
+
+    # Alice succeeds
+    alice_result = await handler(
+        _make_conn("u_alice"),
+        {"id": "f2", "goal_id": g.id, "current_text": "i", "instruction": "rewrite"},
+    )
+    assert alice_result is not None
+    assert alice_result["ok"] is True
+
+
+async def test_author_instruction_requires_instruction(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, _scheduler = service
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.author_instruction"]
+    result = await handler(
+        _make_conn("u_alice"),
+        {"id": "f1", "goal_id": "", "current_text": "x", "instruction": ""},
+    )
+    assert result is not None
+    assert result["ok"] is False
+    assert "instruction" in result["error"].lower()
