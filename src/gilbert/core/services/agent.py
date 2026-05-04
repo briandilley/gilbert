@@ -15,7 +15,7 @@ from gilbert.interfaces.agent import (
     Run,
     RunStatus,
 )
-from gilbert.interfaces.ai import AIProvider, MessageRole
+from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
@@ -31,7 +31,6 @@ from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
-    ToolProvider,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,6 +230,7 @@ class AutonomousAgentService(Service):
 
         try:
             from gilbert.interfaces.auth import UserContext
+
             user_ctx = UserContext.SYSTEM if goal.owner_user_id == "system" else None
             # When user_ctx is None, AIService treats the call as system-driven.
             # A future task can fetch the actual UserContext for the owner.
@@ -331,9 +331,7 @@ class AutonomousAgentService(Service):
             "agent.run.get": self._ws_run_get,
         }
 
-    async def _ws_goal_create(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         name = str(frame.get("name", "")).strip()
         instruction = str(frame.get("instruction", "")).strip()
         profile_id = str(frame.get("profile_id", "")).strip()
@@ -357,9 +355,7 @@ class AutonomousAgentService(Service):
             "goal": _goal_to_dict(goal),
         }
 
-    async def _ws_goal_list(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         goals = await self.list_goals(owner_user_id=conn.user_ctx.user_id)
         return {
             "type": "agent.goal.list.result",
@@ -367,9 +363,7 @@ class AutonomousAgentService(Service):
             "goals": [_goal_to_dict(g) for g in goals],
         }
 
-    async def _ws_goal_get(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         goal_id = str(frame.get("goal_id", ""))
         goal = await self.get_goal(goal_id)
         if goal is None or goal.owner_user_id != conn.user_ctx.user_id:
@@ -386,9 +380,7 @@ class AutonomousAgentService(Service):
             "goal": _goal_to_dict(goal),
         }
 
-    async def _ws_goal_update(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_update(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         goal_id = str(frame.get("goal_id", ""))
         existing = await self.get_goal(goal_id)
         if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
@@ -422,9 +414,7 @@ class AutonomousAgentService(Service):
             "goal": _goal_to_dict(updated) if updated else None,
         }
 
-    async def _ws_goal_delete(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         goal_id = str(frame.get("goal_id", ""))
         existing = await self.get_goal(goal_id)
         if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
@@ -441,9 +431,7 @@ class AutonomousAgentService(Service):
             "ok": deleted,
         }
 
-    async def _ws_goal_run_now(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_goal_run_now(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         goal_id = str(frame.get("goal_id", ""))
         existing = await self.get_goal(goal_id)
         if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
@@ -469,9 +457,7 @@ class AutonomousAgentService(Service):
             "run": _run_to_dict(run),
         }
 
-    async def _ws_run_list(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_run_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         if self._storage is None:
             raise RuntimeError("not started")
         goal_id = str(frame.get("goal_id", ""))
@@ -506,9 +492,7 @@ class AutonomousAgentService(Service):
             "runs": raw_list,
         }
 
-    async def _ws_run_get(
-        self, conn: Any, frame: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    async def _ws_run_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         if self._storage is None:
             raise RuntimeError("not started")
         run_id = str(frame.get("run_id", ""))
@@ -551,7 +535,7 @@ class AutonomousAgentService(Service):
         """
         return (
             f"You are an autonomous agent running a goal on behalf of user "
-            f"{goal.owner_user_id}. Your goal is named \"{goal.name}\". "
+            f'{goal.owner_user_id}. Your goal is named "{goal.name}". '
             f"Goal instruction:\n\n"
             f"{goal.instruction}\n\n"
             f"Take whatever action is appropriate to advance this goal. "

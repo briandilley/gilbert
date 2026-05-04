@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pytest
 
 from gilbert.core.services.agent import AutonomousAgentService
-from gilbert.interfaces.agent import Goal, GoalStatus, Run, RunStatus
-from gilbert.interfaces.ai import AIProvider, ChatTurnResult, FileAttachment
+from gilbert.interfaces.agent import GoalStatus, RunStatus
+from gilbert.interfaces.ai import ChatTurnResult, FileAttachment
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.storage import StorageBackend
 
@@ -103,7 +102,9 @@ class _FakeResolver:
 
 
 @pytest.fixture
-async def service(sqlite_storage: StorageBackend) -> tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus]:
+async def service(
+    sqlite_storage: StorageBackend,
+) -> tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus]:
     ai = _FakeAIService()
     bus = _FakeEventBus()
     svc = AutonomousAgentService()
@@ -451,9 +452,7 @@ async def test_ws_agent_goal_delete_owner_only(
     handler = handlers["agent.goal.delete"]
 
     # Bob attempts; should be rejected
-    bob_result = await handler(
-        _make_conn("u_bob"), {"id": "f1", "goal_id": g.id}
-    )
+    bob_result = await handler(_make_conn("u_bob"), {"id": "f1", "goal_id": g.id})
     assert bob_result is not None
     assert bob_result["ok"] is False
 
@@ -461,9 +460,7 @@ async def test_ws_agent_goal_delete_owner_only(
     assert await svc.get_goal(g.id) is not None
 
     # Alice succeeds
-    alice_result = await handler(
-        _make_conn("u_alice"), {"id": "f2", "goal_id": g.id}
-    )
+    alice_result = await handler(_make_conn("u_alice"), {"id": "f2", "goal_id": g.id})
     assert alice_result is not None
     assert alice_result["ok"] is True
     assert await svc.get_goal(g.id) is None

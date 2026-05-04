@@ -43,3 +43,4 @@
 - [Source Inspector Service](memory-source-inspector-service.md) — read-only source-tree AI tools (list/read/grep), always injected into the proposals reflection AI
 - [run_loop primitive](memory-agent-loop.md) — pure async loop; budgets, tool dispatch, error handling
 - [NotificationService](memory-notification-service.md) — notifications + WS dispatch via per-event filter
+- [AutonomousAgentService](memory-autonomous-agent-service.md) — Goal/Run entities + run_goal_now via AIService.chat
