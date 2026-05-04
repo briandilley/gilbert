@@ -18,6 +18,7 @@ from gilbert.interfaces.agent import (
 )
 from gilbert.interfaces.ai import AIProvider, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import (
     JobCallback,
@@ -47,16 +48,29 @@ _GOAL_COLLECTION = "agent_goals"
 _RUN_COLLECTION = "agent_runs"
 _AI_CALL_NAME = "agent.run"
 
-# TODO: ConfigParam-ify these once AgentService becomes Configurable.
 _DEFAULT_MAX_WALL_CLOCK_S = 600.0   # 10 minutes per run
 _DEFAULT_MAX_ROUNDS = 50            # agent-tuned; higher than chat's default
 
 
-# TODO: Per CLAUDE.md "AI prompts are always configurable", this default
-# should be exposed as a ``ConfigParam(multiline=True, ai_prompt=True)``
-# on AutonomousAgentService once service config infrastructure is added
-# (currently AgentService isn't ``Configurable``). For now it's a
-# module constant — same shape ConfigurationService used pre-Configurable.
+# Per-run system prompt frame. ``{goal_name}``, ``{goal_instruction}``,
+# ``{goal_id}``, and ``{owner_user_id}`` are interpolated by
+# ``_build_system_prompt``. Exposed as a ``ConfigParam(ai_prompt=True)``
+# so operators can tweak the agent's default operating rules without
+# editing source.
+_DEFAULT_SYSTEM_PROMPT_TEMPLATE = """\
+You are an autonomous agent running a goal on behalf of user {owner_user_id}. Your goal is named "{goal_name}".
+
+Goal instruction:
+
+{goal_instruction}
+
+Take whatever action is appropriate to advance this goal. When THIS RUN has met the goal's success criteria, call the ``complete_goal`` tool with goal_id={goal_id!r} and a short reason. The goal stays enabled and may run again later — calling complete_goal records that this particular run succeeded, it does not retire the goal.
+
+IMPORTANT — when you ask the user a question or need their input on anything, you MUST call the ``request_user_input`` tool with your question BEFORE writing the question into your response text. This applies to: choosing between options you've found, confirming an action before taking it, asking for missing info, asking the user what they prefer. If your response is going to end with a question mark, you've forgotten to call this tool — go back and call it. The tool ensures the user gets an URGENT notification (sound, popup, badge) so they know you're waiting; without it, they'll have no idea you asked. After calling the tool, end your turn with the question text. The user's reply will be injected into your context on the next round.
+
+BROWSER ACCESS — when you use the browser plugin and a site blocks you (Cloudflare challenge, 403, captcha, 'unusual traffic' interstitial, sites that detect headless Chromium), the answer is the VNC live-login flow. Call ``request_user_input`` and ask the user to open Settings → Browser → Credentials → 'Log in interactively' for that site. They get a real browser window over noVNC, complete the challenge themselves, and on close their session cookies merge into your persistent context. After they confirm, retry the original navigation — the browser plugin's per-user BrowserContext now has the cookies and the site no longer trips its bot defenses on you."""
+
+
 _DEFAULT_AUTHOR_INSTRUCTION_PROMPT = """\
 You are helping a user write a clear, effective instruction for an
 autonomous AI agent. The instruction tells the agent what to do, how
@@ -91,6 +105,10 @@ class AutonomousAgentService(Service):
 
     tool_provider_name = "autonomous_agent"
 
+    # Configurable
+    config_namespace = "autonomous_agent"
+    config_category = "Intelligence"
+
     def __init__(self) -> None:
         self._storage: StorageBackend | None = None
         self._event_bus: Any = None
@@ -119,6 +137,11 @@ class AutonomousAgentService(Service):
         ``complete_goal`` tool so it can flag the right Run entity rather
         than passing an empty run_id."""
 
+        # Cached AI prompt config. Refreshed by ``on_config_changed``;
+        # call sites read these instead of the module-level defaults.
+        self._system_prompt_template: str = _DEFAULT_SYSTEM_PROMPT_TEMPLATE
+        self._author_instruction_prompt: str = _DEFAULT_AUTHOR_INSTRUCTION_PROMPT
+
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="autonomous_agent",
@@ -127,6 +150,51 @@ class AutonomousAgentService(Service):
                 {"entity_storage", "event_bus", "ai_chat", "scheduler"}
             ),
             ai_calls=frozenset({_AI_CALL_NAME}),
+        )
+
+    # ------------------------------------------------------------------
+    # Configurable
+    # ------------------------------------------------------------------
+
+    def config_params(self) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="system_prompt_template",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt the agent runs under. Placeholders: "
+                    "{owner_user_id}, {goal_name}, {goal_instruction}, "
+                    "{goal_id}. Edit to change the agent's operating "
+                    "rules (request_user_input behaviour, browser-block "
+                    "VNC pattern, complete_goal expectations, …)."
+                ),
+                default=_DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="author_instruction_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt used by the 'Author with AI' button "
+                    "in the goal-instruction editor. The user provides a "
+                    "natural-language change request; this prompt frames "
+                    "the AI's task of revising the instruction text."
+                ),
+                default=_DEFAULT_AUTHOR_INSTRUCTION_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        self._system_prompt_template = (
+            config.get("system_prompt_template")
+            or _DEFAULT_SYSTEM_PROMPT_TEMPLATE
+        )
+        self._author_instruction_prompt = (
+            config.get("author_instruction_prompt")
+            or _DEFAULT_AUTHOR_INSTRUCTION_PROMPT
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -1110,7 +1178,7 @@ class AutonomousAgentService(Service):
         try:
             response = await ai_svc.complete_one_shot(
                 messages=[Message(role=MessageRole.USER, content=user_message)],
-                system_prompt=_DEFAULT_AUTHOR_INSTRUCTION_PROMPT,
+                system_prompt=self._author_instruction_prompt,
                 profile_name=profile_name,
                 tools_override=[],
             )
@@ -1818,50 +1886,41 @@ class AutonomousAgentService(Service):
     def _build_system_prompt(self, goal: Goal) -> str:
         """Build the agent system prompt that frames the run.
 
-        The goal instruction + the agent's operating rules go here so
-        chat()'s user_message slot is free to carry either an
-        autogenerated trigger ("take action on this goal") or an
-        explicit user message from the agent chat composer.
+        Reads ``self._system_prompt_template`` (refreshed from the
+        ``system_prompt_template`` ConfigParam by ``on_config_changed``)
+        and substitutes per-goal placeholders. The goal instruction +
+        the agent's operating rules go here so chat()'s user_message
+        slot is free to carry either an autogenerated trigger ("take
+        action on this goal") or an explicit user message from the
+        agent chat composer.
+
+        Placeholders: ``{owner_user_id}``, ``{goal_name}``,
+        ``{goal_instruction}``, ``{goal_id}`` (the last is rendered
+        with ``!r`` so the prompt shows quotes around the id, matching
+        what the agent should pass to ``complete_goal``).
         """
-        return (
-            f"You are an autonomous agent running a goal on behalf of user "
-            f"{goal.owner_user_id}. Your goal is named \"{goal.name}\".\n\n"
-            f"Goal instruction:\n\n"
-            f"{goal.instruction}\n\n"
-            f"Take whatever action is appropriate to advance this goal. "
-            f"When THIS RUN has met the goal's success criteria, call the "
-            f"``complete_goal`` tool with goal_id={goal.id!r} and a short "
-            f"reason. The goal stays enabled and may run again later — "
-            f"calling complete_goal records that this particular run "
-            f"succeeded, it does not retire the goal.\n\n"
-            f"IMPORTANT — when you ask the user a question or need their "
-            f"input on anything, you MUST call the ``request_user_input`` "
-            f"tool with your question BEFORE writing the question into "
-            f"your response text. This applies to: choosing between "
-            f"options you've found, confirming an action before taking "
-            f"it, asking for missing info, asking the user what they "
-            f"prefer. If your response is going to end with a question "
-            f"mark, you've forgotten to call this tool — go back and "
-            f"call it. The tool ensures the user gets an URGENT "
-            f"notification (sound, popup, badge) so they know you're "
-            f"waiting; without it, they'll have no idea you asked. After "
-            f"calling the tool, end your turn with the question text. "
-            f"The user's reply will be injected into your context on "
-            f"the next round.\n\n"
-            f"BROWSER ACCESS — when you use the browser plugin and a "
-            f"site blocks you (Cloudflare challenge, 403, captcha, "
-            f"'unusual traffic' interstitial, sites that detect "
-            f"headless Chromium), the answer is the VNC live-login "
-            f"flow. Call ``request_user_input`` and ask the user to "
-            f"open Settings → Browser → Credentials → 'Log in "
-            f"interactively' for that site. They get a real browser "
-            f"window over noVNC, complete the challenge themselves, "
-            f"and on close their session cookies merge into your "
-            f"persistent context. After they confirm, retry the "
-            f"original navigation — the browser plugin's per-user "
-            f"BrowserContext now has the cookies and the site no "
-            f"longer trips its bot defenses on you."
-        )
+        try:
+            return self._system_prompt_template.format(
+                owner_user_id=goal.owner_user_id,
+                goal_name=goal.name,
+                goal_instruction=goal.instruction,
+                goal_id=goal.id,
+            )
+        except (KeyError, IndexError) as exc:
+            # User-edited template referenced an unknown placeholder.
+            # Fall back to the bundled default rather than crash a
+            # live agent run.
+            logger.warning(
+                "agent system_prompt_template has invalid placeholder "
+                "(%s); falling back to default",
+                exc,
+            )
+            return _DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
+                owner_user_id=goal.owner_user_id,
+                goal_name=goal.name,
+                goal_instruction=goal.instruction,
+                goal_id=goal.id,
+            )
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:
         """The user-side message when the run was triggered automatically
