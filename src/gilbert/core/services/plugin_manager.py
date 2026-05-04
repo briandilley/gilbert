@@ -684,6 +684,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             "plugins.install": self._ws_plugins_install,
             "plugins.uninstall": self._ws_plugins_uninstall,
             "plugins.restart_host": self._ws_plugins_restart_host,
+            "ui.panels.list": self._ws_ui_panels_list,
         }
 
     async def _ws_plugins_list(
@@ -784,6 +785,71 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             "ref": frame.get("id"),
             "name": name,
             "status": "uninstalled",
+        }
+
+
+    async def _ws_ui_panels_list(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return UI panels declared by every loaded plugin.
+
+        Optional ``slot`` filter narrows to panels for a single mount
+        point. The handler also filters by the calling user's role —
+        a panel with ``required_role="admin"`` is only returned to
+        admin connections.
+        """
+        gilbert = conn.manager.gilbert
+        if gilbert is None:
+            return {"type": "ui.panels.list.result", "ref": frame.get("id"), "panels": []}
+
+        slot_filter = str(frame.get("slot") or "").strip()
+        # ``user_level`` is 0 (admin) / 100 (user) / 200 (anon). A
+        # panel needs ``required_role`` no higher than the caller's
+        # role; resolve required_role names to levels via the access
+        # control service when available.
+        acl = gilbert.service_manager.get_by_capability("access_control")
+
+        def _level_for(role: str) -> int:
+            if acl is not None and hasattr(acl, "get_role_level"):
+                try:
+                    return acl.get_role_level(role)
+                except Exception:
+                    pass
+            # Hardcoded fallback matching the defaults in interfaces/acl.py.
+            return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+
+        caller_level = getattr(conn, "user_level", 200)
+
+        panels: list[dict[str, Any]] = []
+        for entry in gilbert.list_loaded_plugins():
+            try:
+                declared = entry.plugin.ui_panels()
+            except Exception:
+                logger.exception(
+                    "ui_panels() raised on plugin %s",
+                    entry.plugin.metadata().name,
+                )
+                continue
+            for panel in declared:
+                if slot_filter and panel.slot != slot_filter:
+                    continue
+                if caller_level > _level_for(panel.required_role):
+                    continue
+                panels.append(
+                    {
+                        "panel_id": panel.panel_id,
+                        "slot": panel.slot,
+                        "label": panel.label,
+                        "description": panel.description,
+                        "plugin": entry.plugin.metadata().name,
+                    }
+                )
+        return {
+            "type": "ui.panels.list.result",
+            "ref": frame.get("id"),
+            "panels": panels,
         }
 
 

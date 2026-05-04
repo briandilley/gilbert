@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 import { ConfigSection } from "./ConfigSection";
 import { ServiceToggles } from "./ServiceToggles";
-import { BrowserCredentialsPanel } from "./BrowserCredentialsPanel";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import type { ConfigCategory } from "@/types/config";
 
 export function SettingsPage() {
@@ -94,7 +94,14 @@ export function SettingsPage() {
           {current.sections.map((section) => (
             <ConfigSection key={section.namespace} section={section} />
           ))}
-          {current.name === "Browser" ? <BrowserCredentialsPanel /> : null}
+          {/* Plugins can contribute admin-scoped panels to a category
+              via a "settings.<category>" slot — e.g. a future plugin
+              could mount its own management UI under its own
+              category. The slot only renders panels whose plugin
+              declared required_role="admin", filtered server-side. */}
+          <PluginPanelSlot
+            slot={`settings.${current.name.toLowerCase()}`}
+          />
         </div>
       )}
     </div>

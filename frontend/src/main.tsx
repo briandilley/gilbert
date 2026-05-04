@@ -6,6 +6,10 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { WebSocketProvider } from "@/hooks/useWebSocket";
 import App from "@/App";
 import "@/index.css";
+// Side-effect import: register every plugin's UI panels with the
+// per-slot registry before any page renders. Adding a plugin's UI
+// is a one-line edit in src/plugins/index.ts; no core file changes.
+import "@/plugins";
 
 const queryClient = new QueryClient({
   defaultOptions: {

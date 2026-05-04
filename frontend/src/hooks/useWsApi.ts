@@ -72,11 +72,6 @@ import type {
   GoalCreatePayload,
   GoalUpdatePayload,
 } from "@/types/agent";
-import type {
-  BrowserCredential,
-  BrowserCredentialDraft,
-  BrowserVncSession,
-} from "@/types/browser";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -956,43 +951,20 @@ export function useWsApi() {
         type: "agent.event_types.list",
       }),
 
-    // ── Browser plugin ────────────────────────────────────────────
+    // ── Plugin UI extensions ──────────────────────────────────────
 
-    listBrowserCredentials: () =>
-      rpc<{ credentials: BrowserCredential[] }>({
-        type: "browser.credentials.list",
-      }),
-
-    saveBrowserCredential: (draft: BrowserCredentialDraft) =>
-      rpc<{ ok: boolean; id: string }>({
-        type: "browser.credentials.save",
-        ...draft,
-      }),
-
-    deleteBrowserCredential: (credential_id: string) =>
-      rpc<{ ok: boolean }>({
-        type: "browser.credentials.delete",
-        credential_id,
-      }),
-
-    startBrowserVncSession: (params: {
-      credential_id?: string;
-      target_url?: string;
-    }) =>
-      rpc<{ ok: boolean; session: BrowserVncSession }>({
-        type: "browser.vnc.start",
-        ...params,
-      }),
-
-    stopBrowserVncSession: (session_id: string) =>
-      rpc<{ ok: boolean }>({
-        type: "browser.vnc.stop",
-        session_id,
-      }),
-
-    listBrowserVncSessions: () =>
-      rpc<{ sessions: BrowserVncSession[] }>({
-        type: "browser.vnc.list",
+    listUIPanels: (slot?: string) =>
+      rpc<{
+        panels: Array<{
+          panel_id: string;
+          slot: string;
+          label: string;
+          description: string;
+          plugin: string;
+        }>;
+      }>({
+        type: "ui.panels.list",
+        ...(slot ? { slot } : {}),
       }),
 
   }), [rpc, rpcWithRef]);

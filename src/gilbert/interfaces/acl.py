@@ -103,6 +103,10 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # handlers enforce ownership so a user can only see / mutate their
     # own.
     "browser.": 100,
+    # Plugin UI extensions: any authenticated user can ask which panels
+    # the loaded plugins contribute to a given SPA slot. The handler
+    # filters per-panel by required_role.
+    "ui.panels.": 100,
     # MCP client: list/get/start/stop/test are user-level (handlers enforce
     # per-record visibility + ownership). Creating/updating ``shared`` or
     # ``public`` servers, or changing any record's scope/allowed_roles/

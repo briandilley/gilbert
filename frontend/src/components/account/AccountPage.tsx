@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 export function AccountPage() {
   const { user } = useAuth();
@@ -59,6 +60,12 @@ export function AccountPage() {
       {user?.has_password && <ChangePasswordCard />}
 
       <MemoriesCard />
+
+      {/* Per-user plugin panels — anything a plugin declares with
+          ``slot="account.extensions"`` mounts here. Core has zero
+          knowledge of which plugins (browser credentials, future
+          OAuth tokens, etc.) end up in this slot. */}
+      <PluginPanelSlot slot="account.extensions" />
 
       <RevokeAllSessionsCard />
     </div>

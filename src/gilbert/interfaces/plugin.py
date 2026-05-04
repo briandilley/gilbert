@@ -25,6 +25,42 @@ class PluginMeta:
 
 
 @dataclass(frozen=True)
+class UIPanel:
+    """A UI panel a plugin contributes to a named slot in the SPA.
+
+    The frontend exposes ``<PluginPanelSlot name="...">`` mount points
+    on its pages (for example ``account.extensions`` on the Account
+    page). Plugins return ``UIPanel`` entries from
+    ``Plugin.ui_panels()`` to register a component into one of those
+    slots. Core never imports plugin-specific React components — the
+    SPA looks up the registered React component by ``panel_id`` in a
+    per-plugin side-effect-import file under
+    ``frontend/src/plugins/<name>/``, so adding a new plugin's UI is
+    a purely additive change.
+
+    - ``panel_id`` — globally unique, conventionally
+      ``<plugin>.<panel>`` (e.g. ``browser.credentials``).
+    - ``slot`` — the named mount point. Built-in slots include
+      ``account.extensions`` (per-user account page) and
+      ``settings.<category>`` (admin Settings page, scoped to a
+      config category). Pages may declare additional slots over
+      time; this dataclass is the source of truth.
+    - ``label`` — optional short title shown above the panel.
+    - ``description`` — optional one-line description / tooltip.
+    - ``required_role`` — minimum role to see the panel
+      (``"user"`` / ``"admin"``). The frontend filters server-side
+      via the auth context; clients can't request a panel they
+      don't qualify for.
+    """
+
+    panel_id: str
+    slot: str
+    label: str = ""
+    description: str = ""
+    required_role: str = "user"
+
+
+@dataclass(frozen=True)
 class RuntimeDependency:
     """A non-pip runtime dependency a plugin needs.
 
@@ -99,5 +135,15 @@ class Plugin(ABC):
         ``platform.system()`` to vary the shape of the returned list
         across OSes (e.g. ``apt-get install`` on Linux, ``brew
         install`` on macOS).
+        """
+        return []
+
+    def ui_panels(self) -> list[UIPanel]:
+        """Declare UI panels this plugin contributes to SPA slots.
+
+        Default ``[]`` — most plugins only contribute backend services.
+        Plugins that ship per-user / per-admin UI override this to
+        register their React components by ``panel_id`` into named
+        slots, with no core-side knowledge of the plugin's existence.
         """
         return []

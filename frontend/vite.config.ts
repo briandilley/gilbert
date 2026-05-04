@@ -12,6 +12,13 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    fs: {
+      // Plugins live under <repo>/std-plugins/*/frontend/ etc. — one
+      // directory up from the Vite project root (frontend/). Allow
+      // the dev server to read those files so the per-plugin glob
+      // auto-loader in src/plugins/index.ts can resolve them.
+      allow: [path.resolve(__dirname, "..")],
+    },
     proxy: {
       "/api": "http://localhost:8000",
       "/auth": "http://localhost:8000",
