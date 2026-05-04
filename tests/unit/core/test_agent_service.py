@@ -1496,3 +1496,51 @@ async def test_complete_goal_tool_flags_active_run(
     assert raw is not None
     assert raw["complete_goal_called"] is True
     assert raw["complete_reason"] == "shipped"
+
+
+# ── Wall-clock budget tests ───────────────────────────────────────
+
+
+async def test_run_times_out_when_chat_exceeds_wall_clock_budget(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+    )
+    # Override wall-clock cap to a tiny value so we trip it deterministically
+    await svc.update_goal(g.id, name="x")  # no-op to force re-save
+    raw = await svc._storage.get("agent_goals", g.id)
+    raw["max_wall_clock_s_override"] = 0.05
+    await svc._storage.put("agent_goals", g.id, raw)
+
+    # Make chat sleep longer than the budget
+    async def slow_chat(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.5)
+        from gilbert.interfaces.ai import ChatTurnResult
+        return ChatTurnResult(
+            response_text="late",
+            conversation_id="conv-x",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="fake",
+            turn_usage={"input_tokens": 1, "output_tokens": 1},
+        )
+
+    ai.chat = slow_chat  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+    assert run.status == RunStatus.TIMED_OUT
+    assert "0.05" in (run.error or "") or "exceeded" in (run.error or "")
+
+    # Goal counters still updated
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+    assert fetched.last_run_status == RunStatus.TIMED_OUT

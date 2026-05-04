@@ -46,6 +46,10 @@ _GOAL_COLLECTION = "agent_goals"
 _RUN_COLLECTION = "agent_runs"
 _AI_CALL_NAME = "agent.run"
 
+# TODO: ConfigParam-ify these once AgentService becomes Configurable.
+_DEFAULT_MAX_WALL_CLOCK_S = 600.0   # 10 minutes per run
+_DEFAULT_MAX_ROUNDS = 50            # agent-tuned; higher than chat's default
+
 
 # TODO: Per CLAUDE.md "AI prompts are always configurable", this default
 # should be exposed as a ``ConfigParam(multiline=True, ai_prompt=True)``
@@ -993,18 +997,53 @@ class AutonomousAgentService(Service):
         # the goal_id from the model — it doesn't know which run is in
         # flight). Cleared in finally regardless of success/failure.
         self._active_runs[goal_id] = run.id
+        result = None
         try:
             user_message = self._build_initial_user_message(goal)
             # Pass the goal's conversation_id (or None if it's the first run
             # — chat() will create one and we capture it onto the goal below).
             existing_conv = goal.conversation_id or None
-            result = await self._ai.chat(
-                user_message=user_message,
-                conversation_id=existing_conv,
-                user_ctx=None,
-                ai_call=_AI_CALL_NAME,
-                ai_profile=goal.profile_id,
+            max_wall_clock_s = (
+                goal.max_wall_clock_s_override
+                if goal.max_wall_clock_s_override is not None
+                else _DEFAULT_MAX_WALL_CLOCK_S
             )
+            try:
+                result = await asyncio.wait_for(
+                    self._ai.chat(
+                        user_message=user_message,
+                        conversation_id=existing_conv,
+                        user_ctx=None,
+                        ai_call=_AI_CALL_NAME,
+                        ai_profile=goal.profile_id,
+                    ),
+                    timeout=max_wall_clock_s,
+                )
+            except TimeoutError:
+                run.status = RunStatus.TIMED_OUT
+                run.error = (
+                    f"wall-clock budget {max_wall_clock_s}s exceeded; "
+                    f"chat was cancelled mid-stream"
+                )
+                run.ended_at = datetime.now(UTC)
+                # Persist the run as TIMED_OUT and update goal counters
+                await self._storage.put(
+                    _RUN_COLLECTION, run.id, _run_to_dict(run)
+                )
+                # Re-read goal for fresh state then update counters
+                fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+                fresh_goal = (
+                    _goal_from_dict(fresh_goal_raw) if fresh_goal_raw else goal
+                )
+                fresh_goal.run_count += 1
+                fresh_goal.last_run_at = run.ended_at
+                fresh_goal.last_run_status = run.status
+                fresh_goal.updated_at = datetime.now(UTC)
+                await self._storage.put(
+                    _GOAL_COLLECTION, fresh_goal.id, _goal_to_dict(fresh_goal)
+                )
+                self._active_runs.pop(goal_id, None)
+                return run
             run.final_message_text = result.response_text
             run.conversation_id = result.conversation_id
             if result.turn_usage:
@@ -1115,6 +1154,8 @@ def _goal_to_dict(g: Goal) -> dict[str, Any]:
         "run_count": g.run_count,
         "completed_at": g.completed_at.isoformat() if g.completed_at else None,
         "completed_reason": g.completed_reason,
+        "max_rounds_override": g.max_rounds_override,
+        "max_wall_clock_s_override": g.max_wall_clock_s_override,
     }
 
 
@@ -1122,6 +1163,8 @@ def _goal_from_dict(d: dict[str, Any]) -> Goal:
     last_run_status_raw = d.get("last_run_status")
     completed_at_raw = d.get("completed_at")
     last_run_at_raw = d.get("last_run_at")
+    max_rounds_raw = d.get("max_rounds_override")
+    max_wall_clock_raw = d.get("max_wall_clock_s_override")
     return Goal(
         id=d["id"],
         owner_user_id=d["owner_user_id"],
@@ -1139,6 +1182,8 @@ def _goal_from_dict(d: dict[str, Any]) -> Goal:
         run_count=int(d.get("run_count", 0)),
         completed_at=datetime.fromisoformat(completed_at_raw) if completed_at_raw else None,
         completed_reason=d.get("completed_reason"),
+        max_rounds_override=int(max_rounds_raw) if max_rounds_raw is not None else None,
+        max_wall_clock_s_override=float(max_wall_clock_raw) if max_wall_clock_raw is not None else None,
     )
 
 

@@ -27,6 +27,7 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    TIMED_OUT = "timed_out"
 
 
 @dataclass
@@ -60,6 +61,12 @@ class Goal:
     run_count: int = 0
     completed_at: datetime | None = None
     completed_reason: str | None = None
+
+    max_rounds_override: int | None = None
+    """Override per-run max tool rounds. None means use the service default."""
+
+    max_wall_clock_s_override: float | None = None
+    """Override per-run wall-clock cap in seconds. None means use the service default."""
 
 
 @dataclass
