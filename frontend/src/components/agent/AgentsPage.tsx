@@ -271,6 +271,7 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
   const [hourlyMinute, setHourlyMinute] = useState(0);
   const [eventTypes, setEventTypes] = useState<string[]>([]);
   const [eventTypeDraft, setEventTypeDraft] = useState("");
+  const [stateless, setStateless] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authorOpen, setAuthorOpen] = useState(false);
@@ -295,6 +296,7 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
     setHourlyMinute(0);
     setEventTypes([]);
     setEventTypeDraft("");
+    setStateless(false);
     setError(null);
     setAuthorOpen(false);
     setAuthorRequest("");
@@ -340,6 +342,7 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
         name: name.trim(),
         instruction: instruction.trim(),
         profile_id: profileId,
+        stateless,
       };
       if (triggerKind !== "manual") {
         if (triggerKind === "event") {
@@ -486,6 +489,28 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-3">
+            <input
+              id="goal-stateless"
+              type="checkbox"
+              checked={stateless}
+              onChange={(e) => setStateless(e.target.checked)}
+              className="mt-1"
+            />
+            <div className="flex-1">
+              <Label htmlFor="goal-stateless" className="cursor-pointer">
+                Stateless runs (fresh conversation each run)
+              </Label>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                When checked, each run starts a brand-new chat conversation.
+                Use for heartbeat-style goals where runs are genuinely
+                independent and cross-run history would balloon costs.
+                When unchecked (default), all runs append to a single
+                conversation per goal.
+              </p>
+            </div>
           </div>
 
           <div>

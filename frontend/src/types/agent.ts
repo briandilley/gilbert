@@ -40,6 +40,7 @@ export interface Goal {
   run_count: number;
   completed_at: string | null;
   completed_reason: string | null;
+  stateless: boolean;
 }
 
 export interface AgentRun {
@@ -65,6 +66,7 @@ export interface GoalCreatePayload {
   profile_id: string;
   trigger_type?: "time" | "event" | "";
   trigger_config?: TriggerConfig;
+  stateless?: boolean;
 }
 
 export interface GoalUpdatePayload {
@@ -74,4 +76,5 @@ export interface GoalUpdatePayload {
   status?: GoalStatus;
   trigger_type?: "time" | "event" | "";
   trigger_config?: TriggerConfig;
+  stateless?: boolean;
 }
