@@ -312,8 +312,15 @@ class AutonomousAgentService(Service):
             return False
         existing_goal = _goal_from_dict(raw)
         await self._disarm_trigger(existing_goal)
-        await self._storage.delete(_GOAL_COLLECTION, goal_id)
-        # Also delete associated runs
+
+        # Collect all conversation_ids associated with this goal — the
+        # goal's own conversation_id (stateful) and every run's
+        # conversation_id (which may differ for stateless goals). Delete
+        # them all so chat conversations don't outlive the goal.
+        conv_ids: set[str] = set()
+        if existing_goal.conversation_id:
+            conv_ids.add(existing_goal.conversation_id)
+
         runs = await self._storage.query(
             Query(
                 collection=_RUN_COLLECTION,
@@ -322,7 +329,27 @@ class AutonomousAgentService(Service):
             )
         )
         for r in runs:
+            cid = r.get("conversation_id")
+            if cid:
+                conv_ids.add(cid)
+
+        # Drop the goal entity first so any in-flight run sees the
+        # deletion at end-of-run and skips its post-run writeback.
+        await self._storage.delete(_GOAL_COLLECTION, goal_id)
+        for r in runs:
             await self._storage.delete(_RUN_COLLECTION, r["id"])
+        for cid in conv_ids:
+            try:
+                await self._storage.delete("ai_conversations", cid)
+            except Exception:
+                logger.warning(
+                    "delete_goal: failed to delete conversation %s", cid
+                )
+        # Drop any pending user messages and active-run state for the
+        # goal so the in-flight task (if any) doesn't try to follow up.
+        self._pending_user_messages.pop(goal_id, None)
+        self._active_runs.pop(goal_id, None)
+        self._running_goals.discard(goal_id)
         return True
 
     # ── Execution ─────────────────────────────────────────────────
@@ -1516,14 +1543,23 @@ class AutonomousAgentService(Service):
                     f"chat was cancelled mid-stream"
                 )
                 run.ended_at = datetime.now(UTC)
+                # Re-read goal for fresh state — if it's been deleted
+                # mid-run, bail out without persisting anything (writing
+                # the run and the goal would recreate them).
+                fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+                if fresh_goal_raw is None:
+                    logger.info(
+                        "agent run %s timed out but goal %s was deleted "
+                        "mid-run; skipping persistence",
+                        run.id,
+                        goal_id,
+                    )
+                    self._active_runs.pop(goal_id, None)
+                    return run
+                fresh_goal = _goal_from_dict(fresh_goal_raw)
                 # Persist the run as TIMED_OUT and update goal counters
                 await self._storage.put(
                     _RUN_COLLECTION, run.id, _run_to_dict(run)
-                )
-                # Re-read goal for fresh state then update counters
-                fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
-                fresh_goal = (
-                    _goal_from_dict(fresh_goal_raw) if fresh_goal_raw else goal
                 )
                 fresh_goal.run_count += 1
                 fresh_goal.last_run_at = run.ended_at
@@ -1597,10 +1633,20 @@ class AutonomousAgentService(Service):
         # Reload the run too so we pick up complete_goal_called/reason
         # written by the tool during the chat call.
         fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
-        if fresh_goal_raw is not None:
-            fresh_goal = _goal_from_dict(fresh_goal_raw)
-        else:
-            fresh_goal = goal
+        if fresh_goal_raw is None:
+            # The goal was deleted while this run was in flight. Don't
+            # write anything back to storage — that would recreate the
+            # goal (and the run) the user just deleted. Bail out
+            # silently after the chat call returns; the in-flight task
+            # cleanup happens in start_goal_run/_spawn_run's finally.
+            logger.info(
+                "agent run %s: goal %s was deleted mid-run; skipping "
+                "end-of-run persistence",
+                run.id,
+                goal_id,
+            )
+            return run
+        fresh_goal = _goal_from_dict(fresh_goal_raw)
 
         run_raw_after = await self._storage.get(_RUN_COLLECTION, run.id)
         if run_raw_after is not None:

@@ -8,6 +8,7 @@ import {
   Loader2Icon,
   WrenchIcon,
   ZapIcon,
+  Trash2Icon,
 } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -160,6 +161,18 @@ function GoalSidebarRow({ goal, selected, onSelect }: GoalSidebarRowProps) {
     queryClient.invalidateQueries({ queryKey: ["agent"] });
   };
 
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (
+      !confirm(
+        `Delete goal "${goal.name}"? This removes the goal, all runs, and the conversation.`,
+      )
+    )
+      return;
+    await api.deleteGoal(goal.id);
+    queryClient.invalidateQueries({ queryKey: ["agent"] });
+  };
+
   return (
     <button
       type="button"
@@ -215,6 +228,15 @@ function GoalSidebarRow({ goal, selected, onSelect }: GoalSidebarRowProps) {
           title="Settings"
         >
           <CogIcon className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={handleDelete}
+          className="h-6 w-6 hover:text-red-600 dark:hover:text-red-400"
+          title="Delete goal"
+        >
+          <Trash2Icon className="size-3.5" />
         </Button>
       </div>
       <div className="text-xs text-muted-foreground mt-1 ml-4 truncate">
