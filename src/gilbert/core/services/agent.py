@@ -637,6 +637,7 @@ class AutonomousAgentService(Service):
         for r in stale:
             r["awaiting_user_input"] = False
             r["pending_question"] = None
+            r["pending_actions"] = []
             try:
                 await self._storage.put(_RUN_COLLECTION, r["id"], r)
             except Exception:
@@ -778,6 +779,34 @@ class AutonomousAgentService(Service):
         if not question:
             return "error: request_user_input requires a question"
 
+        # Validate optional actions: list of {id, kind, label, payload?}.
+        # Bad shapes are dropped silently rather than failing the tool —
+        # the question is still useful even if the buttons aren't.
+        raw_actions = arguments.get("actions") or []
+        actions: list[dict[str, Any]] = []
+        if isinstance(raw_actions, list):
+            for a in raw_actions:
+                if not isinstance(a, dict):
+                    continue
+                action_id = str(a.get("id") or "").strip()
+                kind = str(a.get("kind") or "").strip()
+                label = str(a.get("label") or "").strip()
+                if not action_id or not kind or not label:
+                    continue
+                payload = a.get("payload")
+                if payload is None:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    continue
+                actions.append(
+                    {
+                        "id": action_id,
+                        "kind": kind,
+                        "label": label,
+                        "payload": payload,
+                    }
+                )
+
         # Find the active run + goal. _active_runs is keyed by goal_id;
         # scan to find which goal has an active run. In practice there's
         # at most one active run per agent call site; O(N) over goals
@@ -797,11 +826,12 @@ class AutonomousAgentService(Service):
         if goal is None:
             return f"error: goal {goal_id} not found"
 
-        # Persist the pending question on the run
+        # Persist the pending question + actions on the run
         run_raw = await self._storage.get(_RUN_COLLECTION, run_id)
         if run_raw is not None:
             run_raw["awaiting_user_input"] = True
             run_raw["pending_question"] = question
+            run_raw["pending_actions"] = actions
             await self._storage.put(_RUN_COLLECTION, run_id, run_raw)
 
         # Send urgent notification to the owner
@@ -1580,6 +1610,7 @@ class AutonomousAgentService(Service):
                     if run_raw and run_raw.get("awaiting_user_input"):
                         run_raw["awaiting_user_input"] = False
                         run_raw["pending_question"] = None
+                        run_raw["pending_actions"] = []
                         await self._storage.put(_RUN_COLLECTION, run.id, run_raw)
                 return [
                     Message(role=MessageRole.USER, content=m)
@@ -2083,6 +2114,7 @@ def _run_to_dict(r: Run) -> dict[str, Any]:
         "complete_reason": r.complete_reason,
         "awaiting_user_input": r.awaiting_user_input,
         "pending_question": r.pending_question,
+        "pending_actions": r.pending_actions,
     }
 
 
@@ -2105,6 +2137,7 @@ def _run_from_dict(d: dict[str, Any]) -> Run:
         complete_reason=d.get("complete_reason"),
         awaiting_user_input=bool(d.get("awaiting_user_input", False)),
         pending_question=d.get("pending_question"),
+        pending_actions=list(d.get("pending_actions") or []),
     )
 
 
@@ -2131,6 +2164,25 @@ _REQUEST_USER_INPUT_TOOL = ToolDefinition(
                 "The question to ask the user. Be concise but specific. "
                 "Surfaced both in the urgent notification and in the run "
                 "history."
+            ),
+        ),
+        ToolParameter(
+            name="actions",
+            type=ToolParameterType.ARRAY,
+            required=False,
+            default=[],
+            description=(
+                "Optional list of action buttons to render alongside the "
+                "question in the agent chat UI. Each entry is an object: "
+                '{"id": "<unique>", "kind": "<handler-key>", '
+                '"label": "<button text>", "payload": {<arbitrary JSON>}}. '
+                "Built-in kinds: 'open-url' (payload.url opens in a new "
+                "tab). Plugin-contributed kinds (e.g. 'browser.vnc' "
+                "opens a VNC live-login session for payload.url) are "
+                "registered in the SPA's agent-action registry. Buttons "
+                "appear inline in the awaiting-input banner so the user "
+                "doesn't have to navigate elsewhere to act on your "
+                "request. Omit when a plain text reply is fine."
             ),
         ),
     ],

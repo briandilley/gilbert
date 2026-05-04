@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -111,6 +111,14 @@ class Run:
     pending_question: str | None = None
     """The question the agent asked when it called request_user_input.
     Surfaced in the UI so the user knows what to answer."""
+
+    pending_actions: list[dict[str, Any]] = field(default_factory=list)
+    """Optional buttons rendered alongside the pending question. Each
+    entry is ``{"id", "kind", "label", "payload"}``. The SPA looks up
+    ``kind`` in its agent-action registry and invokes the registered
+    handler with ``payload`` on click. Built-in kinds: ``open-url``.
+    Plugins (e.g. browser plugin's ``browser.vnc``) register
+    additional kinds via the side-effect import mechanism."""
 
 
 @runtime_checkable

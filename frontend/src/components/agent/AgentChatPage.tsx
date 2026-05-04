@@ -27,6 +27,7 @@ import { CreateGoalDialog } from "@/components/agent/AgentsPage";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { AttachmentChip } from "@/components/chat/TurnBubble";
 import { WorkspacePanelContent } from "@/components/chat/WorkspacePanel";
+import { getAgentActionHandler } from "@/lib/agent-actions";
 import type { FileAttachment } from "@/types/chat";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
@@ -345,6 +346,7 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
   // Runs are returned newest-first so the first match is the latest.
   const awaitingRun = runs.find((r) => r.awaiting_user_input);
   const awaitingQuestion = awaitingRun?.pending_question || null;
+  const awaitingActions = awaitingRun?.pending_actions ?? [];
 
   // ---------------------------------------------------------------------------
   // Streaming turn state — mirrors the ChatPage pattern.
@@ -696,13 +698,38 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
 
       {/* Awaiting-input banner */}
       {awaitingQuestion ? (
-        <div className="border-t border-amber-200 dark:border-amber-900 bg-amber-50/50 dark:bg-amber-950/20 px-4 py-2 text-sm">
-          <span className="font-medium text-amber-800 dark:text-amber-300">
-            Agent is asking:
-          </span>{" "}
-          <span className="text-amber-900 dark:text-amber-200">
-            {awaitingQuestion}
-          </span>
+        <div className="border-t border-amber-200 dark:border-amber-900 bg-amber-50/50 dark:bg-amber-950/20 px-4 py-2 text-sm space-y-2">
+          <div>
+            <span className="font-medium text-amber-800 dark:text-amber-300">
+              Agent is asking:
+            </span>{" "}
+            <span className="text-amber-900 dark:text-amber-200">
+              {awaitingQuestion}
+            </span>
+          </div>
+          {awaitingActions.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {awaitingActions.map((action) => {
+                const handler = getAgentActionHandler(action.kind);
+                return (
+                  <Button
+                    key={action.id}
+                    size="sm"
+                    variant={handler ? "default" : "outline"}
+                    disabled={!handler}
+                    title={
+                      handler
+                        ? action.label
+                        : `No handler registered for action kind '${action.kind}'`
+                    }
+                    onClick={() => handler && handler(action.payload || {})}
+                  >
+                    {action.label}
+                  </Button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

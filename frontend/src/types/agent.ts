@@ -60,6 +60,16 @@ export interface AgentRun {
   complete_reason: string | null;
   awaiting_user_input: boolean;
   pending_question: string | null;
+  /** Optional buttons rendered alongside ``pending_question``. Each
+   *  entry's ``kind`` is looked up in the SPA's agent-action registry
+   *  (built-in: ``"open-url"``; plugins register more like
+   *  ``"browser.vnc"`` via side-effect imports). */
+  pending_actions?: Array<{
+    id: string;
+    kind: string;
+    label: string;
+    payload?: Record<string, unknown>;
+  }>;
 }
 
 export interface GoalCreatePayload {
