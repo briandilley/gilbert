@@ -265,6 +265,58 @@ class AutonomousAgentService(Service):
 
         return run
 
+    async def declare_goal_complete(
+        self,
+        goal_id: str,
+        run_id: str,
+        reason: str,
+    ) -> bool:
+        """Mark a goal as COMPLETED. Idempotent — returns False if already
+        completed. ``run_id`` is currently informational; future versions
+        may validate it against an active run.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        if raw is None:
+            return False
+        goal = _goal_from_dict(raw)
+        if goal.status == GoalStatus.COMPLETED:
+            return False
+        goal.status = GoalStatus.COMPLETED
+        goal.completed_at = datetime.now(UTC)
+        goal.completed_reason = reason
+        goal.updated_at = goal.completed_at
+        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+
+        # Mark the most-recent run as having declared completion
+        run_raw = await self._storage.get(_RUN_COLLECTION, run_id)
+        if run_raw is not None:
+            run_raw["complete_goal_called"] = True
+            run_raw["complete_reason"] = reason
+            await self._storage.put(_RUN_COLLECTION, run_id, run_raw)
+        return True
+
+    # ── ToolProvider implementation ───────────────────────────────
+
+    def get_tools(self, user_ctx: Any = None) -> list[ToolDefinition]:
+        return [_COMPLETE_GOAL_TOOL]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name != "complete_goal":
+            raise KeyError(f"unknown tool: {name}")
+        goal_id = str(arguments.get("goal_id", ""))
+        reason = str(arguments.get("reason", "")).strip() or "(no reason given)"
+        if not goal_id:
+            return "error: complete_goal requires goal_id"
+        # We don't have a run_id available here — pass empty string. In
+        # the v1 manual-run flow this is acceptable; Phase 4b's automatic
+        # triggers will revisit this when runs are spawned by the service.
+        ok = await self.declare_goal_complete(goal_id, run_id="", reason=reason)
+        if ok:
+            return f"goal {goal_id} marked complete: {reason}"
+        return f"goal {goal_id} was already completed (no-op)"
+
     def _build_initial_user_message(self, goal: Goal) -> str:
         """Synthesize the user message that drives the AI loop.
 
@@ -366,3 +418,30 @@ def _run_from_dict(d: dict[str, Any]) -> Run:
         complete_goal_called=bool(d.get("complete_goal_called", False)),
         complete_reason=d.get("complete_reason"),
     )
+
+
+_COMPLETE_GOAL_TOOL = ToolDefinition(
+    name="complete_goal",
+    description=(
+        "Mark an autonomous-agent goal as fully and permanently complete. "
+        "Call this only when the goal has been fully achieved and no future "
+        "runs of it are needed. The goal will stop accepting new runs after "
+        "this call."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id to mark complete.",
+        ),
+        ToolParameter(
+            name="reason",
+            type=ToolParameterType.STRING,
+            description=(
+                "A short human-readable explanation of why you consider the "
+                "goal complete. Surfaced to the goal's owner."
+            ),
+        ),
+    ],
+    required_role="user",
+)

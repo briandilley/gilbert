@@ -285,3 +285,83 @@ async def test_run_goal_now_rejects_disabled_goal(
 
     with pytest.raises(ValueError, match="disabled"):
         await svc.run_goal_now(g.id)
+
+
+# ── complete_goal tool tests ──────────────────────────────────────
+
+
+async def test_declare_goal_complete_marks_goal_completed(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    run = await svc.run_goal_now(g.id)
+
+    ok = await svc.declare_goal_complete(
+        goal_id=g.id,
+        run_id=run.id,
+        reason="found and chased all overdue invoices",
+    )
+    assert ok is True
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.status == GoalStatus.COMPLETED
+    assert fetched.completed_at is not None
+    assert fetched.completed_reason == "found and chased all overdue invoices"
+
+
+async def test_declare_goal_complete_idempotent(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    run = await svc.run_goal_now(g.id)
+
+    ok1 = await svc.declare_goal_complete(g.id, run.id, "first")
+    ok2 = await svc.declare_goal_complete(g.id, run.id, "second")
+    assert ok1 is True
+    assert ok2 is False  # already completed; second call is a no-op
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.completed_reason == "first"  # first wins
+
+
+async def test_complete_goal_tool_definition_exposed(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    tools = svc.get_tools(user_ctx=None)
+    names = {t.name for t in tools}
+    assert "complete_goal" in names
+
+    cg = next(t for t in tools if t.name == "complete_goal")
+    param_names = {p.name for p in cg.parameters}
+    assert "goal_id" in param_names
+    assert "reason" in param_names
+
+
+async def test_complete_goal_tool_executes(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    result = await svc.execute_tool(
+        "complete_goal",
+        {"goal_id": g.id, "reason": "all done"},
+    )
+    # The tool returns a status string the AI sees as a tool result
+    assert "complete" in result.lower() or "ok" in result.lower()
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.status == GoalStatus.COMPLETED
+    assert fetched.completed_reason == "all done"
