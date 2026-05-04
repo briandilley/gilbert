@@ -211,15 +211,25 @@ interface GoalChatPanelProps {
 
 function GoalChatPanel({ goal }: GoalChatPanelProps) {
   const api = useWsApi();
+  const queryClient = useQueryClient();
+  const [composerText, setComposerText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   // Fetch runs so we can fall back to the most recent run's
   // conversation_id when goal.conversation_id is empty (stateless goals
   // never capture a single conversation on the goal; first-run stateful
-  // goals only capture after success).
+  // goals only capture after success). Poll while a run is in progress.
   const { data: runsResp } = useQuery({
     queryKey: ["agent", "runs", goal.id, goal.run_count],
     queryFn: () => api.listAgentRuns(goal.id, 50),
     enabled: !!goal.id,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || !data.ok || !data.runs) return false;
+      const hasRunning = data.runs.some((r) => r.status === "running");
+      return hasRunning ? 2000 : false;
+    },
   });
 
   const runs = runsResp?.ok && runsResp.runs ? runsResp.runs : [];
@@ -227,6 +237,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
   const fallbackConvId =
     runs.find((r) => !!r.conversation_id)?.conversation_id ?? "";
   const conversationId = goal.conversation_id || fallbackConvId;
+  const hasRunningRun = runs.some((r) => r.status === "running");
 
   const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
     queryKey: ["agent-conv", conversationId, goal.run_count],
@@ -235,13 +246,40 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
         ? api.loadConversation(conversationId)
         : Promise.resolve(null),
     enabled: !!conversationId,
+    refetchInterval: hasRunningRun ? 2000 : false,
   });
+
+  const handleSend = async () => {
+    const text = composerText.trim();
+    if (!text) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      const result = await api.runGoalNow(goal.id, text);
+      if (!result.ok) {
+        setSendError(result.error || "Failed to send.");
+        return;
+      }
+      setComposerText("");
+      queryClient.invalidateQueries({ queryKey: ["agent"] });
+      queryClient.invalidateQueries({ queryKey: ["agent-conv"] });
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center gap-3">
         <h1 className="font-semibold text-lg flex-1">{goal.name}</h1>
+        {hasRunningRun ? (
+          <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1">
+            <Loader2Icon className="size-3 animate-spin" /> running…
+          </span>
+        ) : null}
         <span className="text-xs text-muted-foreground">
           {goal.run_count} run{goal.run_count === 1 ? "" : "s"}
         </span>
@@ -251,7 +289,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {!conversationId ? (
           <div className="text-center text-muted-foreground py-12">
-            No conversation yet. Hit Run on the sidebar to start.
+            No conversation yet. Send a message below to start.
           </div>
         ) : isLoading ? (
           <div className="text-center text-muted-foreground py-12">
@@ -268,6 +306,51 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
             <FlatTurnBlock key={i} turn={turn} />
           ))
         )}
+      </div>
+
+      {/* Composer */}
+      <div className="border-t p-3">
+        <div className="flex gap-2 items-end">
+          <textarea
+            value={composerText}
+            onChange={(e) => setComposerText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder={
+              goal.status !== "enabled"
+                ? `Goal is ${goal.status} — re-enable to chat`
+                : hasRunningRun
+                ? "A run is in progress — wait for it to finish, then send"
+                : "Send a message to the agent (Cmd/Ctrl+Enter to send)…"
+            }
+            disabled={sending || goal.status !== "enabled" || hasRunningRun}
+            rows={2}
+            className="flex-1 min-h-12 max-h-48 rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm resize-y disabled:opacity-50"
+          />
+          <Button
+            type="button"
+            onClick={handleSend}
+            disabled={
+              sending ||
+              !composerText.trim() ||
+              goal.status !== "enabled" ||
+              hasRunningRun
+            }
+          >
+            {sending ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              "Send"
+            )}
+          </Button>
+        </div>
+        {sendError ? (
+          <div className="text-xs text-red-600 mt-1">{sendError}</div>
+        ) : null}
       </div>
     </div>
   );
