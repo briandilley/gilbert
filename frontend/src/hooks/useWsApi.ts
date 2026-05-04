@@ -912,10 +912,11 @@ export function useWsApi() {
         goal_id: goalId,
       }),
 
-    runGoalNow: (goalId: string) =>
+    runGoalNow: (goalId: string, userMessage?: string) =>
       rpc<{ ok: boolean; run?: AgentRun; error?: string }>({
         type: "agent.goal.run_now",
         goal_id: goalId,
+        ...(userMessage ? { user_message: userMessage } : {}),
       }),
 
     listAgentRuns: (goalId: string, limit = 100) =>
