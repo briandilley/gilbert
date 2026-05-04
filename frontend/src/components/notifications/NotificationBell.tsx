@@ -199,7 +199,8 @@ export function NotificationBell() {
       // Same suppression rule as the live-event path: if the user is
       // already on the agent chat for this goal, the toast / ding /
       // pulse are noise.
-      if (isViewingGoalChat(n.source_ref?.goal_id)) {
+      const ref = n.source_ref as { goal_id?: string } | null;
+      if (isViewingGoalChat(ref?.goal_id)) {
         continue;
       }
       // First-time show? Pulse + ding once per polling cycle.
