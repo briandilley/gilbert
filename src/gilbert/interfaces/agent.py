@@ -50,6 +50,11 @@ class Goal:
     - EVENT: ``{"event_type": str, "filter"?: {"field": str, "op": str, "value": Any}}``
     """
 
+    conversation_id: str = ""
+    """Per-goal materialized chat conversation. Lazy-created on the
+    first run; subsequent runs append to it. Empty string before the
+    first run."""
+
     last_run_at: datetime | None = None
     last_run_status: RunStatus | None = None
     run_count: int = 0
