@@ -149,6 +149,7 @@ class _FakeAIService:
         backend_override: str = "",
         ai_profile: str = "",
         max_tool_rounds: int | None = None,
+        between_rounds_callback: Any = None,
     ) -> ChatTurnResult:
         self.calls.append(
             {
@@ -2006,3 +2007,51 @@ async def test_user_message_during_run_is_queued_and_triggers_followup(
 
     # Pending queue is drained
     assert g.id not in svc._pending_user_messages or not svc._pending_user_messages[g.id]
+
+
+# ── True mid-run user message injection ───────────────────────────
+
+
+async def test_between_rounds_callback_drains_pending_queue(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """The between_rounds_callback passed to chat() drains the pending-
+    message queue so mid-run user messages are injected before the next
+    round rather than queued for a follow-up run.
+    """
+    from gilbert.interfaces.ai import Message, MessageRole
+
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Capture the between_rounds_callback that agent.py passes to chat().
+    captured_callback: list[Any] = []
+
+    original_chat = ai.chat
+
+    async def capturing_chat(*args: Any, **kwargs: Any) -> Any:
+        cb = kwargs.get("between_rounds_callback")
+        captured_callback.append(cb)
+        return await original_chat(*args, **kwargs)
+
+    ai.chat = capturing_chat  # type: ignore[method-assign]
+
+    await svc.run_goal_now(g.id)
+
+    # The callback must have been passed.
+    assert captured_callback, "between_rounds_callback was not passed to chat()"
+    cb = captured_callback[0]
+    assert cb is not None, "between_rounds_callback was None"
+
+    # Seed a pending message and invoke the callback directly to verify
+    # it drains the queue and returns well-formed Message objects.
+    svc._pending_user_messages[g.id] = ["check this too please"]
+    injected: list[Message] = await cb()
+
+    assert len(injected) == 1
+    assert injected[0].role == MessageRole.USER
+    assert injected[0].content == "check this too please"
+    # Queue should be drained after the callback runs.
+    assert not svc._pending_user_messages.get(g.id)

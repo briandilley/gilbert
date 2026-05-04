@@ -16,7 +16,7 @@ from gilbert.interfaces.agent import (
     Run,
     RunStatus,
 )
-from gilbert.interfaces.ai import AIProvider
+from gilbert.interfaces.ai import AIProvider, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import (
@@ -858,7 +858,7 @@ class AutonomousAgentService(Service):
                 }
 
         # Resolve AI sampling capability
-        from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+        from gilbert.interfaces.ai import AISamplingProvider
 
         ai_svc = self._resolver.get_capability("ai_chat")
         if not isinstance(ai_svc, AISamplingProvider):
@@ -1259,6 +1259,19 @@ class AutonomousAgentService(Service):
                 if goal.max_wall_clock_s_override is not None
                 else _DEFAULT_MAX_WALL_CLOCK_S
             )
+            async def _drain_pending() -> list[Message]:
+                """Pull any user messages queued for this goal since the
+                run started, return as USER-role Message objects for
+                chat() to inject before the next round.
+                """
+                pending = self._pending_user_messages.pop(goal_id, [])
+                if not pending:
+                    return []
+                return [
+                    Message(role=MessageRole.USER, content=m)
+                    for m in pending
+                ]
+
             try:
                 result = await asyncio.wait_for(
                     self._ai.chat(
@@ -1273,6 +1286,7 @@ class AutonomousAgentService(Service):
                             if goal.max_rounds_override is not None
                             else _DEFAULT_MAX_ROUNDS
                         ),
+                        between_rounds_callback=_drain_pending,
                     ),
                     timeout=max_wall_clock_s,
                 )
