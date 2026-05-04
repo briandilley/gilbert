@@ -221,6 +221,10 @@ export function NavBar() {
               <DropdownMenuItem onClick={() => navigate("/account")}>
                 Account settings
               </DropdownMenuItem>
+              {/* Plugin items in the user menu — typically OAuth
+                  connect / disconnect actions, identity-bound
+                  links. Plugins target slot=\"header.user-menu\". */}
+              <PluginPanelSlot slot="header.user-menu" />
               <DropdownMenuItem onClick={logout}>Log out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

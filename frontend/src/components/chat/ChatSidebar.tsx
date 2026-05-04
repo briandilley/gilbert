@@ -4,6 +4,7 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "@/types/chat";
 import { MailIcon, MessageSquareIcon, UsersRoundIcon } from "lucide-react";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 interface ChatSidebarProps {
   conversations: ConversationSummary[];
@@ -147,6 +148,10 @@ export function ChatSidebarContent({
             ))
           )}
         </div>
+
+        {/* Bottom-of-sidebar slot for plugin widgets — now-playing
+            music status, doorbell ring history, presence map, etc. */}
+        <PluginPanelSlot slot="chat.sidebar.bottom" />
       </div>
     </ScrollArea>
   );

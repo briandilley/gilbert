@@ -47,10 +47,29 @@ std-plugins/<name>/
 Plugin TS can import core helpers via the ``@/`` alias (e.g. ``@/components/ui/button``, ``@/hooks/useWebSocket``). Core never imports from a plugin's ``frontend/`` directory.
 
 ### Built-in slots
-- ``account.extensions`` — per-user Account page (``/account``). Default for plugins that surface per-user UI (saved logins, OAuth tokens, …).
-- ``settings.<category>`` — admin Settings page, scoped to a config category. Plugins that already declare a ``Configurable`` namespace + ``config_category`` can mount additional UI under their category by setting ``slot=f"settings.{category.lower()}"``.
-- ``header.widgets`` — top-bar, between the connection indicator and the notification bell. Use for small live-status widgets (sync indicator, queue depth, …).
-- ``dashboard.top`` / ``dashboard.bottom`` — banner-style widgets rendered before / after the standard card grid on the ``/`` landing page.
+
+Per-user / per-admin pages:
+- ``account.extensions`` — per-user Account page (``/account``).
+- ``settings.<category>`` — admin Settings page, scoped to a config category. Mount additional admin UI under your ``config_category``.
+
+Top nav bar:
+- ``header.widgets`` — between the connection indicator and the notification bell. Live-status widgets (sync indicator, queue depth, …).
+- ``header.user-menu`` — items in the avatar dropdown. Wrap each in a ``<DropdownMenuItem>``. OAuth connect / disconnect, identity-bound links.
+
+Dashboard (``/``):
+- ``dashboard.top`` — banner widgets above the card grid.
+- ``dashboard.bottom`` — long-form widgets below the grid.
+
+Chat (``/chat``):
+- ``chat.sidebar.bottom`` — bottom of the conversations sidebar. Now-playing music, presence, doorbell history.
+- ``chat.input.toolbar`` — a strip above the chat input. Quick actions (share to slack, attach now-playing track, …).
+
+Agent chat (``/agents``):
+- ``agent.sidebar.bottom`` — bottom of the goals sidebar.
+- ``agent.composer.toolbar`` — strip above the per-goal composer. Per-goal quick actions; workspace browse goes here.
+
+Documents (``/documents``):
+- ``documents.toolbar`` — alongside the search box. "Import from <source>" / "Sync now" buttons.
 
 Plugins are also free to declare slots **inside their own pages** (e.g. ``browser.sessions.actions``) so other plugins can extend them. Just drop a ``<PluginPanelSlot slot="my-plugin.foo">`` somewhere; any other plugin can register components targeting that slot. Core never has to know.
 

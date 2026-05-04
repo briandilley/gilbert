@@ -23,6 +23,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { CreateGoalDialog } from "@/components/agent/AgentsPage";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
 import type {
@@ -117,6 +118,8 @@ export function AgentChatPage() {
             />
           ))
         )}
+        {/* Bottom-of-sidebar slot for plugin / workspace contributions. */}
+        <PluginPanelSlot slot="agent.sidebar.bottom" />
       </div>
     </>
   );
@@ -629,6 +632,11 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
 
       {/* Composer */}
       <div className="border-t p-3">
+        {/* Toolbar slot — quick actions per goal (workspace browse,
+            plugin contributions). */}
+        <div className="mb-2 empty:hidden">
+          <PluginPanelSlot slot="agent.composer.toolbar" />
+        </div>
         <div className="flex gap-2 items-end">
           <textarea
             value={composerText}

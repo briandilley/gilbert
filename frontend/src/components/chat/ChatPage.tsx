@@ -51,6 +51,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { summarizeUsage } from "@/lib/usage";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 export function ChatPage() {
   const { user } = useAuth();
@@ -1212,6 +1213,16 @@ export function ChatPage() {
 
         {/* The sticky thinking-panel footer is gone — tool activity now
             renders inside each turn bubble's thinking card, in context. */}
+
+        {/* Toolbar slot for plugin contributions above the chat
+            input — quick-actions like 'send to slack', 'attach
+            now-playing track', etc. Only visible alongside the
+            input. */}
+        {(activeConvId || turns.length > 0) && (
+          <div className="px-3 sm:px-4 pt-2">
+            <PluginPanelSlot slot="chat.input.toolbar" />
+          </div>
+        )}
 
         {/* Sticky input — only show when a conversation is active or turns exist */}
         {(activeConvId || turns.length > 0) && (

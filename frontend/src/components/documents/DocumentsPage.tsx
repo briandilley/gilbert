@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { FolderIcon, FolderOpenIcon, FileTextIcon, ChevronRightIcon } from "lucide-react";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 export function DocumentsPage() {
   const api = useWsApi();
@@ -51,17 +52,22 @@ export function DocumentsPage() {
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-4xl mx-auto">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl sm:text-2xl font-semibold">Documents</h1>
-        <form onSubmit={handleSearch} className="flex gap-2 sm:shrink-0">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search documents..."
-            className="flex-1 sm:w-64 sm:flex-none"
-          />
-          <Button type="submit" disabled={isSearching}>
-            Search
-          </Button>
-        </form>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2 sm:shrink-0">
+          {/* Toolbar slot — plugins drop 'Import from <source>' or
+              'Sync now' buttons here. */}
+          <PluginPanelSlot slot="documents.toolbar" />
+          <form onSubmit={handleSearch} className="flex gap-2">
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search documents..."
+              className="flex-1 sm:w-64 sm:flex-none"
+            />
+            <Button type="submit" disabled={isSearching}>
+              Search
+            </Button>
+          </form>
+        </div>
       </div>
 
       {searching && searchResults ? (
