@@ -1396,3 +1396,103 @@ async def test_interrupted_chat_marks_run_failed_not_completed(
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
     assert fetched.conversation_id == ""
+
+
+# ── Goal-status persistence across complete_goal tool calls ───────
+
+
+async def test_complete_goal_tool_persists_goal_status_after_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """When the agent calls complete_goal mid-run, the resulting
+    COMPLETED status must survive the run's end-of-loop counter update.
+    Previously the run loop re-wrote the goal from a stale local copy,
+    clobbering the COMPLETED status back to ENABLED.
+    """
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Make the fake chat call invoke the complete_goal tool mid-run via
+    # the service's own execute_tool path — this mirrors how real chat()
+    # would dispatch a model-emitted tool call.
+    from gilbert.interfaces.ai import ChatTurnResult
+
+    async def chat_that_completes_goal(*args: Any, **kwargs: Any) -> ChatTurnResult:
+        # Simulate the agent's chat run: invoke complete_goal during it.
+        await svc.execute_tool(
+            "complete_goal",
+            {"goal_id": g.id, "reason": "all done"},
+        )
+        return ChatTurnResult(
+            response_text="goal complete",
+            conversation_id="conv-x",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="fake",
+            turn_usage={"input_tokens": 100, "output_tokens": 5},
+        )
+
+    ai.chat = chat_that_completes_goal  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+
+    # The run completed normally
+    assert run.status == RunStatus.COMPLETED
+
+    # Goal status MUST be COMPLETED, not clobbered back to ENABLED
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.status == GoalStatus.COMPLETED
+    assert fetched.completed_reason == "all done"
+    assert fetched.completed_at is not None
+    # Counter updates still happened
+    assert fetched.run_count == 1
+
+
+async def test_complete_goal_tool_flags_active_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """When complete_goal fires from inside a chat() call, the active
+    Run gets complete_goal_called=True and complete_reason set, instead
+    of being silently dropped because run_id was empty.
+    """
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    from gilbert.interfaces.ai import ChatTurnResult
+
+    async def chat_that_completes_goal(*args: Any, **kwargs: Any) -> ChatTurnResult:
+        await svc.execute_tool(
+            "complete_goal",
+            {"goal_id": g.id, "reason": "shipped"},
+        )
+        return ChatTurnResult(
+            response_text="ok",
+            conversation_id="conv-y",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="fake",
+            turn_usage={"input_tokens": 50, "output_tokens": 5},
+        )
+
+    ai.chat = chat_that_completes_goal  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+    assert run.complete_goal_called is True
+    assert run.complete_reason == "shipped"
+
+    # Re-fetch from storage to confirm persistence
+    raw = await svc._storage.get("agent_runs", run.id)
+    assert raw is not None
+    assert raw["complete_goal_called"] is True
+    assert raw["complete_reason"] == "shipped"

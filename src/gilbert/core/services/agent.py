@@ -104,6 +104,12 @@ class AutonomousAgentService(Service):
 
         self._wildcard_unsubscribe: Any = None
 
+        self._active_runs: dict[str, str] = {}
+        """goal_id → currently-active run_id. Populated by ``_run_goal_internal``
+        for the duration of a run; cleared in finally. Used by the
+        ``complete_goal`` tool so it can flag the right Run entity rather
+        than passing an empty run_id."""
+
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="autonomous_agent",
@@ -363,10 +369,11 @@ class AutonomousAgentService(Service):
         reason = str(arguments.get("reason", "")).strip() or "(no reason given)"
         if not goal_id:
             return "error: complete_goal requires goal_id"
-        # We don't have a run_id available here — pass empty string. In
-        # the v1 manual-run flow this is acceptable; Phase 4b's automatic
-        # triggers will revisit this when runs are spawned by the service.
-        ok = await self.declare_goal_complete(goal_id, run_id="", reason=reason)
+        # Look up the active run for this goal so declare_goal_complete
+        # can flag the right Run entity. ``_run_goal_internal`` populates
+        # this dict for the lifetime of the run.
+        run_id = self._active_runs.get(goal_id, "")
+        ok = await self.declare_goal_complete(goal_id, run_id=run_id, reason=reason)
         if ok:
             return f"goal {goal_id} marked complete: {reason}"
         return f"goal {goal_id} was already completed (no-op)"
@@ -980,6 +987,12 @@ class AutonomousAgentService(Service):
             status=RunStatus.RUNNING,
         )
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+
+        # Track the active run for this goal so the complete_goal tool
+        # can flag the right Run entity (the tool dispatcher only gets
+        # the goal_id from the model — it doesn't know which run is in
+        # flight). Cleared in finally regardless of success/failure.
+        self._active_runs[goal_id] = run.id
         try:
             user_message = self._build_initial_user_message(goal)
             # Pass the goal's conversation_id (or None if it's the first run
@@ -1007,24 +1020,56 @@ class AutonomousAgentService(Service):
                 run.error = "interrupted"
             else:
                 run.status = RunStatus.COMPLETED
-                # Capture the conversation_id on the goal if this was the
-                # first run. Skip when interrupted so we don't lock the
-                # goal to a conversation that abandoned mid-mission.
-                if not goal.conversation_id and result.conversation_id:
-                    goal.conversation_id = result.conversation_id
         except Exception as exc:
             run.status = RunStatus.FAILED
             run.error = repr(exc)
             logger.exception("agent run failed: goal=%s run=%s", goal_id, run.id)
+        finally:
+            self._active_runs.pop(goal_id, None)
 
         run.ended_at = datetime.now(UTC)
+
+        # Re-read the goal from storage in case ``declare_goal_complete``
+        # mutated it mid-run (the complete_goal tool flips status to
+        # COMPLETED). Without this re-read, the local ``goal`` variable
+        # holds the pre-run state and we'd clobber the COMPLETED status
+        # when persisting counter updates below.
+        fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        if fresh_goal_raw is not None:
+            fresh_goal = _goal_from_dict(fresh_goal_raw)
+        else:
+            fresh_goal = goal
+
+        # Mirror declare_goal_complete state onto the run if it was set
+        # via the tool during this run. ``declare_goal_complete`` already
+        # set run.complete_goal_called via the run_id we registered in
+        # _active_runs, but if the goal was completed by some other path,
+        # this catches it.
+        if (
+            fresh_goal.status == GoalStatus.COMPLETED
+            and fresh_goal.completed_reason
+            and not run.complete_goal_called
+        ):
+            run.complete_goal_called = True
+            run.complete_reason = fresh_goal.completed_reason
+
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
 
-        goal.run_count += 1
-        goal.last_run_at = run.ended_at
-        goal.last_run_status = run.status
-        goal.updated_at = datetime.now(UTC)
-        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        # Capture conversation_id on the goal if this is the first run
+        # and the run wasn't interrupted (we don't want to lock the goal
+        # to an abandoned conversation).
+        if (
+            run.status == RunStatus.COMPLETED
+            and not fresh_goal.conversation_id
+            and run.conversation_id
+        ):
+            fresh_goal.conversation_id = run.conversation_id
+
+        fresh_goal.run_count += 1
+        fresh_goal.last_run_at = run.ended_at
+        fresh_goal.last_run_status = run.status
+        fresh_goal.updated_at = datetime.now(UTC)
+        await self._storage.put(_GOAL_COLLECTION, fresh_goal.id, _goal_to_dict(fresh_goal))
         return run
 
     def _build_initial_user_message(self, goal: Goal) -> str:
