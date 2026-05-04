@@ -266,6 +266,8 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
           user_message: { content: "", attachments: [] },
           rounds: [],
           final_content: "",
+          final_attachments: [],
+          incomplete: false,
           streaming: true,
         };
         return mutator(base);
