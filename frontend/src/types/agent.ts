@@ -14,7 +14,8 @@ export interface TriggerConfig {
   hour?: number;
   minute?: number;
   // EVENT shape:
-  event_type?: string;
+  event_type?: string;        // legacy: single event subscription
+  event_types?: string[];     // new: multi-event subscription
   filter?: {
     field: string;
     op: "eq" | "neq" | "in" | "contains";

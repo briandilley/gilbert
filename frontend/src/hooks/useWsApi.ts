@@ -945,5 +945,10 @@ export function useWsApi() {
         ai_profile: aiProfile ?? "",
       }),
 
+    listObservedEventTypes: () =>
+      rpc<{ ok: boolean; event_types?: string[]; error?: string }>({
+        type: "agent.event_types.list",
+      }),
+
   }), [rpc, rpcWithRef]);
 }
