@@ -52,10 +52,12 @@ left in RUNNING state across a process restart are marked FAILED with
 ``_running_goals: set[str]`` causes a duplicate trigger-fire to skip
 silently while the previous run is still in flight.
 
-**Cross-run memory & materialized conversations:** v1 does not implement
-notes, digests, or per-goal conversation materialization. Each run
-creates its own fresh conversation. Phase 4c will materialize a single
-conversation per goal and add a notes scratchpad + auto-digest.
+**Materialized conversation per goal:** ``Goal.conversation_id`` is
+lazy-created on the first run by ``AIService.chat()`` (called with
+``conversation_id=None``); the returned id is captured on the goal and
+reused for every subsequent run. The Activity tab in the UI is just a
+view of this conversation. Cross-run notes and auto-digest summarization
+are still future work.
 
 ## Related
 - ``src/gilbert/interfaces/agent.py``
