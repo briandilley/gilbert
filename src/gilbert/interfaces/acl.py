@@ -99,6 +99,10 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "notification.": 100,
     # Autonomous agent: user-level; handlers enforce per-user ownership.
     "agent.": 100,
+    # Browser plugin: credentials and VNC sessions are scoped per user;
+    # handlers enforce ownership so a user can only see / mutate their
+    # own.
+    "browser.": 100,
     # MCP client: list/get/start/stop/test are user-level (handlers enforce
     # per-record visibility + ownership). Creating/updating ``shared`` or
     # ``public`` servers, or changing any record's scope/allowed_roles/
