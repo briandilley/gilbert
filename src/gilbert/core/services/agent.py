@@ -17,6 +17,7 @@ from gilbert.interfaces.agent import (
     RunStatus,
 )
 from gilbert.interfaces.ai import AIProvider
+from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import (
     JobCallback,
@@ -1263,7 +1264,7 @@ class AutonomousAgentService(Service):
                     self._ai.chat(
                         user_message=user_message,
                         conversation_id=run_conv_id,
-                        user_ctx=None,
+                        user_ctx=self._build_owner_user_ctx(goal),
                         system_prompt=system_prompt,
                         ai_call=_AI_CALL_NAME,
                         ai_profile=goal.profile_id,
@@ -1438,6 +1439,26 @@ class AutonomousAgentService(Service):
         )
 
         return run
+
+    def _build_owner_user_ctx(self, goal: Goal) -> UserContext:
+        """Build a minimal UserContext for the goal's owner.
+
+        AIService.chat() uses this to scope stream events (chat.stream.*)
+        to the owner's WebSocket connections via ``visible_to``. Without
+        a real user_ctx the events get filtered out by
+        ``WsConnection.can_see_chat_event`` and the frontend never sees
+        live typing output.
+
+        A minimal context (user_id + roles) is sufficient for stream-event
+        visibility. If callers downstream need a full profile they must
+        resolve it separately.
+        """
+        return UserContext(
+            user_id=goal.owner_user_id,
+            email="",
+            display_name=goal.owner_user_id,
+            roles=frozenset({"user"}),
+        )
 
     def _build_system_prompt(self, goal: Goal) -> str:
         """Build the agent system prompt that frames the run.
