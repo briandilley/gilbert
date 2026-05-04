@@ -17,6 +17,11 @@ from gilbert.interfaces.agent import (
 )
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
+from gilbert.interfaces.scheduler import (
+    JobCallback,
+    Schedule,
+    SchedulerProvider,
+)
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
     Filter,
@@ -57,6 +62,12 @@ class AutonomousAgentService(Service):
         self._event_bus: Any = None
         self._ai: AIProvider | None = None
         self._resolver: ServiceResolver | None = None
+        self._scheduler: SchedulerProvider | None = None
+        self._event_bus_unsubscribers: dict[str, Any] = {}
+        """goal_id → unsubscribe callable for EVENT triggers."""
+
+        self._running_goals: set[str] = set()
+        """In-progress goal IDs to skip duplicate trigger fires."""
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -82,6 +93,11 @@ class AutonomousAgentService(Service):
         if not isinstance(ai_svc, AIProvider):
             raise RuntimeError("ai_chat missing or wrong type")
         self._ai = ai_svc
+
+        sched_svc = resolver.require_capability("scheduler")
+        if not isinstance(sched_svc, SchedulerProvider):
+            raise RuntimeError("scheduler missing or wrong type")
+        self._scheduler = sched_svc
 
         await self._storage.ensure_index(
             IndexDefinition(
@@ -529,6 +545,40 @@ class AutonomousAgentService(Service):
             "ok": True,
             "run": raw,
         }
+
+    # ── Trigger plumbing ──────────────────────────────────────────
+
+    def _scheduler_job_name(self, goal_id: str) -> str:
+        return f"agent_goal_{goal_id}"
+
+    async def _arm_trigger(self, goal: Goal) -> None:
+        """Arm a goal's trigger if it has one and is enabled."""
+        if goal.status != GoalStatus.ENABLED:
+            return
+        if goal.trigger_type == "time":
+            self._arm_time_trigger(goal)
+        elif goal.trigger_type == "event":
+            self._arm_event_trigger(goal)
+        # else: no trigger — manual-only goal
+
+    async def _disarm_trigger(self, goal: Goal) -> None:
+        """Remove any active trigger for this goal."""
+        if goal.trigger_type == "time":
+            self._disarm_time_trigger(goal.id)
+        elif goal.trigger_type == "event":
+            self._disarm_event_trigger(goal.id)
+
+    def _arm_time_trigger(self, goal: Goal) -> None:
+        raise NotImplementedError  # Task 3
+
+    def _disarm_time_trigger(self, goal_id: str) -> None:
+        raise NotImplementedError  # Task 3
+
+    def _arm_event_trigger(self, goal: Goal) -> None:
+        raise NotImplementedError  # Task 4
+
+    def _disarm_event_trigger(self, goal_id: str) -> None:
+        raise NotImplementedError  # Task 4
 
     def _build_initial_user_message(self, goal: Goal) -> str:
         """Synthesize the user message that drives the AI loop.

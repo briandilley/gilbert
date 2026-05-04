@@ -20,14 +20,94 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FakeEventBus:
+    """Captures published events and supports subscribe/dispatch for trigger tests."""
+
     def __init__(self) -> None:
         self.published: list[Event] = []
+        self.subscribers: dict[str, list[Any]] = {}
 
     async def publish(self, event: Event) -> None:
         self.published.append(event)
+        # Don't auto-dispatch; tests call dispatch() explicitly when they want
+        # to simulate a published event reaching subscribers.
+
+    def subscribe(self, event_type: str, handler: Any) -> Any:
+        self.subscribers.setdefault(event_type, []).append(handler)
+
+        def _unsubscribe() -> None:
+            handlers = self.subscribers.get(event_type, [])
+            if handler in handlers:
+                handlers.remove(handler)
+
+        return _unsubscribe
 
     def subscribe_pattern(self, pattern: str, handler: Any) -> Any:
-        return lambda: None
+        return self.subscribe(pattern, handler)
+
+    async def dispatch(self, event: Event) -> None:
+        """Test-only: deliver an event to its subscribers."""
+        for handler in list(self.subscribers.get(event.event_type, [])):
+            await handler(event)
+
+
+class _FakeScheduler:
+    """Minimal SchedulerProvider stub for tests.
+
+    Records add_job/remove_job calls so trigger tests can assert on them.
+    """
+
+    def __init__(self) -> None:
+        self.added: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+        self.jobs: dict[str, Any] = {}
+
+    def add_job(
+        self,
+        name: str,
+        schedule: Any,
+        callback: Any,
+        system: bool = False,
+        enabled: bool = True,
+        owner: str = "",
+    ) -> Any:
+        if name in self.jobs:
+            raise ValueError(f"Job '{name}' already registered")
+        self.added.append(
+            {
+                "name": name,
+                "schedule": schedule,
+                "callback": callback,
+                "system": system,
+                "enabled": enabled,
+                "owner": owner,
+            }
+        )
+        self.jobs[name] = callback
+        # Return something JobInfo-shaped (only what callers actually inspect)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(name=name, schedule=schedule, owner=owner)
+
+    def remove_job(self, name: str, requester_id: str = "") -> None:
+        self.removed.append(name)
+        self.jobs.pop(name, None)
+
+    def enable_job(self, name: str) -> None:
+        return None
+
+    def disable_job(self, name: str) -> None:
+        return None
+
+    def list_jobs(self, include_system: bool = True) -> list[Any]:
+        return list(self.jobs.values())
+
+    def get_job(self, name: str) -> Any:
+        return self.jobs.get(name)
+
+    async def run_now(self, name: str) -> None:
+        cb = self.jobs.get(name)
+        if cb is not None:
+            await cb()
 
 
 class _FakeEventBusProvider:
@@ -104,19 +184,21 @@ class _FakeResolver:
 @pytest.fixture
 async def service(
     sqlite_storage: StorageBackend,
-) -> tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus]:
+) -> tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler]:
     ai = _FakeAIService()
     bus = _FakeEventBus()
+    scheduler = _FakeScheduler()
     svc = AutonomousAgentService()
     resolver = _FakeResolver(
         {
             "entity_storage": _FakeStorageProvider(sqlite_storage),
             "event_bus": _FakeEventBusProvider(bus),
             "ai_chat": ai,
+            "scheduler": scheduler,
         }
     )
     await svc.start(resolver)
-    return svc, ai, bus
+    return svc, ai, bus, scheduler
 
 
 # ── CRUD tests ────────────────────────────────────────────────────
@@ -125,7 +207,7 @@ async def service(
 async def test_create_goal_persists_with_enabled_status(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     goal = await svc.create_goal(
         owner_user_id="u_alice",
         name="Watch invoices",
@@ -144,7 +226,7 @@ async def test_create_goal_persists_with_enabled_status(
 async def test_get_goal_returns_persisted_goal(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="y", profile_id="default"
     )
@@ -157,7 +239,7 @@ async def test_get_goal_returns_persisted_goal(
 async def test_list_goals_filters_by_owner(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     a1 = await svc.create_goal(
         owner_user_id="u_alice", name="A1", instruction="i", profile_id="default"
     )
@@ -178,7 +260,7 @@ async def test_list_goals_filters_by_owner(
 async def test_delete_goal_removes_it(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -195,7 +277,7 @@ async def test_delete_goal_removes_it(
 async def test_run_goal_now_invokes_ai_chat_with_correct_args(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, ai, _bus = service
+    svc, ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice",
         name="x",
@@ -227,7 +309,7 @@ async def test_run_goal_now_invokes_ai_chat_with_correct_args(
 async def test_run_goal_now_updates_goal_run_count_and_last_run(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -245,7 +327,7 @@ async def test_run_goal_now_updates_goal_run_count_and_last_run(
 async def test_run_goal_now_returns_failed_run_on_chat_exception(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, ai, _bus = service
+    svc, ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -265,7 +347,7 @@ async def test_run_goal_now_returns_failed_run_on_chat_exception(
 async def test_run_goal_now_rejects_completed_goal(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -278,7 +360,7 @@ async def test_run_goal_now_rejects_completed_goal(
 async def test_run_goal_now_rejects_disabled_goal(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -294,7 +376,7 @@ async def test_run_goal_now_rejects_disabled_goal(
 async def test_declare_goal_complete_marks_goal_completed(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -317,7 +399,7 @@ async def test_declare_goal_complete_marks_goal_completed(
 async def test_declare_goal_complete_idempotent(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -336,7 +418,7 @@ async def test_declare_goal_complete_idempotent(
 async def test_complete_goal_tool_definition_exposed(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     tools = svc.get_tools(user_ctx=None)
     names = {t.name for t in tools}
     assert "complete_goal" in names
@@ -350,7 +432,7 @@ async def test_complete_goal_tool_definition_exposed(
 async def test_complete_goal_tool_executes(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
@@ -395,7 +477,7 @@ def _make_conn(user_id: str, level: int = 100) -> Any:
 async def test_ws_agent_goal_create_persists_owned_by_caller(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     handlers = svc.get_ws_handlers()
     handler = handlers["agent.goal.create"]
 
@@ -422,7 +504,7 @@ async def test_ws_agent_goal_create_persists_owned_by_caller(
 async def test_ws_agent_goal_list_returns_only_callers_goals(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     a = await svc.create_goal(
         owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
     )
@@ -443,7 +525,7 @@ async def test_ws_agent_goal_list_returns_only_callers_goals(
 async def test_ws_agent_goal_delete_owner_only(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
     )
@@ -469,7 +551,7 @@ async def test_ws_agent_goal_delete_owner_only(
 async def test_ws_agent_goal_run_now_triggers_a_run(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
     )
@@ -487,7 +569,7 @@ async def test_ws_agent_goal_run_now_triggers_a_run(
 async def test_ws_agent_run_list_filters_by_goal(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
-    svc, _ai, _bus = service
+    svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
     )
