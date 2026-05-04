@@ -24,6 +24,7 @@ import { UsagePage } from "@/components/usage/UsagePage";
 import { NotificationsPage } from "@/components/notifications/NotificationsPage";
 import { AgentsPage } from "@/components/agent/AgentsPage";
 import { AgentDetailPage } from "@/components/agent/AgentDetailPage";
+import { AgentChatPage } from "@/components/agent/AgentChatPage";
 
 export default function App() {
   return (
@@ -55,7 +56,8 @@ export default function App() {
           <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/notifications" element={<NotificationsPage />} />
-          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents" element={<AgentChatPage />} />
+          <Route path="/agents/list" element={<AgentsPage />} />
           <Route path="/agents/:goalId" element={<AgentDetailPage />} />
           <Route path="/account" element={<AccountPage />} />
         </Route>
