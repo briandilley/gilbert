@@ -735,3 +735,123 @@ async def test_skip_while_running_drops_concurrent_trigger(
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
     assert fetched.run_count == 1  # second trigger was skipped
+
+
+async def test_event_trigger_subscribes_and_fires_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="React to leads",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={"event_type": "lead.created"},
+    )
+
+    # Now publish a matching event — note: tests use _FakeEventBus which has
+    # a subscribe method we need to implement
+    from datetime import UTC, datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    ev = Event(
+        event_type="lead.created",
+        data={"lead_id": "L42"},
+        source="crm",
+        timestamp=_dt.now(UTC),
+    )
+    # _FakeEventBus.dispatch() — added in Task 4 to deliver events to subscribers
+    await bus.dispatch(ev)
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+
+
+async def test_event_trigger_filter_skips_non_matching(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="Watch high-value leads",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={
+            "event_type": "lead.created",
+            "filter": {"field": "value", "op": "eq", "value": "high"},
+        },
+    )
+
+    from datetime import UTC, datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    # Event with no value — filter rejects
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={"lead_id": "L42"},
+            source="crm",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.02)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 0
+
+    # Event with matching value — filter accepts
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={"lead_id": "L43", "value": "high"},
+            source="crm",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+
+
+async def test_event_trigger_disarms_on_disable(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={"event_type": "lead.created"},
+    )
+
+    await svc.update_goal(g.id, status=GoalStatus.DISABLED)
+
+    from datetime import UTC, datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={},
+            source="crm",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 0

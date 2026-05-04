@@ -565,10 +565,69 @@ class AutonomousAgentService(Service):
             self._scheduler.remove_job(name)
 
     def _arm_event_trigger(self, goal: Goal) -> None:
-        raise NotImplementedError  # Task 4
+        if self._event_bus is None or goal.trigger_config is None:
+            return
+        event_type = goal.trigger_config.get("event_type")
+        if not event_type:
+            logger.warning("EVENT trigger for goal %s missing event_type", goal.id)
+            return
+        filter_spec = goal.trigger_config.get("filter")
+
+        async def _on_event(event: Any) -> None:
+            if not self._event_matches_filter(event, filter_spec):
+                return
+            # Re-fetch goal at fire time in case it was disabled/deleted
+            current = await self.get_goal(goal.id)
+            if current is None or current.status != GoalStatus.ENABLED:
+                return
+            await self._spawn_run(
+                goal.id,
+                "event",
+                {"event_type": event.event_type, "event_data": event.data},
+            )
+
+        unsubscribe = self._event_bus.subscribe(event_type, _on_event)
+        # If a subscription already exists for this goal, drop the old one
+        old = self._event_bus_unsubscribers.pop(goal.id, None)
+        if old is not None:
+            try:
+                old()
+            except Exception:
+                logger.warning("failed to unsubscribe old EVENT handler for %s", goal.id)
+        self._event_bus_unsubscribers[goal.id] = unsubscribe
 
     def _disarm_event_trigger(self, goal_id: str) -> None:
-        raise NotImplementedError  # Task 4
+        unsubscribe = self._event_bus_unsubscribers.pop(goal_id, None)
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:
+                logger.warning("failed to unsubscribe EVENT handler for %s", goal_id)
+
+    def _event_matches_filter(
+        self,
+        event: Any,
+        filter_spec: dict[str, Any] | None,
+    ) -> bool:
+        if not filter_spec:
+            return True
+        field = filter_spec.get("field")
+        op = filter_spec.get("op", "eq")
+        expected = filter_spec.get("value")
+        if not field:
+            return True
+        actual = (event.data or {}).get(field)
+        if op == "eq":
+            return actual == expected
+        elif op == "neq":
+            return actual != expected
+        elif op == "in":
+            return actual in (expected or [])
+        elif op == "contains":
+            return expected in (actual or "")
+        else:
+            logger.warning("unknown filter op: %s", op)
+            return False
 
     def _make_trigger_callback(
         self,
