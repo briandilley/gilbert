@@ -9,12 +9,19 @@ import {
   WrenchIcon,
   ZapIcon,
   Trash2Icon,
+  MenuIcon,
 } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { CreateGoalDialog } from "@/components/agent/AgentsPage";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
@@ -45,6 +52,13 @@ export function AgentChatPage() {
 
   const selectedGoalId = searchParams.get("goal") || "";
   const [createOpen, setCreateOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  // Auto-close the mobile sidebar whenever the selected goal changes
+  // (so picking a goal from the drawer immediately shows the chat).
+  useEffect(() => {
+    if (selectedGoalId) setMobileSidebarOpen(false);
+  }, [selectedGoalId]);
 
   const { data: goals } = useQuery({
     queryKey: ["agent", "goals"],
@@ -75,46 +89,73 @@ export function AgentChatPage() {
 
   const selectedGoal = goals?.find((g) => g.id === selectedGoalId) ?? null;
 
+  const sidebarBody = (
+    <>
+      <div className="p-3 border-b flex items-center justify-between">
+        <span className="font-semibold">Agents</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => setCreateOpen(true)}
+          title="New goal"
+        >
+          <PlusIcon className="size-4" />
+        </Button>
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {!goals || goals.length === 0 ? (
+          <div className="p-4 text-sm text-muted-foreground text-center">
+            No goals yet. Click + to create one.
+          </div>
+        ) : (
+          goals.map((g) => (
+            <GoalSidebarRow
+              key={g.id}
+              goal={g}
+              selected={g.id === selectedGoalId}
+              onSelect={() => setSearchParams({ goal: g.id })}
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div className="flex h-full">
-      {/* Sidebar */}
-      <aside className="w-72 border-r flex flex-col shrink-0">
-        <div className="p-3 border-b flex items-center justify-between">
-          <span className="font-semibold">Agents</span>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setCreateOpen(true)}
-            title="New goal"
-          >
-            <PlusIcon className="size-4" />
-          </Button>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {!goals || goals.length === 0 ? (
-            <div className="p-4 text-sm text-muted-foreground text-center">
-              No goals yet. Click + to create one.
-            </div>
-          ) : (
-            goals.map((g) => (
-              <GoalSidebarRow
-                key={g.id}
-                goal={g}
-                selected={g.id === selectedGoalId}
-                onSelect={() => setSearchParams({ goal: g.id })}
-              />
-            ))
-          )}
-        </div>
+      {/* Desktop sidebar — persistent at md+ */}
+      <aside className="hidden md:flex w-72 border-r flex-col shrink-0">
+        {sidebarBody}
       </aside>
 
+      {/* Mobile sidebar — Sheet drawer */}
+      <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+        <SheetContent side="left" className="w-72 p-0 flex flex-col">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Agents</SheetTitle>
+          </SheetHeader>
+          {sidebarBody}
+        </SheetContent>
+      </Sheet>
+
       {/* Main panel */}
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col overflow-hidden min-w-0">
         {selectedGoal ? (
-          <GoalChatPanel goal={selectedGoal} />
+          <GoalChatPanel
+            goal={selectedGoal}
+            onOpenSidebar={() => setMobileSidebarOpen(true)}
+          />
         ) : (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground">
-            Select a goal from the sidebar to view its conversation.
+          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground p-6 text-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              className="md:hidden"
+              onClick={() => setMobileSidebarOpen(true)}
+            >
+              <MenuIcon className="size-4 mr-2" /> Open agents
+            </Button>
+            <span>Select a goal from the sidebar to view its conversation.</span>
           </div>
         )}
       </main>
@@ -249,9 +290,10 @@ function GoalSidebarRow({ goal, selected, onSelect }: GoalSidebarRowProps) {
 
 interface GoalChatPanelProps {
   goal: Goal;
+  onOpenSidebar?: () => void;
 }
 
-function GoalChatPanel({ goal }: GoalChatPanelProps) {
+function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
   const api = useWsApi();
   const queryClient = useQueryClient();
   const [composerText, setComposerText] = useState("");
@@ -507,18 +549,32 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="border-b px-4 py-3 flex items-center gap-3">
-        <h1 className="font-semibold text-lg flex-1">{goal.name}</h1>
+      <div className="border-b px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3">
+        {onOpenSidebar ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="md:hidden shrink-0"
+            onClick={onOpenSidebar}
+            aria-label="Open agents list"
+          >
+            <MenuIcon className="size-5" />
+          </Button>
+        ) : null}
+        <h1 className="font-semibold text-lg flex-1 truncate min-w-0">
+          {goal.name}
+        </h1>
         {awaitingQuestion ? (
-          <span className="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400">
-            ⌛ waiting for your input
+          <span className="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 shrink-0">
+            <span className="hidden sm:inline">⌛ waiting for your input</span>
+            <span className="sm:hidden">⌛ waiting</span>
           </span>
         ) : hasRunningRun ? (
-          <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1">
+          <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1 shrink-0">
             <Loader2Icon className="size-3 animate-spin" /> running…
           </span>
         ) : null}
-        <span className="text-xs text-muted-foreground">
+        <span className="hidden sm:inline text-xs text-muted-foreground shrink-0">
           {goal.run_count} run{goal.run_count === 1 ? "" : "s"}
         </span>
       </div>
@@ -527,7 +583,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-4 space-y-4"
+        className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4"
       >
         {!conversationId ? (
           <div className="text-center text-muted-foreground py-12">
