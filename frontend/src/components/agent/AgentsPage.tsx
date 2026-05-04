@@ -10,6 +10,8 @@ import {
   ClockIcon,
   RadioIcon,
   ZapIcon,
+  SparklesIcon,
+  Loader2Icon,
 } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -265,6 +267,10 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
   const [eventType, setEventType] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authorOpen, setAuthorOpen] = useState(false);
+  const [authorRequest, setAuthorRequest] = useState("");
+  const [authoring, setAuthoring] = useState(false);
+  const [authorError, setAuthorError] = useState<string | null>(null);
 
   const reset = () => {
     setName("");
@@ -277,6 +283,36 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
     setHourlyMinute(0);
     setEventType("");
     setError(null);
+    setAuthorOpen(false);
+    setAuthorRequest("");
+    setAuthorError(null);
+  };
+
+  const handleAuthor = async () => {
+    if (!authorRequest.trim()) {
+      setAuthorError("Describe what you want changed.");
+      return;
+    }
+    setAuthoring(true);
+    setAuthorError(null);
+    try {
+      const result = await api.authorGoalInstruction(
+        "", // empty: drafting a new goal
+        instruction,
+        authorRequest.trim(),
+      );
+      if (!result.ok || !result.new_text) {
+        setAuthorError(result.error ?? "Author failed.");
+        return;
+      }
+      setInstruction(result.new_text);
+      setAuthorOpen(false);
+      setAuthorRequest("");
+    } catch (e) {
+      setAuthorError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthoring(false);
+    }
   };
 
   const handleSubmit = async () => {
@@ -346,7 +382,22 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
           </div>
 
           <div>
-            <Label htmlFor="goal-instruction">Instruction</Label>
+            <div className="flex items-center justify-between mb-1">
+              <Label htmlFor="goal-instruction">Instruction</Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => {
+                  setAuthorOpen((v) => !v);
+                  setAuthorError(null);
+                }}
+              >
+                <SparklesIcon className="size-3.5 mr-1" />
+                Author with AI
+              </Button>
+            </div>
             <Textarea
               id="goal-instruction"
               value={instruction}
@@ -354,6 +405,56 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
               placeholder="What should the agent do, and how does it know it's done?"
               rows={5}
             />
+            {authorOpen ? (
+              <div className="mt-2 rounded-md border bg-muted/30 p-3 space-y-2">
+                <Label htmlFor="goal-author-request" className="text-xs">
+                  How should the AI revise the instruction?
+                </Label>
+                <Textarea
+                  id="goal-author-request"
+                  value={authorRequest}
+                  onChange={(e) => setAuthorRequest(e.target.value)}
+                  placeholder="e.g. make this more specific about success criteria"
+                  rows={2}
+                />
+                {authorError ? (
+                  <div className="text-xs text-red-600">{authorError}</div>
+                ) : null}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setAuthorOpen(false);
+                      setAuthorRequest("");
+                      setAuthorError(null);
+                    }}
+                    disabled={authoring}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleAuthor}
+                    disabled={authoring}
+                  >
+                    {authoring ? (
+                      <>
+                        <Loader2Icon className="size-3.5 mr-1 animate-spin" />
+                        Authoring…
+                      </>
+                    ) : (
+                      <>
+                        <SparklesIcon className="size-3.5 mr-1" />
+                        Apply
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div>
