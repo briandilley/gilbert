@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   PlusIcon,
@@ -82,6 +82,7 @@ function timeAgo(iso: string | null): string {
 
 export function AgentsPage() {
   const api = useWsApi();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { connected } = useWebSocket();
   const [createOpen, setCreateOpen] = useState(false);
@@ -110,6 +111,10 @@ export function AgentsPage() {
     try {
       await api.runGoalNow(goalId);
       queryClient.invalidateQueries({ queryKey: ["agent"] });
+      // Hop to the agent chat so the user actually sees the run
+      // streaming in. Otherwise nothing visible happens on this page
+      // (the run is fire-and-forget on the backend).
+      navigate(`/agents?goal=${goalId}`);
     } finally {
       setRunningGoals((s) => {
         const next = new Set(s);

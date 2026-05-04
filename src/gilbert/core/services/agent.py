@@ -1585,7 +1585,16 @@ class AutonomousAgentService(Service):
             f"``complete_goal`` tool with goal_id={goal.id!r} and a short "
             f"reason. The goal stays enabled and may run again later — "
             f"calling complete_goal records that this particular run "
-            f"succeeded, it does not retire the goal."
+            f"succeeded, it does not retire the goal.\n\n"
+            f"If you need a decision or input from the user before you can "
+            f"proceed (e.g. you're about to take an action that requires "
+            f"their preference, or you've gathered information and need "
+            f"them to choose between options), call the ``notify_user`` "
+            f"tool with user_id={goal.owner_user_id!r} and an URGENT "
+            f"urgency before ending your turn — that pings the owner so "
+            f"they know to come look. Then end your turn naturally with "
+            f"the question. The user will reply via the agent chat; their "
+            f"reply will be injected into your context on the next round."
         )
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:
