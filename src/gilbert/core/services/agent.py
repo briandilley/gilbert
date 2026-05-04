@@ -1847,7 +1847,20 @@ class AutonomousAgentService(Service):
             f"waiting; without it, they'll have no idea you asked. After "
             f"calling the tool, end your turn with the question text. "
             f"The user's reply will be injected into your context on "
-            f"the next round."
+            f"the next round.\n\n"
+            f"BROWSER ACCESS — when you use the browser plugin and a "
+            f"site blocks you (Cloudflare challenge, 403, captcha, "
+            f"'unusual traffic' interstitial, sites that detect "
+            f"headless Chromium), the answer is the VNC live-login "
+            f"flow. Call ``request_user_input`` and ask the user to "
+            f"open Settings → Browser → Credentials → 'Log in "
+            f"interactively' for that site. They get a real browser "
+            f"window over noVNC, complete the challenge themselves, "
+            f"and on close their session cookies merge into your "
+            f"persistent context. After they confirm, retry the "
+            f"original navigation — the browser plugin's per-user "
+            f"BrowserContext now has the cookies and the site no "
+            f"longer trips its bot defenses on you."
         )
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:

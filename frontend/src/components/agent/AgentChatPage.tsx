@@ -342,6 +342,14 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
   const nextRoundPendingRef = useRef(false);
   const streamingConvIdRef = useRef<string>("");
 
+  // Optimistic local echo for messages the user sent during a live
+  // run. The backend enqueues them into _pending_user_messages until
+  // the next AI round drains them; without an immediate local echo,
+  // the chat shows nothing until the agent responds (often 30s+).
+  // Cleared whenever the persisted conversation reloads — the real
+  // user-message turn from history takes over at that point.
+  const [pendingUserMessages, setPendingUserMessages] = useState<string[]>([]);
+
   // Keep the ref in sync with the active conversation so event handlers
   // can filter correctly without stale closure values.
   useEffect(() => {
@@ -502,6 +510,23 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
     // Events now drive updates; polling not needed.
   });
 
+  // Drop the optimistic pending-message echo once the persisted
+  // turn for that text shows up in the loaded history. Match by
+  // user_message.content equality (good enough — the user almost
+  // never sends two identical strings back-to-back).
+  useEffect(() => {
+    if (!conversation || pendingUserMessages.length === 0) return;
+    const persisted = new Set(
+      conversation.turns
+        .map((t) => t.user_message?.content || "")
+        .filter(Boolean),
+    );
+    setPendingUserMessages((prev) =>
+      prev.filter((text) => !persisted.has(text)),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation]);
+
   // When the conversation content changes (new persisted turns, new
   // streamed deltas, new tool events), keep the scroll glued to the
   // bottom unless the user has scrolled up to read history.
@@ -534,17 +559,29 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
     if (!text) return;
     setSending(true);
     setSendError(null);
+    // Optimistic local echo — show the user's message immediately so
+    // the chat doesn't look frozen while the agent finishes its
+    // current round. Cleared when the conversation reloads (the
+    // persisted user-message turn takes over).
+    setPendingUserMessages((prev) => [...prev, text]);
+    setComposerText("");
     try {
       const result = await api.runGoalNow(goal.id, text);
       if (!result.ok) {
         setSendError(result.error || "Failed to send.");
+        // Roll back the optimistic echo if the send actually failed.
+        setPendingUserMessages((prev) =>
+          prev.filter((t, i) => !(t === text && i === prev.length - 1)),
+        );
         return;
       }
-      setComposerText("");
       queryClient.invalidateQueries({ queryKey: ["agent"] });
       queryClient.invalidateQueries({ queryKey: ["agent-conv"] });
     } catch (e) {
       setSendError(e instanceof Error ? e.message : String(e));
+      setPendingUserMessages((prev) =>
+        prev.filter((t, i) => !(t === text && i === prev.length - 1)),
+      );
     } finally {
       setSending(false);
     }
@@ -599,7 +636,9 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
           </div>
         ) : !conversation ||
           !conversation.turns ||
-          (conversation.turns.length === 0 && !streamingTurn) ? (
+          (conversation.turns.length === 0 &&
+            !streamingTurn &&
+            pendingUserMessages.length === 0) ? (
           <div className="text-center text-muted-foreground py-12">
             Conversation is empty.
           </div>
@@ -615,6 +654,9 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
                 streaming
               />
             ) : null}
+            {pendingUserMessages.map((text, idx) => (
+              <PendingUserBubble key={`__pending-${idx}`} text={text} />
+            ))}
           </>
         )}
       </div>
@@ -687,6 +729,25 @@ function GoalChatPanel({ goal, onOpenSidebar }: GoalChatPanelProps) {
 interface FlatTurnBlockProps {
   turn: ChatTurn;
   streaming?: boolean;
+}
+
+/** Optimistic echo for a message the user just typed, before the
+ * persisted version round-trips through the agent run. Same look as
+ * the user-trigger bubble but with a 'sending' badge. Replaced
+ * automatically once the conversation reload includes a turn whose
+ * user_message.content matches. */
+function PendingUserBubble({ text }: { text: string }) {
+  return (
+    <div className="rounded-md bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200/70 dark:border-blue-900/70 border-dashed px-3 py-2">
+      <div className="text-xs font-medium text-blue-700 dark:text-blue-400 mb-1 flex items-center gap-2">
+        <span>User / trigger</span>
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          sending…
+        </span>
+      </div>
+      <div className="text-sm whitespace-pre-wrap break-words">{text}</div>
+    </div>
+  );
 }
 
 /**

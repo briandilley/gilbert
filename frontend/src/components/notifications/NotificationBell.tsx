@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellIcon, BellRingIcon, XIcon } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -80,6 +80,22 @@ interface UrgentToast {
 
 export function NotificationBell() {
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Suppress urgent toasts + audio when the user is already viewing
+  // the agent chat for the goal that fired the notification — they're
+  // staring at the conversation; popping a toast on top of it is
+  // noise. The bell still pulses (cheap visual cue) and the
+  // notifications list still records it.
+  const isViewingGoalChat = useCallback(
+    (goalId?: string): boolean => {
+      if (!goalId) return false;
+      if (location.pathname !== "/agents") return false;
+      const params = new URLSearchParams(location.search);
+      return params.get("goal") === goalId;
+    },
+    [location.pathname, location.search],
+  );
   const queryClient = useQueryClient();
   const api = useWsApi();
   const { connected } = useWebSocket();
@@ -146,6 +162,13 @@ export function NotificationBell() {
       window.setTimeout(() => setBellPulse(false), 1500);
 
       if (data.urgency === "urgent") {
+        // If the user is already on the agent chat for this goal,
+        // skip the audio/toast/title pulse — they don't need a
+        // dramatic alert about a screen they're already staring at.
+        // The bell pulse stays so peripheral vision still gets a hint.
+        if (isViewingGoalChat(data.source_ref?.goal_id)) {
+          return;
+        }
         playUrgentDing();
         if (typeof document !== "undefined") {
           const original = document.title;
@@ -157,7 +180,7 @@ export function NotificationBell() {
         showToastFor(data);
       }
     },
-    [queryClient, showToastFor],
+    [queryClient, showToastFor, isViewingGoalChat],
   );
   useEventBus("notification.received", handleNotificationEvent);
 
@@ -173,6 +196,12 @@ export function NotificationBell() {
     if (unreadUrgent.length === 0) return;
     let dingPlayed = false;
     for (const n of unreadUrgent) {
+      // Same suppression rule as the live-event path: if the user is
+      // already on the agent chat for this goal, the toast / ding /
+      // pulse are noise.
+      if (isViewingGoalChat(n.source_ref?.goal_id)) {
+        continue;
+      }
       // First-time show? Pulse + ding once per polling cycle.
       const wasNew = !urgentToasts.some((t) => t.id === n.id);
       if (wasNew && !dingPlayed) {
