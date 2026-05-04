@@ -317,6 +317,225 @@ class AutonomousAgentService(Service):
             return f"goal {goal_id} marked complete: {reason}"
         return f"goal {goal_id} was already completed (no-op)"
 
+    # ── WS handlers ───────────────────────────────────────────────
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "agent.goal.create": self._ws_goal_create,
+            "agent.goal.list": self._ws_goal_list,
+            "agent.goal.get": self._ws_goal_get,
+            "agent.goal.update": self._ws_goal_update,
+            "agent.goal.delete": self._ws_goal_delete,
+            "agent.goal.run_now": self._ws_goal_run_now,
+            "agent.run.list": self._ws_run_list,
+            "agent.run.get": self._ws_run_get,
+        }
+
+    async def _ws_goal_create(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        name = str(frame.get("name", "")).strip()
+        instruction = str(frame.get("instruction", "")).strip()
+        profile_id = str(frame.get("profile_id", "")).strip()
+        if not name or not instruction or not profile_id:
+            return {
+                "type": "agent.goal.create.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "name, instruction, profile_id required",
+            }
+        goal = await self.create_goal(
+            owner_user_id=conn.user_ctx.user_id,
+            name=name,
+            instruction=instruction,
+            profile_id=profile_id,
+        )
+        return {
+            "type": "agent.goal.create.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "goal": _goal_to_dict(goal),
+        }
+
+    async def _ws_goal_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        goals = await self.list_goals(owner_user_id=conn.user_ctx.user_id)
+        return {
+            "type": "agent.goal.list.result",
+            "ref": frame.get("id"),
+            "goals": [_goal_to_dict(g) for g in goals],
+        }
+
+    async def _ws_goal_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        goal_id = str(frame.get("goal_id", ""))
+        goal = await self.get_goal(goal_id)
+        if goal is None or goal.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.goal.get.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        return {
+            "type": "agent.goal.get.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "goal": _goal_to_dict(goal),
+        }
+
+    async def _ws_goal_update(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        goal_id = str(frame.get("goal_id", ""))
+        existing = await self.get_goal(goal_id)
+        if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.goal.update.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        status_raw = frame.get("status")
+        try:
+            status_enum = GoalStatus(status_raw) if status_raw else None
+        except ValueError:
+            return {
+                "type": "agent.goal.update.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "invalid status",
+            }
+        updated = await self.update_goal(
+            goal_id,
+            name=frame.get("name"),
+            instruction=frame.get("instruction"),
+            profile_id=frame.get("profile_id"),
+            status=status_enum,
+        )
+        return {
+            "type": "agent.goal.update.result",
+            "ref": frame.get("id"),
+            "ok": updated is not None,
+            "goal": _goal_to_dict(updated) if updated else None,
+        }
+
+    async def _ws_goal_delete(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        goal_id = str(frame.get("goal_id", ""))
+        existing = await self.get_goal(goal_id)
+        if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.goal.delete.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        deleted = await self.delete_goal(goal_id)
+        return {
+            "type": "agent.goal.delete.result",
+            "ref": frame.get("id"),
+            "ok": deleted,
+        }
+
+    async def _ws_goal_run_now(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        goal_id = str(frame.get("goal_id", ""))
+        existing = await self.get_goal(goal_id)
+        if existing is None or existing.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.goal.run_now.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        try:
+            run = await self.run_goal_now(goal_id)
+        except ValueError as exc:
+            return {
+                "type": "agent.goal.run_now.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": str(exc),
+            }
+        return {
+            "type": "agent.goal.run_now.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "run": _run_to_dict(run),
+        }
+
+    async def _ws_run_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        goal_id = str(frame.get("goal_id", ""))
+        if not goal_id:
+            return {
+                "type": "agent.run.list.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "goal_id required",
+            }
+        # Owner-only access via the goal
+        goal = await self.get_goal(goal_id)
+        if goal is None or goal.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.run.list.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        raw_list = await self._storage.query(
+            Query(
+                collection=_RUN_COLLECTION,
+                filters=[Filter(field="goal_id", op=FilterOp.EQ, value=goal_id)],
+                sort=[SortField(field="started_at", descending=True)],
+                limit=int(frame.get("limit") or 100),
+            )
+        )
+        return {
+            "type": "agent.run.list.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "runs": raw_list,
+        }
+
+    async def _ws_run_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        run_id = str(frame.get("run_id", ""))
+        raw = await self._storage.get(_RUN_COLLECTION, run_id)
+        if raw is None:
+            return {
+                "type": "agent.run.get.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        # Owner check via the parent goal
+        goal = await self.get_goal(raw["goal_id"])
+        if goal is None or goal.owner_user_id != conn.user_ctx.user_id:
+            return {
+                "type": "agent.run.get.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "not_found",
+            }
+        return {
+            "type": "agent.run.get.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "run": raw,
+        }
+
     def _build_initial_user_message(self, goal: Goal) -> str:
         """Synthesize the user message that drives the AI loop.
 

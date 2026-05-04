@@ -365,3 +365,143 @@ async def test_complete_goal_tool_executes(
     assert fetched is not None
     assert fetched.status == GoalStatus.COMPLETED
     assert fetched.completed_reason == "all done"
+
+
+# ── WS RPC tests ──────────────────────────────────────────────────
+
+
+def _make_conn(user_id: str, level: int = 100) -> Any:
+    """Build a minimal ws connection-shaped object for handler tests."""
+    from gilbert.interfaces.auth import UserContext
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@example.com",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            self.user_level = level
+
+        @property
+        def user_id(self) -> str:
+            return self.user_ctx.user_id
+
+    return _Conn()
+
+
+async def test_ws_agent_goal_create_persists_owned_by_caller(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.create"]
+
+    result = await handler(
+        _make_conn("u_alice"),
+        {
+            "id": "f1",
+            "name": "Watch X",
+            "instruction": "watch X",
+            "profile_id": "default",
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    goal_id = result["goal"]["id"]
+
+    fetched = await svc.get_goal(goal_id)
+    assert fetched is not None
+    assert fetched.owner_user_id == "u_alice"
+    assert fetched.name == "Watch X"
+
+
+async def test_ws_agent_goal_list_returns_only_callers_goals(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    a = await svc.create_goal(
+        owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
+    )
+    b = await svc.create_goal(
+        owner_user_id="u_bob", name="B", instruction="i", profile_id="default"
+    )
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.list"]
+    result = await handler(_make_conn("u_alice"), {"id": "f1"})
+
+    assert result is not None
+    ids = {g["id"] for g in result["goals"]}
+    assert a.id in ids
+    assert b.id not in ids
+
+
+async def test_ws_agent_goal_delete_owner_only(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
+    )
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.delete"]
+
+    # Bob attempts; should be rejected
+    bob_result = await handler(
+        _make_conn("u_bob"), {"id": "f1", "goal_id": g.id}
+    )
+    assert bob_result is not None
+    assert bob_result["ok"] is False
+
+    # Goal still exists
+    assert await svc.get_goal(g.id) is not None
+
+    # Alice succeeds
+    alice_result = await handler(
+        _make_conn("u_alice"), {"id": "f2", "goal_id": g.id}
+    )
+    assert alice_result is not None
+    assert alice_result["ok"] is True
+    assert await svc.get_goal(g.id) is None
+
+
+async def test_ws_agent_goal_run_now_triggers_a_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
+    )
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.run_now"]
+    result = await handler(_make_conn("u_alice"), {"id": "f1", "goal_id": g.id})
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["run"]["status"] == "completed"
+    assert result["run"]["goal_id"] == g.id
+
+
+async def test_ws_agent_run_list_filters_by_goal(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="A", instruction="i", profile_id="default"
+    )
+    await svc.run_goal_now(g.id)
+    await svc.run_goal_now(g.id)
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.run.list"]
+    result = await handler(_make_conn("u_alice"), {"id": "f1", "goal_id": g.id})
+
+    assert result is not None
+    assert len(result["runs"]) == 2
+    for r in result["runs"]:
+        assert r["goal_id"] == g.id
