@@ -82,6 +82,19 @@ sync_python_deps() {
     # fast when everything is already in sync.
     echo "Syncing Python dependencies..."
     cd "$SCRIPT_DIR" && uv sync
+
+    # The playwright python package is in the workspace, but the
+    # actual Chromium binary it drives lives in a separate
+    # per-user cache. Auto-fetch it on first start so the browser
+    # plugin works out of the box. Idempotent: playwright skips
+    # already-installed browsers.
+    if uv run python -c 'import playwright' >/dev/null 2>&1; then
+        if ! uv run python -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().__enter__(); p.chromium.executable_path' >/dev/null 2>&1; then
+            echo "Fetching Chromium for the browser plugin (one-time, ~170 MB)..."
+            uv run playwright install chromium || \
+                echo "  (skipped — run 'uv run playwright install chromium' manually if needed)"
+        fi
+    fi
 }
 
 run_gilbert_supervised() {
