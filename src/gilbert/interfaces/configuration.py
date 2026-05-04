@@ -37,6 +37,16 @@ class ConfigParam:
     a desired change; the backend rewrites the prompt via the AI and the
     UI shows a side-by-side diff before applying."""
 
+    extensible_target: str = ""
+    """When non-empty, marks this prompt as a target other services /
+    plugins can contribute fragments to via the
+    ``SystemPromptContributor`` capability + ``PromptFragment(target=...)``.
+    The Settings UI shows a 'plugins can extend this prompt' indicator
+    plus a live list of currently-contributing fragments (each with
+    its own per-fragment enable / disable toggle, sourced from the
+    contributing service's own ConfigParams). Conventional value:
+    ``"agent.system_prompt"`` for the autonomous agent's system frame."""
+
 
 @dataclass(frozen=True)
 class ConfigAction:

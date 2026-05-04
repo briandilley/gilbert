@@ -108,6 +108,9 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # per-entry by required_role.
     "ui.panels.": 100,
     "ui.routes.": 100,
+    # Prompt contribution discovery — admin-only since the prompts
+    # themselves live in admin Settings.
+    "prompts.contributions.": 0,
     # MCP client: list/get/start/stop/test are user-level (handlers enforce
     # per-record visibility + ownership). Creating/updating ``shared`` or
     # ``public`` servers, or changing any record's scope/allowed_roles/

@@ -25,7 +25,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, SparklesIcon } from "lucide-react";
+import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, SparklesIcon, PuzzleIcon } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import type { ConfigParamMeta } from "@/types/config";
 import { normalizeChoice } from "@/types/config";
 import { AuthorPromptDialog } from "./AuthorPromptDialog";
@@ -102,6 +104,10 @@ export function ConfigField({ param, value, onChange, namespace }: ConfigFieldPr
 
       <p className="text-xs text-muted-foreground">{param.description}</p>
 
+      {param.extensible_target ? (
+        <PromptContributors target={param.extensible_target} />
+      ) : null}
+
       {canAuthor && namespace && (
         <AuthorPromptDialog
           open={authorOpen}
@@ -113,6 +119,77 @@ export function ConfigField({ param, value, onChange, namespace }: ConfigFieldPr
           onApply={(newText) => onChange(param.key, newText)}
         />
       )}
+    </div>
+  );
+}
+
+interface PromptFragment {
+  fragment_id: string;
+  target: string;
+  label: string;
+  description: string;
+  body: string;
+  enabled: boolean;
+  source_service: string;
+}
+
+function PromptContributors({ target }: { target: string }) {
+  const { rpc } = useWebSocket();
+  const { data } = useQuery({
+    queryKey: ["prompt-contributions", target],
+    queryFn: () =>
+      rpc<{ fragments: PromptFragment[] }>({
+        type: "prompts.contributions.list",
+        target,
+      }),
+    // Cheap RPC, just walks loaded services. Refresh when the user
+    // toggles a fragment's enabled state somewhere else in Settings.
+    staleTime: 30_000,
+  });
+  const fragments = data?.fragments ?? [];
+
+  return (
+    <div className="rounded-md border border-dashed bg-muted/30 px-3 py-2 mt-1">
+      <div className="text-[11px] font-medium text-muted-foreground flex items-center gap-1.5">
+        <PuzzleIcon className="size-3" />
+        <span>Plugins can extend this prompt</span>
+      </div>
+      {fragments.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground/70 mt-1">
+          No fragments contributed yet.
+        </p>
+      ) : (
+        <ul className="mt-1 space-y-0.5">
+          {fragments.map((f) => (
+            <li
+              key={f.fragment_id}
+              className="text-[11px] flex items-baseline gap-2"
+            >
+              <span
+                className={
+                  f.enabled
+                    ? "text-foreground"
+                    : "text-muted-foreground/60 line-through"
+                }
+              >
+                {f.label || f.fragment_id}
+              </span>
+              <span className="text-muted-foreground/70 truncate">
+                from <span className="font-mono">{f.source_service}</span>
+              </span>
+              {!f.enabled && (
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60">
+                  off
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-[10px] text-muted-foreground/70 mt-1.5">
+        Toggle individual fragments on / off in the contributing
+        plugin's own settings.
+      </p>
     </div>
   );
 }

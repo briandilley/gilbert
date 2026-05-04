@@ -66,9 +66,7 @@ Goal instruction:
 
 Take whatever action is appropriate to advance this goal. When THIS RUN has met the goal's success criteria, call the ``complete_goal`` tool with goal_id={goal_id!r} and a short reason. The goal stays enabled and may run again later — calling complete_goal records that this particular run succeeded, it does not retire the goal.
 
-IMPORTANT — when you ask the user a question or need their input on anything, you MUST call the ``request_user_input`` tool with your question BEFORE writing the question into your response text. This applies to: choosing between options you've found, confirming an action before taking it, asking for missing info, asking the user what they prefer. If your response is going to end with a question mark, you've forgotten to call this tool — go back and call it. The tool ensures the user gets an URGENT notification (sound, popup, badge) so they know you're waiting; without it, they'll have no idea you asked. After calling the tool, end your turn with the question text. The user's reply will be injected into your context on the next round.
-
-BROWSER ACCESS — when you use the browser plugin and a site blocks you (Cloudflare challenge, 403, captcha, 'unusual traffic' interstitial, sites that detect headless Chromium), the answer is the VNC live-login flow. Call ``request_user_input`` and ask the user to open Settings → Browser → Credentials → 'Log in interactively' for that site. They get a real browser window over noVNC, complete the challenge themselves, and on close their session cookies merge into your persistent context. After they confirm, retry the original navigation — the browser plugin's per-user BrowserContext now has the cookies and the site no longer trips its bot defenses on you."""
+IMPORTANT — when you ask the user a question or need their input on anything, you MUST call the ``request_user_input`` tool with your question BEFORE writing the question into your response text. This applies to: choosing between options you've found, confirming an action before taking it, asking for missing info, asking the user what they prefer. If your response is going to end with a question mark, you've forgotten to call this tool — go back and call it. The tool ensures the user gets an URGENT notification (sound, popup, badge) so they know you're waiting; without it, they'll have no idea you asked. After calling the tool, end your turn with the question text. The user's reply will be injected into your context on the next round."""
 
 
 _DEFAULT_AUTHOR_INSTRUCTION_PROMPT = """\
@@ -164,13 +162,15 @@ class AutonomousAgentService(Service):
                 description=(
                     "System prompt the agent runs under. Placeholders: "
                     "{owner_user_id}, {goal_name}, {goal_instruction}, "
-                    "{goal_id}. Edit to change the agent's operating "
-                    "rules (request_user_input behaviour, browser-block "
-                    "VNC pattern, complete_goal expectations, …)."
+                    "{goal_id}. This is the BASE prompt; plugins (e.g. "
+                    "the browser plugin's bot-block guidance) contribute "
+                    "additional fragments that get appended at run "
+                    "time — see the contributors list shown below."
                 ),
                 default=_DEFAULT_SYSTEM_PROMPT_TEMPLATE,
                 multiline=True,
                 ai_prompt=True,
+                extensible_target="agent.system_prompt",
             ),
             ConfigParam(
                 key="author_instruction_prompt",
@@ -1900,27 +1900,76 @@ class AutonomousAgentService(Service):
         what the agent should pass to ``complete_goal``).
         """
         try:
-            return self._system_prompt_template.format(
+            base = self._system_prompt_template.format(
                 owner_user_id=goal.owner_user_id,
                 goal_name=goal.name,
                 goal_instruction=goal.instruction,
                 goal_id=goal.id,
             )
         except (KeyError, IndexError) as exc:
-            # User-edited template referenced an unknown placeholder.
-            # Fall back to the bundled default rather than crash a
-            # live agent run.
             logger.warning(
                 "agent system_prompt_template has invalid placeholder "
                 "(%s); falling back to default",
                 exc,
             )
-            return _DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
+            base = _DEFAULT_SYSTEM_PROMPT_TEMPLATE.format(
                 owner_user_id=goal.owner_user_id,
                 goal_name=goal.name,
                 goal_instruction=goal.instruction,
                 goal_id=goal.id,
             )
+
+        # Append plugin contributions targeting "agent.system_prompt".
+        # Each contributor is responsible for its own ConfigParams (body
+        # + enabled toggle) — disabled fragments are filtered server-
+        # side; empty bodies are skipped silently.
+        fragments = self._collect_system_prompt_fragments()
+        if not fragments:
+            return base
+        return base + "\n\n" + "\n\n".join(fragments)
+
+    def _collect_system_prompt_fragments(self) -> list[str]:
+        """Walk every started service implementing ``SystemPromptContributor``
+        and collect enabled fragments targeting the agent's system
+        prompt. Errors raised by individual contributors are logged
+        and skipped — one misbehaving plugin doesn't break the run."""
+        if self._resolver is None:
+            return []
+        from gilbert.interfaces.prompts import SystemPromptContributor
+
+        # Tolerate older / minimal resolvers (test fakes etc.) that
+        # don't implement get_all — the contribution feature is
+        # purely additive, so its absence shouldn't break a run.
+        get_all = getattr(self._resolver, "get_all", None)
+        if not callable(get_all):
+            return []
+        try:
+            services = list(get_all("system_prompt_contributor"))
+        except Exception:
+            logger.exception(
+                "resolver.get_all('system_prompt_contributor') raised"
+            )
+            return []
+
+        out: list[str] = []
+        for svc in services:
+            if not isinstance(svc, SystemPromptContributor):
+                continue
+            try:
+                fragments = svc.get_prompt_fragments()
+            except Exception:
+                logger.exception(
+                    "get_prompt_fragments() raised on %s",
+                    type(svc).__name__,
+                )
+                continue
+            for f in fragments:
+                if f.target != "agent.system_prompt" or not f.enabled:
+                    continue
+                body = f.body.strip()
+                if body:
+                    out.append(body)
+        return out
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:
         """The user-side message when the run was triggered automatically

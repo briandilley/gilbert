@@ -466,6 +466,7 @@ class ConfigurationService(Service):
             "multiline": p.multiline,
             "backend_param": p.backend_param,
             "ai_prompt": p.ai_prompt,
+            "extensible_target": p.extensible_target,
         }
 
     def _serialize_action(self, a: ConfigAction) -> dict[str, Any]:

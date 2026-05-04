@@ -19,6 +19,11 @@ export interface ConfigParamMeta {
   /** True when the field stores an AI prompt — the Settings UI renders an
    *  "Author with AI" button next to the textarea. */
   ai_prompt: boolean;
+  /** Non-empty when this prompt is extensible by other plugins. The
+   *  Settings UI shows a contributors list below the textarea, sourced
+   *  from ``prompts.contributions.list`` for that target. Conventional
+   *  value: ``"agent.system_prompt"``. */
+  extensible_target?: string;
 }
 
 /** Normalize a ConfigChoice to its {value, label} form. */

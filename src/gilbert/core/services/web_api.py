@@ -183,6 +183,7 @@ class WebApiService(Service):
             "entities.collection.query": self._ws_entities_query,
             "entities.entity.get": self._ws_entity_get,
             "ui.routes.list": self._ws_ui_routes_list,
+            "prompts.contributions.list": self._ws_prompt_contributions_list,
         }
 
     async def _ws_dashboard_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -559,6 +560,64 @@ class WebApiService(Service):
             "type": "ui.routes.list.result",
             "ref": frame.get("id"),
             "routes": out,
+        }
+
+    async def _ws_prompt_contributions_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return every PromptFragment contributed for ``target``.
+
+        Settings UI calls this for each ConfigParam with
+        ``extensible_target`` set so it can show the live list of
+        currently-contributing fragments.
+        """
+        gilbert = conn.manager.gilbert
+        target = str(frame.get("target") or "").strip()
+        if gilbert is None or not target:
+            return {
+                "type": "prompts.contributions.list.result",
+                "ref": frame.get("id"),
+                "fragments": [],
+            }
+
+        from gilbert.interfaces.prompts import SystemPromptContributor
+
+        sm = gilbert.service_manager
+        out: list[dict[str, Any]] = []
+        for svc in sm.get_all_by_capability("system_prompt_contributor"):
+            if not isinstance(svc, SystemPromptContributor):
+                continue
+            try:
+                fragments = svc.get_prompt_fragments()
+            except Exception:
+                logger.exception(
+                    "get_prompt_fragments() raised on %s", type(svc).__name__
+                )
+                continue
+            # Best-effort source-service name for display purposes.
+            source_name = ""
+            try:
+                source_name = svc.service_info().name  # type: ignore[attr-defined]
+            except Exception:
+                source_name = type(svc).__name__
+            for f in fragments:
+                if f.target != target:
+                    continue
+                out.append(
+                    {
+                        "fragment_id": f.fragment_id,
+                        "target": f.target,
+                        "label": f.label,
+                        "description": f.description,
+                        "body": f.body,
+                        "enabled": f.enabled,
+                        "source_service": source_name,
+                    }
+                )
+        return {
+            "type": "prompts.contributions.list.result",
+            "ref": frame.get("id"),
+            "fragments": out,
         }
 
     async def _ws_system_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
