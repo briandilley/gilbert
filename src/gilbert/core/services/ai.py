@@ -3970,7 +3970,10 @@ class AIService(Service):
         )
         # Exclude shared conversations — those are listed separately.
         # Can't use NEQ filter because shared=None (missing field) doesn't match.
-        return [c for c in results if not c.get("shared")][:limit]
+        return [
+            c for c in results
+            if not c.get("shared") and c.get("source") != "agent"
+        ][:limit]
 
     async def list_shared_conversations(
         self, user_id: str, limit: int = 50

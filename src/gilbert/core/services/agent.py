@@ -1028,6 +1028,35 @@ class AutonomousAgentService(Service):
         else:
             run_conv_id = str(uuid.uuid4())
 
+        # Ensure the conversation exists in storage with source="agent"
+        # tagging so the regular chat conversation list can exclude it
+        # and the agent UI can identify agent-owned conversations.
+        # If the row already exists (subsequent runs of a stateful goal),
+        # patch the field; if not, create a stub.
+        conv_collection = "ai_conversations"
+        existing_conv_row = await self._storage.get(conv_collection, run_conv_id)
+        if existing_conv_row is None:
+            now_iso = datetime.now(UTC).isoformat()
+            await self._storage.put(
+                conv_collection,
+                run_conv_id,
+                {
+                    "id": run_conv_id,
+                    "user_id": goal.owner_user_id,
+                    "title": goal.name,
+                    "messages": [],
+                    "ui_blocks": [],
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                    "source": "agent",
+                    "agent_goal_id": goal.id,
+                },
+            )
+        elif existing_conv_row.get("source") != "agent":
+            existing_conv_row["source"] = "agent"
+            existing_conv_row["agent_goal_id"] = goal.id
+            await self._storage.put(conv_collection, run_conv_id, existing_conv_row)
+
         run = Run(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
@@ -1128,6 +1157,16 @@ class AutonomousAgentService(Service):
             # store (we want the id that has the messages).
             if result.conversation_id and result.conversation_id != run.conversation_id:
                 run.conversation_id = result.conversation_id
+            # Re-assert source="agent" tag in case chat() rewrote the
+            # conversation row from scratch.
+            try:
+                conv_after = await self._storage.get("ai_conversations", run.conversation_id)
+                if conv_after is not None and conv_after.get("source") != "agent":
+                    conv_after["source"] = "agent"
+                    conv_after["agent_goal_id"] = goal.id
+                    await self._storage.put("ai_conversations", run.conversation_id, conv_after)
+            except Exception:
+                logger.warning("failed to re-tag agent conversation %s", run.conversation_id)
             if result.turn_usage:
                 run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
                 run.tokens_out = int(result.turn_usage.get("output_tokens", 0))

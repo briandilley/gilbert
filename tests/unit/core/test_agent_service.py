@@ -1851,3 +1851,22 @@ async def test_stateless_runs_get_distinct_conversation_ids(
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
     assert fetched.conversation_id == ""
+
+
+# ── Agent conversation tagging ────────────────────────────────────
+
+
+async def test_run_marks_conversation_with_source_agent(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    run = await svc.run_goal_now(g.id)
+    assert run.conversation_id
+
+    raw = await svc._storage.get("ai_conversations", run.conversation_id)
+    assert raw is not None
+    assert raw.get("source") == "agent"
+    assert raw.get("agent_goal_id") == g.id
