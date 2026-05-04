@@ -80,6 +80,15 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                "key": "agents",
+                "label": "Agents",
+                "description": "Autonomous agent goals",
+                "url": "/agents",
+                "icon": "sparkles",
+                "required_role": "user",
+                "items": [],
+            },
+            {
                 "key": "inbox",
                 "label": "Inbox",
                 "description": "Email management",
