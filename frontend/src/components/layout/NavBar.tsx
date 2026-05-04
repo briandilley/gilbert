@@ -52,6 +52,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { NavGroup, NavItem } from "@/types/dashboard";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 
 /** Map of icon names returned by the backend to lucide components. */
 const ICONS: Record<string, LucideIcon> = {
@@ -188,6 +189,8 @@ export function NavBar() {
             className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
             title={connected ? "Connected" : "Disconnected"}
           />
+
+          <NotificationBell />
 
           <DropdownMenu>
             <DropdownMenuTrigger

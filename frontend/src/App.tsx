@@ -21,6 +21,7 @@ import { McpPage } from "@/components/mcp/McpPage";
 import { McpClientsPage } from "@/components/mcp/McpClientsPage";
 import { McpLocalPage } from "@/components/mcp/McpLocalPage";
 import { UsagePage } from "@/components/usage/UsagePage";
+import { NotificationsPage } from "@/components/notifications/NotificationsPage";
 
 export default function App() {
   return (
@@ -51,6 +52,7 @@ export default function App() {
           <Route path="/system" element={<SystemPage />} />
           <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />
+          <Route path="/notifications" element={<NotificationsPage />} />
           <Route path="/account" element={<AccountPage />} />
         </Route>
       </Route>
