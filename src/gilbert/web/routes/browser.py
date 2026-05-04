@@ -120,7 +120,16 @@ async def _authenticate_ws(websocket: Any, gilbert: Any) -> Any | None:
 
 @router.websocket("/vnc/{session_id}/ws")
 async def vnc_proxy(websocket: WebSocket, session_id: str) -> None:
-    """Authenticated WS proxy → 127.0.0.1:<websockify_port>."""
+    """Authenticated WebSocket-to-TCP proxy.
+
+    noVNC connects to us via WebSocket (binary subprotocol). We
+    terminate the WS upgrade, then open a raw TCP socket to x11vnc
+    on its localhost port and pipe RFB protocol bytes between the
+    two endpoints. The previous design proxied to ``websockify``
+    in the middle, but that's a websocket-server itself — raw TCP
+    bytes into it failed the WS handshake. Going directly to
+    x11vnc removes one redundant process and one layer of framing.
+    """
     gilbert = getattr(websocket.app.state, "gilbert", None)
     if gilbert is None:
         await websocket.close(code=4503)
@@ -136,11 +145,16 @@ async def vnc_proxy(websocket: WebSocket, session_id: str) -> None:
         return
 
     svc = _resolve_browser_service(websocket)
-    if svc is None or not hasattr(svc, "get_vnc_websockify_port"):
+    # Newer name; legacy alias still works for older builds.
+    target_port = (
+        getattr(svc, "get_vnc_target_port", None)
+        or getattr(svc, "get_vnc_websockify_port", None)
+    )
+    if svc is None or target_port is None:
         await websocket.close(code=4503)
         return
 
-    port = svc.get_vnc_websockify_port(session_id, user_ctx.user_id)
+    port = target_port(session_id, user_ctx.user_id)
     if port is None:
         await websocket.close(code=4404)
         return
@@ -148,7 +162,7 @@ async def vnc_proxy(websocket: WebSocket, session_id: str) -> None:
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
     except Exception:
-        logger.exception("failed to connect to websockify on %s", port)
+        logger.exception("failed to connect to x11vnc on %s", port)
         await websocket.close(code=4502)
         return
 
