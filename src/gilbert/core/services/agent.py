@@ -4,6 +4,7 @@ AIService.chat(ai_call="agent.run"), exposes complete_goal as a tool.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -306,9 +307,16 @@ class AutonomousAgentService(Service):
             raise ValueError(f"goal {goal_id} is completed")
         if goal.status == GoalStatus.DISABLED:
             raise ValueError(f"goal {goal_id} is disabled")
-        # run_goal_now runs synchronously and returns the completed run
-        # (not via _spawn_run — manual triggers want the result back).
-        return await self._run_goal_internal(goal_id, "manual", {})
+        # Shield the run from outer task cancellation — if the WS RPC
+        # handler calling us is cancelled (user navigates away, page
+        # refresh, connection drop), the agent run should still finish
+        # to its own conclusion (END_TURN, max-rounds, an explicit
+        # cancel from inside the loop). Without this, an interrupted
+        # run leaves a half-finished conversation and a misleading
+        # "completed" Run entity.
+        return await asyncio.shield(
+            self._run_goal_internal(goal_id, "manual", {})
+        )
 
     async def declare_goal_complete(
         self,
@@ -984,16 +992,26 @@ class AutonomousAgentService(Service):
                 ai_call=_AI_CALL_NAME,
                 ai_profile=goal.profile_id,
             )
-            run.status = RunStatus.COMPLETED
             run.final_message_text = result.response_text
             run.conversation_id = result.conversation_id
             if result.turn_usage:
                 run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
                 run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
             run.rounds_used = len(result.rounds) + 1
-            # Capture the conversation_id on the goal if this was the first run
-            if not goal.conversation_id and result.conversation_id:
-                goal.conversation_id = result.conversation_id
+            if getattr(result, "interrupted", False):
+                # AIService caught a CancelledError mid-stream and emitted
+                # the [INTERRUPTED BY USER] sentinel as the final assistant
+                # message. The chat returned successfully but the run did
+                # not actually finish its work.
+                run.status = RunStatus.FAILED
+                run.error = "interrupted"
+            else:
+                run.status = RunStatus.COMPLETED
+                # Capture the conversation_id on the goal if this was the
+                # first run. Skip when interrupted so we don't lock the
+                # goal to a conversation that abandoned mid-mission.
+                if not goal.conversation_id and result.conversation_id:
+                    goal.conversation_id = result.conversation_id
         except Exception as exc:
             run.status = RunStatus.FAILED
             run.error = repr(exc)

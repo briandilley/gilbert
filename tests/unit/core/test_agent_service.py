@@ -1350,3 +1350,49 @@ async def test_observed_event_types_populated_by_wildcard(
     assert "lead.created" in types
     assert "invoice.overdue" in types
     assert "notification.received" not in types  # filtered
+
+
+# ── Interrupted-run honoring ──────────────────────────────────────
+
+
+async def test_interrupted_chat_marks_run_failed_not_completed(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """When AIService.chat() returns ChatTurnResult(interrupted=True) —
+    e.g. because the WS handler task was cancelled mid-stream — the Run
+    must be marked FAILED with error="interrupted" rather than COMPLETED
+    with empty text. Otherwise the goal looks like it succeeded when it
+    actually didn't.
+    """
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Patch the fake to return interrupted=True
+    from gilbert.interfaces.ai import ChatTurnResult
+
+    async def interrupted_chat(*args: Any, **kwargs: Any) -> ChatTurnResult:
+        return ChatTurnResult(
+            response_text="[INTERRUPTED BY USER ...]",
+            conversation_id="conv-x",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=True,
+            model="fake",
+            turn_usage={"input_tokens": 100, "output_tokens": 5},
+        )
+
+    ai.chat = interrupted_chat  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+
+    assert run.status == RunStatus.FAILED
+    assert run.error == "interrupted"
+    # The conversation_id should NOT be captured onto the goal — we
+    # don't want the goal locked to an abandoned conversation.
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == ""
