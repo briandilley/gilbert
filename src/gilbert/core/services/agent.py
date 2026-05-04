@@ -1618,6 +1618,73 @@ class AutonomousAgentService(Service):
             )
             run.pending_question = run_raw_after.get("pending_question")
 
+        # Heuristic backstop: if the run ended without complete_goal_called
+        # AND without already setting awaiting_user_input, AND the final
+        # message looks like the agent is asking a question (ends with
+        # '?'), treat it as if the agent had called request_user_input.
+        # This catches the common case where the agent ends with "Want me
+        # to proceed?" but forgot to invoke the tool.
+        if (
+            run.status == RunStatus.COMPLETED
+            and not run.complete_goal_called
+            and not run.awaiting_user_input
+            and run.final_message_text
+        ):
+            text = run.final_message_text.strip()
+            if text.endswith("?"):
+                # Extract the trailing question — last sentence ending in '?'
+                # so the notification + UI banner show the actual question
+                # rather than the whole final message.
+                last_q = text
+                # Heuristic split: walk backward from the end to find the
+                # last sentence boundary (. ! ? followed by whitespace).
+                for i in range(len(text) - 2, -1, -1):
+                    if text[i] in ".!?" and (
+                        i + 1 < len(text) and text[i + 1].isspace()
+                    ):
+                        last_q = text[i + 1 :].strip()
+                        break
+                if 5 < len(last_q) < 500:
+                    run.awaiting_user_input = True
+                    run.pending_question = last_q
+                    logger.info(
+                        "agent run %s ended with a question; auto-flagging as "
+                        "awaiting user input (model didn't call request_user_input)",
+                        run.id,
+                    )
+                    # Send urgent notification matching what request_user_input
+                    # would have done.
+                    if self._resolver is not None:
+                        try:
+                            from gilbert.interfaces.notifications import (
+                                NotificationProvider,
+                                NotificationUrgency,
+                            )
+
+                            notif_svc = self._resolver.get_capability(
+                                "notifications"
+                            )
+                            if isinstance(notif_svc, NotificationProvider):
+                                await notif_svc.notify_user(
+                                    user_id=fresh_goal.owner_user_id,
+                                    message=(
+                                        f"Agent '{fresh_goal.name}' is waiting "
+                                        f"for your input: {last_q}"
+                                    ),
+                                    urgency=NotificationUrgency.URGENT,
+                                    source="agent",
+                                    source_ref={
+                                        "goal_id": fresh_goal.id,
+                                        "run_id": run.id,
+                                        "kind": "user_input_inferred",
+                                    },
+                                )
+                        except Exception:
+                            logger.exception(
+                                "auto-question backstop: notify_user failed for goal %s",
+                                fresh_goal.id,
+                            )
+
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
 
         # Skip conversation capture for stateless goals — every run
@@ -1721,13 +1788,20 @@ class AutonomousAgentService(Service):
             f"reason. The goal stays enabled and may run again later — "
             f"calling complete_goal records that this particular run "
             f"succeeded, it does not retire the goal.\n\n"
-            f"If you need a decision, preference, or piece of info from "
-            f"the user before you can proceed (e.g. choosing between "
-            f"options, confirming an action), call the "
-            f"``request_user_input`` tool with your question, then end "
-            f"your turn with the question text. The user will be "
-            f"notified urgently and their reply will be injected into "
-            f"your context on the next round."
+            f"IMPORTANT — when you ask the user a question or need their "
+            f"input on anything, you MUST call the ``request_user_input`` "
+            f"tool with your question BEFORE writing the question into "
+            f"your response text. This applies to: choosing between "
+            f"options you've found, confirming an action before taking "
+            f"it, asking for missing info, asking the user what they "
+            f"prefer. If your response is going to end with a question "
+            f"mark, you've forgotten to call this tool — go back and "
+            f"call it. The tool ensures the user gets an URGENT "
+            f"notification (sound, popup, badge) so they know you're "
+            f"waiting; without it, they'll have no idea you asked. After "
+            f"calling the tool, end your turn with the question text. "
+            f"The user's reply will be injected into your context on "
+            f"the next round."
         )
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:
