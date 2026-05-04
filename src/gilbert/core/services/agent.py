@@ -73,6 +73,9 @@ class AutonomousAgentService(Service):
         return ServiceInfo(
             name="autonomous_agent",
             capabilities=frozenset({"agent", "ai_tools", "ws_handlers"}),
+            requires=frozenset(
+                {"entity_storage", "event_bus", "ai_chat", "scheduler"}
+            ),
             ai_calls=frozenset({_AI_CALL_NAME}),
         )
 

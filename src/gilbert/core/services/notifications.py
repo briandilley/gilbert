@@ -59,6 +59,7 @@ class NotificationService(Service):
         return ServiceInfo(
             name="notifications",
             capabilities=frozenset({"notifications", "ws_handlers", "ai_tools"}),
+            requires=frozenset({"entity_storage", "event_bus"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
