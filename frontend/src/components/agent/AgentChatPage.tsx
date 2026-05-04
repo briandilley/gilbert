@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -241,24 +241,147 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
   const conversationId = goal.conversation_id || fallbackConvId;
   const hasRunningRun = runs.some((r) => r.status === "running");
 
-  // Live updates: invalidate the conversation query whenever the
-  // backend publishes a chat.stream.* or chat.message.* event for
-  // this conversation. Falls back to refetchInterval-style polling
-  // (already wired below) if events are missed.
-  const onConvEvent = useCallback(
+  // ---------------------------------------------------------------------------
+  // Streaming turn state — mirrors the ChatPage pattern.
+  // A single "in-flight" ChatTurn is built up from stream events, then
+  // cleared when turn_complete fires and the persisted version is fetched.
+  // ---------------------------------------------------------------------------
+  const [streamingTurn, setStreamingTurn] = useState<ChatTurn | null>(null);
+  const nextRoundPendingRef = useRef(false);
+  const streamingConvIdRef = useRef<string>("");
+
+  // Keep the ref in sync with the active conversation so event handlers
+  // can filter correctly without stale closure values.
+  useEffect(() => {
+    streamingConvIdRef.current = conversationId;
+    // Drop any stale streaming turn when the conversation changes.
+    setStreamingTurn(null);
+    nextRoundPendingRef.current = false;
+  }, [conversationId]);
+
+  const updateStreamingTurn = useCallback(
+    (mutator: (turn: ChatTurn) => ChatTurn) => {
+      setStreamingTurn((prev) => {
+        const base: ChatTurn = prev ?? {
+          user_message: { content: "", attachments: [] },
+          rounds: [],
+          final_content: "",
+          streaming: true,
+        };
+        return mutator(base);
+      });
+    },
+    [],
+  );
+
+  const handleTextDelta = useCallback(
     (event: GilbertEvent) => {
-      const cid = (event.data as { conversation_id?: string } | undefined)?.conversation_id;
-      if (cid && cid === conversationId) {
-        queryClient.invalidateQueries({ queryKey: ["agent-conv", conversationId] });
+      if (event.data.conversation_id !== streamingConvIdRef.current) return;
+      const chunk = event.data.text;
+      if (typeof chunk !== "string" || !chunk) return;
+      const startNewRound = nextRoundPendingRef.current;
+      if (startNewRound) {
+        nextRoundPendingRef.current = false;
       }
+      updateStreamingTurn((turn) => {
+        const rounds = [...turn.rounds];
+        if (rounds.length === 0 || startNewRound) {
+          rounds.push({ reasoning: "", tools: [] });
+        }
+        const lastIdx = rounds.length - 1;
+        rounds[lastIdx] = {
+          ...rounds[lastIdx],
+          reasoning: rounds[lastIdx].reasoning + chunk,
+        };
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleToolStarted = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== streamingConvIdRef.current) return;
+      const toolName = String(event.data.tool_name || "");
+      const toolCallId = String(event.data.tool_call_id || "");
+      const args = (event.data.arguments as Record<string, unknown>) || {};
+      updateStreamingTurn((turn) => {
+        const rounds = [...turn.rounds];
+        if (rounds.length === 0) {
+          rounds.push({ reasoning: "", tools: [] });
+        }
+        const lastIdx = rounds.length - 1;
+        const newTool: ChatRoundTool = {
+          tool_call_id: toolCallId,
+          tool_name: toolName,
+          arguments: args,
+          status: "running",
+          is_error: false,
+        };
+        rounds[lastIdx] = {
+          ...rounds[lastIdx],
+          tools: [...rounds[lastIdx].tools, newTool],
+        };
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleToolCompleted = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== streamingConvIdRef.current) return;
+      const toolCallId = String(event.data.tool_call_id || "");
+      const isError = Boolean(event.data.is_error);
+      const resultPreview =
+        typeof event.data.result_preview === "string"
+          ? event.data.result_preview
+          : "";
+      updateStreamingTurn((turn) => {
+        const rounds = turn.rounds.map((round) => {
+          const tools = round.tools.map((tool) =>
+            tool.tool_call_id === toolCallId
+              ? {
+                  ...tool,
+                  status: "done" as const,
+                  is_error: isError,
+                  result: resultPreview,
+                }
+              : tool,
+          );
+          return { ...round, tools };
+        });
+        return { ...turn, rounds };
+      });
+    },
+    [updateStreamingTurn],
+  );
+
+  const handleRoundComplete = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== streamingConvIdRef.current) return;
+      nextRoundPendingRef.current = true;
+    },
+    [],
+  );
+
+  const handleTurnComplete = useCallback(
+    (event: GilbertEvent) => {
+      if (event.data.conversation_id !== streamingConvIdRef.current) return;
+      // Storage now has the committed turn. Refetch the persisted conversation
+      // and clear the streaming overlay so the user sees the authoritative version.
+      nextRoundPendingRef.current = false;
+      setStreamingTurn(null);
+      queryClient.invalidateQueries({ queryKey: ["agent-conv", conversationId] });
     },
     [conversationId, queryClient],
   );
 
-  useEventBus("chat.stream.text_delta", onConvEvent);
-  useEventBus("chat.stream.round_complete", onConvEvent);
-  useEventBus("chat.stream.turn_complete", onConvEvent);
-  useEventBus("chat.message.created", onConvEvent);
+  useEventBus("chat.stream.text_delta", handleTextDelta);
+  useEventBus("chat.stream.round_complete", handleRoundComplete);
+  useEventBus("chat.stream.turn_complete", handleTurnComplete);
+  useEventBus("chat.tool.started", handleToolStarted);
+  useEventBus("chat.tool.completed", handleToolCompleted);
 
   const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
     queryKey: ["agent-conv", conversationId, goal.run_count],
@@ -267,7 +390,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
         ? api.loadConversation(conversationId)
         : Promise.resolve(null),
     enabled: !!conversationId,
-    refetchInterval: hasRunningRun ? 5000 : false,
+    // Events now drive updates; polling not needed.
   });
 
   const handleSend = async () => {
@@ -318,14 +441,23 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
           </div>
         ) : !conversation ||
           !conversation.turns ||
-          conversation.turns.length === 0 ? (
+          (conversation.turns.length === 0 && !streamingTurn) ? (
           <div className="text-center text-muted-foreground py-12">
             Conversation is empty.
           </div>
         ) : (
-          conversation.turns.map((turn, i) => (
-            <FlatTurnBlock key={i} turn={turn} />
-          ))
+          <>
+            {(conversation?.turns ?? []).map((turn, i) => (
+              <FlatTurnBlock key={i} turn={turn} />
+            ))}
+            {streamingTurn ? (
+              <FlatTurnBlock
+                key="__streaming"
+                turn={streamingTurn}
+                streaming
+              />
+            ) : null}
+          </>
         )}
       </div>
 
@@ -379,16 +511,22 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
 
 interface FlatTurnBlockProps {
   turn: ChatTurn;
+  streaming?: boolean;
 }
 
 /**
  * Renders one ChatTurn flat — user trigger message, then each
  * intermediate round's reasoning + tool calls, then the final
  * assistant response. No collapsing or grouping.
+ *
+ * When `streaming` is true a pulsing indicator is shown and a subtle
+ * left border marks the turn as in-flight.
  */
-function FlatTurnBlock({ turn }: FlatTurnBlockProps) {
+function FlatTurnBlock({ turn, streaming }: FlatTurnBlockProps) {
   return (
-    <div className="space-y-2">
+    <div
+      className={`space-y-2${streaming ? " border-l-2 border-blue-400 pl-3" : ""}`}
+    >
       {/* User / trigger message */}
       {turn.user_message?.content && (
         <div className="rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 px-3 py-2">
@@ -415,6 +553,14 @@ function FlatTurnBlock({ turn }: FlatTurnBlockProps) {
           <MarkdownContent content={turn.final_content} />
         </div>
       )}
+
+      {/* Streaming indicator */}
+      {streaming ? (
+        <div className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1 mt-2">
+          <span className="size-1.5 rounded-full bg-blue-500 animate-pulse" />
+          streaming…
+        </div>
+      ) : null}
     </div>
   );
 }
