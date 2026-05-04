@@ -430,7 +430,8 @@ async def test_notification_service_exposes_notify_user_tool(
 
 
 async def test_notify_user_tool_executes_and_persists_notification(
-    service: NotificationService, sqlite_storage: StorageBackend,
+    service: NotificationService,
+    sqlite_storage: StorageBackend,
 ) -> None:
     result = await service.execute_tool(
         "notify_user",
