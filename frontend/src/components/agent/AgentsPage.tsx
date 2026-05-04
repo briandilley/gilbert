@@ -61,6 +61,11 @@ function describeTrigger(g: Goal): string {
     return "Time trigger";
   }
   if (g.trigger_type === "event") {
+    if (Array.isArray(cfg.event_types) && cfg.event_types.length > 0) {
+      return cfg.event_types.length === 1
+        ? `On ${cfg.event_types[0]}`
+        : `On ${cfg.event_types.length} events`;
+    }
     return `On ${cfg.event_type ?? "event"}`;
   }
   return "Manual";
@@ -264,13 +269,20 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
   const [dailyHour, setDailyHour] = useState(7);
   const [dailyMinute, setDailyMinute] = useState(0);
   const [hourlyMinute, setHourlyMinute] = useState(0);
-  const [eventType, setEventType] = useState("");
+  const [eventTypes, setEventTypes] = useState<string[]>([]);
+  const [eventTypeDraft, setEventTypeDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authorOpen, setAuthorOpen] = useState(false);
   const [authorRequest, setAuthorRequest] = useState("");
   const [authoring, setAuthoring] = useState(false);
   const [authorError, setAuthorError] = useState<string | null>(null);
+
+  const { data: observedEvents } = useQuery({
+    queryKey: ["agent", "event-types"],
+    queryFn: api.listObservedEventTypes,
+    enabled: open,
+  });
 
   const reset = () => {
     setName("");
@@ -281,7 +293,8 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
     setDailyHour(7);
     setDailyMinute(0);
     setHourlyMinute(0);
-    setEventType("");
+    setEventTypes([]);
+    setEventTypeDraft("");
     setError(null);
     setAuthorOpen(false);
     setAuthorRequest("");
@@ -330,13 +343,13 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
       };
       if (triggerKind !== "manual") {
         if (triggerKind === "event") {
-          if (!eventType.trim()) {
-            setError("Event type is required for event triggers.");
+          if (eventTypes.length === 0) {
+            setError("Pick at least one event type for event triggers.");
             setSubmitting(false);
             return;
           }
           payload.trigger_type = "event";
-          payload.trigger_config = { event_type: eventType.trim() };
+          payload.trigger_config = { event_types: eventTypes };
         } else {
           payload.trigger_type = "time";
           if (triggerKind === "interval") {
@@ -549,13 +562,103 @@ function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoa
 
           {triggerKind === "event" ? (
             <div>
-              <Label htmlFor="goal-event">Event type</Label>
-              <Input
-                id="goal-event"
-                value={eventType}
-                onChange={(e) => setEventType(e.target.value)}
-                placeholder="e.g. lead.created"
-              />
+              <Label htmlFor="goal-event">Event types</Label>
+              <p className="text-xs text-muted-foreground mb-2">
+                Goal will fire on any of the selected events. Pick from
+                the list of recently-observed events or type a custom
+                event type.
+              </p>
+
+              {/* Selected events as chips */}
+              {eventTypes.length > 0 ? (
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {eventTypes.map((et) => (
+                    <span
+                      key={et}
+                      className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-xs"
+                    >
+                      <span className="font-mono">{et}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEventTypes((prev) => prev.filter((x) => x !== et))
+                        }
+                        className="text-muted-foreground hover:text-foreground"
+                        aria-label={`Remove ${et}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {/* Custom-type input */}
+              <div className="flex gap-2 mb-2">
+                <Input
+                  id="goal-event"
+                  value={eventTypeDraft}
+                  onChange={(e) => setEventTypeDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const v = eventTypeDraft.trim();
+                      if (v && !eventTypes.includes(v)) {
+                        setEventTypes((prev) => [...prev, v]);
+                      }
+                      setEventTypeDraft("");
+                    }
+                  }}
+                  placeholder="e.g. lead.created"
+                  list="observed-event-types"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const v = eventTypeDraft.trim();
+                    if (v && !eventTypes.includes(v)) {
+                      setEventTypes((prev) => [...prev, v]);
+                    }
+                    setEventTypeDraft("");
+                  }}
+                  disabled={!eventTypeDraft.trim()}
+                >
+                  Add
+                </Button>
+              </div>
+
+              {/* Datalist for native autocomplete */}
+              <datalist id="observed-event-types">
+                {(observedEvents?.event_types ?? []).map((et) => (
+                  <option key={et} value={et} />
+                ))}
+              </datalist>
+
+              {/* Quick-add suggestions */}
+              {observedEvents?.event_types && observedEvents.event_types.length > 0 ? (
+                <div className="text-xs">
+                  <div className="text-muted-foreground mb-1">
+                    Recently observed:
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {observedEvents.event_types
+                      .filter((et) => !eventTypes.includes(et))
+                      .slice(0, 20)
+                      .map((et) => (
+                        <button
+                          key={et}
+                          type="button"
+                          onClick={() => setEventTypes((prev) => [...prev, et])}
+                          className="rounded-full border px-2 py-0.5 hover:bg-accent font-mono"
+                        >
+                          + {et}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
