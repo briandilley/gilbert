@@ -1560,6 +1560,15 @@ class AutonomousAgentService(Service):
                 run_raw_after.get("complete_goal_called", False)
             )
             run.complete_reason = run_raw_after.get("complete_reason")
+            # Preserve any awaiting-input state set during the run via
+            # request_user_input. The flag should only be cleared when the
+            # user actually replies (handled in _drain_pending), not when
+            # the run finishes — the question outlives the run until
+            # answered.
+            run.awaiting_user_input = bool(
+                run_raw_after.get("awaiting_user_input", False)
+            )
+            run.pending_question = run_raw_after.get("pending_question")
 
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
 

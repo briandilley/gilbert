@@ -258,9 +258,11 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
     runs.find((r) => !!r.conversation_id)?.conversation_id ?? "";
   const conversationId = goal.conversation_id || fallbackConvId;
   const hasRunningRun = runs.some((r) => r.status === "running");
-  const awaitingRun = runs.find(
-    (r) => r.status === "running" && r.awaiting_user_input,
-  );
+  // Show "awaiting input" for the most recent run that has the flag,
+  // regardless of run status — the agent's question outlives its
+  // chat() turn and stays pending until the user actually replies.
+  // Runs are returned newest-first so the first match is the latest.
+  const awaitingRun = runs.find((r) => r.awaiting_user_input);
   const awaitingQuestion = awaitingRun?.pending_question || null;
 
   // ---------------------------------------------------------------------------
