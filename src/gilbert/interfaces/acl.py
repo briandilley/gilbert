@@ -97,6 +97,8 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,
+    # Autonomous agent: user-level; handlers enforce per-user ownership.
+    "agent.": 100,
     # MCP client: list/get/start/stop/test are user-level (handlers enforce
     # per-record visibility + ownership). Creating/updating ``shared`` or
     # ``public`` servers, or changing any record's scope/allowed_roles/

@@ -324,6 +324,10 @@ class Gilbert:
 
         self.service_manager.register(NotificationService())
 
+        from gilbert.core.services.agent import AutonomousAgentService
+
+        self.service_manager.register(AutonomousAgentService())
+
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
         config_svc.register_factory("ai", self._factory_ai)
