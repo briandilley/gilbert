@@ -250,14 +250,14 @@ export function AgentsPage() {
   );
 }
 
-interface CreateGoalDialogProps {
+export interface CreateGoalDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   profiles: { name: string; description: string }[];
   onCreated: () => void;
 }
 
-function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoalDialogProps) {
+export function CreateGoalDialog({ open, onOpenChange, profiles, onCreated }: CreateGoalDialogProps) {
   const api = useWsApi();
   const [name, setName] = useState("");
   const [instruction, setInstruction] = useState("");

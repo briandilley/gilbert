@@ -190,11 +190,11 @@ export function AgentDetailPage() {
       {goal.conversation_id ? (
         <div className="mb-6">
           <Link
-            to={`/chat?conversation=${goal.conversation_id}`}
+            to={`/agents?goal=${goal.id}`}
             className="inline-flex items-center gap-2 text-sm text-blue-600 hover:underline"
           >
             <MessageSquareIcon className="size-4" />
-            Open agent activity in chat
+            Open agent chat
           </Link>
         </div>
       ) : (
@@ -257,9 +257,9 @@ export function AgentDetailPage() {
             return convId ? (
               <Link
                 key={r.id}
-                to={`/chat?conversation=${convId}`}
+                to={`/agents?goal=${goalId}`}
                 className="px-4 py-3 flex items-start gap-3 hover:bg-accent/50 transition-colors"
-                title="Open in chat"
+                title="Open in agent chat"
               >
                 {inner}
               </Link>

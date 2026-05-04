@@ -14,6 +14,7 @@ import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { Button } from "@/components/ui/button";
+import { CreateGoalDialog } from "@/components/agent/AgentsPage";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
 import type {
@@ -42,10 +43,17 @@ export function AgentChatPage() {
   const { connected } = useWebSocket();
 
   const selectedGoalId = searchParams.get("goal") || "";
+  const [createOpen, setCreateOpen] = useState(false);
 
   const { data: goals } = useQuery({
     queryKey: ["agent", "goals"],
     queryFn: api.listGoals,
+    enabled: connected,
+  });
+
+  const { data: profiles } = useQuery({
+    queryKey: ["ai-profiles"],
+    queryFn: api.listAiProfiles,
     enabled: connected,
   });
 
@@ -75,7 +83,7 @@ export function AgentChatPage() {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => navigate("/agents/list")}
+            onClick={() => setCreateOpen(true)}
             title="New goal"
           >
             <PlusIcon className="size-4" />
@@ -109,6 +117,16 @@ export function AgentChatPage() {
           </div>
         )}
       </main>
+
+      <CreateGoalDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        profiles={profiles ?? []}
+        onCreated={() => {
+          queryClient.invalidateQueries({ queryKey: ["agent"] });
+          setCreateOpen(false);
+        }}
+      />
     </div>
   );
 }
