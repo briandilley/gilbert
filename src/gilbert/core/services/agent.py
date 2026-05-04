@@ -774,9 +774,12 @@ class AutonomousAgentService(Service):
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
         try:
             user_message = self._build_initial_user_message(goal)
+            # Pass the goal's conversation_id (or None if it's the first run
+            # — chat() will create one and we capture it onto the goal below).
+            existing_conv = goal.conversation_id or None
             result = await self._ai.chat(
                 user_message=user_message,
-                conversation_id=None,
+                conversation_id=existing_conv,
                 user_ctx=None,
                 ai_call=_AI_CALL_NAME,
                 ai_profile=goal.profile_id,
@@ -788,6 +791,9 @@ class AutonomousAgentService(Service):
                 run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
                 run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
             run.rounds_used = len(result.rounds) + 1
+            # Capture the conversation_id on the goal if this was the first run
+            if not goal.conversation_id and result.conversation_id:
+                goal.conversation_id = result.conversation_id
         except Exception as exc:
             run.status = RunStatus.FAILED
             run.error = repr(exc)

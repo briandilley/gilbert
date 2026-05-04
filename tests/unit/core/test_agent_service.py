@@ -1010,3 +1010,40 @@ async def test_ws_agent_goal_create_with_time_trigger(
     assert result["ok"] is True
     assert result["goal"]["trigger_type"] == "time"
     assert len(scheduler.added) == 1
+
+
+# ── Materialized conversation tests ───────────────────────────────
+
+
+async def test_first_run_captures_new_conversation_id_on_goal(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    assert g.conversation_id == ""
+
+    # First run: chat() returns conversation_id "conv-fake"
+    await svc.run_goal_now(g.id)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == "conv-fake"
+
+
+async def test_subsequent_runs_reuse_goal_conversation_id(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    await svc.run_goal_now(g.id)
+    # First call passed conversation_id=None
+    assert ai.calls[-1]["conversation_id"] is None
+
+    await svc.run_goal_now(g.id)
+    # Second call passes the captured conversation_id
+    assert ai.calls[-1]["conversation_id"] == "conv-fake"
