@@ -1928,18 +1928,17 @@ async def test_run_goal_now_default_user_trigger_when_no_override(
     assert "Take action" in call["user_message"]
 
 
-async def test_run_goal_now_rejects_concurrent_run(
+async def test_run_goal_now_without_user_message_during_run_raises(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
 ) -> None:
-    """If a run is already in flight for the goal, run_goal_now refuses
-    rather than silently dropping the new request.
+    """Calling run_goal_now WITHOUT a user_message while a run is in
+    flight still raises — that's a no-op trigger.
     """
     svc, ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
 
-    # Make chat block until we release it
     proceed = asyncio.Event()
     original = ai.chat
 
@@ -1950,10 +1949,60 @@ async def test_run_goal_now_rejects_concurrent_run(
     ai.chat = slow_chat  # type: ignore[method-assign]
 
     task = asyncio.create_task(svc.run_goal_now(g.id))
-    await asyncio.sleep(0.01)  # let run_goal_now start and add to running set
+    await asyncio.sleep(0.01)
 
     with pytest.raises(ValueError, match="in progress"):
-        await svc.run_goal_now(g.id)
+        await svc.run_goal_now(g.id)  # no user_message — no-op trigger
 
     proceed.set()
     await task
+
+
+# ── Mid-run user message queueing ─────────────────────────────────
+
+
+async def test_user_message_during_run_is_queued_and_triggers_followup(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Make the first chat block until we release it
+    proceed = asyncio.Event()
+    original = ai.chat
+    chat_count = 0
+
+    async def slow_first_then_normal(*args: Any, **kwargs: Any) -> Any:
+        nonlocal chat_count
+        chat_count += 1
+        if chat_count == 1:
+            await proceed.wait()
+        return await original(*args, **kwargs)
+
+    ai.chat = slow_first_then_normal  # type: ignore[method-assign]
+
+    # Start the first run (background) — it'll block on `proceed`
+    first_run_task = asyncio.create_task(svc.run_goal_now(g.id))
+    await asyncio.sleep(0.02)
+
+    # Send a user message mid-run — should be queued, not raise
+    queued_run = await svc.run_goal_now(g.id, user_message="add international flights")
+    assert queued_run.id == "queued"
+
+    # Release the first run, let everything settle
+    proceed.set()
+    await first_run_task
+    # Give the auto-fired follow-up time to complete
+    await asyncio.sleep(0.05)
+
+    # Two chat() calls should have happened: original + follow-up
+    assert chat_count == 2
+    # The follow-up should have used the queued user message
+    assert any(
+        c.get("user_message") == "add international flights" for c in ai.calls
+    )
+
+    # Pending queue is drained
+    assert g.id not in svc._pending_user_messages or not svc._pending_user_messages[g.id]

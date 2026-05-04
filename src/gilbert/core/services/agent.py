@@ -102,6 +102,10 @@ class AutonomousAgentService(Service):
         self._running_goals: set[str] = set()
         """In-progress goal IDs to skip duplicate trigger fires."""
 
+        self._pending_user_messages: dict[str, list[str]] = {}
+        """goal_id → list of user messages received while a run was in flight,
+        to be processed when the current run completes."""
+
         self._observed_event_types: set[str] = set()
         """Event types seen on the bus since process start. Populated by
         a wildcard subscription registered in start()."""
@@ -330,7 +334,14 @@ class AutonomousAgentService(Service):
     ) -> Run:
         """Execute a goal once (manual trigger). Persists a Run entity
         and returns it. Raises ValueError if the goal is in a non-runnable
-        state or if a run is already in flight for this goal.
+        state.
+
+        Mid-run behaviour: if a run is already in flight AND a user_message
+        is provided, the message is persisted into the conversation immediately
+        (so the UI shows it) and queued for a follow-up run that fires
+        automatically when the current run completes. A synthetic stub Run
+        with id="queued" is returned. Calling without a user_message while
+        a run is in flight still raises ValueError (no-op trigger).
         """
         if self._storage is None or self._ai is None:
             raise RuntimeError("not started")
@@ -341,10 +352,27 @@ class AutonomousAgentService(Service):
             raise ValueError(f"goal {goal_id} is completed")
         if goal.status == GoalStatus.DISABLED:
             raise ValueError(f"goal {goal_id} is disabled")
+
+        # Mid-run user message: persist as a user-role message in the
+        # conversation immediately so the UI shows it, queue for the
+        # next run, and bail out (current run remains the active one).
         if goal_id in self._running_goals:
+            if user_message:
+                await self._append_user_message_to_conversation(goal, user_message)
+                self._pending_user_messages.setdefault(goal_id, []).append(user_message)
+                # Return a synthetic stub run reflecting the queued state
+                return Run(
+                    id="queued",
+                    goal_id=goal_id,
+                    triggered_by="user_message",
+                    started_at=datetime.now(UTC),
+                    status=RunStatus.RUNNING,
+                    conversation_id=goal.conversation_id or "",
+                )
             raise ValueError(
                 f"goal {goal_id} has a run in progress; wait for it to finish"
             )
+
         # Mark as running before entering _run_goal_internal so that
         # any concurrent call (another manual trigger, an event firing
         # mid-run) sees the in-progress flag and refuses.
@@ -357,11 +385,101 @@ class AutonomousAgentService(Service):
             # cancel from inside the loop). Without this, an interrupted
             # run leaves a half-finished conversation and a misleading
             # "completed" Run entity.
-            return await asyncio.shield(
+            run = await asyncio.shield(
                 self._run_goal_internal(goal_id, "manual", {"user_message": user_message})
             )
         finally:
             self._running_goals.discard(goal_id)
+
+        # Drain any user messages queued mid-run and auto-fire a follow-up.
+        # This happens AFTER _running_goals is cleared so the follow-up can
+        # re-enter the guard without conflict.
+        self._drain_and_follow_up(goal_id)
+        return run
+
+    def _drain_and_follow_up(self, goal_id: str) -> None:
+        """Drain any user messages queued while goal_id was running and
+        spawn a follow-up run if there are any. Must be called AFTER
+        goal_id has been removed from _running_goals.
+        """
+        pending = self._pending_user_messages.pop(goal_id, [])
+        if not pending:
+            return
+        combined = "\n\n".join(pending)
+
+        async def _follow_up() -> None:
+            if goal_id in self._running_goals:
+                # Another trigger raced us; skip.
+                return
+            self._running_goals.add(goal_id)
+            try:
+                await self._run_goal_internal(
+                    goal_id, "user_message", {"user_message": combined}
+                )
+            finally:
+                self._running_goals.discard(goal_id)
+
+        asyncio.create_task(_follow_up())
+
+    async def _append_user_message_to_conversation(
+        self,
+        goal: Goal,
+        user_message: str,
+    ) -> None:
+        """Write a user-role message into the goal's conversation
+        immediately so the chat UI surfaces it. Best-effort: if the
+        conversation doesn't exist yet (first-run stateful goal), skip.
+        Stateless goals: the conversation_id might be missing too —
+        in that case we still skip; the queued message will be picked
+        up by the next run with the user_message override.
+        """
+        if self._storage is None:
+            return
+        conv_id = goal.conversation_id
+        if not conv_id:
+            # Can't persist — no conversation exists. The pending queue
+            # still carries the message, and it'll appear on next run.
+            return
+        raw = await self._storage.get("ai_conversations", conv_id)
+        if raw is None:
+            return
+        msgs = raw.get("messages") or []
+        msgs.append(
+            {
+                "role": "user",
+                "content": user_message,
+                "tool_calls": [],
+                "tool_results": [],
+                "author_id": goal.owner_user_id,
+                "author_name": "",
+                "visible_to": None,
+                "attachments": [],
+                "interrupted": False,
+                "usage": None,
+            }
+        )
+        raw["messages"] = msgs
+        raw["updated_at"] = datetime.now(UTC).isoformat()
+        await self._storage.put("ai_conversations", conv_id, raw)
+        # Publish a chat.message.created event so the frontend can
+        # invalidate / refresh.
+        try:
+            await self._event_bus.publish(
+                Event(
+                    event_type="chat.message.created",
+                    data={
+                        "conversation_id": conv_id,
+                        "user_id": goal.owner_user_id,
+                        "visible_to": [goal.owner_user_id],
+                    },
+                    source="autonomous_agent",
+                    timestamp=datetime.now(UTC),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "failed to publish chat.message.created for goal %s", goal.id
+            )
 
     async def declare_goal_complete(
         self,
@@ -1021,6 +1139,9 @@ class AutonomousAgentService(Service):
                 await self._run_goal_internal(goal_id, triggered_by, trigger_context)
             finally:
                 self._running_goals.discard(goal_id)
+            # Drain any mid-run user messages after the goal is no longer
+            # flagged as running so a follow-up can re-enter cleanly.
+            self._drain_and_follow_up(goal_id)
 
         import asyncio
 
