@@ -158,9 +158,12 @@ class _FakeAIService:
                 "ai_profile": ai_profile,
             }
         )
+        # Echo back the conversation_id we received (or generate one if
+        # the caller passed None — matches AIService behavior).
+        echoed_conv_id = conversation_id or self.conversation_id
         return ChatTurnResult(
             response_text=self.response_text,
-            conversation_id=self.conversation_id,
+            conversation_id=echoed_conv_id,
             ui_blocks=[],
             tool_usage=[],
             attachments=[],
@@ -296,7 +299,7 @@ async def test_run_goal_now_invokes_ai_chat_with_correct_args(
     assert run.goal_id == g.id
     assert run.status == RunStatus.COMPLETED
     assert run.final_message_text == "done"
-    assert run.conversation_id == "conv-fake"
+    assert run.conversation_id != ""  # pre-allocated before chat() call
     assert run.tokens_in == 50
     assert run.tokens_out == 20
     assert run.error is None
@@ -310,6 +313,8 @@ async def test_run_goal_now_invokes_ai_chat_with_correct_args(
     assert call["ai_call"] == "agent.run"
     # The user_message includes the goal instruction
     assert "Investigate the topic" in call["user_message"]
+    # chat() received the pre-allocated conversation_id (not None)
+    assert call["conversation_id"] == run.conversation_id
 
 
 async def test_run_goal_now_updates_goal_run_count_and_last_run(
@@ -1029,12 +1034,14 @@ async def test_first_run_captures_new_conversation_id_on_goal(
     )
     assert g.conversation_id == ""
 
-    # First run: chat() returns conversation_id "conv-fake"
-    await svc.run_goal_now(g.id)
+    # First run: agent pre-allocates a uuid and chat() echoes it back.
+    run = await svc.run_goal_now(g.id)
 
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
-    assert fetched.conversation_id == "conv-fake"
+    # The goal's conversation_id must be captured from the run
+    assert fetched.conversation_id != ""
+    assert fetched.conversation_id == run.conversation_id
 
 
 async def test_subsequent_runs_reuse_goal_conversation_id(
@@ -1045,13 +1052,16 @@ async def test_subsequent_runs_reuse_goal_conversation_id(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
 
-    await svc.run_goal_now(g.id)
-    # First call passed conversation_id=None
-    assert ai.calls[-1]["conversation_id"] is None
+    run1 = await svc.run_goal_now(g.id)
+    # First call passed the pre-allocated uuid (not None)
+    assert ai.calls[-1]["conversation_id"] == run1.conversation_id
 
-    await svc.run_goal_now(g.id)
-    # Second call passes the captured conversation_id
-    assert ai.calls[-1]["conversation_id"] == "conv-fake"
+    run2 = await svc.run_goal_now(g.id)
+    # Second call reuses the goal's captured conversation_id (same as run1's)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert ai.calls[-1]["conversation_id"] == fetched.conversation_id
+    assert run2.conversation_id == fetched.conversation_id
 
 
 # ── author_instruction tests ──────────────────────────────────────
@@ -1688,15 +1698,18 @@ async def test_stateless_goal_uses_fresh_conversation_per_run(
     )
     assert g.stateless is True
 
-    await svc.run_goal_now(g.id)
-    # First call had no conversation_id (fresh)
-    assert ai.calls[-1]["conversation_id"] is None
+    run1 = await svc.run_goal_now(g.id)
+    # First call got a fresh pre-allocated uuid (not None)
+    assert ai.calls[-1]["conversation_id"] is not None
+    assert ai.calls[-1]["conversation_id"] == run1.conversation_id
 
-    await svc.run_goal_now(g.id)
-    # Second call ALSO had no conversation_id (still fresh)
-    assert ai.calls[-1]["conversation_id"] is None
+    run2 = await svc.run_goal_now(g.id)
+    # Second call ALSO got a fresh uuid, different from run 1
+    assert ai.calls[-1]["conversation_id"] is not None
+    assert ai.calls[-1]["conversation_id"] == run2.conversation_id
+    assert run1.conversation_id != run2.conversation_id
 
-    # Goal's conversation_id is never captured
+    # Goal's conversation_id is never captured (stateless)
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
     assert fetched.conversation_id == ""
@@ -1716,11 +1729,18 @@ async def test_stateful_goal_default_reuses_conversation(
     )
     assert g.stateless is False
 
+    run1 = await svc.run_goal_now(g.id)
+    # First run: agent pre-allocated a uuid and passed it to chat()
+    first_conv_id = ai.calls[-1]["conversation_id"]
+    assert first_conv_id is not None
+    assert first_conv_id == run1.conversation_id
+
     await svc.run_goal_now(g.id)
-    assert ai.calls[-1]["conversation_id"] is None  # first run, no prior conv
-    await svc.run_goal_now(g.id)
-    # Second call reuses captured conversation_id
-    assert ai.calls[-1]["conversation_id"] == "conv-fake"
+    # Second run reuses the goal's captured conversation_id (same as run1's)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert ai.calls[-1]["conversation_id"] == fetched.conversation_id
+    assert ai.calls[-1]["conversation_id"] == first_conv_id
 
 
 async def test_run_lifecycle_events_published(
@@ -1748,3 +1768,86 @@ async def test_run_lifecycle_events_published(
     assert c.data["goal_id"] == g.id
     assert c.data["status"] == "completed"
     assert c.data["run_id"] == s.data["run_id"]
+
+
+# ── Conversation_id pre-allocation tests ──────────────────────────
+
+
+async def test_run_has_conversation_id_immediately_for_stateful_first_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """A first run on a stateful goal must have run.conversation_id
+    populated as soon as the Run entity is persisted (before chat()
+    returns), so the UI can deep-link to the in-progress conversation.
+    """
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    # The fake AIService echoes back the conversation_id it receives;
+    # we want to confirm the conversation_id was non-empty when chat() was invoked.
+    captured: list[str | None] = []
+    original = ai.chat
+
+    async def chat_capturing_conv_id(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs.get("conversation_id"))
+        return await original(*args, **kwargs)
+
+    ai.chat = chat_capturing_conv_id  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+
+    assert run.conversation_id != ""
+    # chat() received the pre-allocated id (not None)
+    assert len(captured) == 1
+    assert captured[0] is not None
+    assert captured[0] == run.conversation_id
+
+    # The goal's conversation_id was captured to match (stateful first run)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == run.conversation_id
+
+
+async def test_stateful_subsequent_runs_reuse_goal_conversation_id(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    run1 = await svc.run_goal_now(g.id)
+    # Goal now has a captured conversation_id
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == run1.conversation_id
+
+    run2 = await svc.run_goal_now(g.id)
+    # Second run reuses the goal's conversation_id
+    assert run2.conversation_id == fetched.conversation_id
+
+
+async def test_stateless_runs_get_distinct_conversation_ids(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        stateless=True,
+    )
+
+    run1 = await svc.run_goal_now(g.id)
+    run2 = await svc.run_goal_now(g.id)
+
+    assert run1.conversation_id != ""
+    assert run2.conversation_id != ""
+    assert run1.conversation_id != run2.conversation_id
+
+    # Goal's conversation_id stays empty (stateless)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == ""

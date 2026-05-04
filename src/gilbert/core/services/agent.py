@@ -1017,12 +1017,24 @@ class AutonomousAgentService(Service):
                 status=RunStatus.FAILED,
                 error="goal not in ENABLED state at run-start time",
             )
+        # Decide the conversation_id this run will use upfront so the UI
+        # can deep-link to the live conversation as soon as the run is
+        # listed. Without this, in-progress runs have an empty
+        # conversation_id and the UI has nowhere to navigate.
+        if goal.stateless:
+            run_conv_id = str(uuid.uuid4())
+        elif goal.conversation_id:
+            run_conv_id = goal.conversation_id
+        else:
+            run_conv_id = str(uuid.uuid4())
+
         run = Run(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
             triggered_by=triggered_by,
             started_at=datetime.now(UTC),
             status=RunStatus.RUNNING,
+            conversation_id=run_conv_id,
         )
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
         await self._event_bus.publish(
@@ -1047,8 +1059,6 @@ class AutonomousAgentService(Service):
         result = None
         try:
             user_message = self._build_initial_user_message(goal)
-            # Stateless goals never reuse a prior conversation.
-            existing_conv = None if goal.stateless else (goal.conversation_id or None)
             max_wall_clock_s = (
                 goal.max_wall_clock_s_override
                 if goal.max_wall_clock_s_override is not None
@@ -1058,7 +1068,7 @@ class AutonomousAgentService(Service):
                 result = await asyncio.wait_for(
                     self._ai.chat(
                         user_message=user_message,
-                        conversation_id=existing_conv,
+                        conversation_id=run_conv_id,
                         user_ctx=None,
                         ai_call=_AI_CALL_NAME,
                         ai_profile=goal.profile_id,
@@ -1113,7 +1123,11 @@ class AutonomousAgentService(Service):
                 )
                 return run
             run.final_message_text = result.response_text
-            run.conversation_id = result.conversation_id
+            # Sanity check: chat() should have used the id we passed.
+            # If not, prefer what chat() actually wrote to the conversation
+            # store (we want the id that has the messages).
+            if result.conversation_id and result.conversation_id != run.conversation_id:
+                run.conversation_id = result.conversation_id
             if result.turn_usage:
                 run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
                 run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
