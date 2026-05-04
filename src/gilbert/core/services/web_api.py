@@ -82,7 +82,7 @@ class WebApiService(Service):
             {
                 "key": "agents",
                 "label": "Agents",
-                "description": "Autonomous agent goals",
+                "description": "Autonomous agents — chat-style view per goal",
                 "url": "/agents",
                 "icon": "sparkles",
                 "required_role": "user",
