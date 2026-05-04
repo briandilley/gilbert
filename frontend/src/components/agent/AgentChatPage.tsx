@@ -133,6 +133,12 @@ function GoalSidebarRow({ goal, selected, onSelect }: GoalSidebarRowProps) {
     }
   };
 
+  const handleReenable = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await api.updateGoal(goal.id, { status: "enabled" });
+    queryClient.invalidateQueries({ queryKey: ["agent"] });
+  };
+
   return (
     <button
       type="button"
@@ -147,20 +153,36 @@ function GoalSidebarRow({ goal, selected, onSelect }: GoalSidebarRowProps) {
           aria-label={goal.status}
         />
         <span className="font-medium text-sm flex-1 truncate">{goal.name}</span>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={handleRun}
-          disabled={running || goal.status !== "enabled"}
-          className="h-6 w-6"
-          title="Run now"
-        >
-          {running ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <PlayIcon className="size-3.5" />
-          )}
-        </Button>
+        {goal.status === "completed" ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={handleReenable}
+            className="h-6 w-6"
+            title="Re-enable (clears completion)"
+          >
+            <ZapIcon className="size-3.5" />
+          </Button>
+        ) : (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={handleRun}
+            disabled={running || goal.status !== "enabled"}
+            className="h-6 w-6"
+            title={
+              goal.status === "disabled"
+                ? "Goal is disabled — open settings to re-enable"
+                : "Run now"
+            }
+          >
+            {running ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <PlayIcon className="size-3.5" />
+            )}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon-sm"

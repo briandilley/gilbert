@@ -274,6 +274,15 @@ class AutonomousAgentService(Service):
         if profile_id is not None:
             goal.profile_id = profile_id
         if status is not None:
+            # Re-enabling a previously-COMPLETED goal: clear the completion
+            # markers so the agent doesn't see lingering state and the UI
+            # reflects a clean restart.
+            if (
+                status == GoalStatus.ENABLED
+                and goal.status == GoalStatus.COMPLETED
+            ):
+                goal.completed_at = None
+                goal.completed_reason = None
             goal.status = status
         if trigger_type is not None:
             goal.trigger_type = trigger_type
@@ -344,31 +353,32 @@ class AutonomousAgentService(Service):
         run_id: str,
         reason: str,
     ) -> bool:
-        """Mark a goal as COMPLETED. Idempotent — returns False if already
-        completed. ``run_id`` is currently informational; future versions
-        may validate it against an active run.
+        """Mark THIS RUN as having met its success criteria.
+
+        Goals are reusable — ``complete_goal`` is per-run, not per-goal.
+        Running it does not disable the goal or block future runs; it
+        only flags the active run with ``complete_goal_called=True`` and
+        records the model's stated reason. Returns True if the run was
+        flagged, False if no active run was found for the goal_id.
         """
         if self._storage is None:
             raise RuntimeError("not started")
-        raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
-        if raw is None:
+        # No-op if the goal doesn't exist (defensive)
+        goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        if goal_raw is None:
             return False
-        goal = _goal_from_dict(raw)
-        if goal.status == GoalStatus.COMPLETED:
-            return False
-        goal.status = GoalStatus.COMPLETED
-        goal.completed_at = datetime.now(UTC)
-        goal.completed_reason = reason
-        goal.updated_at = goal.completed_at
-        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
-        await self._disarm_trigger(goal)
 
-        # Mark the most-recent run as having declared completion
+        # Mark the active run for this goal as having declared completion.
+        if not run_id:
+            return False
         run_raw = await self._storage.get(_RUN_COLLECTION, run_id)
-        if run_raw is not None:
-            run_raw["complete_goal_called"] = True
-            run_raw["complete_reason"] = reason
-            await self._storage.put(_RUN_COLLECTION, run_id, run_raw)
+        if run_raw is None:
+            return False
+        if run_raw.get("complete_goal_called"):
+            return False  # already flagged on this run; first reason wins
+        run_raw["complete_goal_called"] = True
+        run_raw["complete_reason"] = reason
+        await self._storage.put(_RUN_COLLECTION, run_id, run_raw)
         return True
 
     # ── ToolProvider implementation ───────────────────────────────
@@ -389,8 +399,15 @@ class AutonomousAgentService(Service):
         run_id = self._active_runs.get(goal_id, "")
         ok = await self.declare_goal_complete(goal_id, run_id=run_id, reason=reason)
         if ok:
-            return f"goal {goal_id} marked complete: {reason}"
-        return f"goal {goal_id} was already completed (no-op)"
+            return (
+                f"run for goal {goal_id} marked as having met its success "
+                f"criteria: {reason}. The goal remains enabled and may run "
+                f"again on its next trigger or manual invocation."
+            )
+        return (
+            f"could not flag run completion for goal {goal_id} "
+            f"(no active run, or already flagged earlier this run)"
+        )
 
     # ── WS handlers ───────────────────────────────────────────────
 
@@ -1189,29 +1206,25 @@ class AutonomousAgentService(Service):
 
         run.ended_at = datetime.now(UTC)
 
-        # Re-read the goal from storage in case ``declare_goal_complete``
-        # mutated it mid-run (the complete_goal tool flips status to
-        # COMPLETED). Without this re-read, the local ``goal`` variable
-        # holds the pre-run state and we'd clobber the COMPLETED status
-        # when persisting counter updates below.
+        # Re-read the goal from storage in case it was edited mid-run
+        # (e.g. user toggled status via WS RPC). Counter updates below
+        # write to fresh_goal so concurrent edits don't get clobbered.
+        # complete_goal flagging happens directly on the Run entity
+        # inside declare_goal_complete — no goal-level mirroring needed.
+        # Reload the run too so we pick up complete_goal_called/reason
+        # written by the tool during the chat call.
         fresh_goal_raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
         if fresh_goal_raw is not None:
             fresh_goal = _goal_from_dict(fresh_goal_raw)
         else:
             fresh_goal = goal
 
-        # Mirror declare_goal_complete state onto the run if it was set
-        # via the tool during this run. ``declare_goal_complete`` already
-        # set run.complete_goal_called via the run_id we registered in
-        # _active_runs, but if the goal was completed by some other path,
-        # this catches it.
-        if (
-            fresh_goal.status == GoalStatus.COMPLETED
-            and fresh_goal.completed_reason
-            and not run.complete_goal_called
-        ):
-            run.complete_goal_called = True
-            run.complete_reason = fresh_goal.completed_reason
+        run_raw_after = await self._storage.get(_RUN_COLLECTION, run.id)
+        if run_raw_after is not None:
+            run.complete_goal_called = bool(
+                run_raw_after.get("complete_goal_called", False)
+            )
+            run.complete_reason = run_raw_after.get("complete_reason")
 
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
 
@@ -1286,9 +1299,9 @@ class AutonomousAgentService(Service):
 
             <instruction>
 
-            Take whatever action is appropriate to advance this goal. When
-            you have fully completed the goal — for good — call the
-            ``complete_goal`` tool with the goal_id and a short reason.
+            Take whatever action is appropriate. When THIS RUN has met
+            the goal's success criteria, call ``complete_goal`` with the
+            goal_id and a short reason.
         """
         return (
             f"You are an autonomous agent running a goal on behalf of user "
@@ -1296,9 +1309,11 @@ class AutonomousAgentService(Service):
             f"Goal instruction:\n\n"
             f"{goal.instruction}\n\n"
             f"Take whatever action is appropriate to advance this goal. "
-            f"When you have fully completed the goal — for good — call the "
+            f"When THIS RUN has met the goal's success criteria, call the "
             f"``complete_goal`` tool with goal_id={goal.id!r} and a short "
-            f"reason. (The reason is logged on the run for the human owner.)"
+            f"reason. The goal stays enabled and may run again later — "
+            f"calling complete_goal records that this particular run "
+            f"succeeded, it does not retire the goal."
         )
 
     async def _notify_cost_cap_exceeded(self, goal: Goal) -> None:
@@ -1431,23 +1446,26 @@ def _run_from_dict(d: dict[str, Any]) -> Run:
 _COMPLETE_GOAL_TOOL = ToolDefinition(
     name="complete_goal",
     description=(
-        "Mark an autonomous-agent goal as fully and permanently complete. "
-        "Call this only when the goal has been fully achieved and no future "
-        "runs of it are needed. The goal will stop accepting new runs after "
-        "this call."
+        "Mark THIS RUN as having met the goal's success criteria. The "
+        "goal itself remains enabled and may run again on its next "
+        "trigger or manual invocation — this tool flags the current run, "
+        "not the goal. Call it once when you've finished delivering "
+        "what the goal asked for, with a short reason describing what "
+        "you accomplished."
     ),
     parameters=[
         ToolParameter(
             name="goal_id",
             type=ToolParameterType.STRING,
-            description="The goal id to mark complete.",
+            description="The goal id this run belongs to.",
         ),
         ToolParameter(
             name="reason",
             type=ToolParameterType.STRING,
             description=(
-                "A short human-readable explanation of why you consider the "
-                "goal complete. Surfaced to the goal's owner."
+                "A short human-readable explanation of what this run "
+                "accomplished. Surfaced to the goal's owner in the run "
+                "history."
             ),
         ),
     ],

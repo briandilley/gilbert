@@ -99,7 +99,9 @@ export function AgentDetailPage() {
   };
 
   const handleToggle = async () => {
-    if (goal.status === "completed") return;
+    // From any state, the toggle's job is to flip toward ENABLED unless
+    // already enabled. Re-enabling a COMPLETED goal also clears its
+    // completion markers (handled server-side).
     const next: GoalStatus = goal.status === "enabled" ? "disabled" : "enabled";
     await api.updateGoal(goal.id, { status: next });
     refresh();
@@ -157,11 +159,14 @@ export function AgentDetailPage() {
             variant="outline"
             size="sm"
             onClick={handleToggle}
-            disabled={goal.status === "completed"}
           >
             {goal.status === "enabled" ? (
               <>
                 <PauseIcon className="size-4 mr-1" /> Disable
+              </>
+            ) : goal.status === "completed" ? (
+              <>
+                <ZapIcon className="size-4 mr-1" /> Re-enable
               </>
             ) : (
               <>

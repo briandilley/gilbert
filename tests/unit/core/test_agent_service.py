@@ -384,9 +384,12 @@ async def test_run_goal_now_rejects_disabled_goal(
 # ── complete_goal tool tests ──────────────────────────────────────
 
 
-async def test_declare_goal_complete_marks_goal_completed(
+async def test_declare_goal_complete_flags_run_not_goal(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
+    """Calling declare_goal_complete flags THIS RUN with the reason but
+    leaves the goal's status untouched — goals are reusable.
+    """
     svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
@@ -400,16 +403,24 @@ async def test_declare_goal_complete_marks_goal_completed(
     )
     assert ok is True
 
+    # The run is flagged
+    run_raw = await svc._storage.get("agent_runs", run.id)
+    assert run_raw is not None
+    assert run_raw["complete_goal_called"] is True
+    assert run_raw["complete_reason"] == "found and chased all overdue invoices"
+
+    # The goal is UNTOUCHED — still ENABLED, still runnable
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
-    assert fetched.status == GoalStatus.COMPLETED
-    assert fetched.completed_at is not None
-    assert fetched.completed_reason == "found and chased all overdue invoices"
+    assert fetched.status == GoalStatus.ENABLED
+    assert fetched.completed_at is None
+    assert fetched.completed_reason is None
 
 
-async def test_declare_goal_complete_idempotent(
+async def test_declare_goal_complete_idempotent_on_same_run(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
+    """First call wins; second call on the same run returns False."""
     svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
@@ -419,11 +430,11 @@ async def test_declare_goal_complete_idempotent(
     ok1 = await svc.declare_goal_complete(g.id, run.id, "first")
     ok2 = await svc.declare_goal_complete(g.id, run.id, "second")
     assert ok1 is True
-    assert ok2 is False  # already completed; second call is a no-op
+    assert ok2 is False
 
-    fetched = await svc.get_goal(g.id)
-    assert fetched is not None
-    assert fetched.completed_reason == "first"  # first wins
+    run_raw = await svc._storage.get("agent_runs", run.id)
+    assert run_raw is not None
+    assert run_raw["complete_reason"] == "first"  # first wins
 
 
 async def test_complete_goal_tool_definition_exposed(
@@ -443,22 +454,26 @@ async def test_complete_goal_tool_definition_exposed(
 async def test_complete_goal_tool_executes(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
 ) -> None:
+    """The tool flags the active run when one is registered. Without an
+    active run (called outside _run_goal_internal), it returns an
+    informational error string and doesn't touch any state.
+    """
     svc, _ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
 
+    # No active run registered — tool reports it can't flag anything
     result = await svc.execute_tool(
         "complete_goal",
         {"goal_id": g.id, "reason": "all done"},
     )
-    # The tool returns a status string the AI sees as a tool result
-    assert "complete" in result.lower() or "ok" in result.lower()
+    assert "could not flag" in result.lower() or "no active run" in result.lower()
 
+    # Goal is untouched — still ENABLED
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
-    assert fetched.status == GoalStatus.COMPLETED
-    assert fetched.completed_reason == "all done"
+    assert fetched.status == GoalStatus.ENABLED
 
 
 # ── WS RPC tests ──────────────────────────────────────────────────
@@ -1412,26 +1427,22 @@ async def test_interrupted_chat_marks_run_failed_not_completed(
 # ── Goal-status persistence across complete_goal tool calls ───────
 
 
-async def test_complete_goal_tool_persists_goal_status_after_run(
+async def test_complete_goal_tool_does_not_change_goal_status(
     service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
 ) -> None:
-    """When the agent calls complete_goal mid-run, the resulting
-    COMPLETED status must survive the run's end-of-loop counter update.
-    Previously the run loop re-wrote the goal from a stale local copy,
-    clobbering the COMPLETED status back to ENABLED.
+    """``complete_goal`` is per-run — calling it during a chat must NOT
+    change the goal's status. Goals are reusable; only the run gets
+    flagged. Verifies the new semantics (the old behavior auto-disabled
+    the goal, which trapped users with single-use goals).
     """
     svc, ai, _bus, _scheduler = service
     g = await svc.create_goal(
         owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
     )
 
-    # Make the fake chat call invoke the complete_goal tool mid-run via
-    # the service's own execute_tool path — this mirrors how real chat()
-    # would dispatch a model-emitted tool call.
     from gilbert.interfaces.ai import ChatTurnResult
 
     async def chat_that_completes_goal(*args: Any, **kwargs: Any) -> ChatTurnResult:
-        # Simulate the agent's chat run: invoke complete_goal during it.
         await svc.execute_tool(
             "complete_goal",
             {"goal_id": g.id, "reason": "all done"},
@@ -1451,18 +1462,21 @@ async def test_complete_goal_tool_persists_goal_status_after_run(
     ai.chat = chat_that_completes_goal  # type: ignore[method-assign]
 
     run = await svc.run_goal_now(g.id)
-
-    # The run completed normally
     assert run.status == RunStatus.COMPLETED
+    assert run.complete_goal_called is True
+    assert run.complete_reason == "all done"
 
-    # Goal status MUST be COMPLETED, not clobbered back to ENABLED
+    # Goal stays ENABLED — re-runnable
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
-    assert fetched.status == GoalStatus.COMPLETED
-    assert fetched.completed_reason == "all done"
-    assert fetched.completed_at is not None
-    # Counter updates still happened
+    assert fetched.status == GoalStatus.ENABLED
+    assert fetched.completed_at is None
+    assert fetched.completed_reason is None
     assert fetched.run_count == 1
+
+    # Confirm we can run it again
+    run2 = await svc.run_goal_now(g.id)
+    assert run2.status == RunStatus.COMPLETED
 
 
 async def test_complete_goal_tool_flags_active_run(
