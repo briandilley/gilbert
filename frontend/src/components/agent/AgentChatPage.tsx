@@ -211,7 +211,22 @@ interface GoalChatPanelProps {
 
 function GoalChatPanel({ goal }: GoalChatPanelProps) {
   const api = useWsApi();
-  const conversationId = goal.conversation_id;
+
+  // Fetch runs so we can fall back to the most recent run's
+  // conversation_id when goal.conversation_id is empty (stateless goals
+  // never capture a single conversation on the goal; first-run stateful
+  // goals only capture after success).
+  const { data: runsResp } = useQuery({
+    queryKey: ["agent", "runs", goal.id, goal.run_count],
+    queryFn: () => api.listAgentRuns(goal.id, 50),
+    enabled: !!goal.id,
+  });
+
+  const runs = runsResp?.ok && runsResp.runs ? runsResp.runs : [];
+  // Most recent run with a conversation_id (runs are returned newest-first)
+  const fallbackConvId =
+    runs.find((r) => !!r.conversation_id)?.conversation_id ?? "";
+  const conversationId = goal.conversation_id || fallbackConvId;
 
   const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
     queryKey: ["agent-conv", conversationId, goal.run_count],
