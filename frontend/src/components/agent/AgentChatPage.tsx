@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/sheet";
 import { CreateGoalDialog } from "@/components/agent/AgentsPage";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { AttachmentChip } from "@/components/chat/TurnBubble";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type { GilbertEvent } from "@/types/events";
 import type {
@@ -718,13 +719,23 @@ function FlatTurnBlock({ turn, streaming }: FlatTurnBlockProps) {
         <FlatRoundBlock key={ri} round={round} />
       ))}
 
-      {/* Final assistant response */}
-      {turn.final_content && (
-        <div className="px-3 py-2 border-l-2 border-muted">
+      {/* Final assistant response — text + any attachments aggregated
+          from tool results (screenshots, generated PDFs, etc.) */}
+      {(turn.final_content || (turn.final_attachments?.length ?? 0) > 0) && (
+        <div className="px-3 py-2 border-l-2 border-muted space-y-2">
           <div className="text-xs font-medium text-muted-foreground mb-1">
             assistant
           </div>
-          <MarkdownContent content={turn.final_content} />
+          {turn.final_attachments && turn.final_attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {turn.final_attachments.map((att, idx) => (
+                <AttachmentChip key={idx} attachment={att} index={idx} />
+              ))}
+            </div>
+          )}
+          {turn.final_content && (
+            <MarkdownContent content={turn.final_content} />
+          )}
         </div>
       )}
 

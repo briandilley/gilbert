@@ -557,7 +557,7 @@ function sumTurnUsage(turn: ChatTurn) {
 
 // ─── Attachment chip (shared between user and assistant) ─────────────
 
-function AttachmentChip({
+export function AttachmentChip({
   attachment,
   index,
 }: {
