@@ -91,12 +91,47 @@ export function NotificationBell() {
     queryKey: ["notifications", "recent"],
     queryFn: () => api.listNotifications(undefined, 10),
     enabled: connected,
-    refetchInterval: 60_000, // light polling backup if events miss
+    // Aggressive polling so even if events are missed entirely (filter
+    // bug, dropped frame, whatever), urgent notifications surface
+    // within a few seconds.
+    refetchInterval: 5_000,
   });
 
-  // Live update on new notifications
+  const showToastFor = useCallback(
+    (n: {
+      id?: string;
+      message?: string;
+      source?: string;
+      source_ref?: { goal_id?: string } | null;
+    }) => {
+      const toast: UrgentToast = {
+        id: n.id || String(Date.now()),
+        message: n.message || "Agent needs your attention",
+        goalId: n.source_ref?.goal_id,
+        source: n.source || "system",
+      };
+      setUrgentToasts((prev) => {
+        // Don't duplicate by id
+        if (prev.some((t) => t.id === toast.id)) return prev;
+        const next = [...prev, toast];
+        return next.slice(-3);
+      });
+    },
+    [],
+  );
+
+  // Live update on new notifications via WS event (fast path).
   const handleNotificationEvent = useCallback(
     (event: GilbertEvent) => {
+      // Visible debug aid — open browser devtools and you should see
+      // these log lines whenever a notification.received event arrives.
+      // If you see nothing while a notification is created in the
+      // backend, the WS event delivery is broken (visibility filter,
+      // reconnect, etc.). If you see them but the UI doesn't react,
+      // it's a render bug here.
+      // eslint-disable-next-line no-console
+      console.debug("[NotificationBell] notification.received", event.data);
+
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
       const data = (event.data ?? {}) as {
         id?: string;
@@ -111,9 +146,7 @@ export function NotificationBell() {
       window.setTimeout(() => setBellPulse(false), 1500);
 
       if (data.urgency === "urgent") {
-        // Sound
         playUrgentDing();
-        // Title flash (longer for urgent)
         if (typeof document !== "undefined") {
           const original = document.title;
           document.title = "🔔 " + original;
@@ -121,23 +154,40 @@ export function NotificationBell() {
             document.title = original;
           }, 8000);
         }
-        // Persistent toast (until user dismisses or clicks through)
-        const toast: UrgentToast = {
-          id: data.id || String(Date.now()),
-          message: data.message || "Agent needs your attention",
-          goalId: data.source_ref?.goal_id,
-          source: data.source || "system",
-        };
-        setUrgentToasts((prev) => {
-          // Cap at 3 visible at once; older ones get dropped
-          const next = [...prev, toast];
-          return next.slice(-3);
-        });
+        showToastFor(data);
       }
     },
-    [queryClient],
+    [queryClient, showToastFor],
   );
   useEventBus("notification.received", handleNotificationEvent);
+
+  // Backstop: every poll cycle, surface unread URGENT notifications as
+  // toasts even if we never received a live event for them. The
+  // showToastFor function dedupes by id so the same notification
+  // doesn't keep popping up.
+  useEffect(() => {
+    const items = data?.items ?? [];
+    const unreadUrgent = items.filter(
+      (n) => n.urgency === "urgent" && !n.read,
+    );
+    if (unreadUrgent.length === 0) return;
+    let dingPlayed = false;
+    for (const n of unreadUrgent) {
+      // First-time show? Pulse + ding once per polling cycle.
+      const wasNew = !urgentToasts.some((t) => t.id === n.id);
+      if (wasNew && !dingPlayed) {
+        playUrgentDing();
+        setBellPulse(true);
+        window.setTimeout(() => setBellPulse(false), 1500);
+        dingPlayed = true;
+      }
+      showToastFor(n);
+    }
+    // We intentionally don't include urgentToasts in deps — that would
+    // cause re-runs on every toast change. The dedupe in showToastFor
+    // handles repeated calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, showToastFor]);
 
   const dismissToast = useCallback((id: string) => {
     setUrgentToasts((prev) => prev.filter((t) => t.id !== id));
