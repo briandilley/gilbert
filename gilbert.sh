@@ -212,8 +212,39 @@ case "$1" in
             echo "No PID file found — Gilbert may not be running"
         fi
         ;;
+    browser-doctor)
+        # Sanity-check the host for the browser plugin's runtime deps.
+        # Exit non-zero on any FAIL so CI / scripts can branch on it.
+        echo "browser-doctor: checking host for browser-plugin requirements"
+        FAIL=0
+        check() {
+            local label="$1"
+            local cmd="$2"
+            if eval "$cmd" >/dev/null 2>&1; then
+                echo "  PASS  $label"
+            else
+                echo "  FAIL  $label"
+                FAIL=1
+            fi
+        }
+        check "playwright python package"   "uv run python -c 'import playwright' 2>&1"
+        check "chromium browser binary"     "uv run python -c 'from playwright.sync_api import sync_playwright; sync_playwright().__enter__().chromium.executable_path'"
+        check "Xvfb (VNC live login)"       "command -v Xvfb"
+        check "x11vnc (VNC live login)"     "command -v x11vnc"
+        check "websockify (VNC live login)" "command -v websockify"
+        if [ "$FAIL" -ne 0 ]; then
+            echo
+            echo "One or more checks failed. Install hints:"
+            echo "  uv run playwright install chromium       # browser binary"
+            echo "  uv run playwright install-deps chromium  # OS shared libs (Linux, sudo)"
+            echo "  apt-get install xvfb x11vnc websockify   # VNC live-login extras"
+            exit 1
+        fi
+        echo
+        echo "All browser-plugin checks PASS."
+        ;;
     *)
-        echo "Usage: gilbert.sh {start|dev|build|stop}"
+        echo "Usage: gilbert.sh {start|dev|build|stop|browser-doctor}"
         exit 1
         ;;
 esac
