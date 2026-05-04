@@ -1670,3 +1670,81 @@ async def test_cost_cap_disables_goal_and_notifies(
     assert last.data["user_id"] == "u_alice"
     assert last.data["urgency"] == "urgent"
     assert "cost" in last.data["message"].lower()
+
+
+# ── Stateless mode tests ──────────────────────────────────────────
+
+
+async def test_stateless_goal_uses_fresh_conversation_per_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        stateless=True,
+    )
+    assert g.stateless is True
+
+    await svc.run_goal_now(g.id)
+    # First call had no conversation_id (fresh)
+    assert ai.calls[-1]["conversation_id"] is None
+
+    await svc.run_goal_now(g.id)
+    # Second call ALSO had no conversation_id (still fresh)
+    assert ai.calls[-1]["conversation_id"] is None
+
+    # Goal's conversation_id is never captured
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.conversation_id == ""
+
+
+async def test_stateful_goal_default_reuses_conversation(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """Default behavior (stateless=False) is the existing materialized
+    conversation flow."""
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+    )
+    assert g.stateless is False
+
+    await svc.run_goal_now(g.id)
+    assert ai.calls[-1]["conversation_id"] is None  # first run, no prior conv
+    await svc.run_goal_now(g.id)
+    # Second call reuses captured conversation_id
+    assert ai.calls[-1]["conversation_id"] == "conv-fake"
+
+
+async def test_run_lifecycle_events_published(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    await svc.run_goal_now(g.id)
+
+    started = [e for e in bus.published if e.event_type == "agent.run.started"]
+    completed = [e for e in bus.published if e.event_type == "agent.run.completed"]
+    assert len(started) == 1
+    assert len(completed) == 1
+
+    s = started[0]
+    assert s.data["goal_id"] == g.id
+    assert s.data["owner_user_id"] == "u_alice"
+    assert s.data["triggered_by"] == "manual"
+    assert s.source == "autonomous_agent"
+
+    c = completed[0]
+    assert c.data["goal_id"] == g.id
+    assert c.data["status"] == "completed"
+    assert c.data["run_id"] == s.data["run_id"]

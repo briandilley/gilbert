@@ -77,6 +77,13 @@ class Goal:
     """Cumulative cost across all runs of this goal, summed from
     ``ChatTurnResult.turn_usage['cost_usd']`` after each run."""
 
+    stateless: bool = False
+    """When True, every run starts a fresh conversation (no
+    materialization across runs). The goal's ``conversation_id`` is
+    never captured. Useful for heartbeat-style goals where each run is
+    genuinely independent and cross-run history would just balloon
+    token costs."""
+
 
 @dataclass
 class Run:
@@ -109,6 +116,7 @@ class AgentProvider(Protocol):
         name: str,
         instruction: str,
         profile_id: str,
+        stateless: bool = False,
     ) -> Goal: ...
 
     async def get_goal(self, goal_id: str) -> Goal | None: ...

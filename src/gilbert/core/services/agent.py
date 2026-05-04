@@ -17,7 +17,7 @@ from gilbert.interfaces.agent import (
     RunStatus,
 )
 from gilbert.interfaces.ai import AIProvider
-from gilbert.interfaces.events import EventBusProvider
+from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import (
     JobCallback,
     Schedule,
@@ -199,6 +199,7 @@ class AutonomousAgentService(Service):
         trigger_type: str | None = None,
         trigger_config: dict[str, Any] | None = None,
         cost_cap_usd: float | None = None,
+        stateless: bool = False,
     ) -> Goal:
         if self._storage is None:
             raise RuntimeError("AutonomousAgentService.start() not called")
@@ -215,6 +216,7 @@ class AutonomousAgentService(Service):
             trigger_type=trigger_type,
             trigger_config=trigger_config,
             cost_cap_usd=cost_cap_usd,
+            stateless=stateless,
         )
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         await self._arm_trigger(goal)
@@ -257,6 +259,7 @@ class AutonomousAgentService(Service):
         trigger_type: str | None = None,
         trigger_config: dict[str, Any] | None = None,
         cost_cap_usd: float | None = None,
+        stateless: bool | None = None,
     ) -> Goal | None:
         if self._storage is None:
             raise RuntimeError("not started")
@@ -278,6 +281,8 @@ class AutonomousAgentService(Service):
             goal.trigger_config = trigger_config
         if cost_cap_usd is not None:
             goal.cost_cap_usd = cost_cap_usd
+        if stateless is not None:
+            goal.stateless = stateless
         goal.updated_at = datetime.now(UTC)
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         # Re-arm: cheapest correct policy is always disarm then arm
@@ -434,6 +439,8 @@ class AutonomousAgentService(Service):
                 cost_cap_usd = float(cost_cap_usd_raw)
             except (TypeError, ValueError):
                 cost_cap_usd = None
+        stateless_raw = frame.get("stateless")
+        stateless = bool(stateless_raw) if stateless_raw is not None else False
         goal = await self.create_goal(
             owner_user_id=conn.user_ctx.user_id,
             name=name,
@@ -442,6 +449,7 @@ class AutonomousAgentService(Service):
             trigger_type=trigger_type,
             trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
             cost_cap_usd=cost_cap_usd,
+            stateless=stateless,
         )
         return {
             "type": "agent.goal.create.result",
@@ -504,6 +512,10 @@ class AutonomousAgentService(Service):
                 cost_cap_usd_update = float(cost_cap_usd_raw)
             except (TypeError, ValueError):
                 cost_cap_usd_update = None
+        stateless_raw = frame.get("stateless")
+        stateless_update: bool | None = None
+        if stateless_raw is not None:
+            stateless_update = bool(stateless_raw)
         updated = await self.update_goal(
             goal_id,
             name=frame.get("name"),
@@ -513,6 +525,7 @@ class AutonomousAgentService(Service):
             trigger_type=trigger_type if trigger_type in (None, "time", "event") else None,
             trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
             cost_cap_usd=cost_cap_usd_update,
+            stateless=stateless_update,
         )
         return {
             "type": "agent.goal.update.result",
@@ -1012,6 +1025,19 @@ class AutonomousAgentService(Service):
             status=RunStatus.RUNNING,
         )
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+        await self._event_bus.publish(
+            Event(
+                event_type="agent.run.started",
+                data={
+                    "goal_id": goal_id,
+                    "run_id": run.id,
+                    "owner_user_id": goal.owner_user_id,
+                    "triggered_by": triggered_by,
+                },
+                source="autonomous_agent",
+                timestamp=run.started_at,
+            )
+        )
 
         # Track the active run for this goal so the complete_goal tool
         # can flag the right Run entity (the tool dispatcher only gets
@@ -1021,9 +1047,8 @@ class AutonomousAgentService(Service):
         result = None
         try:
             user_message = self._build_initial_user_message(goal)
-            # Pass the goal's conversation_id (or None if it's the first run
-            # — chat() will create one and we capture it onto the goal below).
-            existing_conv = goal.conversation_id or None
+            # Stateless goals never reuse a prior conversation.
+            existing_conv = None if goal.stateless else (goal.conversation_id or None)
             max_wall_clock_s = (
                 goal.max_wall_clock_s_override
                 if goal.max_wall_clock_s_override is not None
@@ -1069,6 +1094,23 @@ class AutonomousAgentService(Service):
                     _GOAL_COLLECTION, fresh_goal.id, _goal_to_dict(fresh_goal)
                 )
                 self._active_runs.pop(goal_id, None)
+                await self._event_bus.publish(
+                    Event(
+                        event_type="agent.run.completed",
+                        data={
+                            "goal_id": goal_id,
+                            "run_id": run.id,
+                            "owner_user_id": fresh_goal.owner_user_id,
+                            "status": run.status.value,
+                            "rounds_used": run.rounds_used,
+                            "tokens_in": run.tokens_in,
+                            "tokens_out": run.tokens_out,
+                            "interrupted": False,
+                        },
+                        source="autonomous_agent",
+                        timestamp=run.ended_at,
+                    )
+                )
                 return run
             run.final_message_text = result.response_text
             run.conversation_id = result.conversation_id
@@ -1120,11 +1162,12 @@ class AutonomousAgentService(Service):
 
         await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
 
-        # Capture conversation_id on the goal if this is the first run
-        # and the run wasn't interrupted (we don't want to lock the goal
-        # to an abandoned conversation).
+        # Skip conversation capture for stateless goals — every run
+        # creates a fresh conversation that the run entity references
+        # but the goal does not.
         if (
             run.status == RunStatus.COMPLETED
+            and not fresh_goal.stateless
             and not fresh_goal.conversation_id
             and run.conversation_id
         ):
@@ -1160,6 +1203,24 @@ class AutonomousAgentService(Service):
         if cost_cap_exceeded:
             await self._disarm_trigger(fresh_goal)
             await self._notify_cost_cap_exceeded(fresh_goal)
+
+        await self._event_bus.publish(
+            Event(
+                event_type="agent.run.completed",
+                data={
+                    "goal_id": goal_id,
+                    "run_id": run.id,
+                    "owner_user_id": fresh_goal.owner_user_id,
+                    "status": run.status.value,
+                    "rounds_used": run.rounds_used,
+                    "tokens_in": run.tokens_in,
+                    "tokens_out": run.tokens_out,
+                    "interrupted": (run.status == RunStatus.FAILED and run.error == "interrupted"),
+                },
+                source="autonomous_agent",
+                timestamp=run.ended_at or datetime.now(UTC),
+            )
+        )
 
         return run
 
@@ -1240,6 +1301,7 @@ def _goal_to_dict(g: Goal) -> dict[str, Any]:
         "max_wall_clock_s_override": g.max_wall_clock_s_override,
         "cost_cap_usd": g.cost_cap_usd,
         "lifetime_cost_usd": g.lifetime_cost_usd,
+        "stateless": g.stateless,
     }
 
 
@@ -1270,6 +1332,7 @@ def _goal_from_dict(d: dict[str, Any]) -> Goal:
         max_wall_clock_s_override=float(max_wall_clock_raw) if max_wall_clock_raw is not None else None,
         cost_cap_usd=d.get("cost_cap_usd"),
         lifetime_cost_usd=float(d.get("lifetime_cost_usd", 0.0) or 0.0),
+        stateless=bool(d.get("stateless", False)),
     )
 
 
