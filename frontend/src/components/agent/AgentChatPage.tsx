@@ -336,7 +336,8 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
             value={composerText}
             onChange={(e) => setComposerText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              // Enter sends; Shift+Enter inserts a newline.
+              if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 handleSend();
               }
@@ -345,8 +346,8 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
               goal.status !== "enabled"
                 ? `Goal is ${goal.status} — re-enable to chat`
                 : hasRunningRun
-                ? "Run in progress — message will be queued for the next run…"
-                : "Send a message to the agent (Cmd/Ctrl+Enter to send)…"
+                ? "Run in progress — message will be injected mid-run…"
+                : "Send a message to the agent (Enter to send, Shift+Enter for newline)…"
             }
             disabled={sending || goal.status !== "enabled"}
             rows={2}
