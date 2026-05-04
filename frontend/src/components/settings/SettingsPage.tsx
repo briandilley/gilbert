@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { ConfigSection } from "./ConfigSection";
 import { ServiceToggles } from "./ServiceToggles";
+import { BrowserCredentialsPanel } from "./BrowserCredentialsPanel";
 import type { ConfigCategory } from "@/types/config";
 
 export function SettingsPage() {
@@ -93,6 +94,7 @@ export function SettingsPage() {
           {current.sections.map((section) => (
             <ConfigSection key={section.namespace} section={section} />
           ))}
+          {current.name === "Browser" ? <BrowserCredentialsPanel /> : null}
         </div>
       )}
     </div>
