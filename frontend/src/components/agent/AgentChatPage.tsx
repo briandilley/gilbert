@@ -12,6 +12,7 @@ import {
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { Button } from "@/components/ui/button";
 import type { Goal, GoalStatus } from "@/types/agent";
 import type {
@@ -391,9 +392,7 @@ function FlatTurnBlock({ turn }: FlatTurnBlockProps) {
           <div className="text-xs font-medium text-muted-foreground mb-1">
             assistant
           </div>
-          <div className="text-sm whitespace-pre-wrap break-words">
-            {turn.final_content}
-          </div>
+          <MarkdownContent content={turn.final_content} />
         </div>
       )}
     </div>
@@ -413,8 +412,8 @@ function FlatRoundBlock({ round }: FlatRoundBlockProps) {
           <div className="text-xs font-medium text-muted-foreground mb-1">
             reasoning
           </div>
-          <div className="text-sm whitespace-pre-wrap break-words text-muted-foreground italic">
-            {round.reasoning}
+          <div className="text-muted-foreground italic">
+            <MarkdownContent content={round.reasoning} />
           </div>
         </div>
       )}
