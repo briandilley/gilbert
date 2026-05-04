@@ -40,7 +40,7 @@ from gilbert.interfaces.music import (
     Playable,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState
+from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState, SpeakerProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -459,8 +459,9 @@ class MusicService(Service):
         if not (self._backend and self._backend.supports_loop):
             return False
         speaker_svc = self._get_speaker_svc()
-        backend = getattr(speaker_svc, "backend", None)
-        return bool(backend and getattr(backend, "supports_repeat", False))
+        if not isinstance(speaker_svc, SpeakerProvider):
+            return False
+        return bool(speaker_svc.backend.supports_repeat)
 
     async def start_station(
         self,

@@ -139,6 +139,24 @@ class AuthBackend(ABC):
 
 
 @runtime_checkable
+class PasswordHasher(Protocol):
+    """Protocol for auth backends that store/verify passwords directly.
+
+    Used by the change-password flow to hash a new password and verify
+    the current one without importing the concrete local-auth backend
+    class. OAuth-style backends don't satisfy this.
+    """
+
+    def hash_password(self, password: str) -> str:
+        """Return an opaque hash for ``password`` to persist."""
+        ...
+
+    def verify_password(self, stored_hash: str, password: str) -> bool:
+        """Return ``True`` iff ``password`` matches ``stored_hash``."""
+        ...
+
+
+@runtime_checkable
 class UserBackendAware(Protocol):
     """Protocol for auth backends that need the users backend injected.
 

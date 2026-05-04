@@ -134,6 +134,16 @@ class _FakeWorkspaceProvider:
     async def build_workspace_manifest(self, conversation_id: str) -> str:
         return ""
 
+    def resolve_file_path(
+        self, user_id: str, rel_path: str, conversation_id: str | None
+    ) -> tuple[Path | None, str | None]:
+        if not conversation_id:
+            return None, "no conversation"
+        target = (self.get_workspace_root(user_id, conversation_id) / rel_path)
+        if target.is_file():
+            return target, None
+        return None, f"File not found: {rel_path}"
+
 
 class _FakeServiceManager:
     def __init__(

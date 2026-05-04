@@ -518,13 +518,13 @@ class AuthService(Service):
 
         Raises ``ValueError`` with a user-safe message on any failure.
         """
-        from gilbert.interfaces.auth import UserBackendAware
+        from gilbert.interfaces.auth import PasswordHasher
 
         if not new_password or len(new_password) < 8:
             raise ValueError("New password must be at least 8 characters.")
 
         local = self._backends.get(_LOCAL_BACKEND)
-        if local is None or not isinstance(local, UserBackendAware):
+        if not isinstance(local, PasswordHasher):
             raise ValueError("Local authentication is not available.")
 
         backend = self._user_service.backend
@@ -540,14 +540,10 @@ class AuthService(Service):
                 "to set an initial password."
             )
 
-        # ``hash_password`` and ``_verify_password`` live on the local
-        # backend; reach through the runtime instance rather than
-        # re-importing the class so a future swap of the local backend
-        # implementation still works.
-        if not local._verify_password(stored_hash, old_password):  # type: ignore[attr-defined]
+        if not local.verify_password(stored_hash, old_password):
             raise ValueError("Current password is incorrect.")
 
-        new_hash = local.hash_password(new_password)  # type: ignore[attr-defined]
+        new_hash = local.hash_password(new_password)
         await backend.update_user(user_id, {"password_hash": new_hash})
 
         await self.revoke_user_sessions(user_id, except_session_id=keep_session_id)

@@ -418,7 +418,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
 
         # Resolve the path through the same safety path the other tools
         # use — catches path traversal + missing-file before we mint.
-        target, err = self._resolve_file_path(user_id, rel_path, conversation_id)
+        target, err = self.resolve_file_path(user_id, rel_path, conversation_id)
         if err is not None:
             raise ValueError(err)
         if target is None or not target.is_file():
@@ -554,7 +554,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             str(record.get("media_type") or "application/octet-stream")
         )
 
-        target, err = self._resolve_file_path(user_id, rel_path, conv_id)
+        target, err = self.resolve_file_path(user_id, rel_path, conv_id)
         if err is not None or target is None or not target.is_file():
             await self._storage.delete(_WORKSPACE_SHARES_COLLECTION, share_id)
             return None
@@ -1410,7 +1410,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             return self.get_workspace_root(user_id, conversation_id)
         return self._legacy_workspace_top() / user_id
 
-    def _resolve_file_path(
+    def resolve_file_path(
         self,
         user_id: str,
         rel_path: str,
@@ -1566,7 +1566,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             return json.dumps({"error": "path is required"})
 
         conv_id = self._conv_id_from_args(arguments)
-        target, err = self._resolve_file_path(user_id, rel_path, conv_id)
+        target, err = self.resolve_file_path(user_id, rel_path, conv_id)
         if err is not None:
             return json.dumps({"error": err})
         assert target is not None
@@ -1908,7 +1908,7 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         path_lock = await self._get_path_lock(conv_id, rel_path)
         async with path_lock:
             # Resolve the file
-            target, err = self._resolve_file_path(user_id, rel_path, conv_id)
+            target, err = self.resolve_file_path(user_id, rel_path, conv_id)
             if err is not None:
                 return ToolResult(
                     tool_call_id="",

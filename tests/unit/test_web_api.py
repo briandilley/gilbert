@@ -62,6 +62,7 @@ def _make_gilbert(acl: Any | None = None) -> Any:
     return SimpleNamespace(
         service_manager=_FakeServiceManager(acl),
         request_restart=MagicMock(),
+        list_loaded_plugins=lambda: [],
     )
 
 

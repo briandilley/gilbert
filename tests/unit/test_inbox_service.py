@@ -1046,13 +1046,11 @@ class TestWorkspaceAttachments:
         staged = tmp_path / "po.pdf"
         staged.write_bytes(b"%PDF-1.4 fake")
 
-        class FakeSkills:
-            def _resolve_workspace_file(
-                self, user_id, skill_name, rel_path, conversation_id
-            ):
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
                 return staged, None
 
-        inbox_service._get_skills_service = lambda: FakeSkills()
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
 
         atts, errs = await inbox_service._resolve_attachments(
             ["workspace:usr_a/conv_b/pdf/po.pdf"]
@@ -1071,13 +1069,11 @@ class TestWorkspaceAttachments:
         """A workspace ref that doesn't resolve produces an error
         string instead of silently dropping."""
 
-        class FakeSkills:
-            def _resolve_workspace_file(
-                self, user_id, skill_name, rel_path, conversation_id
-            ):
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
                 return None, "File not found: po.pdf"
 
-        inbox_service._get_skills_service = lambda: FakeSkills()
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
 
         atts, errs = await inbox_service._resolve_attachments(
             ["workspace:usr_a/conv_b/pdf/po.pdf"]
@@ -1094,7 +1090,11 @@ class TestWorkspaceAttachments:
     ) -> None:
         """A workspace URI with too few segments errors out instead of
         crashing."""
-        inbox_service._get_skills_service = lambda: object()
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
+                return None, "should not be called"
+
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
         atts, errs = await inbox_service._resolve_attachments(
             ["workspace:not_enough_segments"]
         )
@@ -1103,37 +1103,56 @@ class TestWorkspaceAttachments:
         assert "invalid" in errs[0].lower()
 
     @pytest.mark.asyncio
-    async def test_skills_capability_resolved_lazily(
+    async def test_workspace_capability_resolved_lazily(
         self,
         inbox_service: InboxService,
         tmp_path: Any,
     ) -> None:
-        """SkillService might start AFTER InboxService — the topological
-        sort only orders by ``requires``, not ``optional``. The skills
-        capability must be looked up at call time, not at start time,
-        so a late-started SkillService is still usable for workspace
-        attachment resolution.
+        """WorkspaceService might start AFTER InboxService — the
+        topological sort only orders by ``requires``, not ``optional``.
+        The workspace capability must be looked up at call time, not at
+        start time, so a late-started WorkspaceService is still usable
+        for workspace attachment resolution.
         """
         staged = tmp_path / "po.pdf"
         staged.write_bytes(b"%PDF-1.4 fake")
 
-        class FakeSkills:
-            def _resolve_workspace_file(
-                self, user_id, skill_name, rel_path, conversation_id
-            ):
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
                 return staged, None
 
+            def get_workspace_root(self, user_id, conversation_id):
+                return tmp_path
+
+            def get_upload_dir(self, user_id, conversation_id):
+                return tmp_path
+
+            def get_output_dir(self, user_id, conversation_id):
+                return tmp_path
+
+            def get_scratch_dir(self, user_id, conversation_id):
+                return tmp_path
+
+            async def register_file(self, **kwargs):
+                return {}
+
+            async def list_files(self, conversation_id, category=None):
+                return []
+
+            async def build_workspace_manifest(self, conversation_id):
+                return ""
+
         # Simulate the start-order race: at start time, the resolver
-        # returns None for "skills" (because skills hasn't started).
-        # Later, when the AI fires inbox_send, skills is now ready —
-        # the lazy lookup picks it up.
-        skills_ready = [False]
-        fake_skills = FakeSkills()
+        # returns None for "workspace" (not started yet). Later, when
+        # the AI fires inbox_send, workspace is ready — the lazy lookup
+        # picks it up.
+        workspace_ready = [False]
+        fake_workspace = FakeWorkspace()
 
         class LazyResolver:
             def get_capability(self, cap):
-                if cap == "skills" and skills_ready[0]:
-                    return fake_skills
+                if cap == "workspace" and workspace_ready[0]:
+                    return fake_workspace
                 return None
 
             def require_capability(self, cap):
@@ -1146,13 +1165,13 @@ class TestWorkspaceAttachments:
                 return []
 
         inbox_service._resolver = LazyResolver()
-        # First call: skills isn't ready yet.
+        # First call: workspace isn't ready yet.
         atts, errs = await inbox_service._resolve_attachments(
             ["workspace:usr_a/conv_b/pdf/po.pdf"]
         )
-        assert errs and "skills service not available" in errs[0]
-        # Now SkillService starts.
-        skills_ready[0] = True
+        assert errs and "workspace service not available" in errs[0]
+        # Now WorkspaceService starts.
+        workspace_ready[0] = True
         # Same call now succeeds.
         atts, errs = await inbox_service._resolve_attachments(
             ["workspace:usr_a/conv_b/pdf/po.pdf"]
@@ -1171,13 +1190,11 @@ class TestWorkspaceAttachments:
         mb = _make_mailbox(mailbox_id="mbx_send")
         await _attach_runtime(inbox_service, mb, FakeEmailBackend())
 
-        class FakeSkills:
-            def _resolve_workspace_file(
-                self, user_id, skill_name, rel_path, conversation_id
-            ):
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
                 return None, "File not found: missing.pdf"
 
-        inbox_service._get_skills_service = lambda: FakeSkills()
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
         set_current_user(_owner())
 
         result = await inbox_service.execute_tool(

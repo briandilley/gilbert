@@ -74,7 +74,7 @@ class LocalAuthBackend(AuthBackend):
         if not stored_hash:
             return None
 
-        if not self._verify_password(stored_hash, password):
+        if not self.verify_password(stored_hash, password):
             return None
 
         return AuthInfo(
@@ -92,7 +92,7 @@ class LocalAuthBackend(AuthBackend):
             self._hasher = PasswordHasher()
         return str(self._hasher.hash(password))
 
-    def _verify_password(self, stored_hash: str, password: str) -> bool:
+    def verify_password(self, stored_hash: str, password: str) -> bool:
         try:
             return bool(self._hasher.verify(stored_hash, password))
         except Exception:

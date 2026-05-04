@@ -56,6 +56,7 @@ from gilbert.interfaces.storage import (
     SortField,
     StorageProvider,
 )
+from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -1430,7 +1431,7 @@ class InboxService(Service):
 
         - **Workspace file ref** — ``workspace:<user_id>/<conv_id>/<skill>/<path>``,
           e.g. ``workspace:usr_28ff/cc2b54.../pdf/po-00006567.pdf``. Resolved
-          via ``SkillService._resolve_workspace_file`` (which tries the
+          via ``WorkspaceProvider.resolve_file_path`` (which tries the
           per-conversation workspace first, then falls back to the legacy
           per-(user, skill) path). Self-contained on purpose so the outbox
           processor — which runs decoupled from the original tool call's
@@ -1505,18 +1506,20 @@ class InboxService(Service):
             None,
         )
 
-    def _get_skills_service(self) -> Any:
-        """Resolve the ``skills`` capability lazily.
+    def _get_workspace_service(self) -> WorkspaceProvider | None:
+        """Resolve the ``workspace`` capability lazily.
 
-        InboxService can start before SkillService since the topological
-        sort only orders by ``requires``, not ``optional``. Looking up
-        the skills capability at use time (after all services have
-        finished starting) avoids the start-order race that would
-        otherwise leave ``self._skills`` stuck at None forever.
+        InboxService can start before WorkspaceService since the
+        topological sort only orders by ``requires``, not ``optional``.
+        Looking up the workspace capability at use time (after all
+        services have finished starting) avoids the start-order race.
         """
         if self._resolver is None:
             return None
-        return self._resolver.get_capability("skills")
+        svc = self._resolver.get_capability("workspace")
+        if isinstance(svc, WorkspaceProvider):
+            return svc
+        return None
 
     async def _resolve_workspace_attachment(
         self,
@@ -1524,9 +1527,9 @@ class InboxService(Service):
     ) -> tuple[EmailAttachment | None, str | None]:
         """Look up a ``workspace:<user>/<conv>/<skill>/<path>`` ref and
         read the file's bytes off disk via ``SkillService``."""
-        skills = self._get_skills_service()
-        if skills is None:
-            return None, f"{doc_id}: skills service not available"
+        workspace = self._get_workspace_service()
+        if workspace is None:
+            return None, f"{doc_id}: workspace service not available"
         # Strip the scheme.
         body = doc_id[len("workspace:") :]
         # Expect at least 4 path segments: user / conv / skill / path...
@@ -1543,12 +1546,14 @@ class InboxService(Service):
         if not user_id or not skill_name or not rel_path:
             return None, f"{doc_id}: workspace ref has empty segments"
 
-        # Resolve via SkillService — handles conv-scoped + legacy
-        # fallback + path traversal check.
-        target, err = skills._resolve_workspace_file(
+        # Resolve via WorkspaceService — handles conv-scoped + legacy
+        # fallback + path traversal check. The split rejoins skill/path
+        # so new-layout refs (uploads/foo, outputs/bar, scratch/baz)
+        # land directly on disk; legacy refs fall through to the
+        # per-skill iteration inside ``resolve_file_path``.
+        target, err = workspace.resolve_file_path(
             user_id=user_id,
-            skill_name=skill_name,
-            rel_path=rel_path,
+            rel_path=f"{skill_name}/{rel_path}",
             conversation_id=conv_id or None,
         )
         if err is not None or target is None:

@@ -79,3 +79,19 @@ class WorkspaceProvider(Protocol):
     async def build_workspace_manifest(self, conversation_id: str) -> str:
         """Build a system prompt fragment describing the conversation's files."""
         ...
+
+    def resolve_file_path(
+        self,
+        user_id: str,
+        rel_path: str,
+        conversation_id: str | None,
+    ) -> tuple[Path | None, str | None]:
+        """Resolve a workspace-relative path to a real on-disk ``Path``.
+
+        Returns ``(resolved_path, error_message)``. ``error_message`` is
+        non-empty on failure (path traversal, file missing, etc.); the
+        path is the absolute file location otherwise. Implementations
+        should also try legacy layouts so old workspace references keep
+        resolving as the on-disk shape evolves.
+        """
+        ...
