@@ -2073,3 +2073,115 @@ async def test_between_rounds_callback_drains_pending_queue(
     assert injected[0].content == "check this too please"
     # Queue should be drained after the callback runs.
     assert not svc._pending_user_messages.get(g.id)
+
+
+# ── request_user_input tool ───────────────────────────────────────
+
+
+async def test_request_user_input_tool_flags_run_and_notifies(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+    sqlite_storage: Any,
+) -> None:
+    """request_user_input flags the active run with awaiting_user_input
+    and pending_question, and sends an URGENT notification.
+    """
+    svc, ai, bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Wire NotificationService so the notify_user call lands somewhere
+    from gilbert.core.services.notifications import NotificationService
+
+    notif_svc = NotificationService()
+
+    class _Resolver:
+        def __init__(self, caps: dict[str, Any]) -> None:
+            self._caps = caps
+
+        def require_capability(self, k: str) -> Any:
+            return self._caps[k]
+
+        def get_capability(self, k: str) -> Any:
+            return self._caps.get(k)
+
+    class _StorageProvider:
+        def __init__(self, b: Any) -> None:
+            self.backend = b
+            self.raw_backend = b
+
+        def create_namespaced(self, ns: str) -> Any:
+            return self.backend
+
+    class _BusProvider:
+        def __init__(self, b: Any) -> None:
+            self.bus = b
+
+    notif_resolver = _Resolver({
+        "entity_storage": _StorageProvider(sqlite_storage),
+        "event_bus": _BusProvider(bus),
+    })
+    await notif_svc.start(notif_resolver)
+    svc._resolver._caps["notifications"] = notif_svc  # type: ignore[attr-defined]
+
+    # Simulate an active run by registering it in _active_runs and
+    # creating a Run entity in storage
+    from datetime import UTC, datetime
+
+    run_id = "test-run-1"
+    await sqlite_storage.put(
+        "agent_runs",
+        run_id,
+        {
+            "id": run_id,
+            "goal_id": g.id,
+            "triggered_by": "manual",
+            "started_at": datetime.now(UTC).isoformat(),
+            "status": "running",
+            "conversation_id": "",
+            "ended_at": None,
+            "final_message_text": None,
+            "rounds_used": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "error": None,
+            "complete_goal_called": False,
+            "complete_reason": None,
+            "awaiting_user_input": False,
+            "pending_question": None,
+        },
+    )
+    svc._active_runs[g.id] = run_id
+
+    result = await svc.execute_tool(
+        "request_user_input",
+        {"question": "Should I book the JetBlue flight?"},
+    )
+    assert "notified" in result.lower()
+    assert "JetBlue" in result
+
+    # Run is flagged
+    raw = await sqlite_storage.get("agent_runs", run_id)
+    assert raw is not None
+    assert raw["awaiting_user_input"] is True
+    assert raw["pending_question"] == "Should I book the JetBlue flight?"
+
+    # An urgent notification was published
+    notif_events = [e for e in bus.published if e.event_type == "notification.received"]
+    assert len(notif_events) >= 1
+    n = notif_events[-1]
+    assert n.data["user_id"] == "u_alice"
+    assert n.data["urgency"] == "urgent"
+    assert "JetBlue" in n.data["message"]
+
+
+async def test_request_user_input_requires_active_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, _scheduler = service
+    # No active runs registered
+    result = await svc.execute_tool(
+        "request_user_input",
+        {"question": "anything?"},
+    )
+    assert "no active run" in result.lower()

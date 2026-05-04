@@ -104,6 +104,14 @@ class Run:
     complete_goal_called: bool = False
     complete_reason: str | None = None
 
+    awaiting_user_input: bool = False
+    """True after the agent calls request_user_input. Cleared when the
+    next user message lands."""
+
+    pending_question: str | None = None
+    """The question the agent asked when it called request_user_input.
+    Surfaced in the UI so the user knows what to answer."""
+
 
 @runtime_checkable
 class AgentProvider(Protocol):

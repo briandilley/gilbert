@@ -598,11 +598,16 @@ class AutonomousAgentService(Service):
     # ── ToolProvider implementation ───────────────────────────────
 
     def get_tools(self, user_ctx: Any = None) -> list[ToolDefinition]:
-        return [_COMPLETE_GOAL_TOOL]
+        return [_COMPLETE_GOAL_TOOL, _REQUEST_USER_INPUT_TOOL]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        if name != "complete_goal":
-            raise KeyError(f"unknown tool: {name}")
+        if name == "complete_goal":
+            return await self._exec_complete_goal(arguments)
+        if name == "request_user_input":
+            return await self._exec_request_user_input(arguments)
+        raise KeyError(f"unknown tool: {name}")
+
+    async def _exec_complete_goal(self, arguments: dict[str, Any]) -> str:
         goal_id = str(arguments.get("goal_id", ""))
         reason = str(arguments.get("reason", "")).strip() or "(no reason given)"
         if not goal_id:
@@ -621,6 +626,71 @@ class AutonomousAgentService(Service):
         return (
             f"could not flag run completion for goal {goal_id} "
             f"(no active run, or already flagged earlier this run)"
+        )
+
+    async def _exec_request_user_input(self, arguments: dict[str, Any]) -> str:
+        if self._storage is None or self._resolver is None:
+            return "error: service not started"
+        question = str(arguments.get("question", "")).strip()
+        if not question:
+            return "error: request_user_input requires a question"
+
+        # Find the active run + goal. _active_runs is keyed by goal_id;
+        # scan to find which goal has an active run. In practice there's
+        # at most one active run per agent call site; O(N) over goals
+        # where N is small.
+        goal_id = ""
+        run_id = ""
+        for gid, rid in self._active_runs.items():
+            goal_id = gid
+            run_id = rid
+            break
+        if not run_id:
+            return (
+                "error: no active run for request_user_input "
+                "(this tool can only be called from inside a run)"
+            )
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+
+        # Persist the pending question on the run
+        run_raw = await self._storage.get(_RUN_COLLECTION, run_id)
+        if run_raw is not None:
+            run_raw["awaiting_user_input"] = True
+            run_raw["pending_question"] = question
+            await self._storage.put(_RUN_COLLECTION, run_id, run_raw)
+
+        # Send urgent notification to the owner
+        from gilbert.interfaces.notifications import (
+            NotificationProvider,
+            NotificationUrgency,
+        )
+
+        notif_svc = self._resolver.get_capability("notifications")
+        if isinstance(notif_svc, NotificationProvider):
+            try:
+                await notif_svc.notify_user(
+                    user_id=goal.owner_user_id,
+                    message=f"Agent '{goal.name}' needs your input: {question}",
+                    urgency=NotificationUrgency.URGENT,
+                    source="agent",
+                    source_ref={
+                        "goal_id": goal.id,
+                        "run_id": run_id,
+                        "kind": "user_input_requested",
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "request_user_input: failed to notify user for goal %s",
+                    goal.id,
+                )
+
+        return (
+            f"User has been notified urgently: {question!r}. "
+            f"End your turn now with the question text. The user's reply "
+            f"will be injected into your context on the next round."
         )
 
     # ── WS handlers ───────────────────────────────────────────────
@@ -1360,6 +1430,14 @@ class AutonomousAgentService(Service):
                 pending = self._pending_user_messages.pop(goal_id, [])
                 if not pending:
                     return []
+                # User responded to the agent — clear the awaiting-input
+                # flag so the UI updates.
+                if self._storage is not None:
+                    run_raw = await self._storage.get(_RUN_COLLECTION, run.id)
+                    if run_raw and run_raw.get("awaiting_user_input"):
+                        run_raw["awaiting_user_input"] = False
+                        run_raw["pending_question"] = None
+                        await self._storage.put(_RUN_COLLECTION, run.id, run_raw)
                 return [
                     Message(role=MessageRole.USER, content=m)
                     for m in pending
@@ -1586,15 +1664,13 @@ class AutonomousAgentService(Service):
             f"reason. The goal stays enabled and may run again later — "
             f"calling complete_goal records that this particular run "
             f"succeeded, it does not retire the goal.\n\n"
-            f"If you need a decision or input from the user before you can "
-            f"proceed (e.g. you're about to take an action that requires "
-            f"their preference, or you've gathered information and need "
-            f"them to choose between options), call the ``notify_user`` "
-            f"tool with user_id={goal.owner_user_id!r} and an URGENT "
-            f"urgency before ending your turn — that pings the owner so "
-            f"they know to come look. Then end your turn naturally with "
-            f"the question. The user will reply via the agent chat; their "
-            f"reply will be injected into your context on the next round."
+            f"If you need a decision, preference, or piece of info from "
+            f"the user before you can proceed (e.g. choosing between "
+            f"options, confirming an action), call the "
+            f"``request_user_input`` tool with your question, then end "
+            f"your turn with the question text. The user will be "
+            f"notified urgently and their reply will be injected into "
+            f"your context on the next round."
         )
 
     def _build_default_user_trigger_message(self, goal: Goal) -> str:
@@ -1707,6 +1783,8 @@ def _run_to_dict(r: Run) -> dict[str, Any]:
         "error": r.error,
         "complete_goal_called": r.complete_goal_called,
         "complete_reason": r.complete_reason,
+        "awaiting_user_input": r.awaiting_user_input,
+        "pending_question": r.pending_question,
     }
 
 
@@ -1727,7 +1805,39 @@ def _run_from_dict(d: dict[str, Any]) -> Run:
         error=d.get("error"),
         complete_goal_called=bool(d.get("complete_goal_called", False)),
         complete_reason=d.get("complete_reason"),
+        awaiting_user_input=bool(d.get("awaiting_user_input", False)),
+        pending_question=d.get("pending_question"),
     )
+
+
+_REQUEST_USER_INPUT_TOOL = ToolDefinition(
+    name="request_user_input",
+    description=(
+        "Ask the goal's owner a question and wait for their reply. Use "
+        "this when you need a decision, preference, or piece of info "
+        "from the user before you can proceed (e.g. choosing between "
+        "options, confirming an action, or asking for missing context). "
+        "Calling this tool: (1) records the question on the current run "
+        "so the UI shows a 'waiting for input' indicator, (2) sends an "
+        "URGENT notification to the user so they know to come look, and "
+        "(3) returns a confirmation message. After calling it, end your "
+        "turn naturally with the question text. The user's reply, when "
+        "they send it via the agent chat, will be injected into your "
+        "context on the next round."
+    ),
+    parameters=[
+        ToolParameter(
+            name="question",
+            type=ToolParameterType.STRING,
+            description=(
+                "The question to ask the user. Be concise but specific. "
+                "Surfaced both in the urgent notification and in the run "
+                "history."
+            ),
+        ),
+    ],
+    required_role="user",
+)
 
 
 _COMPLETE_GOAL_TOOL = ToolDefinition(
