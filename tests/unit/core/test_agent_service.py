@@ -855,3 +855,130 @@ async def test_event_trigger_disarms_on_disable(
     fetched = await svc.get_goal(g.id)
     assert fetched is not None
     assert fetched.run_count == 0
+
+
+async def test_start_rearms_existing_enabled_goals(
+    sqlite_storage: StorageBackend,
+) -> None:
+    """Enabled goals with triggers must be re-armed on service startup so
+    the system survives restarts.
+    """
+    # Seed the storage with a goal directly (simulating a previous process
+    # that created the goal then exited)
+    bus = _FakeEventBus()
+    scheduler = _FakeScheduler()
+    ai = _FakeAIService()
+
+    # First service instance creates a goal
+    svc1 = AutonomousAgentService()
+    resolver = _FakeResolver(
+        {
+            "entity_storage": _FakeStorageProvider(sqlite_storage),
+            "event_bus": _FakeEventBusProvider(bus),
+            "ai_chat": ai,
+            "scheduler": scheduler,
+        }
+    )
+    await svc1.start(resolver)
+    g = await svc1.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="time",
+        trigger_config={"kind": "interval", "seconds": 600},
+    )
+    assert len(scheduler.added) == 1
+    await svc1.stop()
+
+    # Simulate a process restart with a fresh scheduler (jobs lost)
+    scheduler2 = _FakeScheduler()
+    svc2 = AutonomousAgentService()
+    resolver2 = _FakeResolver(
+        {
+            "entity_storage": _FakeStorageProvider(sqlite_storage),
+            "event_bus": _FakeEventBusProvider(bus),
+            "ai_chat": ai,
+            "scheduler": scheduler2,
+        }
+    )
+    await svc2.start(resolver2)
+
+    # The new scheduler should have the goal's trigger re-armed
+    assert len(scheduler2.added) == 1
+    assert scheduler2.added[0]["name"] == f"agent_goal_{g.id}"
+
+
+async def test_start_marks_stale_running_runs_as_failed(
+    sqlite_storage: StorageBackend,
+) -> None:
+    """A run left in RUNNING state across a process restart should be
+    marked FAILED so the goal isn't permanently stuck.
+    """
+    import json
+    from datetime import UTC, datetime as _dt
+
+    bus = _FakeEventBus()
+    scheduler = _FakeScheduler()
+    ai = _FakeAIService()
+
+    svc1 = AutonomousAgentService()
+    resolver = _FakeResolver(
+        {
+            "entity_storage": _FakeStorageProvider(sqlite_storage),
+            "event_bus": _FakeEventBusProvider(bus),
+            "ai_chat": ai,
+            "scheduler": scheduler,
+        }
+    )
+    await svc1.start(resolver)
+
+    g = await svc1.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+    )
+
+    # Insert a stale RUNNING run directly
+    stale_run_id = "stale-run-1"
+    started_at = _dt(2026, 5, 1, tzinfo=UTC)  # well in the past
+    await sqlite_storage.put(
+        "agent_runs",
+        stale_run_id,
+        {
+            "id": stale_run_id,
+            "goal_id": g.id,
+            "triggered_by": "manual",
+            "started_at": started_at.isoformat(),
+            "status": "running",
+            "conversation_id": "",
+            "ended_at": None,
+            "final_message_text": None,
+            "rounds_used": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "error": None,
+            "complete_goal_called": False,
+            "complete_reason": None,
+        },
+    )
+
+    await svc1.stop()
+
+    # Restart
+    svc2 = AutonomousAgentService()
+    resolver2 = _FakeResolver(
+        {
+            "entity_storage": _FakeStorageProvider(sqlite_storage),
+            "event_bus": _FakeEventBusProvider(bus),
+            "ai_chat": ai,
+            "scheduler": _FakeScheduler(),
+        }
+    )
+    await svc2.start(resolver2)
+
+    raw = await sqlite_storage.get("agent_runs", stale_run_id)
+    assert raw is not None
+    assert raw["status"] == "failed"
+    assert "process_restarted" in (raw.get("error") or "")

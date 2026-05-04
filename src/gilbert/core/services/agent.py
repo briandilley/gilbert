@@ -111,6 +111,8 @@ class AutonomousAgentService(Service):
                 fields=["goal_id", "started_at"],
             )
         )
+        await self._mark_orphaned_runs_failed()
+        await self._rearm_enabled_goals()
         logger.info("AutonomousAgentService started")
 
     async def stop(self) -> None:
@@ -505,6 +507,49 @@ class AutonomousAgentService(Service):
             "ok": True,
             "run": raw,
         }
+
+    # ── Restart safety ────────────────────────────────────────────
+
+    async def _mark_orphaned_runs_failed(self) -> None:
+        """Find any runs left in RUNNING state from a previous process
+        and mark them FAILED.
+        """
+        if self._storage is None:
+            return
+        running = await self._storage.query(
+            Query(
+                collection=_RUN_COLLECTION,
+                filters=[
+                    Filter(field="status", op=FilterOp.EQ, value="running"),
+                ],
+                limit=10_000,
+            )
+        )
+        for raw in running:
+            raw["status"] = "failed"
+            raw["error"] = "process_restarted"
+            raw["ended_at"] = datetime.now(UTC).isoformat()
+            await self._storage.put(_RUN_COLLECTION, raw["id"], raw)
+        if running:
+            logger.info(
+                "marked %d orphaned RUNNING runs as FAILED on startup",
+                len(running),
+            )
+
+    async def _rearm_enabled_goals(self) -> None:
+        """Re-arm triggers for every enabled goal on startup."""
+        goals = await self.list_goals()
+        for g in goals:
+            if g.status != GoalStatus.ENABLED:
+                continue
+            if g.trigger_type:
+                try:
+                    await self._arm_trigger(g)
+                except Exception:
+                    logger.exception(
+                        "failed to re-arm trigger for goal %s on startup",
+                        g.id,
+                    )
 
     # ── Trigger plumbing ──────────────────────────────────────────
 
