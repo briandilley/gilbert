@@ -385,6 +385,48 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
   useEventBus("chat.tool.started", handleToolStarted);
   useEventBus("chat.tool.completed", handleToolCompleted);
 
+  // Auto-scroll: track whether the user is scrolled to the bottom. If
+  // they are, follow new content as it streams in. If they've scrolled
+  // up to read older content, leave them alone — don't yank them back.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // 32px threshold lets the user be "near the bottom" and still
+    // count as following along.
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 32;
+  }, []);
+
+  // When the conversation content changes (new persisted turns, new
+  // streamed deltas, new tool events), keep the scroll glued to the
+  // bottom unless the user has scrolled up to read history.
+  const turnsCount = conversation?.turns?.length ?? 0;
+  const streamingReasoningLen = streamingTurn
+    ? streamingTurn.rounds.reduce(
+        (sum, r) => sum + (r.reasoning?.length ?? 0),
+        0,
+      )
+    : 0;
+  const streamingToolsCount = streamingTurn
+    ? streamingTurn.rounds.reduce((sum, r) => sum + r.tools.length, 0)
+    : 0;
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [turnsCount, streamingReasoningLen, streamingToolsCount, streamingTurn]);
+
+  // When the user switches to a different goal, snap to the bottom.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [conversationId]);
+
   const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
     queryKey: ["agent-conv", conversationId, goal.run_count],
     queryFn: () =>
@@ -432,7 +474,11 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-4 space-y-4"
+      >
         {!conversationId ? (
           <div className="text-center text-muted-foreground py-12">
             No conversation yet. Send a message below to start.
