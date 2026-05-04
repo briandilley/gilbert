@@ -109,6 +109,8 @@ class AutonomousAgentService(Service):
         name: str,
         instruction: str,
         profile_id: str,
+        trigger_type: str | None = None,
+        trigger_config: dict[str, Any] | None = None,
     ) -> Goal:
         if self._storage is None:
             raise RuntimeError("AutonomousAgentService.start() not called")
@@ -122,6 +124,8 @@ class AutonomousAgentService(Service):
             status=GoalStatus.ENABLED,
             created_at=now,
             updated_at=now,
+            trigger_type=trigger_type,
+            trigger_config=trigger_config,
         )
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         return goal
@@ -160,6 +164,8 @@ class AutonomousAgentService(Service):
         instruction: str | None = None,
         profile_id: str | None = None,
         status: GoalStatus | None = None,
+        trigger_type: str | None = None,
+        trigger_config: dict[str, Any] | None = None,
     ) -> Goal | None:
         if self._storage is None:
             raise RuntimeError("not started")
@@ -175,6 +181,10 @@ class AutonomousAgentService(Service):
             goal.profile_id = profile_id
         if status is not None:
             goal.status = status
+        if trigger_type is not None:
+            goal.trigger_type = trigger_type
+        if trigger_config is not None:
+            goal.trigger_config = trigger_config
         goal.updated_at = datetime.now(UTC)
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         return goal
@@ -555,6 +565,8 @@ def _goal_to_dict(g: Goal) -> dict[str, Any]:
         "status": g.status.value,
         "created_at": g.created_at.isoformat(),
         "updated_at": g.updated_at.isoformat(),
+        "trigger_type": g.trigger_type,
+        "trigger_config": g.trigger_config,
         "last_run_at": g.last_run_at.isoformat() if g.last_run_at else None,
         "last_run_status": g.last_run_status.value if g.last_run_status else None,
         "run_count": g.run_count,
@@ -576,6 +588,8 @@ def _goal_from_dict(d: dict[str, Any]) -> Goal:
         status=GoalStatus(d["status"]),
         created_at=datetime.fromisoformat(d["created_at"]),
         updated_at=datetime.fromisoformat(d["updated_at"]),
+        trigger_type=d.get("trigger_type"),
+        trigger_config=d.get("trigger_config"),
         last_run_at=datetime.fromisoformat(last_run_at_raw) if last_run_at_raw else None,
         last_run_status=RunStatus(last_run_status_raw) if last_run_status_raw else None,
         run_count=int(d.get("run_count", 0)),

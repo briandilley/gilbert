@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class GoalStatus(StrEnum):
@@ -41,6 +41,15 @@ class Goal:
     status: GoalStatus
     created_at: datetime
     updated_at: datetime
+    trigger_type: str | None = None
+    """``"time"`` or ``"event"`` or None for manual-only goals."""
+
+    trigger_config: dict[str, Any] | None = None
+    """Shape depends on trigger_type:
+    - TIME: ``{"kind": "interval"|"daily_at"|"hourly_at", "seconds"?: int, "hour"?: int, "minute"?: int}``
+    - EVENT: ``{"event_type": str, "filter"?: {"field": str, "op": str, "value": Any}}``
+    """
+
     last_run_at: datetime | None = None
     last_run_status: RunStatus | None = None
     run_count: int = 0
