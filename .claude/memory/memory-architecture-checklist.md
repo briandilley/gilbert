@@ -72,6 +72,17 @@ See [Multi-User Isolation](memory-multi-user-isolation.md) for the full pattern 
 - **Non-identifier `slash_command` or `slash_group` values** — both must match `[a-zA-Z][a-zA-Z0-9_\-]*`. Dots are reserved for plugin namespacing; spaces are reserved for group/subcommand composition. Enforced by `tests/unit/test_slash_command_uniqueness.py`.
 - **Duplicate `(slash_group, slash_command)` pairs across core tools** — collisions within a group. Uniqueness test catches this. Same leaf name under different groups (`/radio stop` vs `/speaker stop`) is allowed.
 
+### UI Extension Violations (frontend)
+
+Plugin UI lives inside the plugin's own directory; core SPA never imports plugin-specific code. Audit procedure:
+
+- **Plugin imports in `frontend/src/`** — grep `frontend/src/` for plugin-specific identifiers and any `import .* from "@/(types|api|components)/<plugin-specific-name>"`. Anything that names a specific plugin (a service the plugin provides, a component the plugin owns) is a violation. Example violations to look for: imports from `@/components/<plugin-name>/...`, `@/types/<plugin-name>`, `@/hooks/use<PluginName>Api`. The browser plugin is the canonical example of "done right" — every TS file lives under `std-plugins/browser/frontend/`.
+- **Plugin-specific WS RPC bindings on core's `useWsApi`** — every entry in `frontend/src/hooks/useWsApi.ts` must be either generic chat / dashboard / settings infrastructure OR a non-plugin core service (agent, notifications, mcp). Plugin RPCs (`browser.*`, `slack.*`, `sonos.*`, …) belong in a per-plugin `<plugin>/frontend/api.ts` exporting a `useFooApi()` hook that uses the underlying `rpc()` from `useWebSocket`.
+- **Plugin-specific React types on core's `frontend/src/types/`** — same rule. `BrowserCredential`-style types live in `<plugin>/frontend/types.ts`.
+- **Plugin-specific panels mounted in core via hardcoded conditionals** — anti-pattern: `{current.name === "Browser" ? <BrowserCredentialsPanel /> : null}` in a core page. Replace with `<PluginPanelSlot slot="...">` and have the plugin register the component via `Plugin.ui_panels()` + a side-effect `<plugin>/frontend/panels.ts` calling `registerPanel`. See [Plugin UI Extensions](memory-plugin-ui-extensions.md).
+- **Core pages that don't expose extension slots in the obvious places** — header (`header.widgets`, `header.user-menu`), dashboard (`dashboard.top`/`bottom`), per-page sidebars and toolbars. If you add a new core page, drop a `<PluginPanelSlot slot="<page-name>.toolbar">` (or similar) where a future plugin would naturally want to inject something — even if no plugin uses it yet. The slot itself costs nothing when empty.
+- **`Plugin.ui_panels()` / `ui_routes()` declarations whose `panel_id` isn't registered** in any `<plugin>/frontend/panels.ts` — silent dead code. Backend declares the panel, the SPA queries `ui.panels.list`, the registry returns no component, slot renders nothing. Either remove the backend declaration or add the registration.
+
 ### Documentation Freshness
 
 These READMEs are product documentation and must stay in sync with reality. Drift is a regression to fix in the same change that caused it, not defer.
@@ -92,4 +103,6 @@ Run the full checklist across `src/` and `std-plugins/`, report findings, and fi
 - [Backend Pattern](memory-backend-pattern.md) — the registry pattern the concrete-class violations target
 - [Slash Commands](memory-slash-commands.md) — the semantics the slash-command violations enforce
 - [Plugin System](memory-plugin-system.md) — plugin layout rules
+- [Plugin UI Extensions](memory-plugin-ui-extensions.md) — UIPanel / UIRoute / NavContribution / DashboardCard, the registry, slot semantics
+- [Plugin runtime_dependencies](memory-runtime-dependencies.md) — non-pip OS deps + `gilbert doctor`
 - `tests/unit/test_slash_command_uniqueness.py` — static enforcement for slash collisions
