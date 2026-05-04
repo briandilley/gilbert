@@ -179,12 +179,30 @@ def main() -> int:
                 )
                 print(f"        installing: {dep.auto_install_cmd}")
                 installed_ok, log = _run_install(dep.auto_install_cmd)
-                if installed_ok and _run_check(dep.check_cmd):
+                if not installed_ok:
+                    # The auto-install command itself failed.
+                    print(_color("        install command failed", _RED))
+                    if log:
+                        print(_indent(log, 8))
+                    total_fail += 1
+                    print(f"        hint: {dep.install_hint}")
+                    continue
+                # Install ran cleanly — re-run the check.
+                if _run_check(dep.check_cmd):
                     print(f"        {_color('OK', _GREEN)} (installed and verified)")
                     continue
-                print(_color("        install failed", _RED))
+                # Install ran but the check still fails — usually means
+                # there's a second piece (e.g. OS shared libs) the
+                # auto-installer can't touch.
+                print(
+                    _color(
+                        "        install ran but the check still fails — "
+                        "additional manual steps needed:",
+                        _YELLOW,
+                    )
+                )
                 if log:
-                    print(_indent(log, 8))
+                    print(_indent(log[-800:], 8))
                 total_fail += 1
                 print(f"        hint: {dep.install_hint}")
             else:
