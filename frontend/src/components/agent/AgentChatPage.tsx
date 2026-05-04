@@ -7,6 +7,7 @@ import {
   CogIcon,
   Loader2Icon,
   WrenchIcon,
+  ZapIcon,
 } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
