@@ -205,35 +205,69 @@ export function AgentDetailPage() {
         </div>
       ) : (
         <div className="rounded-md border divide-y">
-          {runs.map((r) => (
-            <div key={r.id} className="px-4 py-3 flex items-start gap-3">
-              <span
-                className={`inline-flex items-center rounded px-2 py-0.5 text-xs ${
-                  RUN_STATUS_CLS[r.status] ?? RUN_STATUS_CLS.failed
-                }`}
-              >
-                {r.status}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm break-words">
-                  {r.final_message_text ?? (r.error ? `Error: ${r.error}` : "(no output)")}
-                </div>
-                <div className="text-xs text-muted-foreground mt-1 flex items-center gap-3 flex-wrap">
-                  <span>{fmtTimestamp(r.started_at)}</span>
-                  <span>·</span>
-                  <span>{fmtDuration(r.started_at, r.ended_at)}</span>
-                  <span>·</span>
-                  <span>triggered by {r.triggered_by}</span>
-                  {r.tokens_in + r.tokens_out > 0 ? (
+          {runs.map((r) => {
+            const convId = r.conversation_id || goal.conversation_id || "";
+            const displayText =
+              r.status === "running"
+                ? "Running…"
+                : r.final_message_text
+                ? r.final_message_text
+                : r.error
+                ? `Error: ${r.error}`
+                : "(no output)";
+            const inner = (
+              <>
+                <span
+                  className={`inline-flex items-center rounded px-2 py-0.5 text-xs shrink-0 ${
+                    RUN_STATUS_CLS[r.status] ?? RUN_STATUS_CLS.failed
+                  }`}
+                >
+                  {r.status === "running" ? (
                     <>
-                      <span>·</span>
-                      <span>{r.tokens_in + r.tokens_out} tokens</span>
+                      <span className="size-1.5 rounded-full bg-blue-500 animate-pulse mr-1.5" />
+                      running
                     </>
-                  ) : null}
+                  ) : (
+                    r.status
+                  )}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm break-words">{displayText}</div>
+                  <div className="text-xs text-muted-foreground mt-1 flex items-center gap-3 flex-wrap">
+                    <span>{fmtTimestamp(r.started_at)}</span>
+                    <span>·</span>
+                    <span>{fmtDuration(r.started_at, r.ended_at)}</span>
+                    <span>·</span>
+                    <span>triggered by {r.triggered_by}</span>
+                    {r.tokens_in + r.tokens_out > 0 ? (
+                      <>
+                        <span>·</span>
+                        <span>{r.tokens_in + r.tokens_out} tokens</span>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
+              </>
+            );
+            return convId ? (
+              <Link
+                key={r.id}
+                to={`/chat?conversation=${convId}`}
+                className="px-4 py-3 flex items-start gap-3 hover:bg-accent/50 transition-colors"
+                title="Open in chat"
+              >
+                {inner}
+              </Link>
+            ) : (
+              <div
+                key={r.id}
+                className="px-4 py-3 flex items-start gap-3 opacity-70"
+                title="Conversation not yet started"
+              >
+                {inner}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
