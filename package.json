@@ -1,0 +1,12 @@
+{
+  "name": "gilbert-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "npm workspace root for Gilbert's frontend + every plugin's frontend/ — mirrors the uv workspace setup at the Python layer.",
+  "workspaces": [
+    "frontend",
+    "std-plugins/*/frontend",
+    "local-plugins/*/frontend",
+    "installed-plugins/*/frontend"
+  ]
+}

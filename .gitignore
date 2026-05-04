@@ -55,8 +55,10 @@ htmlcov/
 .ruff_cache/
 
 # Frontend build
+node_modules/
 frontend/node_modules/
 frontend/dist/
+package-lock.json
 # Built SPA is fully generated from the frontend source every time
 # ``gilbert.sh start`` runs (it ``rm -rf``s this directory and copies
 # a fresh ``frontend/dist`` into it). Tracking anything here just

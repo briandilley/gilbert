@@ -178,9 +178,20 @@ run_gilbert_supervised() {
 
 build_frontend() {
     echo "Building frontend..."
-    if [ ! -d "$SCRIPT_DIR/frontend/node_modules" ]; then
-        echo "Installing frontend dependencies..."
-        cd "$SCRIPT_DIR/frontend" && npm install
+    # npm workspaces: install runs from the repo root so frontend AND
+    # every plugin's frontend/ directory share a single node_modules
+    # tree. Plugin TS files (under std-plugins/<name>/frontend/) can
+    # then resolve react / @tanstack/react-query / etc. by walking up
+    # to the repo-root node_modules — same way uv hoists Python deps
+    # across plugin pyproject.toml workspace members.
+    if [ ! -d "$SCRIPT_DIR/node_modules" ]; then
+        echo "Installing frontend dependencies (npm workspaces)..."
+        # If a pre-workspace standalone install exists, blow it away so
+        # npm rebuilds the hoisted layout cleanly.
+        if [ -d "$SCRIPT_DIR/frontend/node_modules" ] && [ ! -L "$SCRIPT_DIR/frontend/node_modules" ]; then
+            rm -rf "$SCRIPT_DIR/frontend/node_modules"
+        fi
+        cd "$SCRIPT_DIR" && npm install
     fi
     cd "$SCRIPT_DIR/frontend" && npm run build
     rm -rf "$SCRIPT_DIR/src/gilbert/web/spa"
