@@ -410,3 +410,49 @@ async def test_notification_delete_rejects_other_users(
     # Notification still exists
     raw = await service._storage.get("notifications", n.id)
     assert raw is not None
+
+
+# ── notify_user as a tool ─────────────────────────────────────────
+
+
+async def test_notification_service_exposes_notify_user_tool(
+    service: NotificationService,
+) -> None:
+    tools = service.get_tools(user_ctx=None)
+    names = {t.name for t in tools}
+    assert "notify_user" in names
+
+    nu = next(t for t in tools if t.name == "notify_user")
+    param_names = {p.name for p in nu.parameters}
+    assert "user_id" in param_names
+    assert "message" in param_names
+    assert "urgency" in param_names
+
+
+async def test_notify_user_tool_executes_and_persists_notification(
+    service: NotificationService, sqlite_storage: StorageBackend,
+) -> None:
+    result = await service.execute_tool(
+        "notify_user",
+        {"user_id": "u_alice", "message": "hello via tool", "urgency": "urgent"},
+    )
+    assert "notified" in result.lower() or "sent" in result.lower()
+
+    bus: _FakeEventBus = service._test_bus  # type: ignore[attr-defined]
+    assert len(bus.published) == 1
+    ev = bus.published[0]
+    assert ev.data["user_id"] == "u_alice"
+    assert ev.data["message"] == "hello via tool"
+    assert ev.data["urgency"] == "urgent"
+
+
+async def test_notify_user_tool_invalid_urgency_falls_back_to_normal(
+    service: NotificationService,
+) -> None:
+    result = await service.execute_tool(
+        "notify_user",
+        {"user_id": "u_alice", "message": "hi", "urgency": "kaboom"},
+    )
+    assert "notified" in result.lower() or "sent" in result.lower()
+    bus: _FakeEventBus = service._test_bus  # type: ignore[attr-defined]
+    assert bus.published[-1].data["urgency"] == "normal"

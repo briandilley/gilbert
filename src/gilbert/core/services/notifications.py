@@ -28,6 +28,11 @@ from gilbert.interfaces.storage import (
     StorageBackend,
     StorageProvider,
 )
+from gilbert.interfaces.tools import (
+    ToolDefinition,
+    ToolParameter,
+    ToolParameterType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +58,7 @@ class NotificationService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="notifications",
-            capabilities=frozenset({"notifications", "ws_handlers"}),
+            capabilities=frozenset({"notifications", "ws_handlers", "ai_tools"}),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -115,6 +120,31 @@ class NotificationService(Service):
             )
         )
         return notification
+
+    tool_provider_name = "notifications"
+
+    def get_tools(self, user_ctx: Any = None) -> list[ToolDefinition]:
+        return [_NOTIFY_USER_TOOL]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name != "notify_user":
+            raise KeyError(f"unknown tool: {name}")
+        user_id = str(arguments.get("user_id", "")).strip()
+        message = str(arguments.get("message", "")).strip()
+        if not user_id or not message:
+            return "error: notify_user requires user_id and message"
+        urgency_raw = str(arguments.get("urgency", "normal")).lower()
+        try:
+            urgency = NotificationUrgency(urgency_raw)
+        except ValueError:
+            urgency = NotificationUrgency.NORMAL
+        await self.notify_user(
+            user_id=user_id,
+            message=message,
+            urgency=urgency,
+            source="ai",
+        )
+        return f"notified user {user_id} ({urgency.value}): {message}"
 
     def get_ws_handlers(self) -> dict[str, Any]:
         """Return the frame-type → handler map for this service.
@@ -290,3 +320,37 @@ def _serialize(n: Notification) -> dict[str, Any]:
         "read_at": n.read_at.isoformat() if n.read_at else None,
         "source_ref": n.source_ref,
     }
+
+
+_NOTIFY_USER_TOOL = ToolDefinition(
+    name="notify_user",
+    description=(
+        "Send a notification to a specific user. The notification appears "
+        "in their notifications panel and (depending on urgency) may "
+        "trigger a sound or visual alert. Use this when you need to get "
+        "a user's attention about something important."
+    ),
+    parameters=[
+        ToolParameter(
+            name="user_id",
+            type=ToolParameterType.STRING,
+            description="The recipient's user id.",
+        ),
+        ToolParameter(
+            name="message",
+            type=ToolParameterType.STRING,
+            description="Short, one-sentence message the user will see.",
+        ),
+        ToolParameter(
+            name="urgency",
+            type=ToolParameterType.STRING,
+            description=(
+                "Urgency level: 'info' (silent), 'normal' (default), or "
+                "'urgent' (sound + visual alert)."
+            ),
+            required=False,
+            enum=["info", "normal", "urgent"],
+        ),
+    ],
+    required_role="user",
+)
