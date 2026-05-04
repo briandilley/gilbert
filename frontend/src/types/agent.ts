@@ -58,6 +58,8 @@ export interface AgentRun {
   error: string | null;
   complete_goal_called: boolean;
   complete_reason: string | null;
+  awaiting_user_input: boolean;
+  pending_question: string | null;
 }
 
 export interface GoalCreatePayload {

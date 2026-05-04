@@ -258,6 +258,10 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
     runs.find((r) => !!r.conversation_id)?.conversation_id ?? "";
   const conversationId = goal.conversation_id || fallbackConvId;
   const hasRunningRun = runs.some((r) => r.status === "running");
+  const awaitingRun = runs.find(
+    (r) => r.status === "running" && r.awaiting_user_input,
+  );
+  const awaitingQuestion = awaitingRun?.pending_question || null;
 
   // ---------------------------------------------------------------------------
   // Streaming turn state — mirrors the ChatPage pattern.
@@ -481,7 +485,11 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center gap-3">
         <h1 className="font-semibold text-lg flex-1">{goal.name}</h1>
-        {hasRunningRun ? (
+        {awaitingQuestion ? (
+          <span className="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400">
+            ⌛ waiting for your input
+          </span>
+        ) : hasRunningRun ? (
           <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1">
             <Loader2Icon className="size-3 animate-spin" /> running…
           </span>
@@ -526,6 +534,18 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
           </>
         )}
       </div>
+
+      {/* Awaiting-input banner */}
+      {awaitingQuestion ? (
+        <div className="border-t border-amber-200 dark:border-amber-900 bg-amber-50/50 dark:bg-amber-950/20 px-4 py-2 text-sm">
+          <span className="font-medium text-amber-800 dark:text-amber-300">
+            Agent is asking:
+          </span>{" "}
+          <span className="text-amber-900 dark:text-amber-200">
+            {awaitingQuestion}
+          </span>
+        </div>
+      ) : null}
 
       {/* Composer */}
       <div className="border-t p-3">
