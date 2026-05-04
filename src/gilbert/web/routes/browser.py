@@ -67,9 +67,13 @@ async def serve_novnc(
     request: Request,
     filename: str,
 ) -> FileResponse:
-    """Serve the noVNC client. Authenticated user-level access only."""
-    user_ctx = getattr(request.state, "user_ctx", None)
-    if user_ctx is None or not user_ctx.user_id:
+    """Serve the noVNC client. Authenticated user-level access only.
+
+    AuthMiddleware sets ``request.state.user`` (a UserContext); a
+    ``user_id`` of "" / "guest" is treated as anonymous and rejected.
+    """
+    user_ctx = getattr(request.state, "user", None)
+    if user_ctx is None or not getattr(user_ctx, "user_id", "") or user_ctx.user_id == "guest":
         raise HTTPException(status_code=401, detail="Authentication required")
     root = _resolve_novnc_root()
     if root is None:
@@ -85,11 +89,49 @@ async def serve_novnc(
     return FileResponse(str(target))
 
 
+async def _authenticate_ws(websocket: Any, gilbert: Any) -> Any | None:
+    """Resolve UserContext on a WebSocket upgrade.
+
+    AuthMiddleware (BaseHTTPMiddleware) does NOT run on websocket
+    handshakes, so ``websocket.state.user`` would be unset — we have
+    to extract the session cookie / token ourselves. Mirrors the
+    logic in ``web/routes/websocket._authenticate`` but kept local
+    to avoid a cross-module import.
+    """
+    from gilbert.interfaces.auth import (
+        GuestPolicy,
+        SessionValidator,
+        UserContext,
+    )
+
+    session_id = websocket.cookies.get("gilbert_session")
+    if not session_id:
+        session_id = websocket.query_params.get("token")
+    auth_svc = gilbert.service_manager.get_by_capability("authentication")
+
+    if session_id and isinstance(auth_svc, SessionValidator):
+        ctx = await auth_svc.validate_session(session_id)
+        if isinstance(ctx, UserContext):
+            return ctx
+    if isinstance(auth_svc, GuestPolicy) and not auth_svc.is_guest_allowed():
+        return None
+    return UserContext.GUEST
+
+
 @router.websocket("/vnc/{session_id}/ws")
 async def vnc_proxy(websocket: WebSocket, session_id: str) -> None:
     """Authenticated WS proxy → 127.0.0.1:<websockify_port>."""
-    user_ctx = getattr(websocket.state, "user_ctx", None)
-    if user_ctx is None or not user_ctx.user_id:
+    gilbert = getattr(websocket.app.state, "gilbert", None)
+    if gilbert is None:
+        await websocket.close(code=4503)
+        return
+
+    user_ctx = await _authenticate_ws(websocket, gilbert)
+    if (
+        user_ctx is None
+        or not getattr(user_ctx, "user_id", "")
+        or user_ctx.user_id == "guest"
+    ):
         await websocket.close(code=4401)
         return
 
