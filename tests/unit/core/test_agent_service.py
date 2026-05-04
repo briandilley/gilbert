@@ -1545,3 +1545,128 @@ async def test_run_times_out_when_chat_exceeds_wall_clock_budget(
     assert fetched is not None
     assert fetched.run_count == 1
     assert fetched.last_run_status == RunStatus.TIMED_OUT
+
+
+# ── Cost cap tests ────────────────────────────────────────────────
+
+
+async def test_lifetime_cost_accumulates_across_runs(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    from gilbert.interfaces.ai import ChatTurnResult
+
+    async def chat_with_cost(*args: Any, **kwargs: Any) -> ChatTurnResult:
+        return ChatTurnResult(
+            response_text="ok",
+            conversation_id="c1",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="m",
+            turn_usage={"input_tokens": 1, "output_tokens": 1, "cost_usd": 0.25},
+        )
+
+    ai.chat = chat_with_cost  # type: ignore[method-assign]
+
+    await svc.run_goal_now(g.id)
+    await svc.run_goal_now(g.id)
+    await svc.run_goal_now(g.id)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert abs(fetched.lifetime_cost_usd - 0.75) < 1e-9
+
+
+async def test_cost_cap_disables_goal_and_notifies(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+    sqlite_storage: Any,
+) -> None:
+    """When a goal's lifetime cost crosses cost_cap_usd, the goal is
+    auto-disabled and the owner gets an URGENT notification.
+    """
+    svc, ai, bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        cost_cap_usd=0.5,
+    )
+
+    # Wire a real NotificationService into the resolver so we can observe
+    # the notify_user call. Use the same sqlite fixture for its storage.
+    from gilbert.core.services.notifications import NotificationService
+    notif_svc = NotificationService()
+
+    class _Resolver:
+        def __init__(self, caps: dict[str, Any]) -> None:
+            self._caps = caps
+        def require_capability(self, k: str) -> Any:
+            return self._caps[k]
+        def get_capability(self, k: str) -> Any:
+            return self._caps.get(k)
+
+    class _StorageProvider:
+        def __init__(self, b: Any) -> None:
+            self.backend = b
+            self.raw_backend = b
+        def create_namespaced(self, ns: str) -> Any:
+            return self.backend
+
+    class _BusProvider:
+        def __init__(self, b: Any) -> None:
+            self.bus = b
+
+    notif_resolver = _Resolver({
+        "entity_storage": _StorageProvider(sqlite_storage),
+        "event_bus": _BusProvider(bus),
+    })
+    await notif_svc.start(notif_resolver)
+
+    # Inject NotificationService into the agent's resolver
+    svc._resolver._caps["notifications"] = notif_svc  # type: ignore[attr-defined]
+
+    from gilbert.interfaces.ai import ChatTurnResult
+
+    async def chat_with_cost(*args: Any, **kwargs: Any) -> ChatTurnResult:
+        return ChatTurnResult(
+            response_text="ok",
+            conversation_id="c1",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="m",
+            turn_usage={"input_tokens": 1, "output_tokens": 1, "cost_usd": 0.30},
+        )
+
+    ai.chat = chat_with_cost  # type: ignore[method-assign]
+
+    # Run once: cost = 0.30, under cap. Goal stays enabled.
+    await svc.run_goal_now(g.id)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.status == GoalStatus.ENABLED
+
+    # Run again: cost = 0.60, exceeds cap.
+    await svc.run_goal_now(g.id)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.status == GoalStatus.DISABLED
+    assert fetched.lifetime_cost_usd >= 0.5
+
+    # An urgent notification was published
+    notif_events = [e for e in bus.published if e.event_type == "notification.received"]
+    assert len(notif_events) >= 1
+    last = notif_events[-1]
+    assert last.data["user_id"] == "u_alice"
+    assert last.data["urgency"] == "urgent"
+    assert "cost" in last.data["message"].lower()

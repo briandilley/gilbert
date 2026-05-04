@@ -68,6 +68,15 @@ class Goal:
     max_wall_clock_s_override: float | None = None
     """Override per-run wall-clock cap in seconds. None means use the service default."""
 
+    cost_cap_usd: float | None = None
+    """Optional per-goal lifetime cost cap. When ``lifetime_cost_usd``
+    exceeds this, the goal is auto-disabled and the owner is notified.
+    None means no cap."""
+
+    lifetime_cost_usd: float = 0.0
+    """Cumulative cost across all runs of this goal, summed from
+    ``ChatTurnResult.turn_usage['cost_usd']`` after each run."""
+
 
 @dataclass
 class Run:

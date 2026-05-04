@@ -198,6 +198,7 @@ class AutonomousAgentService(Service):
         profile_id: str,
         trigger_type: str | None = None,
         trigger_config: dict[str, Any] | None = None,
+        cost_cap_usd: float | None = None,
     ) -> Goal:
         if self._storage is None:
             raise RuntimeError("AutonomousAgentService.start() not called")
@@ -213,6 +214,7 @@ class AutonomousAgentService(Service):
             updated_at=now,
             trigger_type=trigger_type,
             trigger_config=trigger_config,
+            cost_cap_usd=cost_cap_usd,
         )
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         await self._arm_trigger(goal)
@@ -254,6 +256,7 @@ class AutonomousAgentService(Service):
         status: GoalStatus | None = None,
         trigger_type: str | None = None,
         trigger_config: dict[str, Any] | None = None,
+        cost_cap_usd: float | None = None,
     ) -> Goal | None:
         if self._storage is None:
             raise RuntimeError("not started")
@@ -273,6 +276,8 @@ class AutonomousAgentService(Service):
             goal.trigger_type = trigger_type
         if trigger_config is not None:
             goal.trigger_config = trigger_config
+        if cost_cap_usd is not None:
+            goal.cost_cap_usd = cost_cap_usd
         goal.updated_at = datetime.now(UTC)
         await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
         # Re-arm: cheapest correct policy is always disarm then arm
@@ -422,6 +427,13 @@ class AutonomousAgentService(Service):
         # Empty string normalizes to None (manual-only)
         if trigger_type == "":
             trigger_type = None
+        cost_cap_usd_raw = frame.get("cost_cap_usd")
+        cost_cap_usd: float | None = None
+        if cost_cap_usd_raw is not None:
+            try:
+                cost_cap_usd = float(cost_cap_usd_raw)
+            except (TypeError, ValueError):
+                cost_cap_usd = None
         goal = await self.create_goal(
             owner_user_id=conn.user_ctx.user_id,
             name=name,
@@ -429,6 +441,7 @@ class AutonomousAgentService(Service):
             profile_id=profile_id,
             trigger_type=trigger_type,
             trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
+            cost_cap_usd=cost_cap_usd,
         )
         return {
             "type": "agent.goal.create.result",
@@ -484,6 +497,13 @@ class AutonomousAgentService(Service):
             }
         trigger_type = frame.get("trigger_type")
         trigger_config = frame.get("trigger_config")
+        cost_cap_usd_raw = frame.get("cost_cap_usd")
+        cost_cap_usd_update: float | None = None
+        if cost_cap_usd_raw is not None:
+            try:
+                cost_cap_usd_update = float(cost_cap_usd_raw)
+            except (TypeError, ValueError):
+                cost_cap_usd_update = None
         updated = await self.update_goal(
             goal_id,
             name=frame.get("name"),
@@ -492,6 +512,7 @@ class AutonomousAgentService(Service):
             status=status_enum,
             trigger_type=trigger_type if trigger_type in (None, "time", "event") else None,
             trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
+            cost_cap_usd=cost_cap_usd_update,
         )
         return {
             "type": "agent.goal.update.result",
@@ -1109,11 +1130,37 @@ class AutonomousAgentService(Service):
         ):
             fresh_goal.conversation_id = run.conversation_id
 
+        # Accumulate cost and enforce cap
+        run_cost = 0.0
+        if run.status != RunStatus.FAILED:  # don't bill failed runs that did nothing
+            try:
+                # result is set when the chat call succeeded — fall back to
+                # 0 for TIMED_OUT/interrupted runs that may not have a usage stamp.
+                if result is not None and result.turn_usage:
+                    run_cost = float(result.turn_usage.get("cost_usd", 0.0) or 0.0)
+            except (AttributeError, TypeError):
+                pass
+
+        fresh_goal.lifetime_cost_usd += run_cost
         fresh_goal.run_count += 1
         fresh_goal.last_run_at = run.ended_at
         fresh_goal.last_run_status = run.status
         fresh_goal.updated_at = datetime.now(UTC)
+
+        cost_cap_exceeded = (
+            fresh_goal.cost_cap_usd is not None
+            and fresh_goal.lifetime_cost_usd >= fresh_goal.cost_cap_usd
+        )
+        if cost_cap_exceeded and fresh_goal.status == GoalStatus.ENABLED:
+            fresh_goal.status = GoalStatus.DISABLED
+
         await self._storage.put(_GOAL_COLLECTION, fresh_goal.id, _goal_to_dict(fresh_goal))
+
+        # If cost cap was just exceeded, disarm triggers and notify owner
+        if cost_cap_exceeded:
+            await self._disarm_trigger(fresh_goal)
+            await self._notify_cost_cap_exceeded(fresh_goal)
+
         return run
 
     def _build_initial_user_message(self, goal: Goal) -> str:
@@ -1140,6 +1187,36 @@ class AutonomousAgentService(Service):
             f"reason. (The reason is logged on the run for the human owner.)"
         )
 
+    async def _notify_cost_cap_exceeded(self, goal: Goal) -> None:
+        """Notify the goal's owner that the lifetime cost cap was hit
+        and the goal has been auto-disabled.
+        """
+        if self._resolver is None:
+            return
+        from gilbert.interfaces.notifications import NotificationProvider, NotificationUrgency
+
+        notif_svc = self._resolver.get_capability("notifications")
+        if not isinstance(notif_svc, NotificationProvider):
+            logger.warning(
+                "cost cap exceeded for goal %s but notifications unavailable",
+                goal.id,
+            )
+            return
+        try:
+            await notif_svc.notify_user(
+                user_id=goal.owner_user_id,
+                message=(
+                    f"Goal '{goal.name}' has been disabled — its lifetime "
+                    f"cost (${goal.lifetime_cost_usd:.2f}) exceeded the cap "
+                    f"of ${goal.cost_cap_usd:.2f}."
+                ),
+                urgency=NotificationUrgency.URGENT,
+                source="agent",
+                source_ref={"goal_id": goal.id, "kind": "cost_cap"},
+            )
+        except Exception:
+            logger.exception("failed to notify cost-cap on goal %s", goal.id)
+
 
 def _goal_to_dict(g: Goal) -> dict[str, Any]:
     return {
@@ -1161,6 +1238,8 @@ def _goal_to_dict(g: Goal) -> dict[str, Any]:
         "completed_reason": g.completed_reason,
         "max_rounds_override": g.max_rounds_override,
         "max_wall_clock_s_override": g.max_wall_clock_s_override,
+        "cost_cap_usd": g.cost_cap_usd,
+        "lifetime_cost_usd": g.lifetime_cost_usd,
     }
 
 
@@ -1189,6 +1268,8 @@ def _goal_from_dict(d: dict[str, Any]) -> Goal:
         completed_reason=d.get("completed_reason"),
         max_rounds_override=int(max_rounds_raw) if max_rounds_raw is not None else None,
         max_wall_clock_s_override=float(max_wall_clock_raw) if max_wall_clock_raw is not None else None,
+        cost_cap_usd=d.get("cost_cap_usd"),
+        lifetime_cost_usd=float(d.get("lifetime_cost_usd", 0.0) or 0.0),
     )
 
 
