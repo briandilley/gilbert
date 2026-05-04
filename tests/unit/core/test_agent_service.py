@@ -186,3 +186,102 @@ async def test_delete_goal_removes_it(
     assert await svc.get_goal(g.id) is None
     # Re-deleting returns False
     assert await svc.delete_goal(g.id) is False
+
+
+# ── Run execution tests ───────────────────────────────────────────
+
+
+async def test_run_goal_now_invokes_ai_chat_with_correct_args(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="Investigate the topic and report back.",
+        profile_id="my_profile",
+    )
+
+    run = await svc.run_goal_now(g.id)
+
+    assert run.goal_id == g.id
+    assert run.status == RunStatus.COMPLETED
+    assert run.final_message_text == "done"
+    assert run.conversation_id == "conv-fake"
+    assert run.tokens_in == 50
+    assert run.tokens_out == 20
+    assert run.error is None
+    assert isinstance(run.started_at, datetime)
+    assert run.ended_at is not None
+
+    # AIService.chat was called once with the right routing
+    assert len(ai.calls) == 1
+    call = ai.calls[0]
+    assert call["ai_profile"] == "my_profile"
+    assert call["ai_call"] == "agent.run"
+    # The user_message includes the goal instruction
+    assert "Investigate the topic" in call["user_message"]
+
+
+async def test_run_goal_now_updates_goal_run_count_and_last_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    await svc.run_goal_now(g.id)
+    await svc.run_goal_now(g.id)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 2
+    assert fetched.last_run_status == RunStatus.COMPLETED
+    assert fetched.last_run_at is not None
+
+
+async def test_run_goal_now_returns_failed_run_on_chat_exception(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    async def raising_chat(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("backend on fire")
+
+    # Replace the chat method on the fake to raise
+    ai.chat = raising_chat  # type: ignore[method-assign]
+
+    run = await svc.run_goal_now(g.id)
+    assert run.status == RunStatus.FAILED
+    assert run.error is not None
+    assert "backend on fire" in run.error
+
+
+async def test_run_goal_now_rejects_completed_goal(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    await svc.update_goal(g.id, status=GoalStatus.COMPLETED)
+
+    with pytest.raises(ValueError, match="completed"):
+        await svc.run_goal_now(g.id)
+
+
+async def test_run_goal_now_rejects_disabled_goal(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus],
+) -> None:
+    svc, _ai, _bus = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    await svc.update_goal(g.id, status=GoalStatus.DISABLED)
+
+    with pytest.raises(ValueError, match="disabled"):
+        await svc.run_goal_now(g.id)

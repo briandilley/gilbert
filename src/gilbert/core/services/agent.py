@@ -199,6 +199,96 @@ class AutonomousAgentService(Service):
             await self._storage.delete(_RUN_COLLECTION, r["id"])
         return True
 
+    # ── Execution ─────────────────────────────────────────────────
+
+    async def run_goal_now(self, goal_id: str) -> Run:
+        """Execute a goal once (manual trigger). Persists a Run entity
+        and returns it. Raises ValueError if the goal is in a non-runnable
+        state.
+        """
+        if self._storage is None or self._ai is None:
+            raise RuntimeError("not started")
+
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            raise ValueError(f"goal not found: {goal_id}")
+        if goal.status == GoalStatus.COMPLETED:
+            raise ValueError(f"goal {goal_id} is completed")
+        if goal.status == GoalStatus.DISABLED:
+            raise ValueError(f"goal {goal_id} is disabled")
+
+        run = Run(
+            id=str(uuid.uuid4()),
+            goal_id=goal_id,
+            triggered_by="manual",
+            started_at=datetime.now(UTC),
+            status=RunStatus.RUNNING,
+        )
+        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+
+        # Build the user message that kicks the loop
+        user_message = self._build_initial_user_message(goal)
+
+        try:
+            from gilbert.interfaces.auth import UserContext
+            user_ctx = UserContext.SYSTEM if goal.owner_user_id == "system" else None
+            # When user_ctx is None, AIService treats the call as system-driven.
+            # A future task can fetch the actual UserContext for the owner.
+            result = await self._ai.chat(
+                user_message=user_message,
+                conversation_id=None,  # fresh conversation per run
+                user_ctx=user_ctx,
+                ai_call=_AI_CALL_NAME,
+                ai_profile=goal.profile_id,
+            )
+            run.status = RunStatus.COMPLETED
+            run.final_message_text = result.response_text
+            run.conversation_id = result.conversation_id
+            if result.turn_usage:
+                run.tokens_in = int(result.turn_usage.get("input_tokens", 0))
+                run.tokens_out = int(result.turn_usage.get("output_tokens", 0))
+            run.rounds_used = len(result.rounds) + 1
+        except Exception as exc:
+            run.status = RunStatus.FAILED
+            run.error = repr(exc)
+            logger.exception("agent run failed: goal=%s run=%s", goal_id, run.id)
+
+        run.ended_at = datetime.now(UTC)
+        await self._storage.put(_RUN_COLLECTION, run.id, _run_to_dict(run))
+
+        # Update goal counters
+        goal.run_count += 1
+        goal.last_run_at = run.ended_at
+        goal.last_run_status = run.status
+        goal.updated_at = datetime.now(UTC)
+        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+
+        return run
+
+    def _build_initial_user_message(self, goal: Goal) -> str:
+        """Synthesize the user message that drives the AI loop.
+
+        Format:
+            You are an autonomous agent running a goal on behalf of user
+            <owner>. Your goal is named "<name>". Goal instruction:
+
+            <instruction>
+
+            Take whatever action is appropriate to advance this goal. When
+            you have fully completed the goal — for good — call the
+            ``complete_goal`` tool with the goal_id and a short reason.
+        """
+        return (
+            f"You are an autonomous agent running a goal on behalf of user "
+            f"{goal.owner_user_id}. Your goal is named \"{goal.name}\". "
+            f"Goal instruction:\n\n"
+            f"{goal.instruction}\n\n"
+            f"Take whatever action is appropriate to advance this goal. "
+            f"When you have fully completed the goal — for good — call the "
+            f"``complete_goal`` tool with goal_id={goal.id!r} and a short "
+            f"reason. (The reason is logged on the run for the human owner.)"
+        )
+
 
 def _goal_to_dict(g: Goal) -> dict[str, Any]:
     return {
