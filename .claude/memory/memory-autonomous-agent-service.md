@@ -35,8 +35,22 @@ or ``COMPLETED`` (terminal — no more runs).
 per-user ownership: a user can only see/run/edit/delete their own goals.
 Set in ``DEFAULT_RPC_PERMISSIONS``.
 
-**Triggers:** v1 supports manual triggers only (``agent.goal.run_now``
-RPC). Automatic TIME and EVENT triggers are Phase 4b.
+**Triggers:** Three trigger sources funnel into one ``_run_goal_internal``
+entry point.
+- **Manual** (``agent.goal.run_now`` RPC): synchronous; returns the run
+  to the caller.
+- **TIME** (``trigger_type="time"``): scheduler job named
+  ``agent_goal_<id>``. Schedule kinds: ``interval`` (seconds), ``daily_at``
+  (hour, minute), ``hourly_at`` (minute). ``add_job`` is not idempotent
+  on name; service does ``remove_job`` then ``add_job`` for re-arm.
+- **EVENT** (``trigger_type="event"``): subscribes to one event_type
+  with optional simple field/op/value filter (ops: eq, neq, in, contains).
+
+Triggers are re-armed on ``start()`` from persisted goal state. Runs
+left in RUNNING state across a process restart are marked FAILED with
+``error="process_restarted"``. Concurrency: in-memory
+``_running_goals: set[str]`` causes a duplicate trigger-fire to skip
+silently while the previous run is still in flight.
 
 **Cross-run memory & materialized conversations:** v1 does not implement
 notes, digests, or per-goal conversation materialization. Each run

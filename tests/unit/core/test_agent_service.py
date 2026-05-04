@@ -753,7 +753,8 @@ async def test_event_trigger_subscribes_and_fires_run(
 
     # Now publish a matching event — note: tests use _FakeEventBus which has
     # a subscribe method we need to implement
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     from gilbert.interfaces.events import Event
 
@@ -789,7 +790,8 @@ async def test_event_trigger_filter_skips_non_matching(
         },
     )
 
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     from gilbert.interfaces.events import Event
 
@@ -838,7 +840,8 @@ async def test_event_trigger_disarms_on_disable(
 
     await svc.update_goal(g.id, status=GoalStatus.DISABLED)
 
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     from gilbert.interfaces.events import Event
 
@@ -915,8 +918,8 @@ async def test_start_marks_stale_running_runs_as_failed(
     """A run left in RUNNING state across a process restart should be
     marked FAILED so the goal isn't permanently stuck.
     """
-    import json
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     bus = _FakeEventBus()
     scheduler = _FakeScheduler()
@@ -982,3 +985,28 @@ async def test_start_marks_stale_running_runs_as_failed(
     assert raw is not None
     assert raw["status"] == "failed"
     assert "process_restarted" in (raw.get("error") or "")
+
+
+async def test_ws_agent_goal_create_with_time_trigger(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, _bus, scheduler = service
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.goal.create"]
+
+    result = await handler(
+        _make_conn("u_alice"),
+        {
+            "id": "f1",
+            "name": "Hourly check",
+            "instruction": "i",
+            "profile_id": "default",
+            "trigger_type": "time",
+            "trigger_config": {"kind": "interval", "seconds": 3600},
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["goal"]["trigger_type"] == "time"
+    assert len(scheduler.added) == 1

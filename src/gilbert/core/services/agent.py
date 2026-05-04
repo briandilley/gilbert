@@ -330,11 +330,26 @@ class AutonomousAgentService(Service):
                 "ok": False,
                 "error": "name, instruction, profile_id required",
             }
+        trigger_type = frame.get("trigger_type")
+        trigger_config = frame.get("trigger_config")
+        # Validate trigger_type
+        if trigger_type not in (None, "", "time", "event"):
+            return {
+                "type": "agent.goal.create.result",
+                "ref": frame.get("id"),
+                "ok": False,
+                "error": "trigger_type must be 'time' or 'event'",
+            }
+        # Empty string normalizes to None (manual-only)
+        if trigger_type == "":
+            trigger_type = None
         goal = await self.create_goal(
             owner_user_id=conn.user_ctx.user_id,
             name=name,
             instruction=instruction,
             profile_id=profile_id,
+            trigger_type=trigger_type,
+            trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
         )
         return {
             "type": "agent.goal.create.result",
@@ -388,12 +403,16 @@ class AutonomousAgentService(Service):
                 "ok": False,
                 "error": "invalid status",
             }
+        trigger_type = frame.get("trigger_type")
+        trigger_config = frame.get("trigger_config")
         updated = await self.update_goal(
             goal_id,
             name=frame.get("name"),
             instruction=frame.get("instruction"),
             profile_id=frame.get("profile_id"),
             status=status_enum,
+            trigger_type=trigger_type if trigger_type in (None, "time", "event") else None,
+            trigger_config=trigger_config if isinstance(trigger_config, dict) else None,
         )
         return {
             "type": "agent.goal.update.result",
