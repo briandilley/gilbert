@@ -400,6 +400,16 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
     stickToBottomRef.current = distanceFromBottom < 32;
   }, []);
 
+  const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
+    queryKey: ["agent-conv", conversationId, goal.run_count],
+    queryFn: () =>
+      conversationId
+        ? api.loadConversation(conversationId)
+        : Promise.resolve(null),
+    enabled: !!conversationId,
+    // Events now drive updates; polling not needed.
+  });
+
   // When the conversation content changes (new persisted turns, new
   // streamed deltas, new tool events), keep the scroll glued to the
   // bottom unless the user has scrolled up to read history.
@@ -426,16 +436,6 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
     const el = scrollContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [conversationId]);
-
-  const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
-    queryKey: ["agent-conv", conversationId, goal.run_count],
-    queryFn: () =>
-      conversationId
-        ? api.loadConversation(conversationId)
-        : Promise.resolve(null),
-    enabled: !!conversationId,
-    // Events now drive updates; polling not needed.
-  });
 
   const handleSend = async () => {
     const text = composerText.trim();
