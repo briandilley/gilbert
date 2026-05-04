@@ -322,10 +322,15 @@ class AutonomousAgentService(Service):
 
     # ── Execution ─────────────────────────────────────────────────
 
-    async def run_goal_now(self, goal_id: str) -> Run:
+    async def run_goal_now(
+        self,
+        goal_id: str,
+        *,
+        user_message: str | None = None,
+    ) -> Run:
         """Execute a goal once (manual trigger). Persists a Run entity
         and returns it. Raises ValueError if the goal is in a non-runnable
-        state.
+        state or if a run is already in flight for this goal.
         """
         if self._storage is None or self._ai is None:
             raise RuntimeError("not started")
@@ -336,16 +341,27 @@ class AutonomousAgentService(Service):
             raise ValueError(f"goal {goal_id} is completed")
         if goal.status == GoalStatus.DISABLED:
             raise ValueError(f"goal {goal_id} is disabled")
-        # Shield the run from outer task cancellation — if the WS RPC
-        # handler calling us is cancelled (user navigates away, page
-        # refresh, connection drop), the agent run should still finish
-        # to its own conclusion (END_TURN, max-rounds, an explicit
-        # cancel from inside the loop). Without this, an interrupted
-        # run leaves a half-finished conversation and a misleading
-        # "completed" Run entity.
-        return await asyncio.shield(
-            self._run_goal_internal(goal_id, "manual", {})
-        )
+        if goal_id in self._running_goals:
+            raise ValueError(
+                f"goal {goal_id} has a run in progress; wait for it to finish"
+            )
+        # Mark as running before entering _run_goal_internal so that
+        # any concurrent call (another manual trigger, an event firing
+        # mid-run) sees the in-progress flag and refuses.
+        self._running_goals.add(goal_id)
+        try:
+            # Shield the run from outer task cancellation — if the WS RPC
+            # handler calling us is cancelled (user navigates away, page
+            # refresh, connection drop), the agent run should still finish
+            # to its own conclusion (END_TURN, max-rounds, an explicit
+            # cancel from inside the loop). Without this, an interrupted
+            # run leaves a half-finished conversation and a misleading
+            # "completed" Run entity.
+            return await asyncio.shield(
+                self._run_goal_internal(goal_id, "manual", {"user_message": user_message})
+            )
+        finally:
+            self._running_goals.discard(goal_id)
 
     async def declare_goal_complete(
         self,
@@ -578,8 +594,14 @@ class AutonomousAgentService(Service):
                 "ok": False,
                 "error": "not_found",
             }
+        user_message_raw = frame.get("user_message")
+        user_message = (
+            str(user_message_raw).strip()
+            if isinstance(user_message_raw, str) and user_message_raw.strip()
+            else None
+        )
         try:
-            run = await self.run_goal_now(goal_id)
+            run = await self.run_goal_now(goal_id, user_message=user_message)
         except ValueError as exc:
             return {
                 "type": "agent.goal.run_now.result",
@@ -1104,7 +1126,12 @@ class AutonomousAgentService(Service):
         self._active_runs[goal_id] = run.id
         result = None
         try:
-            user_message = self._build_initial_user_message(goal)
+            system_prompt = self._build_system_prompt(goal)
+            user_message_override = (trigger_context or {}).get("user_message")
+            if isinstance(user_message_override, str) and user_message_override.strip():
+                user_message = user_message_override.strip()
+            else:
+                user_message = self._build_default_user_trigger_message(goal)
             max_wall_clock_s = (
                 goal.max_wall_clock_s_override
                 if goal.max_wall_clock_s_override is not None
@@ -1116,6 +1143,7 @@ class AutonomousAgentService(Service):
                         user_message=user_message,
                         conversation_id=run_conv_id,
                         user_ctx=None,
+                        system_prompt=system_prompt,
                         ai_call=_AI_CALL_NAME,
                         ai_profile=goal.profile_id,
                         max_tool_rounds=(
@@ -1290,22 +1318,17 @@ class AutonomousAgentService(Service):
 
         return run
 
-    def _build_initial_user_message(self, goal: Goal) -> str:
-        """Synthesize the user message that drives the AI loop.
+    def _build_system_prompt(self, goal: Goal) -> str:
+        """Build the agent system prompt that frames the run.
 
-        Format:
-            You are an autonomous agent running a goal on behalf of user
-            <owner>. Your goal is named "<name>". Goal instruction:
-
-            <instruction>
-
-            Take whatever action is appropriate. When THIS RUN has met
-            the goal's success criteria, call ``complete_goal`` with the
-            goal_id and a short reason.
+        The goal instruction + the agent's operating rules go here so
+        chat()'s user_message slot is free to carry either an
+        autogenerated trigger ("take action on this goal") or an
+        explicit user message from the agent chat composer.
         """
         return (
             f"You are an autonomous agent running a goal on behalf of user "
-            f'{goal.owner_user_id}. Your goal is named "{goal.name}". '
+            f"{goal.owner_user_id}. Your goal is named \"{goal.name}\".\n\n"
             f"Goal instruction:\n\n"
             f"{goal.instruction}\n\n"
             f"Take whatever action is appropriate to advance this goal. "
@@ -1315,6 +1338,12 @@ class AutonomousAgentService(Service):
             f"calling complete_goal records that this particular run "
             f"succeeded, it does not retire the goal."
         )
+
+    def _build_default_user_trigger_message(self, goal: Goal) -> str:
+        """The user-side message when the run was triggered automatically
+        (heartbeat/event/manual run-now without explicit user input).
+        """
+        return "Take action on the goal described in your instructions."
 
     async def _notify_cost_cap_exceeded(self, goal: Goal) -> None:
         """Notify the goal's owner that the lifetime cost cap was hit

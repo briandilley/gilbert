@@ -153,6 +153,7 @@ class _FakeAIService:
         self.calls.append(
             {
                 "user_message": user_message,
+                "system_prompt": system_prompt,
                 "conversation_id": conversation_id,
                 "ai_call": ai_call,
                 "ai_profile": ai_profile,
@@ -311,8 +312,10 @@ async def test_run_goal_now_invokes_ai_chat_with_correct_args(
     call = ai.calls[0]
     assert call["ai_profile"] == "my_profile"
     assert call["ai_call"] == "agent.run"
-    # The user_message includes the goal instruction
-    assert "Investigate the topic" in call["user_message"]
+    # The goal instruction lives in system_prompt now, not user_message
+    assert "Investigate the topic" in (call.get("system_prompt") or "")
+    # The default user trigger message is used when no user_message override given
+    assert "Take action" in call["user_message"]
     # chat() received the pre-allocated conversation_id (not None)
     assert call["conversation_id"] == run.conversation_id
 
@@ -1884,3 +1887,73 @@ async def test_run_marks_conversation_with_source_agent(
     assert raw is not None
     assert raw.get("source") == "agent"
     assert raw.get("agent_goal_id") == g.id
+
+
+# ── User-message override on run_goal_now ─────────────────────────
+
+
+async def test_run_goal_now_uses_user_message_when_provided(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="default goal instruction",
+        profile_id="default",
+    )
+
+    await svc.run_goal_now(g.id, user_message="please also include international flights")
+
+    assert len(ai.calls) == 1
+    call = ai.calls[0]
+    # The user message is what the user typed
+    assert call["user_message"] == "please also include international flights"
+    # The goal context is in system_prompt
+    assert "default goal instruction" in (call.get("system_prompt") or "")
+    assert "autonomous agent" in (call.get("system_prompt") or "").lower()
+
+
+async def test_run_goal_now_default_user_trigger_when_no_override(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+    await svc.run_goal_now(g.id)
+    assert len(ai.calls) == 1
+    call = ai.calls[0]
+    # Default trigger message ("Take action…")
+    assert "Take action" in call["user_message"]
+
+
+async def test_run_goal_now_rejects_concurrent_run(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """If a run is already in flight for the goal, run_goal_now refuses
+    rather than silently dropping the new request.
+    """
+    svc, ai, _bus, _scheduler = service
+    g = await svc.create_goal(
+        owner_user_id="u_alice", name="x", instruction="i", profile_id="default"
+    )
+
+    # Make chat block until we release it
+    proceed = asyncio.Event()
+    original = ai.chat
+
+    async def slow_chat(*args: Any, **kwargs: Any) -> Any:
+        await proceed.wait()
+        return await original(*args, **kwargs)
+
+    ai.chat = slow_chat  # type: ignore[method-assign]
+
+    task = asyncio.create_task(svc.run_goal_now(g.id))
+    await asyncio.sleep(0.01)  # let run_goal_now start and add to running set
+
+    with pytest.raises(ValueError, match="in progress"):
+        await svc.run_goal_now(g.id)
+
+    proceed.set()
+    await task
