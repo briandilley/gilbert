@@ -967,5 +967,19 @@ export function useWsApi() {
         ...(slot ? { slot } : {}),
       }),
 
+    listUIRoutes: () =>
+      rpc<{
+        routes: Array<{
+          path: string;
+          panel_id: string;
+          label: string;
+          description: string;
+          icon: string;
+          plugin: string;
+        }>;
+      }>({
+        type: "ui.routes.list",
+      }),
+
   }), [rpc, rpcWithRef]);
 }

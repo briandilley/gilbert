@@ -53,6 +53,7 @@ import {
 } from "@/components/ui/dialog";
 import type { NavGroup, NavItem } from "@/types/dashboard";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 /** Map of icon names returned by the backend to lucide components. */
 const ICONS: Record<string, LucideIcon> = {
@@ -189,6 +190,10 @@ export function NavBar() {
             className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
             title={connected ? "Connected" : "Disconnected"}
           />
+
+          {/* Plugins can drop widgets next to the bell — a sync
+              indicator, a connected-device count, anything. */}
+          <PluginPanelSlot slot="header.widgets" />
 
           <NotificationBell />
 

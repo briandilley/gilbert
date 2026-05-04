@@ -13,6 +13,142 @@ from gilbert.interfaces.service import Service, ServiceEnumerator, ServiceInfo, 
 logger = logging.getLogger(__name__)
 
 
+def _merge_plugin_nav(gilbert: Any, nav_groups: list[dict[str, Any]]) -> None:
+    """Mutate ``nav_groups`` in place to include plugin contributions.
+
+    Two sources from each loaded plugin:
+
+    - ``ui_routes()`` entries with ``add_to_nav=True`` — add a leaf
+      pointing at ``r.path``.
+    - ``nav_contributions()`` — explicit nav items, with no associated
+      route.
+
+    Each item slots under ``parent_group`` (or ``nav_parent_group``
+    on a route) when that key matches an existing top-level group;
+    otherwise we create a new top-level group at the end of the list.
+    """
+    by_key: dict[str, dict[str, Any]] = {g["key"]: g for g in nav_groups}
+
+    def _append(parent_key: str, item: dict[str, Any], *, group_label: str = "", group_icon: str = "") -> None:
+        if parent_key and parent_key in by_key:
+            by_key[parent_key].setdefault("items", []).append(item)
+            return
+        # New top-level group named after the plugin's chosen key.
+        # When parent_key is blank we synthesize one from the item
+        # label (lowercased). The caller's group_label/group_icon
+        # control how the new group displays.
+        new_key = parent_key or item["label"].lower().replace(" ", "-")
+        if new_key in by_key:
+            by_key[new_key].setdefault("items", []).append(item)
+            return
+        new_group = {
+            "key": new_key,
+            "label": group_label or item["label"],
+            "description": item.get("description", ""),
+            "url": item.get("url", ""),
+            "icon": group_icon or item.get("icon", ""),
+            "required_role": item.get("required_role", "user"),
+            "items": [],  # leaf
+        }
+        nav_groups.append(new_group)
+        by_key[new_key] = new_group
+
+    for entry in gilbert.list_loaded_plugins():
+        plugin = entry.plugin
+        try:
+            routes = plugin.ui_routes()
+        except Exception:
+            logger.exception(
+                "ui_routes() raised on %s", plugin.metadata().name
+            )
+            routes = []
+        for r in routes:
+            if not r.add_to_nav:
+                continue
+            item = {
+                "label": r.label or r.path,
+                "description": r.description,
+                "url": r.path,
+                "icon": r.icon,
+                "required_role": r.required_role,
+            }
+            _append(r.nav_parent_group, item)
+
+        try:
+            contribs = plugin.nav_contributions()
+        except Exception:
+            logger.exception(
+                "nav_contributions() raised on %s", plugin.metadata().name
+            )
+            contribs = []
+        for c in contribs:
+            item: dict[str, Any] = {
+                "label": c.label,
+                "description": c.description,
+                "icon": c.icon,
+                "required_role": c.required_role,
+            }
+            if c.url:
+                item["url"] = c.url
+            elif c.action:
+                item["action"] = c.action
+            if c.requires_capability:
+                item["requires_capability"] = c.requires_capability
+            _append(c.parent_group, item)
+
+
+def _visible_plugin_cards(
+    gilbert: Any,
+    visible_fn: Any,
+) -> list[dict[str, Any]]:
+    """Collect dashboard cards from plugin ``dashboard_cards()`` and
+    from routes with ``show_in_dashboard=True``. Filtered by the same
+    role/capability rule used for nav."""
+    out: list[dict[str, Any]] = []
+    for entry in gilbert.list_loaded_plugins():
+        plugin = entry.plugin
+        try:
+            cards = plugin.dashboard_cards()
+        except Exception:
+            logger.exception(
+                "dashboard_cards() raised on %s", plugin.metadata().name
+            )
+            cards = []
+        for c in cards:
+            row: dict[str, Any] = {
+                "title": c.title,
+                "description": c.description,
+                "url": c.url,
+                "icon": c.icon,
+                "required_role": c.required_role,
+            }
+            if c.requires_capability:
+                row["requires_capability"] = c.requires_capability
+            if visible_fn(row):
+                out.append({k: v for k, v in row.items() if k != "requires_capability"})
+
+        try:
+            routes = plugin.ui_routes()
+        except Exception:
+            logger.exception(
+                "ui_routes() raised on %s", plugin.metadata().name
+            )
+            routes = []
+        for r in routes:
+            if not r.show_in_dashboard:
+                continue
+            row = {
+                "title": r.label or r.path,
+                "description": r.description,
+                "url": r.path,
+                "icon": r.icon,
+                "required_role": r.required_role,
+            }
+            if visible_fn(row):
+                out.append({k: v for k, v in row.items() if k != "requires_capability"})
+    return out
+
+
 class WebApiService(Service):
     """Provides dashboard, system, and entity browser WS handlers.
 
@@ -46,6 +182,7 @@ class WebApiService(Service):
             "entities.collection.list": self._ws_entities_list,
             "entities.collection.query": self._ws_entities_query,
             "entities.entity.get": self._ws_entity_get,
+            "ui.routes.list": self._ws_ui_routes_list,
         }
 
     async def _ws_dashboard_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -274,6 +411,16 @@ class WebApiService(Service):
             },
         ]
 
+        # Merge plugin contributions before role/capability filtering so
+        # plugin items see exactly the same gating logic as core entries.
+        # Two paths:
+        #   - Routes with ``add_to_nav=True`` slot under their declared
+        #     ``nav_parent_group`` (or create a new top-level group if
+        #     blank).
+        #   - Standalone NavContribution entries do the same, without
+        #     binding to a route.
+        _merge_plugin_nav(gilbert, nav_groups)
+
         acl = gilbert.service_manager.get_by_capability("access_control")
         sm = gilbert.service_manager
 
@@ -342,7 +489,7 @@ class WebApiService(Service):
         # Flat ``cards`` list preserved for the dashboard view.
         # Dashboard shows one card per top-level entry (leaves and
         # groups both) — clicking a group card lands on its default
-        # URL.
+        # URL — plus any extra cards plugins contributed.
         cards = [
             {
                 "title": g["label"],
@@ -353,12 +500,65 @@ class WebApiService(Service):
             }
             for g in visible_nav
         ]
+        cards.extend(_visible_plugin_cards(gilbert, _visible))
 
         return {
             "type": "dashboard.get.result",
             "ref": frame.get("id"),
             "cards": cards,
             "nav": visible_nav,
+        }
+
+    async def _ws_ui_routes_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the routes plugins contribute, role-filtered.
+
+        SPA's ``<PluginRoutes />`` queries this once at boot and
+        injects a ``<Route path={path} element={<Component/>}/>`` per
+        entry — components are looked up by ``panel_id`` in the
+        registered-component registry.
+        """
+        gilbert = conn.manager.gilbert
+        if gilbert is None:
+            return {"type": "ui.routes.list.result", "ref": frame.get("id"), "routes": []}
+        acl = gilbert.service_manager.get_by_capability("access_control")
+        caller_level = getattr(conn, "user_level", 200)
+
+        def _level_for(role: str) -> int:
+            if acl is not None and hasattr(acl, "get_role_level"):
+                try:
+                    return acl.get_role_level(role)
+                except Exception:
+                    pass
+            return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+
+        out: list[dict[str, Any]] = []
+        for entry in gilbert.list_loaded_plugins():
+            try:
+                routes = entry.plugin.ui_routes()
+            except Exception:
+                logger.exception(
+                    "ui_routes() raised on %s", entry.plugin.metadata().name
+                )
+                continue
+            for r in routes:
+                if caller_level > _level_for(r.required_role):
+                    continue
+                out.append(
+                    {
+                        "path": r.path,
+                        "panel_id": r.panel_id,
+                        "label": r.label,
+                        "description": r.description,
+                        "icon": r.icon,
+                        "plugin": entry.plugin.metadata().name,
+                    }
+                )
+        return {
+            "type": "ui.routes.list.result",
+            "ref": frame.get("id"),
+            "routes": out,
         }
 
     async def _ws_system_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:

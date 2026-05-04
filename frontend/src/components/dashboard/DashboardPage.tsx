@@ -21,6 +21,7 @@ import {
   PlugIcon,
   type LucideIcon,
 } from "lucide-react";
+import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 interface CardStyle {
   icon: LucideIcon;
@@ -64,6 +65,12 @@ export function DashboardPage() {
   return (
     <div className="p-4 sm:p-6">
       <h1 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 text-center">Gilbert</h1>
+      {/* Above-the-grid slot: plugins can drop banner-style widgets,
+          system-status panels, etc. before the standard card grid. */}
+      <div className="mb-4 sm:mb-6 space-y-3">
+        <PluginPanelSlot slot="dashboard.top" />
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
         {data?.cards.map((card) => {
           const style = CARD_STYLES[card.icon] ?? DEFAULT_STYLE;
@@ -82,6 +89,11 @@ export function DashboardPage() {
             </Link>
           );
         })}
+      </div>
+
+      {/* Below-the-grid slot: long-form widgets go here. */}
+      <div className="mt-4 sm:mt-6 space-y-3">
+        <PluginPanelSlot slot="dashboard.bottom" />
       </div>
     </div>
   );

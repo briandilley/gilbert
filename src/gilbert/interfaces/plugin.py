@@ -25,6 +25,71 @@ class PluginMeta:
 
 
 @dataclass(frozen=True)
+class NavContribution:
+    """A nav-bar item a plugin adds.
+
+    Setting ``parent_group`` to an existing top-level group's key
+    (``"system"``, ``"security"``, ``"mcp"`` — see ``web_api.py``)
+    appends this item under that group's dropdown. Leaving ``parent_group``
+    blank creates a new top-level group with this item as its single
+    leaf — convenient for plugins that want their own header entry.
+
+    Either ``url`` (absolute SPA path) OR ``action`` (a frontend-side
+    handler key, e.g. ``"restart_host"``) must be set; if both are set
+    ``url`` wins.
+    """
+
+    label: str
+    url: str = ""
+    action: str = ""
+    icon: str = ""
+    description: str = ""
+    parent_group: str = ""
+    required_role: str = "user"
+    requires_capability: str = ""
+
+
+@dataclass(frozen=True)
+class DashboardCard:
+    """A card a plugin contributes to the ``/`` landing page."""
+
+    title: str
+    description: str
+    url: str
+    icon: str = ""
+    required_role: str = "user"
+    requires_capability: str = ""
+
+
+@dataclass(frozen=True)
+class UIRoute:
+    """A full SPA route the plugin owns.
+
+    The plugin's frontend code registers a React component under
+    ``panel_id`` (using ``registerPanel`` exactly the way panels are
+    registered); the SPA's ``<PluginRoutes />`` mounts a
+    ``<Route path={path} element={<Component/>}/>`` for each
+    declared route. A route is functionally an "anywhere-mountable
+    page", so the same registry covers panels and full pages.
+
+    Setting ``add_to_nav=True`` automatically adds a matching nav
+    item; ``nav_parent_group`` controls which existing group the
+    nav item slots into (or blank for a new top-level group).
+    Setting ``show_in_dashboard=True`` also adds a dashboard card.
+    """
+
+    path: str
+    panel_id: str
+    label: str = ""
+    description: str = ""
+    icon: str = ""
+    required_role: str = "user"
+    add_to_nav: bool = False
+    nav_parent_group: str = ""
+    show_in_dashboard: bool = False
+
+
+@dataclass(frozen=True)
 class UIPanel:
     """A UI panel a plugin contributes to a named slot in the SPA.
 
@@ -145,5 +210,34 @@ class Plugin(ABC):
         Plugins that ship per-user / per-admin UI override this to
         register their React components by ``panel_id`` into named
         slots, with no core-side knowledge of the plugin's existence.
+        """
+        return []
+
+    def ui_routes(self) -> list[UIRoute]:
+        """Declare full SPA pages the plugin contributes.
+
+        Each entry adds a ``<Route path={path}>`` that mounts the
+        React component registered under ``panel_id``. Optionally
+        adds a matching nav item and/or dashboard card. Default ``[]``.
+        """
+        return []
+
+    def nav_contributions(self) -> list[NavContribution]:
+        """Declare standalone nav items (no associated route).
+
+        Use this for nav entries that point at an existing route
+        (so it's not a new page, just another way to reach one) or
+        an action like ``restart_host``. Routes that need their own
+        nav entry should use ``UIRoute(add_to_nav=True)`` instead —
+        less duplication. Default ``[]``.
+        """
+        return []
+
+    def dashboard_cards(self) -> list[DashboardCard]:
+        """Declare cards on the ``/`` landing page.
+
+        Use for cards that point at existing routes or external
+        URLs. ``UIRoute(show_in_dashboard=True)`` covers the
+        common case. Default ``[]``.
         """
         return []

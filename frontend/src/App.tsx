@@ -25,8 +25,10 @@ import { NotificationsPage } from "@/components/notifications/NotificationsPage"
 import { AgentsPage } from "@/components/agent/AgentsPage";
 import { AgentDetailPage } from "@/components/agent/AgentDetailPage";
 import { AgentChatPage } from "@/components/agent/AgentChatPage";
+import { usePluginRouteElements } from "@/components/PluginRoutes";
 
 export default function App() {
+  const pluginRoutes = usePluginRouteElements();
   return (
     <Routes>
       <Route path="/auth/login" element={<LoginPage />} />
@@ -60,6 +62,9 @@ export default function App() {
           <Route path="/agents/list" element={<AgentsPage />} />
           <Route path="/agents/:goalId" element={<AgentDetailPage />} />
           <Route path="/account" element={<AccountPage />} />
+          {/* Plugin-contributed routes — looked up server-side and
+              rendered with components from the per-plugin registry. */}
+          {pluginRoutes}
         </Route>
       </Route>
     </Routes>
