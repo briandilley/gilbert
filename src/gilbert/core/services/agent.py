@@ -425,6 +425,15 @@ class AutonomousAgentService(Service):
         if goal.status == GoalStatus.DISABLED:
             raise ValueError(f"goal {goal_id} is disabled")
 
+        # If the user is providing a message, clear awaiting_user_input
+        # on ALL prior runs of this goal. Whatever question the agent
+        # was asking is now being answered by this message. Without
+        # this, the UI's "waiting for input" banner stays up forever
+        # (it's keyed off the most recent run's flag, and the run that
+        # actually asked the question is now completed).
+        if user_message:
+            await self._clear_awaiting_input_on_goal_runs(goal_id)
+
         # Mid-run user message — same handling as run_goal_now.
         if goal_id in self._running_goals:
             if user_message:
@@ -500,6 +509,45 @@ class AutonomousAgentService(Service):
                 self._running_goals.discard(goal_id)
 
         asyncio.create_task(_follow_up())
+
+    async def _clear_awaiting_input_on_goal_runs(self, goal_id: str) -> None:
+        """Clear awaiting_user_input + pending_question on every run of
+        this goal that still has the flag set. Called whenever a user
+        message arrives — the user's reply answers any prior pending
+        question, so no run for this goal should still claim it's
+        waiting for input.
+        """
+        if self._storage is None:
+            return
+        try:
+            stale = await self._storage.query(
+                Query(
+                    collection=_RUN_COLLECTION,
+                    filters=[
+                        Filter(field="goal_id", op=FilterOp.EQ, value=goal_id),
+                        Filter(
+                            field="awaiting_user_input",
+                            op=FilterOp.EQ,
+                            value=True,
+                        ),
+                    ],
+                    limit=1000,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "failed to query awaiting runs for goal %s", goal_id
+            )
+            return
+        for r in stale:
+            r["awaiting_user_input"] = False
+            r["pending_question"] = None
+            try:
+                await self._storage.put(_RUN_COLLECTION, r["id"], r)
+            except Exception:
+                logger.exception(
+                    "failed to clear awaiting flag on run %s", r.get("id")
+                )
 
     async def _append_user_message_to_conversation(
         self,
