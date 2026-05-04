@@ -61,6 +61,17 @@ import type {
   ProposalsListResult,
   ProposalsListCyclesResult,
 } from "@/types/proposals";
+import type {
+  Notification,
+  NotificationListResult,
+  NotificationUrgency,
+} from "@/types/notifications";
+import type {
+  Goal,
+  AgentRun,
+  GoalCreatePayload,
+  GoalUpdatePayload,
+} from "@/types/agent";
 
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
@@ -845,6 +856,80 @@ export function useWsApi() {
 
     listProposalCycles: (params?: { kind?: string; limit?: number }) =>
       rpc<ProposalsListCyclesResult>({ type: "proposals.list_cycles", ...params }),
+
+    // ── Notifications ─────────────────────────────────────────────
+
+    listNotifications: (filter?: { read?: boolean; source?: string; since?: string }, limit = 100) =>
+      rpc<NotificationListResult>({
+        type: "notification.list",
+        ...(filter ? { filter } : {}),
+        limit,
+      }),
+
+    markNotificationRead: (notificationId: string) =>
+      rpc<{ ok: boolean; error?: string }>({
+        type: "notification.mark_read",
+        notification_id: notificationId,
+      }),
+
+    markAllNotificationsRead: () =>
+      rpc<{ count: number }>({ type: "notification.mark_all_read" }),
+
+    deleteNotification: (notificationId: string) =>
+      rpc<{ ok: boolean; error?: string }>({
+        type: "notification.delete",
+        notification_id: notificationId,
+      }),
+
+    // ── Autonomous Agent ──────────────────────────────────────────
+
+    listGoals: () =>
+      rpc<{ goals: Goal[] }>({ type: "agent.goal.list" })
+        .then((r) => r.goals),
+
+    getGoal: (goalId: string) =>
+      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
+        type: "agent.goal.get",
+        goal_id: goalId,
+      }),
+
+    createGoal: (payload: GoalCreatePayload) =>
+      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
+        type: "agent.goal.create",
+        ...payload,
+      }),
+
+    updateGoal: (goalId: string, payload: GoalUpdatePayload) =>
+      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
+        type: "agent.goal.update",
+        goal_id: goalId,
+        ...payload,
+      }),
+
+    deleteGoal: (goalId: string) =>
+      rpc<{ ok: boolean; error?: string }>({
+        type: "agent.goal.delete",
+        goal_id: goalId,
+      }),
+
+    runGoalNow: (goalId: string) =>
+      rpc<{ ok: boolean; run?: AgentRun; error?: string }>({
+        type: "agent.goal.run_now",
+        goal_id: goalId,
+      }),
+
+    listAgentRuns: (goalId: string, limit = 100) =>
+      rpc<{ ok: boolean; runs?: AgentRun[]; error?: string }>({
+        type: "agent.run.list",
+        goal_id: goalId,
+        limit,
+      }),
+
+    getAgentRun: (runId: string) =>
+      rpc<{ ok: boolean; run?: AgentRun; error?: string }>({
+        type: "agent.run.get",
+        run_id: runId,
+      }),
 
   }), [rpc, rpcWithRef]);
 }
