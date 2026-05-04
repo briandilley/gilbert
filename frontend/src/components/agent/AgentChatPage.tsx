@@ -15,6 +15,7 @@ import { useWsApi } from "@/hooks/useWsApi";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { Button } from "@/components/ui/button";
 import type { Goal, GoalStatus } from "@/types/agent";
+import type { GilbertEvent } from "@/types/events";
 import type {
   ConversationDetail,
   ChatTurn,
@@ -240,6 +241,25 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
   const conversationId = goal.conversation_id || fallbackConvId;
   const hasRunningRun = runs.some((r) => r.status === "running");
 
+  // Live updates: invalidate the conversation query whenever the
+  // backend publishes a chat.stream.* or chat.message.* event for
+  // this conversation. Falls back to refetchInterval-style polling
+  // (already wired below) if events are missed.
+  const onConvEvent = useCallback(
+    (event: GilbertEvent) => {
+      const cid = (event.data as { conversation_id?: string } | undefined)?.conversation_id;
+      if (cid && cid === conversationId) {
+        queryClient.invalidateQueries({ queryKey: ["agent-conv", conversationId] });
+      }
+    },
+    [conversationId, queryClient],
+  );
+
+  useEventBus("chat.stream.text_delta", onConvEvent);
+  useEventBus("chat.stream.round_complete", onConvEvent);
+  useEventBus("chat.stream.turn_complete", onConvEvent);
+  useEventBus("chat.message.created", onConvEvent);
+
   const { data: conversation, isLoading } = useQuery<ConversationDetail | null>({
     queryKey: ["agent-conv", conversationId, goal.run_count],
     queryFn: () =>
@@ -247,7 +267,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
         ? api.loadConversation(conversationId)
         : Promise.resolve(null),
     enabled: !!conversationId,
-    refetchInterval: hasRunningRun ? 2000 : false,
+    refetchInterval: hasRunningRun ? 5000 : false,
   });
 
   const handleSend = async () => {
@@ -325,10 +345,10 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
               goal.status !== "enabled"
                 ? `Goal is ${goal.status} — re-enable to chat`
                 : hasRunningRun
-                ? "A run is in progress — wait for it to finish, then send"
+                ? "Run in progress — message will be queued for the next run…"
                 : "Send a message to the agent (Cmd/Ctrl+Enter to send)…"
             }
-            disabled={sending || goal.status !== "enabled" || hasRunningRun}
+            disabled={sending || goal.status !== "enabled"}
             rows={2}
             className="flex-1 min-h-12 max-h-48 rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm resize-y disabled:opacity-50"
           />
@@ -338,8 +358,7 @@ function GoalChatPanel({ goal }: GoalChatPanelProps) {
             disabled={
               sending ||
               !composerText.trim() ||
-              goal.status !== "enabled" ||
-              hasRunningRun
+              goal.status !== "enabled"
             }
           >
             {sending ? (
