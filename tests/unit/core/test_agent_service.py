@@ -47,7 +47,11 @@ class _FakeEventBus:
 
     async def dispatch(self, event: Event) -> None:
         """Test-only: deliver an event to its subscribers."""
+        # Exact-type subscribers
         for handler in list(self.subscribers.get(event.event_type, [])):
+            await handler(event)
+        # Wildcard subscribers
+        for handler in list(self.subscribers.get("*", [])):
             await handler(event)
 
 
@@ -1172,3 +1176,177 @@ async def test_author_instruction_requires_instruction(
     assert result is not None
     assert result["ok"] is False
     assert "instruction" in result["error"].lower()
+
+
+# ── Multi-event trigger tests ─────────────────────────────────────
+
+
+async def test_event_trigger_with_multiple_event_types_subscribes_to_all(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="React to leads or invoices",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={"event_types": ["lead.created", "invoice.overdue"]},
+    )
+
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    # Both event types should fire the goal
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={},
+            source="crm",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+
+    await bus.dispatch(
+        Event(
+            event_type="invoice.overdue",
+            data={},
+            source="billing",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 2
+
+    # Unrelated event does not fire
+    await bus.dispatch(
+        Event(
+            event_type="weather.changed",
+            data={},
+            source="x",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 2
+
+
+async def test_event_trigger_legacy_singular_still_works(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    """Goals persisted with the old shape (singular event_type) must still
+    arm correctly after a service restart.
+    """
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={"event_type": "lead.created"},
+    )
+
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={},
+            source="x",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    fetched = await svc.get_goal(g.id)
+    assert fetched is not None
+    assert fetched.run_count == 1
+
+
+async def test_disarm_event_trigger_releases_all_subscriptions(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    g = await svc.create_goal(
+        owner_user_id="u_alice",
+        name="x",
+        instruction="i",
+        profile_id="default",
+        trigger_type="event",
+        trigger_config={"event_types": ["a.x", "b.y", "c.z"]},
+    )
+
+    # Three subscriptions registered
+    assert len(svc._event_bus_unsubscribers[g.id]) == 3
+
+    await svc.update_goal(g.id, status=GoalStatus.DISABLED)
+
+    # All released
+    assert g.id not in svc._event_bus_unsubscribers
+
+
+async def test_observed_event_types_populated_by_wildcard(
+    service: tuple[AutonomousAgentService, _FakeAIService, _FakeEventBus, _FakeScheduler],
+) -> None:
+    svc, _ai, bus, _scheduler = service
+
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from gilbert.interfaces.events import Event
+
+    await bus.dispatch(
+        Event(
+            event_type="lead.created",
+            data={},
+            source="x",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    await bus.dispatch(
+        Event(
+            event_type="invoice.overdue",
+            data={},
+            source="x",
+            timestamp=_dt.now(UTC),
+        )
+    )
+    # notification.* events are filtered out
+    await bus.dispatch(
+        Event(
+            event_type="notification.received",
+            data={"user_id": "u"},
+            source="x",
+            timestamp=_dt.now(UTC),
+        )
+    )
+
+    handlers = svc.get_ws_handlers()
+    handler = handlers["agent.event_types.list"]
+    result = await handler(_make_conn("u_alice"), {"id": "f1"})
+
+    assert result is not None
+    assert result["ok"] is True
+    types = set(result["event_types"])
+    assert "lead.created" in types
+    assert "invoice.overdue" in types
+    assert "notification.received" not in types  # filtered

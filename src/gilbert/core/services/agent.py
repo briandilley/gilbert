@@ -91,11 +91,17 @@ class AutonomousAgentService(Service):
         self._ai: AIProvider | None = None
         self._resolver: ServiceResolver | None = None
         self._scheduler: SchedulerProvider | None = None
-        self._event_bus_unsubscribers: dict[str, Any] = {}
-        """goal_id → unsubscribe callable for EVENT triggers."""
+        self._event_bus_unsubscribers: dict[str, list[Any]] = {}
+        """goal_id → list of unsubscribe callables (one per subscribed event_type)."""
 
         self._running_goals: set[str] = set()
         """In-progress goal IDs to skip duplicate trigger fires."""
+
+        self._observed_event_types: set[str] = set()
+        """Event types seen on the bus since process start. Populated by
+        a wildcard subscription registered in start()."""
+
+        self._wildcard_unsubscribe: Any = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -142,11 +148,32 @@ class AutonomousAgentService(Service):
                 fields=["goal_id", "started_at"],
             )
         )
+        # Track every event_type seen — feeds the agent.event_types.list
+        # RPC so the goal-create UI can suggest known events without us
+        # maintaining a static registry.
+        async def _record_event(event: Any) -> None:
+            try:
+                etype = getattr(event, "event_type", "") or ""
+                if etype and not etype.startswith("notification."):
+                    # Skip notification.* — they're per-user noise that
+                    # would dominate the suggestions list.
+                    self._observed_event_types.add(etype)
+            except Exception:
+                pass
+
+        self._wildcard_unsubscribe = self._event_bus.subscribe_pattern("*", _record_event)
+
         await self._mark_orphaned_runs_failed()
         await self._rearm_enabled_goals()
         logger.info("AutonomousAgentService started")
 
     async def stop(self) -> None:
+        if self._wildcard_unsubscribe is not None:
+            try:
+                self._wildcard_unsubscribe()
+            except Exception:
+                pass
+            self._wildcard_unsubscribe = None
         return None
 
     # ── Goal CRUD ─────────────────────────────────────────────────
@@ -349,6 +376,7 @@ class AutonomousAgentService(Service):
             "agent.run.list": self._ws_run_list,
             "agent.run.get": self._ws_run_get,
             "agent.goal.author_instruction": self._ws_goal_author_instruction,
+            "agent.event_types.list": self._ws_event_types_list,
         }
 
     async def _ws_goal_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -559,6 +587,19 @@ class AutonomousAgentService(Service):
             "run": raw,
         }
 
+    async def _ws_event_types_list(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return the sorted list of event types observed since process
+        start. Useful for populating event-trigger pickers in the UI.
+        """
+        return {
+            "type": "agent.event_types.list.result",
+            "ref": frame.get("id"),
+            "ok": True,
+            "event_types": sorted(self._observed_event_types),
+        }
+
     async def _ws_goal_author_instruction(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -764,40 +805,66 @@ class AutonomousAgentService(Service):
     def _arm_event_trigger(self, goal: Goal) -> None:
         if self._event_bus is None or goal.trigger_config is None:
             return
-        event_type = goal.trigger_config.get("event_type")
-        if not event_type:
-            logger.warning("EVENT trigger for goal %s missing event_type", goal.id)
+        cfg = goal.trigger_config
+
+        # Support both shapes:
+        # - new:    {"event_types": ["a", "b", ...]}
+        # - legacy: {"event_type": "a"}
+        event_types: list[str] = []
+        et_plural = cfg.get("event_types")
+        if isinstance(et_plural, list):
+            event_types = [str(x) for x in et_plural if isinstance(x, str) and x]
+        elif cfg.get("event_type"):
+            event_types = [str(cfg["event_type"])]
+
+        if not event_types:
+            logger.warning("EVENT trigger for goal %s has no event_types", goal.id)
             return
-        filter_spec = goal.trigger_config.get("filter")
+
+        filter_spec = cfg.get("filter")
+
+        # Drop any prior subscriptions before re-arming
+        self._disarm_event_trigger(goal.id)
+
+        unsubscribers: list[Any] = []
+        for et in event_types:
+            handler = self._make_event_handler(goal.id, et, filter_spec)
+            unsub = self._event_bus.subscribe(et, handler)
+            unsubscribers.append(unsub)
+        self._event_bus_unsubscribers[goal.id] = unsubscribers
+
+    def _make_event_handler(
+        self,
+        goal_id: str,
+        event_type: str,
+        filter_spec: dict[str, Any] | None,
+    ) -> Any:
+        """Build a closure that fires _spawn_run for one event type."""
 
         async def _on_event(event: Any) -> None:
             if not self._event_matches_filter(event, filter_spec):
                 return
-            # Re-fetch goal at fire time in case it was disabled/deleted
-            current = await self.get_goal(goal.id)
+            current = await self.get_goal(goal_id)
             if current is None or current.status != GoalStatus.ENABLED:
                 return
             await self._spawn_run(
-                goal.id,
+                goal_id,
                 "event",
-                {"event_type": event.event_type, "event_data": event.data},
+                {
+                    "event_type": getattr(event, "event_type", event_type),
+                    "event_data": getattr(event, "data", {}),
+                },
             )
 
-        unsubscribe = self._event_bus.subscribe(event_type, _on_event)
-        # If a subscription already exists for this goal, drop the old one
-        old = self._event_bus_unsubscribers.pop(goal.id, None)
-        if old is not None:
-            try:
-                old()
-            except Exception:
-                logger.warning("failed to unsubscribe old EVENT handler for %s", goal.id)
-        self._event_bus_unsubscribers[goal.id] = unsubscribe
+        return _on_event
 
     def _disarm_event_trigger(self, goal_id: str) -> None:
-        unsubscribe = self._event_bus_unsubscribers.pop(goal_id, None)
-        if unsubscribe is not None:
+        unsubs = self._event_bus_unsubscribers.pop(goal_id, None)
+        if not unsubs:
+            return
+        for unsub in unsubs:
             try:
-                unsubscribe()
+                unsub()
             except Exception:
                 logger.warning("failed to unsubscribe EVENT handler for %s", goal_id)
 
