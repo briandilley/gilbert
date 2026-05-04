@@ -100,3 +100,179 @@ class AutonomousAgentService(Service):
 
     async def stop(self) -> None:
         return None
+
+    # ── Goal CRUD ─────────────────────────────────────────────────
+
+    async def create_goal(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        instruction: str,
+        profile_id: str,
+    ) -> Goal:
+        if self._storage is None:
+            raise RuntimeError("AutonomousAgentService.start() not called")
+        now = datetime.now(UTC)
+        goal = Goal(
+            id=str(uuid.uuid4()),
+            owner_user_id=owner_user_id,
+            name=name,
+            instruction=instruction,
+            profile_id=profile_id,
+            status=GoalStatus.ENABLED,
+            created_at=now,
+            updated_at=now,
+        )
+        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        return goal
+
+    async def get_goal(self, goal_id: str) -> Goal | None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        return _goal_from_dict(raw) if raw else None
+
+    async def list_goals(
+        self,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[Goal]:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        filters = []
+        if owner_user_id is not None:
+            filters.append(Filter(field="owner_user_id", op=FilterOp.EQ, value=owner_user_id))
+        raw_list = await self._storage.query(
+            Query(
+                collection=_GOAL_COLLECTION,
+                filters=filters,
+                sort=[SortField(field="created_at", descending=True)],
+                limit=1000,
+            )
+        )
+        return [_goal_from_dict(r) for r in raw_list]
+
+    async def update_goal(
+        self,
+        goal_id: str,
+        *,
+        name: str | None = None,
+        instruction: str | None = None,
+        profile_id: str | None = None,
+        status: GoalStatus | None = None,
+    ) -> Goal | None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        if raw is None:
+            return None
+        goal = _goal_from_dict(raw)
+        if name is not None:
+            goal.name = name
+        if instruction is not None:
+            goal.instruction = instruction
+        if profile_id is not None:
+            goal.profile_id = profile_id
+        if status is not None:
+            goal.status = status
+        goal.updated_at = datetime.now(UTC)
+        await self._storage.put(_GOAL_COLLECTION, goal.id, _goal_to_dict(goal))
+        return goal
+
+    async def delete_goal(self, goal_id: str) -> bool:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        raw = await self._storage.get(_GOAL_COLLECTION, goal_id)
+        if raw is None:
+            return False
+        await self._storage.delete(_GOAL_COLLECTION, goal_id)
+        # Also delete associated runs
+        runs = await self._storage.query(
+            Query(
+                collection=_RUN_COLLECTION,
+                filters=[Filter(field="goal_id", op=FilterOp.EQ, value=goal_id)],
+                limit=10_000,
+            )
+        )
+        for r in runs:
+            await self._storage.delete(_RUN_COLLECTION, r["id"])
+        return True
+
+
+def _goal_to_dict(g: Goal) -> dict[str, Any]:
+    return {
+        "id": g.id,
+        "owner_user_id": g.owner_user_id,
+        "name": g.name,
+        "instruction": g.instruction,
+        "profile_id": g.profile_id,
+        "status": g.status.value,
+        "created_at": g.created_at.isoformat(),
+        "updated_at": g.updated_at.isoformat(),
+        "last_run_at": g.last_run_at.isoformat() if g.last_run_at else None,
+        "last_run_status": g.last_run_status.value if g.last_run_status else None,
+        "run_count": g.run_count,
+        "completed_at": g.completed_at.isoformat() if g.completed_at else None,
+        "completed_reason": g.completed_reason,
+    }
+
+
+def _goal_from_dict(d: dict[str, Any]) -> Goal:
+    last_run_status_raw = d.get("last_run_status")
+    completed_at_raw = d.get("completed_at")
+    last_run_at_raw = d.get("last_run_at")
+    return Goal(
+        id=d["id"],
+        owner_user_id=d["owner_user_id"],
+        name=d["name"],
+        instruction=d["instruction"],
+        profile_id=d["profile_id"],
+        status=GoalStatus(d["status"]),
+        created_at=datetime.fromisoformat(d["created_at"]),
+        updated_at=datetime.fromisoformat(d["updated_at"]),
+        last_run_at=datetime.fromisoformat(last_run_at_raw) if last_run_at_raw else None,
+        last_run_status=RunStatus(last_run_status_raw) if last_run_status_raw else None,
+        run_count=int(d.get("run_count", 0)),
+        completed_at=datetime.fromisoformat(completed_at_raw) if completed_at_raw else None,
+        completed_reason=d.get("completed_reason"),
+    )
+
+
+def _run_to_dict(r: Run) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "goal_id": r.goal_id,
+        "triggered_by": r.triggered_by,
+        "started_at": r.started_at.isoformat(),
+        "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+        "status": r.status.value,
+        "conversation_id": r.conversation_id,
+        "final_message_text": r.final_message_text,
+        "rounds_used": r.rounds_used,
+        "tokens_in": r.tokens_in,
+        "tokens_out": r.tokens_out,
+        "error": r.error,
+        "complete_goal_called": r.complete_goal_called,
+        "complete_reason": r.complete_reason,
+    }
+
+
+def _run_from_dict(d: dict[str, Any]) -> Run:
+    ended_at_raw = d.get("ended_at")
+    return Run(
+        id=d["id"],
+        goal_id=d["goal_id"],
+        triggered_by=d.get("triggered_by", "manual"),
+        started_at=datetime.fromisoformat(d["started_at"]),
+        status=RunStatus(d["status"]),
+        conversation_id=d.get("conversation_id", ""),
+        ended_at=datetime.fromisoformat(ended_at_raw) if ended_at_raw else None,
+        final_message_text=d.get("final_message_text"),
+        rounds_used=int(d.get("rounds_used", 0)),
+        tokens_in=int(d.get("tokens_in", 0)),
+        tokens_out=int(d.get("tokens_out", 0)),
+        error=d.get("error"),
+        complete_goal_called=bool(d.get("complete_goal_called", False)),
+        complete_reason=d.get("complete_reason"),
+    )
