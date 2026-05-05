@@ -271,7 +271,9 @@ _TOOL_AGENT_SEND_MESSAGE = ToolDefinition(
     description=(
         "Send a fire-and-forget direct message to a peer agent. The peer's "
         "loop wakes (or, if running, picks up the message between rounds). "
-        "No reply is awaited — use agent_delegate if you need a response."
+        "No reply is awaited — use agent_delegate if you need a response. "
+        "Pass priority=\"urgent\" to interrupt a busy peer at the next "
+        "tool-call boundary instead of waiting for its current round to end."
     ),
     parameters=[
         ToolParameter(
@@ -286,6 +288,15 @@ _TOOL_AGENT_SEND_MESSAGE = ToolDefinition(
             description="Message body.",
             required=True,
         ),
+        ToolParameter(
+            name="priority",
+            type=ToolParameterType.STRING,
+            description=(
+                "\"urgent\" interrupts the recipient between tool calls; "
+                "\"normal\" (default) waits for round boundaries."
+            ),
+            required=False,
+        ),
     ],
     slash_command="agent_send_message",
     slash_help="DM another agent.",
@@ -298,7 +309,10 @@ _TOOL_AGENT_DELEGATE = ToolDefinition(
         "gets a system-prompt note saying it is handling a delegation; its "
         "final assistant message becomes your tool result. Errors on "
         "circular delegations or when the delegation chain depth would "
-        "exceed 5. Default timeout is 600 seconds."
+        "exceed 5. Default timeout is 600 seconds. Delegations default "
+        "to priority=\"urgent\" since the caller is awaiting a reply — "
+        "set priority=\"normal\" to queue behind the peer's current "
+        "round work instead."
     ),
     parameters=[
         ToolParameter(
@@ -319,6 +333,16 @@ _TOOL_AGENT_DELEGATE = ToolDefinition(
             description="Timeout in seconds (default 600).",
             required=False,
         ),
+        ToolParameter(
+            name="priority",
+            type=ToolParameterType.STRING,
+            description=(
+                "\"urgent\" (default for delegations) interrupts the "
+                "target between tool calls; \"normal\" waits for round "
+                "boundaries."
+            ),
+            required=False,
+        ),
     ],
     slash_command="agent_delegate",
     slash_help="Delegate work to another agent and await its reply.",
@@ -328,6 +352,29 @@ _TOOL_AGENT_DELEGATE = ToolDefinition(
 # Maximum allowed delegation chain depth (caller + targets). The 5th
 # delegation in a chain is rejected before the signal fires.
 _DELEGATION_DEPTH_CAP = 5
+
+
+# Allowed values for InboxSignal.priority / the ``priority`` argument
+# on ``agent_send_message`` and ``agent_delegate``.
+_VALID_PRIORITIES: frozenset[str] = frozenset({"urgent", "normal"})
+
+
+def _parse_priority(raw: Any, default: str) -> tuple[str | None, str | None]:
+    """Validate a ``priority`` argument from an AI tool invocation.
+
+    Returns ``(value, error_message)`` — exactly one is non-None.
+    Missing / empty ``raw`` yields ``default``; any other value is
+    lowercased + stripped and must be in :data:`_VALID_PRIORITIES`.
+    """
+    if raw is None:
+        return default, None
+    text = str(raw).lower().strip()
+    if not text:
+        return default, None
+    if text not in _VALID_PRIORITIES:
+        valid = ", ".join(sorted(_VALID_PRIORITIES))
+        return None, f"priority must be one of: {valid}"
+    return text, None
 
 
 # ── Module-level helpers ─────────────────────────────────────────────
@@ -590,6 +637,14 @@ class AgentService(Service):
         # final assistant message. Resolved in _run_agent_internal when
         # a delegation-triggered run finishes.
         self._pending_delegations: dict[str, asyncio.Future[str]] = {}
+
+        # Per-agent urgent-signal pending flag. Set by ``_signal_agent``
+        # whenever it persists a signal with ``priority="urgent"`` for
+        # the agent; consumed (cleared) by ``_drain_inbox``. Drives the
+        # ``mid_round_interrupt`` callback passed to ``AIService.chat``
+        # so a busy agent breaks out of its tool-call loop at the next
+        # safe boundary instead of waiting for the round to end.
+        self._urgent_pending: dict[str, bool] = {}
 
         # Service-level defaults merged into create_agent calls
         self._defaults: dict[str, Any] = {}
@@ -1114,6 +1169,12 @@ class AgentService(Service):
             _AGENT_INBOX_SIGNALS_COLLECTION, sig.id, _signal_to_dict(sig)
         )
 
+        # Mark the agent as having an urgent signal pending. Set AFTER
+        # persistence so a crash mid-write doesn't leave a flag with no
+        # backing row. Cleared in ``_drain_inbox``.
+        if priority == "urgent":
+            self._urgent_pending[agent_id] = True
+
         # Append to in-memory inbox cache.
         self._inboxes.setdefault(agent_id, []).append(sig)
 
@@ -1184,6 +1245,11 @@ class AgentService(Service):
             if row is not None:
                 row["processed_at"] = now_iso
                 await self._storage.put(_AGENT_INBOX_SIGNALS_COLLECTION, sig.id, row)
+        # Drain consumed everything, including any urgent signals — clear
+        # the pending flag unconditionally so the next round's
+        # ``mid_round_interrupt`` only trips on signals that arrive after
+        # this drain.
+        self._urgent_pending.pop(agent_id, None)
         return sigs
 
     def _format_inbox_signal(self, sig: InboxSignal) -> str:
@@ -1441,6 +1507,18 @@ class AgentService(Service):
                     for s in sigs
                 ]
 
+            def _interrupt_check() -> bool:
+                """Mid-round boundary check (between tool-call groups).
+
+                Returns True iff an ``urgent`` signal has been queued for
+                this agent since the last drain. ``AIService.chat``
+                stubs out remaining tool calls in the current round,
+                completes the round, and the existing
+                ``between_rounds_callback`` flow drains the urgent
+                signal into the next round.
+                """
+                return self._urgent_pending.get(a.id, False)
+
             from gilbert.interfaces.auth import UserContext
             user_ctx = UserContext.from_user_id(a.owner_user_id) if hasattr(UserContext, "from_user_id") else None
 
@@ -1452,6 +1530,7 @@ class AgentService(Service):
                 ai_call=_AI_CALL_NAME,
                 ai_profile=a.profile_id,
                 between_rounds_callback=_between_rounds,
+                mid_round_interrupt=_interrupt_check,
             )
 
             # ChatTurnResult uses `response_text`; map to run.final_message_text.
@@ -1905,6 +1984,11 @@ class AgentService(Service):
         if not body:
             return "error: body is required"
 
+        priority, perr = _parse_priority(args.get("priority"), default="normal")
+        if perr is not None:
+            return f"error: {perr}"
+        assert priority is not None
+
         me = await self.get_agent(agent_id)
         if me is None:
             return "error: caller agent not found"
@@ -1926,6 +2010,7 @@ class AgentService(Service):
             sender_kind="agent",
             sender_id=me.id,
             sender_name=me.name,
+            priority=priority,
         )
         return f"sent to {target_name}"
 
@@ -1942,6 +2027,15 @@ class AgentService(Service):
             return "error: missing _agent_id"
         if not target_name or not instruction:
             return "error: target_name and instruction are required"
+
+        # Delegations default to ``urgent`` priority — the caller is
+        # awaiting an END_TURN reply, so a busy target should drop
+        # whatever it's doing at the next safe boundary instead of
+        # finishing its current round first.
+        priority, perr = _parse_priority(args.get("priority"), default="urgent")
+        if perr is not None:
+            return f"error: {perr}"
+        assert priority is not None
 
         me = await self.get_agent(agent_id)
         if me is None:
@@ -1989,6 +2083,7 @@ class AgentService(Service):
                 sender_name=me.name,
                 delegation_id=delegation_id,
                 metadata={"chain": chain},
+                priority=priority,
             )
             try:
                 reply = await asyncio.wait_for(future, timeout=max_wait_s)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -340,3 +341,248 @@ async def test_agent_delegate_rejects_self(started_agent_service):
     assert result.startswith("error:")
     assert "yourself" in result
     assert svc._pending_delegations == {}
+
+
+# ── Phase 3 — priority + urgent_pending + mid-round interrupt wiring ─
+
+
+@pytest.mark.asyncio
+async def test_agent_send_message_urgent_sets_pending_flag(started_agent_service):
+    """priority='urgent' on send_message flips _urgent_pending[target]."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    # Hold A2 busy so _signal_agent does NOT fire a fresh run that would
+    # immediately drain the inbox (and clear the flag).
+    svc._running_agents.add(a2.id)
+    try:
+        result = await svc._exec_agent_send_message({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "body": "drop everything",
+            "priority": "urgent",
+        })
+    finally:
+        # Don't release until after the assertion — the asyncio task that
+        # would fire on idle would race the test otherwise.
+        assert result == "sent to a2"
+        assert svc._urgent_pending.get(a2.id) is True
+        svc._running_agents.discard(a2.id)
+
+
+@pytest.mark.asyncio
+async def test_agent_send_message_normal_does_not_set_pending(started_agent_service):
+    """Default (normal) priority leaves _urgent_pending alone."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    svc._running_agents.add(a2.id)
+    try:
+        result = await svc._exec_agent_send_message({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "body": "no rush",
+            # priority omitted → default "normal"
+        })
+    finally:
+        assert result == "sent to a2"
+        # Flag should be absent or False — both are equivalent here.
+        assert not svc._urgent_pending.get(a2.id, False)
+        svc._running_agents.discard(a2.id)
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_defaults_to_urgent(started_agent_service):
+    """No priority arg → delegate signals urgent on the target."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    # Keep A2 busy so the run doesn't fire and drain the flag.
+    svc._running_agents.add(a2.id)
+    delegate_task = asyncio.create_task(
+        svc._exec_agent_delegate({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "instruction": "handle this",
+            "max_wait_s": 1,
+        })
+    )
+    # Yield once so the delegate handler runs up through _signal_agent.
+    # The task will then block on the future until timeout.
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if svc._urgent_pending.get(a2.id):
+            break
+    try:
+        assert svc._urgent_pending.get(a2.id) is True
+    finally:
+        svc._running_agents.discard(a2.id)
+        # Let the delegate timeout finish so the asyncio task exits cleanly.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(delegate_task, timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_explicit_normal_does_not_set_pending(started_agent_service):
+    """priority='normal' on delegate → no urgent flag."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    svc._running_agents.add(a2.id)
+    delegate_task = asyncio.create_task(
+        svc._exec_agent_delegate({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "instruction": "handle whenever",
+            "max_wait_s": 1,
+            "priority": "normal",
+        })
+    )
+    # Yield enough for _signal_agent to have completed.
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        # Inbox row exists once _signal_agent has persisted.
+        sigs = svc._inboxes.get(a2.id, [])
+        if sigs:
+            break
+
+    try:
+        assert svc._inboxes.get(a2.id), "delegation signal should be queued"
+        # Flag must remain unset for "normal" priority.
+        assert not svc._urgent_pending.get(a2.id, False)
+    finally:
+        svc._running_agents.discard(a2.id)
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(delegate_task, timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_drain_inbox_clears_urgent_pending(started_agent_service):
+    """_drain_inbox unconditionally clears the urgent flag — even if
+    no signals were drained, a stale flag could mis-trip the next round."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+
+    # Pre-stage: flag set, plus one urgent signal queued so the drain
+    # has work to do as well.
+    svc._running_agents.add(a1.id)
+    try:
+        await svc._signal_agent(
+            agent_id=a1.id,
+            signal_kind="inbox",
+            body="urgent ping",
+            sender_kind="agent",
+            sender_id="ag_other",
+            sender_name="other",
+            priority="urgent",
+        )
+        assert svc._urgent_pending.get(a1.id) is True
+
+        sigs = await svc._drain_inbox(a1.id)
+        assert len(sigs) == 1
+        assert sigs[0].priority == "urgent"
+        # And the flag is cleared.
+        assert a1.id not in svc._urgent_pending
+    finally:
+        svc._running_agents.discard(a1.id)
+
+
+@pytest.mark.asyncio
+async def test_invalid_priority_returns_error_string(started_agent_service):
+    """Unknown priority value → tool returns an error: ... string and
+    no signal is created."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    result = await svc._exec_agent_send_message({
+        "_agent_id": a1.id,
+        "target_name": "a2",
+        "body": "hi",
+        "priority": "bogus",
+    })
+    assert result.startswith("error:")
+    assert "priority" in result.lower()
+
+    # No signal row was persisted.
+    rows = await svc._storage.query(
+        Query(
+            collection=_AGENT_INBOX_SIGNALS_COLLECTION,
+            filters=[Filter(field="agent_id", op=FilterOp.EQ, value=a2.id)],
+        )
+    )
+    assert rows == []
+    # Same path on delegate.
+    result_d = await svc._exec_agent_delegate({
+        "_agent_id": a1.id,
+        "target_name": "a2",
+        "instruction": "do",
+        "priority": "WHATEVER",
+    })
+    assert result_d.startswith("error:")
+    assert "priority" in result_d.lower()
+
+
+# ── Phase 3 — end-to-end mid-round interrupt wiring ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_urgent_interrupts_mid_round(started_agent_service):
+    """End-to-end wiring assertion.
+
+    The boundary mechanic itself is exercised in
+    ``tests/unit/test_ai_service_interrupt.py``; this test verifies the
+    Agent side: _run_agent_internal hands AIService.chat a callback
+    that reads ``self._urgent_pending[a.id]`` — so when the flag is
+    set ahead of (or during) a run, the interrupt callback returns
+    True.
+    """
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+
+    # Capture the kwargs of the next chat call so we can extract the
+    # callback _run_agent_internal hands down.
+    captured: dict[str, object] = {}
+
+    async def fake_chat(*args, **kwargs):
+        captured.update(kwargs)
+        from gilbert.interfaces.ai import ChatTurnResult
+        return ChatTurnResult(
+            response_text="ok",
+            conversation_id="conv_test",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="",
+            turn_usage={"rounds": 1},
+        )
+
+    svc._ai.chat = fake_chat  # type: ignore[method-assign]
+
+    # Pre-stage the urgent flag *before* the run starts.
+    svc._urgent_pending[a1.id] = True
+
+    await svc.run_agent_now(a1.id, user_message="hello")
+
+    assert "mid_round_interrupt" in captured, (
+        "AgentService must pass a mid_round_interrupt callback to AIService.chat"
+    )
+    cb = captured["mid_round_interrupt"]
+    assert callable(cb)
+
+    # Round 0 calls _drain_inbox, which clears the urgent flag — so
+    # by the time fake_chat captures the callback, the flag has just
+    # been cleared. Re-set it to simulate "an urgent signal arrived
+    # mid-round" and assert the callback returns True.
+    svc._urgent_pending[a1.id] = True
+    assert cb() is True
+
+    # Clear it; callback returns False — backwards-compat path.
+    svc._urgent_pending.pop(a1.id, None)
+    assert cb() is False
