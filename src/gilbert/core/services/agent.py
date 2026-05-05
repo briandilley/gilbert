@@ -1632,6 +1632,7 @@ class AgentService(Service):
             "agents.set_status": self._ws_set_status,
             "agents.run_now": self._ws_run_now,
             "agents.get_defaults": self._ws_get_defaults,
+            "agents.runs.list": self._ws_runs_list,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -1727,6 +1728,16 @@ class AgentService(Service):
 
     async def _ws_get_defaults(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {"defaults": dict(self._defaults)}
+
+    async def _ws_runs_list(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        limit = int(params.get("limit", 50))
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        runs = await self.list_runs(agent_id=agent_id, limit=limit)
+        return {"runs": [_run_to_dict(r) for r in runs]}
 
     # ── Event publishing helper ─────────────────────────────────────
 
