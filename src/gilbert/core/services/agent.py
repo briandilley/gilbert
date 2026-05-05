@@ -4017,8 +4017,32 @@ class AgentService(Service):
 
     # ── WsHandlerProvider ────────────────────────────────────────────
 
+    def _wrap_ws_handler(self, handler: Any) -> Any:
+        """Inject ``ref`` (and a ``type``) into the response so the SPA's
+        rpc client can route it back to the awaiting promise.
+
+        The dispatcher (``dispatch_frame``) sends whatever the handler
+        returns straight to the wire, and the SPA's ``useWebSocket``
+        client routes by ``frame.ref`` matching the outgoing ``id``.
+        Without ``ref``, the response is dropped and the rpc Promise
+        hangs forever. Every handler in this service produces a payload
+        dict (e.g. ``{"agents": [...]}``); this wrapper adds the ref/type.
+        """
+
+        async def _wrapped(conn: Any, frame: dict[str, Any]) -> Any:
+            result = await handler(conn, frame)
+            if isinstance(result, dict) and "ref" not in result:
+                result = {
+                    "type": f"{frame.get('type', '')}.result",
+                    "ref": frame.get("id"),
+                    **result,
+                }
+            return result
+
+        return _wrapped
+
     def get_ws_handlers(self) -> dict[str, Any]:
-        return {
+        raw: dict[str, Any] = {
             "agents.create": self._ws_create,
             "agents.get": self._ws_get,
             "agents.list": self._ws_list,
@@ -4055,6 +4079,7 @@ class AgentService(Service):
             "goals.dependencies.add": self._ws_goal_dependencies_add,
             "goals.dependencies.remove": self._ws_goal_dependencies_remove,
         }
+        return {k: self._wrap_ws_handler(h) for k, h in raw.items()}
 
     def _is_admin(self, conn: Any) -> bool:
         return getattr(conn, "user_level", 999) <= 0

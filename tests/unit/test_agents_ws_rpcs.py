@@ -35,6 +35,26 @@ class _FakeConn:
         )
 
 
+# ── ref/type injection (so SPA's pending-rpc map can resolve) ──────
+
+
+async def test_ws_handler_responses_include_ref_and_type(
+    started_agent_service: Any,
+) -> None:
+    """Every handler returned by ``get_ws_handlers`` must wrap its
+    response with ``ref`` (matching the request ``id``) and a default
+    ``type`` so the SPA's ``useWebSocket().rpc`` Promise resolves.
+    Without this, every agents-page query hangs forever.
+    """
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    frame = {"type": "agents.list", "id": "test-rpc-1"}
+    res = await h["agents.list"](_FakeConn("usr_1"), frame)
+    assert res["ref"] == "test-rpc-1"
+    assert res["type"] == "agents.list.result"
+    assert "agents" in res  # original payload preserved
+
+
 # ── Task 2: agents.runs.list ─────────────────────────────────────────
 
 
