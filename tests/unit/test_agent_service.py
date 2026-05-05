@@ -397,6 +397,30 @@ async def test_delete_agent_publishes_event(started_agent_service: Any) -> None:
     assert seen[0].data["agent_id"] == a.id
 
 
+async def test_set_status_publishes_updated_event(started_agent_service: Any) -> None:
+    """The agents.set_status WS handler routes through update_agent and
+    therefore publishes ``agent.updated``."""
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    res = await h["agents.create"](_FakeConn("usr_1"), {"name": "status-evt"})
+    agent_id = res["agent"]["_id"]
+
+    seen: list[Any] = []
+
+    async def _handler(event: Any) -> None:
+        seen.append(event)
+
+    svc._event_bus.subscribe("agent.updated", _handler)
+    out = await h["agents.set_status"](
+        _FakeConn("usr_1"), {"agent_id": agent_id, "status": "disabled"},
+    )
+    assert out["agent"]["status"] == "disabled"
+    assert len(seen) == 1
+    assert seen[0].event_type == "agent.updated"
+    assert seen[0].data["agent_id"] == agent_id
+    assert seen[0].source == "agent"
+
+
 async def test_run_agent_now_publishes_started_and_completed(
     started_agent_service: Any,
 ) -> None:
@@ -421,12 +445,14 @@ async def test_run_agent_now_publishes_started_and_completed(
     assert started[0].data["agent_id"] == a.id
     assert started[0].data["run_id"] == run.id
     assert started[0].data["triggered_by"] == "manual"
+    assert started[0].source == "agent"
 
     assert len(completed) == 1
     assert completed[0].data["agent_id"] == a.id
     assert completed[0].data["run_id"] == run.id
     assert completed[0].data["status"] == run.status.value
     assert "cost_usd" in completed[0].data
+    assert completed[0].source == "agent"
 
 
 async def test_tool_injection_adds_agent_id(started_agent_service: Any) -> None:

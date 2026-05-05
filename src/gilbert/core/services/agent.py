@@ -804,18 +804,25 @@ class AgentService(Service):
             "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
             "tools_allowed", "heartbeat_enabled", "heartbeat_interval_s",
             "heartbeat_checklist", "dream_enabled", "dream_quiet_hours",
-            "dream_probability", "dream_max_per_night",
+            "dream_probability", "dream_max_per_night", "status",
         }
         for k, v in patch.items():
             if k not in _allowed_patch_fields:
                 raise ValueError(f"field not patchable: {k}")
-            row[k] = v
+            if k == "status":
+                # Coerce to AgentStatus to validate, then store the canonical
+                # string value. Accepts either an AgentStatus or its .value.
+                row[k] = AgentStatus(v).value if not isinstance(v, AgentStatus) else v.value
+            else:
+                row[k] = v
         row["updated_at"] = _now().isoformat()
         await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
         updated = _agent_from_dict(row)
         # Re-arm (or disarm) heartbeat whenever any agent field changes.
-        # _arm_heartbeat is idempotent and a no-op when heartbeat_enabled=False.
-        if updated.heartbeat_enabled:
+        # A DISABLED agent must never have an armed heartbeat, regardless of
+        # heartbeat_enabled. _arm_heartbeat is idempotent and a no-op when
+        # heartbeat_enabled=False.
+        if updated.status is AgentStatus.ENABLED and updated.heartbeat_enabled:
             await self._arm_heartbeat(updated)
         else:
             await self._disarm_heartbeat(agent_id)
@@ -1703,15 +1710,10 @@ class AgentService(Service):
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
-        if self._storage is None:
-            raise RuntimeError("not started")
-        row = await self._storage.get(_AGENTS_COLLECTION, agent_id)
-        if row is None:
-            raise KeyError(agent_id)
-        row["status"] = status.value
-        row["updated_at"] = _now().isoformat()
-        await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
-        return {"agent": _agent_to_dict(_agent_from_dict(row))}
+        # Route through update_agent so the agent.updated event fires and
+        # heartbeat lifecycle is handled in one place.
+        updated = await self.update_agent(agent_id, {"status": status.value})
+        return {"agent": _agent_to_dict(updated)}
 
     async def _ws_run_now(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
