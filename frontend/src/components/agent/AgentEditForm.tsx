@@ -79,7 +79,8 @@ interface FormState {
   dream_max_per_night: number;
   profile_id: string;
   cost_cap_usd: string; // text — empty string => null
-  tools_allowed: string[] | null;
+  tools_include: string[] | null;
+  tools_exclude: string[] | null;
 }
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -120,7 +121,8 @@ function emptyState(): FormState {
     dream_max_per_night: 0,
     profile_id: "",
     cost_cap_usd: "",
-    tools_allowed: null,
+    tools_include: null,
+    tools_exclude: null,
   };
 }
 
@@ -145,11 +147,6 @@ function stateFromDefaults(defaults: AgentDefaults): FormState {
       defaults.default_dream_probability ?? base.dream_probability,
     dream_max_per_night:
       defaults.default_dream_max_per_night ?? base.dream_max_per_night,
-    profile_id: defaults.default_profile_id ?? base.profile_id,
-    tools_allowed:
-      defaults.default_tools_allowed === undefined
-        ? base.tools_allowed
-        : defaults.default_tools_allowed,
   };
 }
 
@@ -174,7 +171,8 @@ function stateFromAgent(agent: Agent): FormState {
       agent.cost_cap_usd === null || agent.cost_cap_usd === undefined
         ? ""
         : String(agent.cost_cap_usd),
-    tools_allowed: agent.tools_allowed,
+    tools_include: agent.tools_include,
+    tools_exclude: agent.tools_exclude,
   };
 }
 
@@ -182,6 +180,7 @@ function stateFromAgent(agent: Agent): FormState {
 
 interface ValidationErrors {
   name?: string;
+  profile_id?: string;
   cost_cap_usd?: string;
   dream_probability?: string;
   heartbeat_interval_s?: string;
@@ -194,6 +193,9 @@ function validate(state: FormState): ValidationErrors {
   } else if (!NAME_RE.test(state.name)) {
     errors.name =
       "Use lowercase letters, digits, and hyphens. Must start with a letter or digit.";
+  }
+  if (state.profile_id === "") {
+    errors.profile_id = "Pick an AI profile";
   }
   if (state.cost_cap_usd.trim() !== "") {
     const n = Number(state.cost_cap_usd);
@@ -357,7 +359,8 @@ export function AgentEditForm(props: Props) {
       profile_id: state.profile_id,
       cost_cap_usd:
         state.cost_cap_usd.trim() === "" ? null : Number(state.cost_cap_usd),
-      tools_allowed: state.tools_allowed,
+      tools_include: state.tools_include,
+      tools_exclude: state.tools_exclude,
     };
     const agent = await createAgent.mutateAsync(payload);
     if (props.mode === "create" && props.onSuccess) {
@@ -388,7 +391,8 @@ export function AgentEditForm(props: Props) {
       profile_id: state.profile_id,
       cost_cap_usd:
         state.cost_cap_usd.trim() === "" ? null : Number(state.cost_cap_usd),
-      tools_allowed: state.tools_allowed,
+      tools_include: state.tools_include,
+      tools_exclude: state.tools_exclude,
     };
     const agent = await updateAgent.mutateAsync({
       agentId: props.agent._id,
@@ -757,8 +761,9 @@ export function AgentEditForm(props: Props) {
               value={state.profile_id}
               onChange={(e) => update("profile_id", e.target.value)}
               className="h-8 w-full rounded-lg border border-input bg-transparent px-2 text-sm"
+              aria-invalid={errors.profile_id ? true : undefined}
             >
-              <option value="">(use default)</option>
+              <option value="">— select an AI profile —</option>
               {profilesQuery.data?.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
@@ -766,6 +771,11 @@ export function AgentEditForm(props: Props) {
                 </option>
               ))}
             </select>
+            {errors.profile_id && (
+              <p className="text-xs text-destructive">
+                {errors.profile_id}
+              </p>
+            )}
           </div>
 
           <div className="space-y-1">
@@ -796,8 +806,12 @@ export function AgentEditForm(props: Props) {
         </summary>
         <section className="space-y-3 px-3 pb-3">
           <ToolPicker
-            value={state.tools_allowed}
-            onChange={(next) => update("tools_allowed", next)}
+            toolsInclude={state.tools_include}
+            toolsExclude={state.tools_exclude}
+            onChange={(next) => {
+              update("tools_include", next.tools_include);
+              update("tools_exclude", next.tools_exclude);
+            }}
           />
         </section>
       </details>
