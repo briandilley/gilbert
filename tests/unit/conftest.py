@@ -43,9 +43,16 @@ class _FakeAIProvider:
     Returns a minimal ChatTurnResult so run_agent_now tests succeed without
     a real AI backend. The turn_usage keys mirror ChatTurnResult's dict shape:
     input_tokens / output_tokens / cost_usd / rounds.
+
+    Records the kwargs from the most recent chat() call in last_call_kwargs
+    so tests can assert on system_prompt and other arguments.
     """
 
+    def __init__(self) -> None:
+        self.last_call_kwargs: dict[str, Any] = {}
+
     async def chat(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        self.last_call_kwargs = dict(kwargs)
         from gilbert.interfaces.ai import ChatTurnResult
         return ChatTurnResult(
             response_text="ok",
@@ -68,13 +75,29 @@ class _FakeAIProvider:
 
 
 class _FakeSchedulerProvider:
-    """Satisfies SchedulerProvider (all required methods present)."""
+    """Satisfies SchedulerProvider (all required methods present).
+
+    Tracks add_job and remove_job calls so heartbeat tests can assert
+    on registered and removed job names.
+    """
+
+    def __init__(self) -> None:
+        self.added_jobs: list[str] = []
+        self.removed_jobs: list[str] = []
+        self._jobs: dict[str, Any] = {}
 
     def add_job(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        pass
+        name: str = kwargs.get("name", args[0] if args else "")
+        if name in self._jobs:
+            raise ValueError(f"Job '{name}' already registered")
+        self.added_jobs.append(name)
+        self._jobs[name] = kwargs
 
-    def remove_job(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def remove_job(self, name: str, requester_id: str = "") -> None:
+        if name not in self._jobs:
+            raise KeyError(f"Job not found: {name}")
+        self.removed_jobs.append(name)
+        self._jobs.pop(name, None)
 
     def enable_job(self, *args: Any, **kwargs: Any) -> None:
         pass

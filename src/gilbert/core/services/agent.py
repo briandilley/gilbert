@@ -36,7 +36,7 @@ from gilbert.interfaces.agent import (
 )
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
-from gilbert.interfaces.scheduler import SchedulerProvider
+from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, Query, StorageBackend, StorageProvider
 
@@ -319,12 +319,24 @@ class AgentService(Service):
 
         # Task 5: index creation goes here.
         # Task 8: run rehydration goes here.
-        # Task 10: heartbeat re-arming goes here.
+
+        # Re-arm heartbeats for every ENABLED agent on service start.
+        rows = await self._storage.query(
+            Query(collection=_AGENTS_COLLECTION, filters=[])
+        )
+        for r in rows:
+            a = _agent_from_dict(r)
+            if a.status is AgentStatus.ENABLED and a.heartbeat_enabled:
+                await self._arm_heartbeat(a)
 
         logger.info("AgentService started")
 
     async def stop(self) -> None:
-        """Graceful shutdown — Task 8 will add run teardown here."""
+        """Graceful shutdown — disarm all heartbeat scheduler jobs."""
+        if self._storage:
+            rows = await self._storage.query(Query(collection=_AGENTS_COLLECTION, filters=[]))
+            for r in rows:
+                await self._disarm_heartbeat(r["_id"])
         logger.info("AgentService stopped")
 
     # ── AgentProvider — CRUD (Task 5) ───────────────────────────────
@@ -393,6 +405,7 @@ class AgentService(Service):
             updated_at=now,
         )
         await self._storage.put(_AGENTS_COLLECTION, a.id, _agent_to_dict(a))
+        await self._arm_heartbeat(a)
         return a
 
     async def get_agent(self, agent_id: str) -> Agent | None:
@@ -440,7 +453,14 @@ class AgentService(Service):
             row[k] = v
         row["updated_at"] = _now().isoformat()
         await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
-        return _agent_from_dict(row)
+        updated = _agent_from_dict(row)
+        # Re-arm (or disarm) heartbeat whenever any agent field changes.
+        # _arm_heartbeat is idempotent and a no-op when heartbeat_enabled=False.
+        if updated.heartbeat_enabled:
+            await self._arm_heartbeat(updated)
+        else:
+            await self._disarm_heartbeat(agent_id)
+        return updated
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Delete the agent and cascade-delete its memories, triggers,
@@ -453,6 +473,7 @@ class AgentService(Service):
         row = await self._storage.get(_AGENTS_COLLECTION, agent_id)
         if row is None:
             return False
+        await self._disarm_heartbeat(agent_id)
         await self._storage.delete(_AGENTS_COLLECTION, agent_id)
         # Cascade-delete related collections.
         for coll in (
@@ -471,6 +492,60 @@ class AgentService(Service):
             for r in related:
                 await self._storage.delete(coll, r["_id"])
         return True
+
+    # ── Heartbeat scheduling (Task 10) ──────────────────────────────
+
+    async def _arm_heartbeat(self, a: Agent) -> None:
+        """Register a heartbeat scheduler job for this agent.
+
+        Idempotent: removes any existing job first, then adds a fresh one.
+        A no-op if the scheduler is not bound or heartbeat is disabled.
+        """
+        if self._scheduler is None or not a.heartbeat_enabled:
+            return
+        job_name = f"heartbeat_{a.id}"
+
+        async def _cb() -> None:
+            await self._on_heartbeat_fired(a.id)
+
+        try:
+            self._scheduler.remove_job(job_name)
+        except Exception:
+            pass
+        self._scheduler.add_job(
+            name=job_name,
+            schedule=Schedule.every(a.heartbeat_interval_s),
+            callback=_cb,
+            system=True,
+        )
+
+    async def _disarm_heartbeat(self, agent_id: str) -> None:
+        """Remove the heartbeat scheduler job for *agent_id*, if any."""
+        if self._scheduler is None:
+            return
+        try:
+            self._scheduler.remove_job(f"heartbeat_{agent_id}")
+        except Exception:
+            pass
+
+    async def _on_heartbeat_fired(self, agent_id: str) -> None:
+        """Scheduler callback — fire a heartbeat run if the agent is
+        still ENABLED and not already running."""
+        a = await self.get_agent(agent_id)
+        if a is None or a.status is not AgentStatus.ENABLED:
+            await self._disarm_heartbeat(agent_id)
+            return
+        if agent_id in self._running_agents:
+            # In-flight run; skip silently. The heartbeat re-fires next interval.
+            return
+        try:
+            self._running_agents.add(agent_id)
+            await self._run_agent_internal(
+                a, triggered_by="heartbeat",
+                trigger_context={}, user_message=None,
+            )
+        finally:
+            self._running_agents.discard(agent_id)
 
     async def _load_agent_for_caller(
         self,
