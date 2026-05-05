@@ -66,13 +66,6 @@ import type {
   NotificationListResult,
   NotificationUrgency,
 } from "@/types/notifications";
-import type {
-  Goal,
-  AgentRun,
-  GoalCreatePayload,
-  GoalUpdatePayload,
-} from "@/types/agent";
-
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
 
@@ -879,76 +872,6 @@ export function useWsApi() {
       rpc<{ ok: boolean; error?: string }>({
         type: "notification.delete",
         notification_id: notificationId,
-      }),
-
-    // ── Autonomous Agent ──────────────────────────────────────────
-
-    listGoals: () =>
-      rpc<{ goals: Goal[] }>({ type: "agent.goal.list" })
-        .then((r) => r.goals),
-
-    getGoal: (goalId: string) =>
-      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
-        type: "agent.goal.get",
-        goal_id: goalId,
-      }),
-
-    createGoal: (payload: GoalCreatePayload) =>
-      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
-        type: "agent.goal.create",
-        ...payload,
-      }),
-
-    updateGoal: (goalId: string, payload: GoalUpdatePayload) =>
-      rpc<{ ok: boolean; goal?: Goal; error?: string }>({
-        type: "agent.goal.update",
-        goal_id: goalId,
-        ...payload,
-      }),
-
-    deleteGoal: (goalId: string) =>
-      rpc<{ ok: boolean; error?: string }>({
-        type: "agent.goal.delete",
-        goal_id: goalId,
-      }),
-
-    runGoalNow: (goalId: string, userMessage?: string) =>
-      rpc<{ ok: boolean; run?: AgentRun; error?: string }>({
-        type: "agent.goal.run_now",
-        goal_id: goalId,
-        ...(userMessage ? { user_message: userMessage } : {}),
-      }),
-
-    listAgentRuns: (goalId: string, limit = 100) =>
-      rpc<{ ok: boolean; runs?: AgentRun[]; error?: string }>({
-        type: "agent.run.list",
-        goal_id: goalId,
-        limit,
-      }),
-
-    getAgentRun: (runId: string) =>
-      rpc<{ ok: boolean; run?: AgentRun; error?: string }>({
-        type: "agent.run.get",
-        run_id: runId,
-      }),
-
-    authorGoalInstruction: (
-      goalId: string,
-      currentText: string,
-      instruction: string,
-      aiProfile?: string,
-    ) =>
-      rpc<{ ok: boolean; new_text?: string; profile_used?: string; error?: string }>({
-        type: "agent.goal.author_instruction",
-        goal_id: goalId,
-        current_text: currentText,
-        instruction,
-        ai_profile: aiProfile ?? "",
-      }),
-
-    listObservedEventTypes: () =>
-      rpc<{ ok: boolean; event_types?: string[]; error?: string }>({
-        type: "agent.event_types.list",
       }),
 
     // ── Plugin UI extensions ──────────────────────────────────────

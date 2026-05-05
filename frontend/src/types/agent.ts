@@ -1,70 +1,87 @@
 /**
  * Autonomous agent types — mirror Python dataclasses in
- * gilbert.interfaces.agent.
+ * ``gilbert.interfaces.agent``.
+ *
+ * Storage rows use ``_id`` (not ``id``) for primary keys — see
+ * ``_agent_to_dict`` / ``_run_to_dict`` / ``_commitment_to_dict`` /
+ * ``_memory_to_dict`` in ``src/gilbert/core/services/agent.py``. The
+ * frontend preserves that shape verbatim; we don't translate
+ * ``_id`` → ``id``.
  */
 
-export type GoalStatus = "enabled" | "disabled" | "completed";
-export type RunStatus = "running" | "completed" | "failed";
-export type TriggerType = "time" | "event" | null;
+export type AgentStatus = "enabled" | "disabled";
+export type MemoryState = "short_term" | "long_term";
+export type RunStatus = "running" | "completed" | "failed" | "timed_out";
+export type AvatarKind = "emoji" | "icon" | "image";
 
-export interface TriggerConfig {
-  // TIME shape:
-  kind?: "interval" | "daily_at" | "hourly_at";
-  seconds?: number;
-  hour?: number;
-  minute?: number;
-  // EVENT shape:
-  event_type?: string;        // legacy: single event subscription
-  event_types?: string[];     // new: multi-event subscription
-  filter?: {
-    field: string;
-    op: "eq" | "neq" | "in" | "contains";
-    value: unknown;
-  };
-}
-
-export interface Goal {
-  id: string;
+export interface Agent {
+  _id: string;
   owner_user_id: string;
   name: string;
-  instruction: string;
+  role_label: string;
+  persona: string;
+  system_prompt: string;
+  procedural_rules: string;
   profile_id: string;
-  status: GoalStatus;
+  conversation_id: string;
+  status: AgentStatus;
+  avatar_kind: AvatarKind;
+  avatar_value: string;
+  lifetime_cost_usd: number;
+  cost_cap_usd: number | null;
+  tools_allowed: string[] | null;
+  heartbeat_enabled: boolean;
+  heartbeat_interval_s: number;
+  heartbeat_checklist: string;
+  dream_enabled: boolean;
+  dream_quiet_hours: string;
+  dream_probability: number;
+  dream_max_per_night: number;
   created_at: string;
   updated_at: string;
-  trigger_type: TriggerType | string | null;
-  trigger_config: TriggerConfig | null;
-  conversation_id: string;
-  last_run_at: string | null;
-  last_run_status: RunStatus | null;
-  run_count: number;
+}
+
+export interface AgentMemory {
+  _id: string;
+  agent_id: string;
+  content: string;
+  state: MemoryState;
+  kind: string;
+  tags: string[];
+  score: number;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface Commitment {
+  _id: string;
+  agent_id: string;
+  content: string;
+  due_at: string;
+  created_at: string;
   completed_at: string | null;
-  completed_reason: string | null;
-  stateless: boolean;
+  completion_note: string;
 }
 
 export interface AgentRun {
-  id: string;
-  goal_id: string;
+  _id: string;
+  agent_id: string;
   triggered_by: string;
+  trigger_context: Record<string, unknown>;
   started_at: string;
-  ended_at: string | null;
   status: RunStatus;
   conversation_id: string;
+  delegation_id: string;
+  ended_at: string | null;
   final_message_text: string | null;
   rounds_used: number;
   tokens_in: number;
   tokens_out: number;
+  cost_usd: number;
   error: string | null;
-  complete_goal_called: boolean;
-  complete_reason: string | null;
   awaiting_user_input: boolean;
   pending_question: string | null;
-  /** Optional buttons rendered alongside ``pending_question``. Each
-   *  entry's ``kind`` is looked up in the SPA's agent-action registry
-   *  (built-in: ``"open-url"``; plugins register more like
-   *  ``"browser.vnc"`` via side-effect imports). */
-  pending_actions?: Array<{
+  pending_actions: Array<{
     id: string;
     kind: string;
     label: string;
@@ -72,21 +89,60 @@ export interface AgentRun {
   }>;
 }
 
-export interface GoalCreatePayload {
+export interface ToolDescriptor {
   name: string;
-  instruction: string;
-  profile_id: string;
-  trigger_type?: "time" | "event" | "";
-  trigger_config?: TriggerConfig;
-  stateless?: boolean;
+  description: string;
+  provider: string;
+  required_role?: string;
 }
 
-export interface GoalUpdatePayload {
-  name?: string;
-  instruction?: string;
-  profile_id?: string;
-  status?: GoalStatus;
-  trigger_type?: "time" | "event" | "";
-  trigger_config?: TriggerConfig;
-  stateless?: boolean;
+export type ToolGroupMap = Record<string, string[]>;
+
+export interface AgentDefaults {
+  default_persona?: string;
+  default_system_prompt?: string;
+  default_procedural_rules?: string;
+  default_heartbeat_interval_s?: number;
+  default_heartbeat_checklist?: string;
+  default_dream_enabled?: boolean;
+  default_dream_quiet_hours?: string;
+  default_dream_probability?: number;
+  default_dream_max_per_night?: number;
+  default_profile_id?: string;
+  default_avatar_kind?: AvatarKind;
+  default_avatar_value?: string;
+  default_tools_allowed?: string[] | null;
+  tool_groups?: ToolGroupMap;
 }
+
+export interface MemoryFilters {
+  state?: MemoryState;
+  kind?: string;
+  tags?: string[];
+  q?: string;
+  limit?: number;
+}
+
+export interface AgentCreatePayload {
+  name: string;
+  role_label?: string;
+  persona?: string;
+  system_prompt?: string;
+  procedural_rules?: string;
+  profile_id?: string;
+  avatar_kind?: AvatarKind;
+  avatar_value?: string;
+  cost_cap_usd?: number | null;
+  tools_allowed?: string[] | null;
+  heartbeat_enabled?: boolean;
+  heartbeat_interval_s?: number;
+  heartbeat_checklist?: string;
+  dream_enabled?: boolean;
+  dream_quiet_hours?: string;
+  dream_probability?: number;
+  dream_max_per_night?: number;
+}
+
+export type AgentUpdatePayload = Partial<AgentCreatePayload> & {
+  status?: AgentStatus;
+};
