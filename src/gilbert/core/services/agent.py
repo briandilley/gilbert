@@ -116,7 +116,12 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     "agent_list",
     "agent_send_message",
     "agent_delegate",
-    # Phase 4 will add goal_post.
+    # Phase 4 — goal participation. ``goal_post`` is core because every
+    # assignee needs to be able to post to a war room they're on.
+    # The other six goal tools (create / assign / unassign / handoff /
+    # status / summary) are NOT core — operators may pin them via
+    # ``tools_allowed`` on a per-agent basis.
+    "goal_post",
 })
 
 
@@ -360,6 +365,217 @@ _TOOL_AGENT_DELEGATE = ToolDefinition(
     ],
     slash_command="agent_delegate",
     slash_help="Delegate work to another agent and await its reply.",
+)
+
+
+# ── Phase 4 — goal tools ─────────────────────────────────────────────
+
+_TOOL_GOAL_CREATE = ToolDefinition(
+    name="goal_create",
+    description=(
+        "Create a new goal you own. Optionally assign one or more peer "
+        "agents (by name) at specified roles. The first assignee is "
+        "promoted to DRIVER if no DRIVER is in the list. A war-room "
+        "conversation is created and bound to the goal."
+    ),
+    parameters=[
+        ToolParameter(
+            name="name",
+            type=ToolParameterType.STRING,
+            description="Goal name (short, human-readable).",
+            required=True,
+        ),
+        ToolParameter(
+            name="description",
+            type=ToolParameterType.STRING,
+            description="Goal description / brief.",
+            required=False,
+        ),
+        ToolParameter(
+            name="assign_to",
+            type=ToolParameterType.ARRAY,
+            description=(
+                "List of {agent_name, role} objects to assign. Roles: "
+                "'driver' | 'collaborator' | 'reviewer'."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="cost_cap_usd",
+            type=ToolParameterType.NUMBER,
+            description="Optional cost cap in USD (informational in Phase 4).",
+            required=False,
+        ),
+    ],
+    slash_command="goal_create",
+    slash_help="Create a new multi-agent goal.",
+)
+
+_TOOL_GOAL_ASSIGN = ToolDefinition(
+    name="goal_assign",
+    description=(
+        "Assign a peer agent to a goal at the given role. Only the "
+        "current DRIVER on the goal may call this."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="agent_name",
+            type=ToolParameterType.STRING,
+            description="Peer agent name (must be same owner).",
+            required=True,
+        ),
+        ToolParameter(
+            name="role",
+            type=ToolParameterType.STRING,
+            description="'driver' | 'collaborator' | 'reviewer'.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_assign",
+    slash_help="Assign a peer agent to a goal.",
+)
+
+_TOOL_GOAL_UNASSIGN = ToolDefinition(
+    name="goal_unassign",
+    description=(
+        "Remove an agent from a goal. Driver-only, except an agent may "
+        "remove itself."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="agent_name",
+            type=ToolParameterType.STRING,
+            description="Agent name to unassign.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_unassign",
+    slash_help="Remove an agent from a goal.",
+)
+
+_TOOL_GOAL_HANDOFF = ToolDefinition(
+    name="goal_handoff",
+    description=(
+        "Hand off DRIVER on a goal to a peer agent. Only the current "
+        "DRIVER may call this. The from-agent becomes COLLABORATOR."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="target_name",
+            type=ToolParameterType.STRING,
+            description="Peer agent to receive DRIVER.",
+            required=True,
+        ),
+        ToolParameter(
+            name="role",
+            type=ToolParameterType.STRING,
+            description="Role to grant the target (default 'driver').",
+            required=False,
+        ),
+        ToolParameter(
+            name="note",
+            type=ToolParameterType.STRING,
+            description="Optional handoff note (stamped on both rows).",
+            required=False,
+        ),
+    ],
+    slash_command="goal_handoff",
+    slash_help="Hand off a goal's driver role to a peer.",
+)
+
+_TOOL_GOAL_POST = ToolDefinition(
+    name="goal_post",
+    description=(
+        "Post a message into a goal's war-room conversation. You must "
+        "be an active assignee. ``mention`` is a list of peer-agent "
+        "names that should each receive an inbox signal pointing at "
+        "this post."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="body",
+            type=ToolParameterType.STRING,
+            description="Message body.",
+            required=True,
+        ),
+        ToolParameter(
+            name="mention",
+            type=ToolParameterType.ARRAY,
+            description="List of peer agent names to ping with an inbox signal.",
+            required=False,
+        ),
+    ],
+    slash_command="goal_post",
+    slash_help="Post into a goal's war room.",
+)
+
+_TOOL_GOAL_STATUS = ToolDefinition(
+    name="goal_status",
+    description=(
+        "Set a goal's status. Only the current DRIVER may call this. "
+        "Statuses: 'new' | 'in_progress' | 'blocked' | 'complete' | "
+        "'cancelled'. Use 'cancelled' to abandon a goal — there is no "
+        "goal-deletion path."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="new_status",
+            type=ToolParameterType.STRING,
+            description="One of 'new', 'in_progress', 'blocked', 'complete', 'cancelled'.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_status",
+    slash_help="Update a goal's status.",
+)
+
+_TOOL_GOAL_SUMMARY = ToolDefinition(
+    name="goal_summary",
+    description=(
+        "Return a JSON summary of a goal you're assigned to: name, "
+        "description, status, assignees (with roles), recent posts "
+        "(last 10), lifetime_cost_usd, is_dependency_blocked."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal id.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_summary",
+    slash_help="Summarize a goal you're on.",
 )
 
 
@@ -2277,6 +2493,13 @@ class AgentService(Service):
             _TOOL_AGENT_LIST,
             _TOOL_AGENT_SEND_MESSAGE,
             _TOOL_AGENT_DELEGATE,
+            _TOOL_GOAL_CREATE,
+            _TOOL_GOAL_ASSIGN,
+            _TOOL_GOAL_UNASSIGN,
+            _TOOL_GOAL_HANDOFF,
+            _TOOL_GOAL_POST,
+            _TOOL_GOAL_STATUS,
+            _TOOL_GOAL_SUMMARY,
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -2301,6 +2524,20 @@ class AgentService(Service):
             return await self._exec_agent_send_message(arguments)
         if name == "agent_delegate":
             return await self._exec_agent_delegate(arguments)
+        if name == "goal_create":
+            return await self._exec_goal_create(arguments)
+        if name == "goal_assign":
+            return await self._exec_goal_assign(arguments)
+        if name == "goal_unassign":
+            return await self._exec_goal_unassign(arguments)
+        if name == "goal_handoff":
+            return await self._exec_goal_handoff(arguments)
+        if name == "goal_post":
+            return await self._exec_goal_post(arguments)
+        if name == "goal_status":
+            return await self._exec_goal_status(arguments)
+        if name == "goal_summary":
+            return await self._exec_goal_summary(arguments)
         raise KeyError(f"unknown tool: {name}")
 
     async def _exec_complete_run(self, args: dict[str, Any]) -> str:
@@ -2587,6 +2824,336 @@ class AgentService(Service):
             return reply
         finally:
             self._pending_delegations.pop(delegation_id, None)
+
+    # ── Phase 4: goal tool helpers ───────────────────────────────────
+
+    async def _is_active_assignee(
+        self, *, goal_id: str, agent_id: str,
+    ) -> GoalAssignment | None:
+        """Return the active assignment if the agent is on the goal, else None."""
+        asgns = await self.list_assignments(goal_id=goal_id, active_only=True)
+        for a in asgns:
+            if a.agent_id == agent_id:
+                return a
+        return None
+
+    async def _is_driver(self, *, goal_id: str, agent_id: str) -> bool:
+        a = await self._is_active_assignee(goal_id=goal_id, agent_id=agent_id)
+        return a is not None and a.role is AssignmentRole.DRIVER
+
+    def _coerce_role(self, raw: Any) -> AssignmentRole | None:
+        """Map a string to AssignmentRole. Returns None on bad input."""
+        if raw is None:
+            return None
+        try:
+            return AssignmentRole(str(raw).lower().strip())
+        except ValueError:
+            return None
+
+    def _coerce_goal_status(self, raw: Any) -> GoalStatus | None:
+        try:
+            return GoalStatus(str(raw).lower().strip())
+        except ValueError:
+            return None
+
+    async def _exec_goal_create(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        if not agent_id:
+            return "error: goal_create requires _agent_id (injected by runtime)"
+        me = await self.get_agent(agent_id)
+        if me is None:
+            return "error: caller agent not found"
+        name = str(args.get("name", "")).strip()
+        if not name:
+            return "error: name is required"
+        description = str(args.get("description", ""))
+        cost_cap_raw = args.get("cost_cap_usd")
+        cost_cap = float(cost_cap_raw) if cost_cap_raw is not None else None
+
+        # Resolve assign_to. Each entry is either {agent_name, role} or
+        # a plain string (interpreted as agent_name with role=collaborator).
+        assign_raw = args.get("assign_to") or []
+        assign_to: list[tuple[str, AssignmentRole]] = []
+        if not isinstance(assign_raw, list):
+            return "error: assign_to must be an array"
+        for entry in assign_raw:
+            if isinstance(entry, str):
+                target_name = entry.strip()
+                role: AssignmentRole | None = AssignmentRole.COLLABORATOR
+            elif isinstance(entry, dict):
+                target_name = str(entry.get("agent_name", "")).strip()
+                role = self._coerce_role(entry.get("role")) or AssignmentRole.COLLABORATOR
+            else:
+                return "error: assign_to entries must be strings or {agent_name, role} objects"
+            if not target_name:
+                return "error: assign_to entry missing agent_name"
+            # Resolve owner-scoped via _load_peer_by_name (raises if cross-owner).
+            try:
+                await self._load_peer_by_name(
+                    caller_agent_id=agent_id, target_name=target_name,
+                )
+            except PermissionError as exc:
+                return f"error: {exc}"
+            assign_to.append((target_name, role))
+
+        try:
+            g = await self.create_goal(
+                owner_user_id=me.owner_user_id,
+                name=name,
+                description=description,
+                cost_cap_usd=cost_cap,
+                assign_to=assign_to,
+                assigned_by=f"agent:{agent_id}",
+            )
+        except ValueError as exc:
+            return f"error: {exc}"
+        return json.dumps({"goal_id": g.id, "war_room_conversation_id": g.war_room_conversation_id})
+
+    async def _exec_goal_assign(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        target_name = str(args.get("agent_name", "")).strip()
+        role = self._coerce_role(args.get("role"))
+        if not agent_id:
+            return "error: goal_assign requires _agent_id"
+        if not goal_id or not target_name or role is None:
+            return "error: goal_id, agent_name, role required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        if not await self._is_driver(goal_id=goal_id, agent_id=agent_id):
+            return "error: only the goal's DRIVER may assign agents"
+        try:
+            target = await self._load_peer_by_name(
+                caller_agent_id=agent_id, target_name=target_name,
+            )
+        except PermissionError as exc:
+            return f"error: {exc}"
+        ga = await self.assign_agent_to_goal(
+            goal_id=goal_id,
+            agent_id=target.id,
+            role=role,
+            assigned_by=f"agent:{agent_id}",
+        )
+        return f"assigned {target_name} as {ga.role.value}"
+
+    async def _exec_goal_unassign(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        target_name = str(args.get("agent_name", "")).strip()
+        if not agent_id:
+            return "error: goal_unassign requires _agent_id"
+        if not goal_id or not target_name:
+            return "error: goal_id and agent_name required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        try:
+            target = await self._load_peer_by_name(
+                caller_agent_id=agent_id, target_name=target_name,
+            )
+        except PermissionError as exc:
+            return f"error: {exc}"
+        # DRIVER may unassign anyone; non-DRIVER may only unassign self.
+        is_driver = await self._is_driver(goal_id=goal_id, agent_id=agent_id)
+        if not is_driver and target.id != agent_id:
+            return "error: only the DRIVER (or yourself) may unassign on this goal"
+        try:
+            await self.unassign_agent_from_goal(goal_id=goal_id, agent_id=target.id)
+        except KeyError as exc:
+            return f"error: {exc}"
+        return f"unassigned {target_name}"
+
+    async def _exec_goal_handoff(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        target_name = str(args.get("target_name", "")).strip()
+        note = str(args.get("note", ""))
+        # ``role`` defaults to "driver" per the spec — if specified as
+        # something else, that's the role the FROM-agent receives after
+        # the handoff (the TO-agent is always promoted to DRIVER).
+        role_raw = args.get("role")
+        role_for_from = AssignmentRole.COLLABORATOR
+        if role_raw is not None:
+            coerced = self._coerce_role(role_raw)
+            if coerced is None:
+                return "error: role must be one of driver/collaborator/reviewer"
+            # If caller supplied "driver" (the default), the FROM-agent
+            # demotes to COLLABORATOR — we don't allow two DRIVERs.
+            if coerced is not AssignmentRole.DRIVER:
+                role_for_from = coerced
+        if not agent_id:
+            return "error: goal_handoff requires _agent_id"
+        if not goal_id or not target_name:
+            return "error: goal_id and target_name required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        if not await self._is_driver(goal_id=goal_id, agent_id=agent_id):
+            return "error: only the current DRIVER may hand off"
+        try:
+            target = await self._load_peer_by_name(
+                caller_agent_id=agent_id, target_name=target_name,
+            )
+        except PermissionError as exc:
+            return f"error: {exc}"
+        if target.id == agent_id:
+            return "error: cannot hand off to yourself"
+        try:
+            await self.handoff_goal(
+                goal_id=goal_id,
+                from_agent_id=agent_id,
+                to_agent_id=target.id,
+                new_role_for_from=role_for_from,
+                note=note,
+            )
+        except (KeyError, ValueError) as exc:
+            return f"error: {exc}"
+        return f"handed off goal {goal_id} to {target_name}"
+
+    async def _exec_goal_post(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        body = str(args.get("body", "")).strip()
+        if not agent_id:
+            return "error: goal_post requires _agent_id"
+        if not goal_id or not body:
+            return "error: goal_id and body required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        # Assignee-only.
+        asgn = await self._is_active_assignee(goal_id=goal_id, agent_id=agent_id)
+        if asgn is None:
+            return "error: only assignees can post to the war room"
+
+        if self._storage is None:
+            return "error: not started"
+        conv_id = goal.war_room_conversation_id
+        conv_row = await self._storage.get(_AI_CONVERSATIONS_COLLECTION, conv_id)
+        if conv_row is None:
+            return "error: war room conversation missing"
+        msgs = list(conv_row.get("messages", []) or [])
+        now = _now()
+        msg = {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "role": "user",
+            "content": body,
+            "ts": now.isoformat(),
+            "metadata": {
+                "sender": {"kind": "agent", "id": me.id, "name": me.name},
+                "goal_id": goal_id,
+            },
+        }
+        msgs.append(msg)
+        conv_row["messages"] = msgs
+        conv_row["updated_at"] = now.isoformat()
+        await self._storage.put(_AI_CONVERSATIONS_COLLECTION, conv_id, conv_row)
+
+        # Process mentions: each named peer gets an inbox signal.
+        mentions_raw = args.get("mention") or []
+        mention_count = 0
+        if isinstance(mentions_raw, list):
+            short_body = body if len(body) <= 200 else body[:200]
+            for raw_name in mentions_raw:
+                name = str(raw_name).strip()
+                if not name:
+                    continue
+                try:
+                    target = await self._load_peer_by_name(
+                        caller_agent_id=agent_id, target_name=name,
+                    )
+                except PermissionError:
+                    continue
+                if target.id == me.id:
+                    continue
+                await self._signal_agent(
+                    agent_id=target.id,
+                    signal_kind="inbox",
+                    body=f"[mentioned in war room {goal.name}]: {short_body}",
+                    sender_kind="agent",
+                    sender_id=me.id,
+                    sender_name=me.name,
+                    source_conv_id=conv_id,
+                    source_message_id=msg["id"],
+                    metadata={"goal_id": goal_id, "kind": "war_room_mention"},
+                )
+                mention_count += 1
+        return f"posted to war room (mentions={mention_count})"
+
+    async def _exec_goal_status(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        new_status = self._coerce_goal_status(args.get("new_status"))
+        if not agent_id:
+            return "error: goal_status requires _agent_id"
+        if not goal_id or new_status is None:
+            return "error: goal_id and new_status required (one of new/in_progress/blocked/complete/cancelled)"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        if not await self._is_driver(goal_id=goal_id, agent_id=agent_id):
+            return "error: only the goal's DRIVER may change status"
+        await self.update_goal_status(goal_id, new_status)
+        return f"goal {goal_id} status set to {new_status.value}"
+
+    async def _exec_goal_summary(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        goal_id = str(args.get("goal_id", "")).strip()
+        if not agent_id:
+            return "error: goal_summary requires _agent_id"
+        if not goal_id:
+            return "error: goal_id is required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        # Assignee-only.
+        if await self._is_active_assignee(goal_id=goal_id, agent_id=agent_id) is None:
+            return "error: only assignees can read the summary"
+
+        asgns = await self.list_assignments(goal_id=goal_id, active_only=True)
+        # Build (agent_id → name) lookup.
+        names: dict[str, str] = {}
+        for a in asgns:
+            ag = await self.get_agent(a.agent_id)
+            if ag is not None:
+                names[a.agent_id] = ag.name
+        recent = await self._recent_war_room_posts(goal_id, limit=10)
+        out = {
+            "name": goal.name,
+            "description": goal.description,
+            "status": goal.status.value,
+            "assignees": [
+                {
+                    "agent_id": a.agent_id,
+                    "agent_name": names.get(a.agent_id, ""),
+                    "role": a.role.value,
+                }
+                for a in asgns
+            ],
+            "recent_posts": recent,
+            "lifetime_cost_usd": goal.lifetime_cost_usd,
+            "is_dependency_blocked": False,
+        }
+        return json.dumps(out)
 
     # ── Tool argument injection (Task 15) ────────────────────────────
 
