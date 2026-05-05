@@ -584,6 +584,153 @@ _TOOL_GOAL_SUMMARY = ToolDefinition(
 )
 
 
+# ── Phase 5 — deliverable + dependency tools ────────────────────────
+
+_TOOL_DELIVERABLE_CREATE = ToolDefinition(
+    name="deliverable_create",
+    description=(
+        "Create a DRAFT deliverable on a goal you're assigned to. "
+        "``name`` is the logical key dependents reference (e.g., 'spec'); "
+        "``kind`` is a free-form category ('spec', 'code', 'report', "
+        "'image', etc.); ``content_ref`` is an optional pointer to the "
+        "underlying content (typically 'workspace_file:<id>')."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The goal the deliverable belongs to.",
+            required=True,
+        ),
+        ToolParameter(
+            name="name",
+            type=ToolParameterType.STRING,
+            description="Logical name (dependents reference this).",
+            required=True,
+        ),
+        ToolParameter(
+            name="kind",
+            type=ToolParameterType.STRING,
+            description="Category: 'spec' | 'code' | 'report' | 'image' | …",
+            required=True,
+        ),
+        ToolParameter(
+            name="content_ref",
+            type=ToolParameterType.STRING,
+            description="Pointer to underlying content (default empty).",
+            required=False,
+        ),
+    ],
+    slash_command="deliverable_create",
+    slash_help="Create a DRAFT deliverable on a goal.",
+)
+
+_TOOL_DELIVERABLE_FINALIZE = ToolDefinition(
+    name="deliverable_finalize",
+    description=(
+        "Flip a deliverable from DRAFT to READY. Only the producer or "
+        "the goal's DRIVER may call this. Finalizing a deliverable with "
+        "the same ``name`` as a prior READY one supersedes the prior "
+        "(marks it OBSOLETE) — only one READY per (goal, name)."
+    ),
+    parameters=[
+        ToolParameter(
+            name="deliverable_id",
+            type=ToolParameterType.STRING,
+            description="The deliverable id.",
+            required=True,
+        ),
+    ],
+    slash_command="deliverable_finalize",
+    slash_help="Finalize a deliverable to READY.",
+)
+
+_TOOL_DELIVERABLE_SUPERSEDE = ToolDefinition(
+    name="deliverable_supersede",
+    description=(
+        "Mark a deliverable OBSOLETE and create a new one (DRAFT, or "
+        "READY if ``finalize=True``) with the same ``name`` and "
+        "``kind`` on the same goal. Only the producer or the goal's "
+        "DRIVER may call this."
+    ),
+    parameters=[
+        ToolParameter(
+            name="deliverable_id",
+            type=ToolParameterType.STRING,
+            description="The deliverable id to obsolete.",
+            required=True,
+        ),
+        ToolParameter(
+            name="new_content_ref",
+            type=ToolParameterType.STRING,
+            description="Content pointer for the replacement deliverable.",
+            required=True,
+        ),
+        ToolParameter(
+            name="finalize",
+            type=ToolParameterType.BOOLEAN,
+            description="If true, the new deliverable is created READY.",
+            required=False,
+        ),
+    ],
+    slash_command="deliverable_supersede",
+    slash_help="Supersede a deliverable with a new revision.",
+)
+
+_TOOL_GOAL_ADD_DEPENDENCY = ToolDefinition(
+    name="goal_add_dependency",
+    description=(
+        "Register that ``goal_id`` depends on ``source_goal_id`` "
+        "producing a READY deliverable named "
+        "``required_deliverable_name``. DRIVER-only on the dependent "
+        "goal. Idempotent on (dependent, source, name). If the source "
+        "already has a matching READY deliverable, the new dependency "
+        "is created satisfied — and assignees on ``goal_id`` are "
+        "signaled immediately."
+    ),
+    parameters=[
+        ToolParameter(
+            name="goal_id",
+            type=ToolParameterType.STRING,
+            description="The dependent goal (the one that gets unblocked).",
+            required=True,
+        ),
+        ToolParameter(
+            name="source_goal_id",
+            type=ToolParameterType.STRING,
+            description="The source goal that must produce the deliverable.",
+            required=True,
+        ),
+        ToolParameter(
+            name="required_deliverable_name",
+            type=ToolParameterType.STRING,
+            description="Name of the deliverable on the source goal.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_add_dependency",
+    slash_help="Add a goal dependency edge.",
+)
+
+_TOOL_GOAL_REMOVE_DEPENDENCY = ToolDefinition(
+    name="goal_remove_dependency",
+    description=(
+        "Remove a goal dependency edge. Only the DRIVER on the dependent "
+        "goal may call this."
+    ),
+    parameters=[
+        ToolParameter(
+            name="dependency_id",
+            type=ToolParameterType.STRING,
+            description="The dependency row id to remove.",
+            required=True,
+        ),
+    ],
+    slash_command="goal_remove_dependency",
+    slash_help="Remove a goal dependency edge.",
+)
+
+
 # Maximum allowed delegation chain depth (caller + targets). The 5th
 # delegation in a chain is rejected before the signal fires.
 _DELEGATION_DEPTH_CAP = 5
@@ -2988,6 +3135,11 @@ class AgentService(Service):
             _TOOL_GOAL_POST,
             _TOOL_GOAL_STATUS,
             _TOOL_GOAL_SUMMARY,
+            _TOOL_DELIVERABLE_CREATE,
+            _TOOL_DELIVERABLE_FINALIZE,
+            _TOOL_DELIVERABLE_SUPERSEDE,
+            _TOOL_GOAL_ADD_DEPENDENCY,
+            _TOOL_GOAL_REMOVE_DEPENDENCY,
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -3026,6 +3178,16 @@ class AgentService(Service):
             return await self._exec_goal_status(arguments)
         if name == "goal_summary":
             return await self._exec_goal_summary(arguments)
+        if name == "deliverable_create":
+            return await self._exec_deliverable_create(arguments)
+        if name == "deliverable_finalize":
+            return await self._exec_deliverable_finalize(arguments)
+        if name == "deliverable_supersede":
+            return await self._exec_deliverable_supersede(arguments)
+        if name == "goal_add_dependency":
+            return await self._exec_goal_add_dependency(arguments)
+        if name == "goal_remove_dependency":
+            return await self._exec_goal_remove_dependency(arguments)
         raise KeyError(f"unknown tool: {name}")
 
     async def _exec_complete_run(self, args: dict[str, Any]) -> str:
@@ -3648,6 +3810,169 @@ class AgentService(Service):
             "is_dependency_blocked": len(unsat) > 0,
         }
         return json.dumps(out)
+
+    # ── Phase 5: deliverable + dependency tool helpers ───────────────
+
+    async def _exec_deliverable_create(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        if not agent_id:
+            return "error: deliverable_create requires _agent_id"
+        goal_id = str(args.get("goal_id", "")).strip()
+        name = str(args.get("name", "")).strip()
+        kind = str(args.get("kind", "")).strip()
+        content_ref = str(args.get("content_ref", ""))
+        if not goal_id or not name or not kind:
+            return "error: goal_id, name, kind required"
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            return f"error: goal {goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        if await self._is_active_assignee(
+            goal_id=goal_id, agent_id=agent_id,
+        ) is None:
+            return "error: only assignees may create deliverables on this goal"
+        d = await self.create_deliverable(
+            goal_id=goal_id,
+            name=name,
+            kind=kind,
+            produced_by_agent_id=agent_id,
+            content_ref=content_ref,
+        )
+        return json.dumps({"deliverable_id": d.id, "state": d.state.value})
+
+    async def _exec_deliverable_finalize(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        deliverable_id = str(args.get("deliverable_id", "")).strip()
+        if not agent_id:
+            return "error: deliverable_finalize requires _agent_id"
+        if not deliverable_id:
+            return "error: deliverable_id is required"
+        d = await self.get_deliverable(deliverable_id)
+        if d is None:
+            return f"error: deliverable {deliverable_id} not found"
+        goal = await self.get_goal(d.goal_id)
+        if goal is None:
+            return f"error: goal {d.goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        is_producer = d.produced_by_agent_id == agent_id
+        is_driver = await self._is_driver(goal_id=d.goal_id, agent_id=agent_id)
+        if not (is_producer or is_driver):
+            return "error: only the producer or DRIVER may finalize"
+        try:
+            finalized = await self.finalize_deliverable(deliverable_id)
+        except (KeyError, ValueError) as exc:
+            return f"error: {exc}"
+        return f"deliverable {finalized.id} READY"
+
+    async def _exec_deliverable_supersede(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        deliverable_id = str(args.get("deliverable_id", "")).strip()
+        new_content_ref = str(args.get("new_content_ref", "")).strip()
+        finalize = bool(args.get("finalize", False))
+        if not agent_id:
+            return "error: deliverable_supersede requires _agent_id"
+        if not deliverable_id or not new_content_ref:
+            return "error: deliverable_id and new_content_ref required"
+        d = await self.get_deliverable(deliverable_id)
+        if d is None:
+            return f"error: deliverable {deliverable_id} not found"
+        goal = await self.get_goal(d.goal_id)
+        if goal is None:
+            return f"error: goal {d.goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != goal.owner_user_id:
+            return "error: not authorized for this goal"
+        is_producer = d.produced_by_agent_id == agent_id
+        is_driver = await self._is_driver(goal_id=d.goal_id, agent_id=agent_id)
+        if not (is_producer or is_driver):
+            return "error: only the producer or DRIVER may supersede"
+        try:
+            obs, new = await self.supersede_deliverable(
+                deliverable_id, new_content_ref=new_content_ref,
+                finalize=finalize,
+            )
+        except (KeyError, ValueError) as exc:
+            return f"error: {exc}"
+        return json.dumps({
+            "obsoleted_id": obs.id,
+            "new_id": new.id,
+            "new_state": new.state.value,
+        })
+
+    async def _exec_goal_add_dependency(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        dependent_goal_id = str(args.get("goal_id", "")).strip()
+        source_goal_id = str(args.get("source_goal_id", "")).strip()
+        required_name = str(
+            args.get("required_deliverable_name", "")
+        ).strip()
+        if not agent_id:
+            return "error: goal_add_dependency requires _agent_id"
+        if not dependent_goal_id or not source_goal_id or not required_name:
+            return (
+                "error: goal_id, source_goal_id, "
+                "required_deliverable_name required"
+            )
+        dep_goal = await self.get_goal(dependent_goal_id)
+        src_goal = await self.get_goal(source_goal_id)
+        if dep_goal is None:
+            return f"error: dependent goal {dependent_goal_id} not found"
+        if src_goal is None:
+            return f"error: source goal {source_goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != dep_goal.owner_user_id:
+            return "error: not authorized for the dependent goal"
+        # Source goal must also be same-owner — no cross-owner reach.
+        if src_goal.owner_user_id != dep_goal.owner_user_id:
+            return "error: source and dependent goals must share owner"
+        if not await self._is_driver(
+            goal_id=dependent_goal_id, agent_id=agent_id,
+        ):
+            return "error: only the dependent goal's DRIVER may add dependencies"
+        dep = await self.add_goal_dependency(
+            dependent_goal_id=dependent_goal_id,
+            source_goal_id=source_goal_id,
+            required_deliverable_name=required_name,
+        )
+        return json.dumps({
+            "dependency_id": dep.id,
+            "dependent_goal_id": dep.dependent_goal_id,
+            "source_goal_id": dep.source_goal_id,
+            "satisfied": dep.satisfied_at is not None,
+        })
+
+    async def _exec_goal_remove_dependency(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        dependency_id = str(args.get("dependency_id", "")).strip()
+        if not agent_id:
+            return "error: goal_remove_dependency requires _agent_id"
+        if not dependency_id:
+            return "error: dependency_id required"
+        if self._storage is None:
+            return "error: not started"
+        row = await self._storage.get(_DEPENDENCIES_COLLECTION, dependency_id)
+        if row is None:
+            return f"error: dependency {dependency_id} not found"
+        dep = _dependency_from_dict(row)
+        dep_goal = await self.get_goal(dep.dependent_goal_id)
+        if dep_goal is None:
+            return f"error: dependent goal {dep.dependent_goal_id} not found"
+        me = await self.get_agent(agent_id)
+        if me is None or me.owner_user_id != dep_goal.owner_user_id:
+            return "error: not authorized for the dependent goal"
+        if not await self._is_driver(
+            goal_id=dep.dependent_goal_id, agent_id=agent_id,
+        ):
+            return "error: only the DRIVER may remove dependencies"
+        try:
+            await self.remove_goal_dependency(dependency_id)
+        except KeyError as exc:
+            return f"error: {exc}"
+        return f"dependency {dependency_id} removed"
 
     # ── Tool argument injection (Task 15) ────────────────────────────
 
