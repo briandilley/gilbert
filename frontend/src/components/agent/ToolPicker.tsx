@@ -10,6 +10,7 @@ import type { ToolDescriptor } from "@/types/agent";
  * input, manage commitments, or persist memories.
  */
 const CORE_TOOLS = new Set<string>([
+  // Phase 1A — agent self-management
   "complete_run",
   "request_user_input",
   "notify_user",
@@ -19,6 +20,10 @@ const CORE_TOOLS = new Set<string>([
   "agent_memory_save",
   "agent_memory_search",
   "agent_memory_review_and_promote",
+  // Phase 2 — peer messaging
+  "agent_list",
+  "agent_send_message",
+  "agent_delegate",
 ]);
 
 interface Props {

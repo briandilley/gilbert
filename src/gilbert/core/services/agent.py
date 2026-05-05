@@ -1503,7 +1503,7 @@ class AgentService(Service):
                     fut.set_result(run.final_message_text or "")
                 else:
                     fut.set_exception(
-                        RuntimeError(f"delegation target run {run.status.value}")
+                        RuntimeError(run.status.value)
                     )
         return run
 
