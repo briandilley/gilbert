@@ -91,11 +91,46 @@ add `agent_send_message`, `agent_delegate`, `agent_list` (Phase 2),
 
 **WS RPCs (Phase 1A):** `agents.create / get / list / update / delete /
 set_status / run_now / get_defaults`. Per-user RBAC enforced via
-`_load_agent_for_caller`; admin sees-all on list.
-`agents.tools.list_available` and `agents.tools.list_groups` ship in
-Phase 1B alongside the SPA `<ToolPicker>`. Permission entry in
-`acl.py`: single broad `"agents.": 100` matching the file's existing
-prefix-style convention.
+`load_agent_for_caller` (public on `AgentProvider`); admin sees-all on
+list. Permission entry in `acl.py`: single broad `"agents.": 100`
+matching the file's existing prefix-style convention.
+
+**WS RPCs (Phase 1B):** the SPA reads runs / commitments / memories /
+the tool catalog through:
+- `agents.runs.list(agent_id, limit?)` — owner-scoped, clamped `limit ≥ 1`.
+- `agents.commitments.{list, create, complete}` — owner-scoped; create
+  rejects empty content and resolves `due_at` from either `due_at` or
+  `due_in_seconds`; complete authorizes via the commitment's owning agent.
+- `agents.memories.{list, set_state}` — owner-scoped. `list` supports
+  `state`, `kind`, `tags` (any-match), `q` (substring), `limit` filters
+  (handled inline in `search_memory`). `set_state` flips between
+  `short_term` ↔ `long_term` via `promote_memory`.
+- `agents.tools.list_available` — backed by `AIToolDiscoveryProvider.discover_tools(user_ctx=...)`
+  bound as a hard requirement in `start()`. Returns `[{name, description, provider, required_role?}]`
+  shape; tuple-unpacks the `(provider, ToolDefinition)` returned by `AIService`.
+- `agents.tools.list_groups` — returns `_defaults["tool_groups"]`.
+
+**HTTP routes (Phase 1B):** `web/routes/agent_avatar.py` mounts:
+- `POST /api/agents/{agent_id}/avatar` — multipart `file=<image>`. MIME
+  gate (png/jpeg/webp/gif → 415), 4 MiB cap (`_MAX_AVATAR_BYTES`),
+  filename sanitizer (`_sanitize_filename`), streamed write. Calls
+  `AgentService.set_agent_avatar(agent_id, filename=...)` (a thin
+  wrapper that delegates to `update_agent` so `agent.updated` fires).
+- `GET /api/agents/{agent_id}/avatar` — streams the avatar back; 404
+  when `avatar_kind != "image"`. Cache headers: `Cache-Control: private,
+  max-age=3600` (filenames are content-hashed).
+
+Both routes require auth (`Depends(require_authenticated)`); admin
+bypass goes through `AccessControlProvider.get_effective_level(user) ≤ 0`,
+matching the WS-handler discipline. Avatars live at
+`<DATA_DIR>/agent-avatars/<agent_id>/<sha-suffixed filename>`;
+`_remove_avatar_dir(agent_id)` is best-effort and called from `delete_agent`.
+
+**Public AgentProvider (Phase 1B):** Phase 1B added two methods to the
+`AgentProvider` protocol — `load_agent_for_caller(agent_id, *,
+caller_user_id, admin=False)` and `set_agent_avatar(agent_id, *,
+filename)`. The HTTP routes use `isinstance(svc, AgentProvider)` rather
+than reaching into private internals.
 
 **Defaults (ConfigParam):** `default_persona`, `default_system_prompt`,
 `default_procedural_rules`, `default_heartbeat_checklist` are flagged
@@ -138,6 +173,9 @@ dict-shaped filters — they don't match the real API. For
 ## Related
 - `src/gilbert/interfaces/agent.py`
 - `src/gilbert/core/services/agent.py`
+- `src/gilbert/web/routes/agent_avatar.py` (Phase 1B HTTP routes)
+- `frontend/src/api/agents.ts` (Phase 1B SPA client)
+- `frontend/src/components/agent/` (Phase 1B SPA components)
 - `tests/unit/test_agent_service.py`
 - `tests/unit/test_agent_memory.py`
 - `tests/unit/test_commitments.py`
@@ -145,8 +183,11 @@ dict-shaped filters — they don't match the real API. For
 - `tests/unit/test_agent_inbox.py`
 - `tests/unit/test_tool_gating.py`
 - `tests/unit/test_agent_entities.py`
+- `tests/unit/test_agents_ws_rpcs.py` (Phase 1B WS RPC coverage)
+- `tests/unit/test_agent_avatar_route.py` (Phase 1B HTTP route coverage)
 - `docs/superpowers/specs/2026-05-04-agent-messaging-design.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1a-backend.md`
+- `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1b-ui.md`
 - `.claude/memory/memory-agent-loop.md` (run_loop primitive)
 - `.claude/memory/memory-multi-user-isolation.md`
 - `.claude/memory/memory-ai-prompts-configurable.md`
