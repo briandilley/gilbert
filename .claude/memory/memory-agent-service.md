@@ -402,6 +402,105 @@ SPA subscribes for live refresh of the kanban + war-room.
   `ai_conversations.<id>.messages` directly. A capability-protocol
   `append_message_to_conversation` would be cleaner; deferred.
 
+## Phase 5 — Deliverables + dependency wake-up
+
+Goals now have first-class artifacts (Deliverables) and structured
+cross-goal blockers (GoalDependencies). Finalizing a deliverable
+satisfies any matching dependency rows and wakes the dependent goal's
+non-REVIEWER assignees so they can pick up the unblocked work.
+
+**Entities** (`src/gilbert/interfaces/agent.py`):
+- `Deliverable` — `id, goal_id, name, kind, state (DRAFT / READY /
+  OBSOLETE), produced_by_agent_id, content_ref, created_at,
+  finalized_at`. State machine:
+  - DRAFT → READY (via `finalize`)
+  - DRAFT|READY → OBSOLETE (via `supersede` on the predecessor)
+  - OBSOLETE is terminal; producing a successor creates a fresh DRAFT
+    row.
+- `GoalDependency` — `id, dependent_goal_id, source_goal_id,
+  required_deliverable_name, satisfied_at`. `satisfied_at` is set the
+  first time the source goal finalizes a deliverable whose `name`
+  matches `required_deliverable_name`.
+
+**Collections:** `deliverables`, `goal_dependencies`.
+
+**Single-READY-per-(goal,name) invariant:** at most one deliverable
+with `state=READY` may exist per `(goal_id, name)`. `finalize_deliverable`
+enforces this — finalizing a DRAFT when another READY already exists is
+a `ValueError("a ready deliverable already exists for this name")`. Use
+`supersede` to swap the READY row.
+
+**`_on_deliverable_finalized` propagation:** on every successful
+`finalize_deliverable`, the service marks any `goal_dependencies` rows
+with `source_goal_id == finalized.goal_id` AND
+`required_deliverable_name == finalized.name` AND `satisfied_at IS
+NULL` as satisfied (`satisfied_at = now`). For each dependent goal
+whose blocker just cleared, every active non-REVIEWER assignee
+receives an `inbox` signal (`[system]: dependency 'name' satisfied —
+goal '<dep-goal>' may proceed`). REVIEWERs are NOT woken — same
+opt-out as the goal-post mention path.
+
+**Cross-goal file access:**
+`WorkspaceProvider.resolve_deliverable_for_dependent(deliverable_id,
+caller_goal_id)` — the public entry point a future
+`read_workspace_file` tool will use. It checks that
+`caller_goal_id` has a *satisfied* `GoalDependency` row pointing at
+the deliverable's `goal_id` with the matching `required_deliverable_name`,
+then resolves `content_ref` against the source goal's workspace.
+Phase 5 only ships the resolver; the agent-facing tool that consumes
+it is out of scope.
+
+**`goal_summary.is_dependency_blocked`:** Phase 4 returned hardcoded
+`False`. Phase 5 computes it: True iff any `goal_dependencies` row
+with `dependent_goal_id == goal_id` has `satisfied_at IS NULL`.
+
+**Tools (five new):**
+- `deliverable_create(goal_id, name, kind, content_ref?)` — assignee-
+  only. Creates a DRAFT row owned by the caller agent.
+- `deliverable_finalize(deliverable_id)` — producer OR DRIVER. Flips
+  DRAFT → READY, fires `goal.deliverable.finalized`, runs
+  propagation.
+- `deliverable_supersede(deliverable_id, new_content_ref, finalize=False)`
+  — producer OR DRIVER. Marks the predecessor OBSOLETE and creates a
+  successor DRAFT (or READY when `finalize=True`). When the successor
+  is finalized, propagation runs as above.
+- `goal_add_dependency(dependent_goal_id, source_goal_id,
+  required_deliverable_name)` — DRIVER of the dependent goal.
+  Idempotent on `(dependent, source, name)`. If the source goal
+  *already* has a READY deliverable matching the name, the row is
+  created with `satisfied_at = now` immediately.
+- `goal_remove_dependency(dependency_id)` — DRIVER of the dependent
+  goal.
+
+**WS RPCs (six new):**
+- `deliverables.list / create / finalize / supersede`
+- `goals.dependencies.list / add / remove`
+
+ACL: `"deliverables.": 100` and `"goals.dependencies.": 100` in
+`interfaces/acl.py`.
+
+**Events:** `goal.deliverable.created`, `goal.deliverable.finalized`,
+`goal.deliverable.superseded`, `goal.dependency.added`,
+`goal.dependency.satisfied`, `goal.dependency.removed`.
+
+**Frontend:** `DeliverablesPanel` and `DependenciesPanel` replace the
+Phase 4 placeholders in the war-room right rail. The viewer is a
+human user, not an agent, so the SPA forwards a permissive
+``isDriver=true`` and surfaces backend errors inline if the user lacks
+the producer/DRIVER role on the goal. The deliverables panel
+subscribes to `goal.deliverable.finalized` for live refresh. New
+React Query hooks live in `frontend/src/api/goals.ts`:
+`useDeliverables`, `useCreateDeliverable`, `useFinalizeDeliverable`,
+`useSupersedeDeliverable`, `useDependencies`, `useAddDependency`,
+`useRemoveDependency`.
+
+**Out of scope (Phase 5):**
+- Agent-facing `read_workspace_file` tool. Only the
+  `WorkspaceProvider.resolve_deliverable_for_dependent` resolver is
+  shipped; the tool that consumes it lands later.
+- Workspace cleanup on goal deletion. Goal deletion isn't a thing yet
+  in Phase 4/5; CANCELLED is the closure path.
+
 ## Related
 - `src/gilbert/interfaces/agent.py`
 - `src/gilbert/core/services/agent.py`

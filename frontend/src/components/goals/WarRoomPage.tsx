@@ -7,8 +7,8 @@
  *    "Status" dropdown (DRIVER mutates via ``goals.update_status``),
  *    "Handoff" button (opens dialog).
  *  - AssigneesStrip below the header.
- *  - Two-column body: scrollable post list + a right rail of two
- *    placeholder cards (Deliverables / Dependencies, ship in Phase 5).
+ *  - Two-column body: scrollable post list + a right rail with
+ *    DeliverablesPanel + DependenciesPanel (Phase 5, wired below).
  *
  * Composer: Phase 4 ships a READ-ONLY war room. Posting flows through
  * ``goal_post`` from an assigned agent. A human composer is a
@@ -18,6 +18,7 @@
  *  - ``goal.updated`` and ``goal.status.changed`` invalidate the
  *    summary + detail.
  *  - ``goal.assignment.changed`` invalidates assignments + summary.
+ *  - ``goal.deliverable.finalized`` is handled inside DeliverablesPanel.
  *  - We don't subscribe to a per-message "new post" event yet; the
  *    posts query auto-refreshes when React Query re-validates.
  */
@@ -64,6 +65,8 @@ import type {
   WarRoomPost,
 } from "@/types/agent";
 import { AssigneesStrip } from "./AssigneesStrip";
+import { DeliverablesPanel } from "./DeliverablesPanel";
+import { DependenciesPanel } from "./DependenciesPanel";
 import { GoalStatusPill } from "./GoalCard";
 import type { GilbertEvent } from "@/types/events";
 
@@ -260,8 +263,15 @@ export function WarRoomPage() {
         </Card>
 
         <div className="space-y-3">
-          <PlaceholderCard title="Deliverables" />
-          <PlaceholderCard title="Dependencies" />
+          {/*
+           * The viewer here is a user, not an agent. The backend gates
+           * each mutation (producer OR DRIVER for finalize/supersede;
+           * caller owner for dependency add/remove), so we forward a
+           * permissive ``isDriver={true}`` and surface backend errors
+           * inline. Future polish can compute true ownership/role.
+           */}
+          <DeliverablesPanel goalId={goal._id} isDriver={true} />
+          <DependenciesPanel goalId={goal._id} isDriver={true} />
         </div>
       </div>
 
@@ -330,19 +340,6 @@ function StatusSelector({
         ))}
       </SelectContent>
     </Select>
-  );
-}
-
-function PlaceholderCard({ title }: { title: string }) {
-  return (
-    <Card size="sm">
-      <CardContent>
-        <h3 className="text-sm font-semibold">{title}</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Ships in Phase 5.
-        </p>
-      </CardContent>
-    </Card>
   );
 }
 
