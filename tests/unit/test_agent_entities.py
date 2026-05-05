@@ -23,6 +23,7 @@ def test_agent_dataclass_round_trip() -> None:
         id="ag_1",
         owner_user_id="usr_1",
         name="research-bot",
+        display_name="Ballsagna Bot",
         role_label="Research Bot",
         persona="curious and methodical",
         system_prompt="follow up on every lead",

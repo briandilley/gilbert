@@ -229,7 +229,12 @@ export function AgentDetailPage() {
           <AgentAvatar agent={agent} size="md" />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-lg font-semibold truncate">{agent.name}</h1>
+              <h1 className="text-lg font-semibold truncate">
+                {agent.display_name || agent.name}
+              </h1>
+              <code className="text-xs text-muted-foreground font-mono">
+                {agent.name}
+              </code>
               <Badge
                 className={
                   isEnabled

@@ -46,6 +46,7 @@ def _make_agent(agent_id: str, owner_user_id: str) -> Agent:
         id=agent_id,
         owner_user_id=owner_user_id,
         name=agent_id,
+        display_name=agent_id,
         role_label="",
         persona="",
         system_prompt="",

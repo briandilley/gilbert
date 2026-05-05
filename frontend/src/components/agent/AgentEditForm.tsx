@@ -35,6 +35,15 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { AuthorPromptDialog } from "@/components/settings/AuthorPromptDialog";
+import { Sparkles as SparklesIcon } from "lucide-react";
 import { AgentAvatar } from "./AgentAvatar";
 import { ToolPicker } from "./ToolPicker";
 import type {
@@ -63,7 +72,13 @@ type Props = CreateProps | EditProps;
 // ── Form state ────────────────────────────────────────────────────
 
 interface FormState {
+  /** Slug-friendly addressable identity, e.g. ``ballsagna-bot``. */
   name: string;
+  /** Free-form human label, e.g. ``"Ballsagna Bot"``. */
+  display_name: string;
+  /** True once the user has explicitly edited the slug — auto-derive
+   *  from ``display_name`` stops kicking in. */
+  slug_dirty: boolean;
   role_label: string;
   persona: string;
   system_prompt: string;
@@ -103,9 +118,28 @@ function pickInitialUnit(seconds: number): IntervalUnit {
   return "seconds";
 }
 
+/**
+ * Derive a slug from a free-form display name.
+ *
+ * - Lowercase
+ * - Whitespace + non-slug chars → ``-``
+ * - Collapse consecutive ``-`` and trim leading/trailing
+ * - Cap at 64 chars (a sane address-bar / tool-arg ceiling)
+ */
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
 function emptyState(): FormState {
   return {
     name: "",
+    display_name: "",
+    slug_dirty: false,
     role_label: "",
     persona: "",
     system_prompt: "",
@@ -153,6 +187,8 @@ function stateFromDefaults(defaults: AgentDefaults): FormState {
 function stateFromAgent(agent: Agent): FormState {
   return {
     name: agent.name,
+    display_name: agent.display_name || agent.name,
+    slug_dirty: true, // edit mode: slug is fixed, never auto-re-derive
     role_label: agent.role_label,
     persona: agent.persona,
     system_prompt: agent.system_prompt,
@@ -343,6 +379,7 @@ export function AgentEditForm(props: Props) {
     if (!state) return;
     const payload: AgentCreatePayload = {
       name: state.name,
+      display_name: state.display_name.trim() || state.name,
       role_label: state.role_label,
       persona: state.persona,
       system_prompt: state.system_prompt,
@@ -375,6 +412,7 @@ export function AgentEditForm(props: Props) {
     // Build a patch with only the fields the backend allows. ``name`` is
     // intentionally excluded — see ``_allowed_patch_fields``.
     const patch: AgentUpdatePayload = {
+      display_name: state.display_name.trim() || state.name,
       role_label: state.role_label,
       persona: state.persona,
       system_prompt: state.system_prompt,
@@ -443,7 +481,13 @@ export function AgentEditForm(props: Props) {
   // ── Render ──────────────────────────────────────────────────────
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form
+      onSubmit={handleSubmit}
+      className="p-4 sm:p-6 space-y-4 max-w-3xl mx-auto"
+    >
+      <h1 className="text-xl sm:text-2xl font-semibold">
+        {props.mode === "edit" ? "Edit agent" : "New agent"}
+      </h1>
       {/* ── Identity ────────────────────────────────────────────── */}
       <details open className="rounded-md border">
         <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
@@ -451,23 +495,50 @@ export function AgentEditForm(props: Props) {
         </summary>
         <section className="space-y-3 px-3 pb-3">
           <div className="space-y-1">
-            <Label htmlFor="agent-name">Name (slug)</Label>
+            <Label htmlFor="agent-display-name">Name</Label>
+            <Input
+              id="agent-display-name"
+              value={state.display_name}
+              onChange={(e) => {
+                const next = e.target.value;
+                setState((s) => {
+                  if (!s) return s;
+                  // While the slug hasn't been hand-edited (and we're
+                  // still in create mode), derive it live from the
+                  // display name. In edit mode the slug is locked, so
+                  // we never re-derive — stateFromAgent sets
+                  // ``slug_dirty: true`` on load.
+                  const nextSlug = s.slug_dirty ? s.name : slugify(next);
+                  return { ...s, display_name: next, name: nextSlug };
+                });
+              }}
+              placeholder="e.g. Ballsagna Bot"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="agent-name">Slug</Label>
             <Input
               id="agent-name"
               value={state.name}
-              onChange={(e) => update("name", e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setState((s) =>
+                  s ? { ...s, name: next, slug_dirty: true } : s,
+                );
+              }}
               disabled={props.mode === "edit"}
-              placeholder="e.g. concierge-bot"
+              placeholder="e.g. ballsagna-bot"
               aria-invalid={errors.name ? true : undefined}
             />
             {errors.name && (
               <p className="text-xs text-destructive">{errors.name}</p>
             )}
-            {props.mode === "edit" && (
-              <p className="text-xs text-muted-foreground">
-                Names cannot be changed after creation.
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground">
+              {props.mode === "edit"
+                ? "Slug cannot be changed after creation — it's the addressable identity peers and tools use."
+                : "Auto-derived from the name; edit if you want a different addressable identifier (lowercase, digits, and hyphens only)."}
+            </p>
           </div>
 
           <div className="space-y-1">
@@ -580,21 +651,21 @@ export function AgentEditForm(props: Props) {
             label="Persona"
             value={state.persona}
             onChange={(v) => update("persona", v)}
-            settingsHref="/settings#agent.default_persona"
+            authorParamKey="default_persona"
           />
           <PersonaField
             id="agent-system-prompt"
             label="System prompt"
             value={state.system_prompt}
             onChange={(v) => update("system_prompt", v)}
-            settingsHref="/settings#agent.default_system_prompt"
+            authorParamKey="default_system_prompt"
           />
           <PersonaField
             id="agent-procedural-rules"
             label="Procedural rules"
             value={state.procedural_rules}
             onChange={(v) => update("procedural_rules", v)}
-            settingsHref="/settings#agent.default_procedural_rules"
+            authorParamKey="default_procedural_rules"
           />
         </section>
       </details>
@@ -756,21 +827,25 @@ export function AgentEditForm(props: Props) {
         <section className="space-y-3 px-3 pb-3">
           <div className="space-y-1">
             <Label htmlFor="agent-profile">AI profile</Label>
-            <select
-              id="agent-profile"
+            <Select
               value={state.profile_id}
-              onChange={(e) => update("profile_id", e.target.value)}
-              className="h-8 w-full rounded-lg border border-input bg-transparent px-2 text-sm"
-              aria-invalid={errors.profile_id ? true : undefined}
+              onValueChange={(v) => update("profile_id", v ?? "")}
             >
-              <option value="">— select an AI profile —</option>
-              {profilesQuery.data?.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                  {p.description ? ` — ${p.description}` : ""}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger
+                id="agent-profile"
+                aria-invalid={errors.profile_id ? true : undefined}
+              >
+                <SelectValue placeholder="Select an AI profile…" />
+              </SelectTrigger>
+              <SelectContent>
+                {profilesQuery.data?.map((p) => (
+                  <SelectItem key={p.name} value={p.name}>
+                    {p.name}
+                    {p.description ? ` — ${p.description}` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {errors.profile_id && (
               <p className="text-xs text-destructive">
                 {errors.profile_id}
@@ -861,7 +936,11 @@ interface PersonaFieldProps {
   label: string;
   value: string;
   onChange: (next: string) => void;
-  settingsHref: string;
+  /** Config namespace + key the AI-author dialog should use as
+   *  context. We point at the matching ``agent_service.default_*``
+   *  param so the LLM has the same prompt-author guidance the
+   *  Settings UI uses for the service-level default. */
+  authorParamKey: string;
 }
 
 function PersonaField({
@@ -869,23 +948,39 @@ function PersonaField({
   label,
   value,
   onChange,
-  settingsHref,
+  authorParamKey,
 }: PersonaFieldProps) {
+  const [authorOpen, setAuthorOpen] = useState(false);
   return (
     <div className="space-y-1">
-      <Label htmlFor={id}>{label}</Label>
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id}>{label}</Label>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-2 text-xs"
+          onClick={() => setAuthorOpen(true)}
+        >
+          <SparklesIcon className="size-3" />
+          Author with AI
+        </Button>
+      </div>
       <Textarea
         id={id}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={6}
       />
-      <a
-        href={settingsHref}
-        className="text-xs text-muted-foreground hover:underline"
-      >
-        ↗ open in Settings
-      </a>
+      <AuthorPromptDialog
+        open={authorOpen}
+        onClose={() => setAuthorOpen(false)}
+        namespace="agent_service"
+        paramKey={authorParamKey}
+        paramLabel={label}
+        currentText={value}
+        onApply={(next) => onChange(next)}
+      />
     </div>
   );
 }

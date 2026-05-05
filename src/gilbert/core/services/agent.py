@@ -765,6 +765,7 @@ def _agent_to_dict(a: Agent) -> dict[str, Any]:
         "_id": a.id,
         "owner_user_id": a.owner_user_id,
         "name": a.name,
+        "display_name": a.display_name,
         "role_label": a.role_label,
         "persona": a.persona,
         "system_prompt": a.system_prompt,
@@ -795,6 +796,7 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         id=row["_id"],
         owner_user_id=row["owner_user_id"],
         name=row["name"],
+        display_name=row.get("display_name") or row["name"],
         role_label=row.get("role_label", ""),
         persona=row.get("persona", ""),
         system_prompt=row.get("system_prompt", ""),
@@ -1242,14 +1244,27 @@ class AgentService(Service):
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        """Cache the full config section as ``_defaults``.
+        """Cache the full config section as ``_defaults``, merged over the
+        ConfigParam defaults.
+
+        ``ConfigurationService.get_section`` returns whatever is stored in
+        YAML/DB without merging param defaults; if the operator has never
+        edited an ``agent_service.*`` value, the section is ``{}``. We
+        merge the param defaults here so the SPA's ``agents.get_defaults``
+        always returns sensible prompt fields and the create-form
+        pre-fills as expected.
 
         Also caches the ``enabled`` flag onto ``self._enabled`` — note that
         ``start()`` checks the same key separately so a disabled service
         skips capability binding entirely.
         """
-        self._defaults = dict(config)
-        self._enabled = bool(config.get("enabled", True))
+        merged: dict[str, Any] = {}
+        for param in self.config_params():
+            if param.default is not None:
+                merged[param.key] = param.default
+        merged.update(config)
+        self._defaults = merged
+        self._enabled = bool(merged.get("enabled", True))
 
     # ── Service lifecycle ────────────────────────────────────────────
 
@@ -1259,6 +1274,10 @@ class AgentService(Service):
             capabilities=frozenset({"agent", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage", "event_bus", "ai_chat", "scheduler"}),
             ai_calls=frozenset({_AI_CALL_NAME}),
+            # Surfaces the ``enabled`` ConfigParam in the Settings UI's
+            # "Services" toggle section alongside Greeting / Knowledge /
+            # Vision / etc. — the standard place for service on/off.
+            toggleable=True,
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -1268,14 +1287,20 @@ class AgentService(Service):
         # Check enabled flag before binding any capability. When disabled,
         # the web nav filter drops /agents and /goals via ``svc.enabled``,
         # ``get_ws_handlers`` returns ``{}``, and no heartbeats are armed.
+        # Also seed ``self._defaults`` from the resolved section so the
+        # SPA's ``agents.get_defaults`` can pre-fill the create form on
+        # first run — the configuration service only fires
+        # ``on_config_changed`` when the user explicitly changes a value,
+        # so without this initial pull the form would render with empty
+        # prompt fields.
         config_svc = resolver.get_capability("configuration")
         if config_svc is not None:
             from gilbert.interfaces.configuration import ConfigurationReader
 
             if isinstance(config_svc, ConfigurationReader):
                 section = config_svc.get_section(self.config_namespace)
-                if not bool(section.get("enabled", True)):
-                    self._enabled = False
+                await self.on_config_changed(section)
+                if not self._enabled:
                     logger.info("AgentService disabled")
                     return
 
@@ -1388,10 +1413,21 @@ class AgentService(Service):
 
         defaults = self._defaults
         now = _now()
+        # display_name defaults to the slug when not supplied (so a brand-new
+        # agent is at least nameable). The SPA derives a slug from the
+        # display_name on the create form, but server-side both fields are
+        # independent — we don't re-derive here.
+        display_name_raw = fields.get("display_name", "")
+        if isinstance(display_name_raw, str):
+            display_name = display_name_raw.strip() or name
+        else:
+            display_name = name
+
         a = Agent(
             id=f"ag_{uuid.uuid4().hex[:12]}",
             owner_user_id=owner_user_id,
             name=name,
+            display_name=display_name,
             role_label=fields.get("role_label", ""),
             persona=fields.get("persona", defaults.get("default_persona", "")),
             system_prompt=fields.get("system_prompt", defaults.get("default_system_prompt", "")),
@@ -1462,6 +1498,7 @@ class AgentService(Service):
         if row is None:
             raise KeyError(agent_id)
         _allowed_patch_fields = {
+            "display_name",
             "role_label", "persona", "system_prompt", "procedural_rules",
             "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
             "tools_include", "tools_exclude",
@@ -4128,6 +4165,7 @@ class AgentService(Service):
             raise ValueError("name is required")
         # Drop unknown fields; create_agent accepts a tight allowlist.
         allowed_fields = {
+            "display_name",
             "role_label", "persona", "system_prompt", "procedural_rules",
             "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
             "tools_include", "tools_exclude",

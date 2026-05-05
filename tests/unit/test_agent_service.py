@@ -114,6 +114,55 @@ async def test_update_agent_patches_fields(started_agent_service: Any) -> None:
     assert updated.name == "x"  # unchanged
 
 
+async def test_create_agent_display_name_defaults_to_slug(
+    started_agent_service: Any,
+) -> None:
+    """Without an explicit ``display_name`` the agent is at least nameable
+    by falling back to the slug. Empty / whitespace strings collapse to
+    the slug too."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="ballsagna-bot")
+    assert a.display_name == "ballsagna-bot"
+
+    b = await svc.create_agent(
+        owner_user_id="usr_1",
+        name="other-bot",
+        display_name="   ",
+    )
+    assert b.display_name == "other-bot"
+
+
+async def test_create_agent_with_explicit_display_name(
+    started_agent_service: Any,
+) -> None:
+    """Explicit ``display_name`` is preserved verbatim — the slug is the
+    addressable identity, the display name is the human label."""
+    svc = started_agent_service
+    a = await svc.create_agent(
+        owner_user_id="usr_1",
+        name="ballsagna-bot",
+        display_name="Ballsagna Bot",
+    )
+    assert a.name == "ballsagna-bot"
+    assert a.display_name == "Ballsagna Bot"
+
+
+async def test_update_agent_patches_display_name(
+    started_agent_service: Any,
+) -> None:
+    """``display_name`` is patchable post-create (renaming the human label
+    without rotating the addressable slug)."""
+    svc = started_agent_service
+    a = await svc.create_agent(
+        owner_user_id="usr_1", name="b1", display_name="Bot 1",
+    )
+    updated = await svc.update_agent(
+        a.id, {"display_name": "Ballsagna Bot"},
+    )
+    assert updated.display_name == "Ballsagna Bot"
+    assert updated.name == "b1"  # slug unchanged
+
+
 async def test_delete_agent_removes_row(started_agent_service: Any) -> None:
     svc = started_agent_service
     a = await svc.create_agent(owner_user_id="usr_1", name="x")

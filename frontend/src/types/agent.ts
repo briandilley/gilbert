@@ -17,7 +17,19 @@ export type AvatarKind = "emoji" | "icon" | "image";
 export interface Agent {
   _id: string;
   owner_user_id: string;
+  /**
+   * Slug-friendly addressable identity (e.g. ``ballsagna-bot``). This
+   * is what peers and tools target. Validated against
+   * ``^[a-z0-9][a-z0-9-]*$`` server-side; cannot be renamed once an
+   * agent exists.
+   */
   name: string;
+  /**
+   * Human-readable label (e.g. ``"Ballsagna Bot"``). Shown in UI
+   * surfaces. Defaults to ``name`` server-side when omitted. Editable
+   * any time.
+   */
+  display_name: string;
   role_label: string;
   persona: string;
   system_prompt: string;
@@ -121,6 +133,7 @@ export interface MemoryFilters {
 
 export interface AgentCreatePayload {
   name: string;
+  display_name?: string;
   role_label?: string;
   persona?: string;
   system_prompt?: string;

@@ -72,7 +72,13 @@ class Agent:
 
     id: str
     owner_user_id: str
-    name: str                       # slug-friendly; unique within owner
+    name: str                       # slug-friendly; unique within owner;
+                                    # the addressable identity peers and
+                                    # tools use (e.g. ``agent_send_message
+                                    # (target_name="ballsagna-bot")``).
+    display_name: str               # free-form human label, e.g.
+                                    # "Ballsagna Bot". Defaults to ``name``
+                                    # when not supplied.
     role_label: str                 # free-form descriptor
     persona: str                    # the "soul" — long-form identity prompt
     system_prompt: str              # role-specific instructions on persona

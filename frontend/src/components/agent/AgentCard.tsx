@@ -37,7 +37,12 @@ export function AgentCard({ agent }: Props) {
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="font-medium truncate">{agent.name}</div>
+                  <div className="font-medium truncate">
+                    {agent.display_name || agent.name}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate font-mono">
+                    {agent.name}
+                  </div>
                   {agent.role_label && (
                     <div className="text-xs text-muted-foreground truncate">
                       {agent.role_label}
