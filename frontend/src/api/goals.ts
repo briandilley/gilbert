@@ -14,14 +14,19 @@
  * - ``["goals", "summary", goalId]``
  * - ``["goals", "assignments", goalId | null, agentId | null, activeOnly]``
  * - ``["goals", "posts", goalId, limit | null]``
+ * - ``["goals", "deliverables", goalId | null, state | null]``
+ * - ``["goals", "dependencies", dependentGoalId | null, sourceGoalId | null, satisfied | null]``
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import type {
   AssignmentRole,
+  Deliverable,
+  DeliverableState,
   Goal,
   GoalAssignment,
+  GoalDependency,
   GoalStatus,
   GoalSummary,
   WarRoomPost,
@@ -264,6 +269,181 @@ export function useHandoffGoal() {
         queryKey: ["goals", "summary", vars.goalId],
       });
       qc.invalidateQueries({ queryKey: ["goals", "list"] });
+    },
+  });
+}
+
+// ── Deliverables (Phase 5) ────────────────────────────────────────
+
+export function useDeliverables(
+  goalId: string | null | undefined,
+  state?: DeliverableState,
+) {
+  const { rpc, connected } = useWebSocket();
+  return useQuery({
+    queryKey: ["goals", "deliverables", goalId ?? null, state ?? null],
+    queryFn: () =>
+      rpc<{ deliverables: Deliverable[] }>({
+        type: "deliverables.list",
+        ...(goalId ? { goal_id: goalId } : {}),
+        ...(state ? { state } : {}),
+      }).then((r) => r.deliverables),
+    enabled: connected && Boolean(goalId),
+  });
+}
+
+export function useCreateDeliverable() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      goalId,
+      name,
+      kind,
+      contentRef,
+    }: {
+      goalId: string;
+      name: string;
+      kind: string;
+      contentRef?: string;
+    }) =>
+      rpc<{ deliverable: Deliverable }>({
+        type: "deliverables.create",
+        goal_id: goalId,
+        name,
+        kind,
+        ...(contentRef !== undefined ? { content_ref: contentRef } : {}),
+      }).then((r) => r.deliverable),
+    onSuccess: (deliverable) => {
+      qc.invalidateQueries({
+        queryKey: ["goals", "deliverables", deliverable.goal_id],
+      });
+      qc.invalidateQueries({
+        queryKey: ["goals", "summary", deliverable.goal_id],
+      });
+    },
+  });
+}
+
+export function useFinalizeDeliverable() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (deliverableId: string) =>
+      rpc<{ deliverable: Deliverable }>({
+        type: "deliverables.finalize",
+        deliverable_id: deliverableId,
+      }).then((r) => r.deliverable),
+    onSuccess: (deliverable) => {
+      qc.invalidateQueries({
+        queryKey: ["goals", "deliverables", deliverable.goal_id],
+      });
+      // Finalizing may unblock dependent goals — broadly invalidate
+      // every goal summary.
+      qc.invalidateQueries({ queryKey: ["goals", "summary"] });
+    },
+  });
+}
+
+export function useSupersedeDeliverable() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      deliverableId,
+      newContentRef,
+      finalize,
+    }: {
+      deliverableId: string;
+      newContentRef: string;
+      finalize?: boolean;
+    }) =>
+      rpc<{ old: Deliverable; new: Deliverable }>({
+        type: "deliverables.supersede",
+        deliverable_id: deliverableId,
+        new_content_ref: newContentRef,
+        ...(finalize !== undefined ? { finalize } : {}),
+      }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({
+        queryKey: ["goals", "deliverables", data.new.goal_id],
+      });
+      // Supersede may finalize, which may unblock dependents.
+      qc.invalidateQueries({ queryKey: ["goals", "summary"] });
+    },
+  });
+}
+
+// ── Goal dependencies (Phase 5) ───────────────────────────────────
+
+export function useDependencies(
+  dependentGoalId?: string | null,
+  sourceGoalId?: string | null,
+  satisfied?: boolean | null,
+) {
+  const { rpc, connected } = useWebSocket();
+  return useQuery({
+    queryKey: [
+      "goals",
+      "dependencies",
+      dependentGoalId ?? null,
+      sourceGoalId ?? null,
+      satisfied ?? null,
+    ],
+    queryFn: () =>
+      rpc<{ dependencies: GoalDependency[] }>({
+        type: "goals.dependencies.list",
+        ...(dependentGoalId ? { dependent_goal_id: dependentGoalId } : {}),
+        ...(sourceGoalId ? { source_goal_id: sourceGoalId } : {}),
+        ...(satisfied !== undefined && satisfied !== null
+          ? { satisfied }
+          : {}),
+      }).then((r) => r.dependencies),
+    enabled:
+      connected && (Boolean(dependentGoalId) || Boolean(sourceGoalId)),
+  });
+}
+
+export function useAddDependency() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      dependentGoalId,
+      sourceGoalId,
+      requiredDeliverableName,
+    }: {
+      dependentGoalId: string;
+      sourceGoalId: string;
+      requiredDeliverableName: string;
+    }) =>
+      rpc<{ dependency: GoalDependency }>({
+        type: "goals.dependencies.add",
+        dependent_goal_id: dependentGoalId,
+        source_goal_id: sourceGoalId,
+        required_deliverable_name: requiredDeliverableName,
+      }).then((r) => r.dependency),
+    onSuccess: (dependency) => {
+      qc.invalidateQueries({ queryKey: ["goals", "dependencies"] });
+      qc.invalidateQueries({
+        queryKey: ["goals", "summary", dependency.dependent_goal_id],
+      });
+    },
+  });
+}
+
+export function useRemoveDependency() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (dependencyId: string) =>
+      rpc<{ removed: boolean }>({
+        type: "goals.dependencies.remove",
+        dependency_id: dependencyId,
+      }).then((r) => r.removed),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["goals", "dependencies"] });
+      qc.invalidateQueries({ queryKey: ["goals", "summary"] });
     },
   });
 }

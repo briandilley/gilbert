@@ -200,3 +200,27 @@ export interface GoalSummary {
   recent_posts: WarRoomPost[];
   is_dependency_blocked: boolean;
 }
+
+// ── Deliverables + dependencies (Phase 5) ─────────────────────────
+
+export type DeliverableState = "draft" | "ready" | "obsolete";
+
+export interface Deliverable {
+  _id: string;
+  goal_id: string;
+  name: string;
+  kind: string;
+  state: DeliverableState;
+  produced_by_agent_id: string;
+  content_ref: string;
+  created_at: string;
+  finalized_at: string | null;
+}
+
+export interface GoalDependency {
+  _id: string;
+  dependent_goal_id: string;
+  source_goal_id: string;
+  required_deliverable_name: string;
+  satisfied_at: string | null;
+}
