@@ -227,6 +227,15 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                "key": "goals",
+                "label": "Goals",
+                "description": "Multi-agent goals with kanban + war rooms",
+                "url": "/goals",
+                "icon": "target",
+                "required_role": "user",
+                "items": [],
+            },
+            {
                 "key": "inbox",
                 "label": "Inbox",
                 "description": "Email management",
