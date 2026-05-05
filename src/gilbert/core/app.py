@@ -214,6 +214,10 @@ class Gilbert:
 
         self.service_manager.register(AudioOutputService())
 
+        from gilbert.core.services.system_datetime import SystemDatetimeService
+
+        self.service_manager.register(SystemDatetimeService())
+
         from gilbert.core.services.knowledge import KnowledgeService
 
         self.service_manager.register(KnowledgeService())
