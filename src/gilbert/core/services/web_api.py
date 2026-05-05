@@ -224,6 +224,7 @@ class WebApiService(Service):
                 "url": "/agents",
                 "icon": "sparkles",
                 "required_role": "user",
+                "requires_capability": "agent",
                 "items": [],
             },
             {
@@ -233,6 +234,7 @@ class WebApiService(Service):
                 "url": "/goals",
                 "icon": "target",
                 "required_role": "user",
+                "requires_capability": "agent",
                 "items": [],
             },
             {
