@@ -24,7 +24,6 @@ import pytest
 from gilbert.core.services.workspace import WorkspaceService
 from gilbert.interfaces.agent import AssignmentRole
 
-
 # ── Fixtures / scaffolding ───────────────────────────────────────────
 
 

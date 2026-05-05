@@ -24,7 +24,6 @@ from gilbert.interfaces.agent import (
     GoalDependency,
 )
 
-
 # ── Task 1 — entity round-trip + enum coverage ───────────────────────
 
 

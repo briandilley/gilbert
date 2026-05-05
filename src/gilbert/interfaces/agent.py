@@ -396,7 +396,7 @@ class AgentProvider(Protocol):
         kind: str,
         produced_by_agent_id: str,
         content_ref: str = "",
-        state: "DeliverableState | None" = None,
+        state: DeliverableState | None = None,
     ) -> Deliverable: ...
 
     async def get_deliverable(self, deliverable_id: str) -> Deliverable | None: ...
@@ -405,7 +405,7 @@ class AgentProvider(Protocol):
         self,
         *,
         goal_id: str | None = None,
-        state: "DeliverableState | None" = None,
+        state: DeliverableState | None = None,
     ) -> list[Deliverable]: ...
 
     async def finalize_deliverable(self, deliverable_id: str) -> Deliverable: ...
