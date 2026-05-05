@@ -1108,13 +1108,18 @@ class AgentService(Service):
         query: str,
         limit: int = 20,
         state: MemoryState | None = None,
+        kind: str | None = None,
+        tags: frozenset[str] | None = None,
     ) -> list[AgentMemory]:
         """Naive substring search over an agent's memories.
 
         Filters by ``agent_id`` first (indexed filter), then applies a
         case-insensitive substring match on ``content``. Optional ``state``
-        filter restricts to SHORT_TERM or LONG_TERM only. Results are sorted
-        by ``created_at`` descending and capped at ``limit``.
+        filter restricts to SHORT_TERM or LONG_TERM only. Optional ``kind``
+        is an exact-match filter on ``kind``. Optional ``tags`` is an
+        any-match filter — a memory matches if any of its tags appears in
+        the requested set. Results are sorted by ``created_at`` descending
+        and capped at ``limit``.
         """
         if self._storage is None:
             raise RuntimeError("not started")
@@ -1129,6 +1134,12 @@ class AgentService(Service):
         for r in rows:
             if state is not None and r.get("state") != state.value:
                 continue
+            if kind is not None and r.get("kind") != kind:
+                continue
+            if tags is not None:
+                row_tags = frozenset(r.get("tags", []))
+                if not (tags & row_tags):
+                    continue
             content = str(r.get("content", "")).lower()
             if not q or q in content:
                 out.append(_memory_from_dict(r))
@@ -1635,6 +1646,8 @@ class AgentService(Service):
             "agents.commitments.list": self._ws_commitments_list,
             "agents.commitments.create": self._ws_commitments_create,
             "agents.commitments.complete": self._ws_commitments_complete,
+            "agents.memories.list": self._ws_memories_list,
+            "agents.memories.set_state": self._ws_memories_set_state,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -1797,6 +1810,51 @@ class AgentService(Service):
         )
         c = await self.complete_commitment(commitment_id, note=note)
         return {"commitment": _commitment_to_dict(c)}
+
+    async def _ws_memories_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        state_raw = params.get("state")
+        state = MemoryState(state_raw) if state_raw else None
+        kind = params.get("kind")
+        kind_str = str(kind) if kind else None
+        tags_raw = params.get("tags")
+        tags: frozenset[str] | None = None
+        if tags_raw:
+            tags = frozenset(str(t) for t in tags_raw if str(t).strip())
+        q = str(params.get("q", ""))
+        limit = int(params.get("limit", 50))
+        memories = await self.search_memory(
+            agent_id=agent_id, query=q, limit=limit,
+            state=state, kind=kind_str, tags=tags,
+        )
+        return {"memories": [_memory_to_dict(m) for m in memories]}
+
+    async def _ws_memories_set_state(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        memory_id = str(params.get("memory_id", ""))
+        state_raw = str(params.get("state", ""))
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_AGENT_MEMORIES_COLLECTION, memory_id)
+        if row is None:
+            raise KeyError(memory_id)
+        await self._load_agent_for_caller(
+            row["agent_id"], caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        updated = await self.promote_memory(
+            memory_id=memory_id,
+            score=float(row.get("score", 0.0)),
+            state=MemoryState(state_raw),
+        )
+        return {"memory": _memory_to_dict(updated)}
 
     # ── Event publishing helper ─────────────────────────────────────
 
