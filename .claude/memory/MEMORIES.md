@@ -42,6 +42,7 @@
 - [Proposals Service](memory-proposals-service.md) — autonomous self-improvement proposals from observed activity, admin triage via `/proposals`
 - [Source Inspector Service](memory-source-inspector-service.md) — read-only source-tree AI tools (list/read/grep), always injected into the proposals reflection AI
 - [run_loop primitive](memory-agent-loop.md) — pure async loop; budgets, tool dispatch, error handling
+- [AgentService](memory-agent-service.md) — durable Agent identity with persona/heartbeat/memory/commitments/tool gating; replaces AutonomousAgentService
 - [NotificationService](memory-notification-service.md) — notifications + WS dispatch via per-event filter
 - [Plugin UI Extensions](memory-plugin-ui-extensions.md) — Plugin.ui_panels() + <PluginPanelSlot> + per-plugin frontend/ dir
 - [Plugin runtime_dependencies](memory-runtime-dependencies.md) — Plugin.runtime_dependencies() + 'gilbert doctor' for non-pip OS deps
