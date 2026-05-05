@@ -148,6 +148,31 @@ class _FakeAgentService:
     async def handoff_goal(self, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    # Phase 5 additions to ``AgentProvider`` — deliverables + dependencies.
+    async def create_deliverable(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def get_deliverable(self, deliverable_id: str) -> Any:
+        return None
+
+    async def list_deliverables(self, **kwargs: Any) -> Any:
+        return []
+
+    async def finalize_deliverable(self, deliverable_id: str) -> Any:
+        raise NotImplementedError
+
+    async def supersede_deliverable(self, deliverable_id: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def add_goal_dependency(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def remove_goal_dependency(self, dependency_id: str) -> None:
+        return None
+
+    async def list_goal_dependencies(self, **kwargs: Any) -> Any:
+        return []
+
 
 class _FakeServiceManager:
     def __init__(self, agent_svc: _FakeAgentService) -> None:

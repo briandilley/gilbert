@@ -55,6 +55,12 @@ class AssignmentRole(StrEnum):
     REVIEWER = "reviewer"
 
 
+class DeliverableState(StrEnum):
+    DRAFT = "draft"
+    READY = "ready"
+    OBSOLETE = "obsolete"
+
+
 # ── Entities ─────────────────────────────────────────────────────────
 
 
@@ -214,6 +220,48 @@ class Goal:
 
 
 @dataclass
+class Deliverable:
+    """Phase 5 — a tracked artifact produced by a goal's assignees.
+
+    Deliverables transition DRAFT → READY → OBSOLETE. A goal can host
+    multiple deliverables (different ``name``s); within a single
+    ``(goal_id, name)`` only one Deliverable may be READY at a time —
+    finalizing a new one supersedes the prior READY row.
+
+    ``content_ref`` is a free-form pointer to the actual content:
+    ``"workspace_file:<id>"`` references a registered workspace file on
+    the goal's war-room; inline text and external URLs are also valid.
+    """
+
+    id: str
+    goal_id: str
+    name: str
+    kind: str
+    state: DeliverableState
+    produced_by_agent_id: str
+    content_ref: str
+    created_at: datetime
+    finalized_at: datetime | None
+
+
+@dataclass
+class GoalDependency:
+    """Phase 5 — directed edge from a dependent goal to a source goal.
+
+    The dependent goal's drivers wake when the source produces a READY
+    Deliverable named ``required_deliverable_name``. ``satisfied_at`` is
+    populated when a matching READY Deliverable exists; before that the
+    dependency is "unsatisfied" (the dependent goal is blocked).
+    """
+
+    id: str
+    dependent_goal_id: str
+    source_goal_id: str
+    required_deliverable_name: str
+    satisfied_at: datetime | None
+
+
+@dataclass
 class GoalAssignment:
     """An agent's assignment to a goal at a given role.
 
@@ -337,3 +385,53 @@ class AgentProvider(Protocol):
         new_role_for_from: AssignmentRole = AssignmentRole.COLLABORATOR,
         note: str = "",
     ) -> tuple[GoalAssignment, GoalAssignment]: ...
+
+    # ── Deliverables + Dependencies (Phase 5) ───────────────────────
+
+    async def create_deliverable(
+        self,
+        *,
+        goal_id: str,
+        name: str,
+        kind: str,
+        produced_by_agent_id: str,
+        content_ref: str = "",
+        state: "DeliverableState | None" = None,
+    ) -> Deliverable: ...
+
+    async def get_deliverable(self, deliverable_id: str) -> Deliverable | None: ...
+
+    async def list_deliverables(
+        self,
+        *,
+        goal_id: str | None = None,
+        state: "DeliverableState | None" = None,
+    ) -> list[Deliverable]: ...
+
+    async def finalize_deliverable(self, deliverable_id: str) -> Deliverable: ...
+
+    async def supersede_deliverable(
+        self,
+        deliverable_id: str,
+        *,
+        new_content_ref: str,
+        finalize: bool = False,
+    ) -> tuple[Deliverable, Deliverable]: ...
+
+    async def add_goal_dependency(
+        self,
+        *,
+        dependent_goal_id: str,
+        source_goal_id: str,
+        required_deliverable_name: str,
+    ) -> GoalDependency: ...
+
+    async def remove_goal_dependency(self, dependency_id: str) -> None: ...
+
+    async def list_goal_dependencies(
+        self,
+        *,
+        dependent_goal_id: str | None = None,
+        source_goal_id: str | None = None,
+        satisfied: bool | None = None,
+    ) -> list[GoalDependency]: ...

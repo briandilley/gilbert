@@ -109,6 +109,30 @@ def test_agent_provider_is_runtime_checkable() -> None:
         async def handoff_goal(self, **kwargs):
             return None
 
+        async def create_deliverable(self, **kwargs):
+            return None
+
+        async def get_deliverable(self, deliverable_id):
+            return None
+
+        async def list_deliverables(self, **kwargs):
+            return []
+
+        async def finalize_deliverable(self, deliverable_id):
+            return None
+
+        async def supersede_deliverable(self, deliverable_id, **kwargs):
+            return None
+
+        async def add_goal_dependency(self, **kwargs):
+            return None
+
+        async def remove_goal_dependency(self, dependency_id):
+            return None
+
+        async def list_goal_dependencies(self, **kwargs):
+            return []
+
     assert isinstance(FakeAgentService(), AgentProvider)
 
 
