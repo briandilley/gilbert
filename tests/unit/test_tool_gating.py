@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 _CORE = {
+    # Phase 1A — agent self-management
     "complete_run", "request_user_input", "notify_user",
     "commitment_create", "commitment_complete", "commitment_list",
     "agent_memory_save", "agent_memory_search",
     "agent_memory_review_and_promote",
+    # Phase 2 — peer messaging
+    "agent_list", "agent_send_message", "agent_delegate",
 }
 
 
