@@ -144,6 +144,18 @@ class _FakeWorkspaceProvider:
             return target, None
         return None, f"File not found: {rel_path}"
 
+    async def resolve_deliverable_for_dependent(
+        self,
+        *,
+        file_id: str,
+        viewing_agent_id: str,
+        viewing_goal_id: str,
+    ) -> tuple[Path | None, str | None]:
+        # Phase 5 — not exercised by the chat-uploads route tests; the
+        # protocol stub is here purely to satisfy the runtime-checkable
+        # ``isinstance(workspace, WorkspaceProvider)`` gate.
+        return None, "not supported"
+
 
 class _FakeServiceManager:
     def __init__(

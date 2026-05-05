@@ -1142,6 +1142,12 @@ class TestWorkspaceAttachments:
             async def build_workspace_manifest(self, conversation_id):
                 return ""
 
+            async def resolve_deliverable_for_dependent(
+                self, *, file_id, viewing_agent_id, viewing_goal_id,
+            ):
+                # Phase 5 — protocol stub; not exercised here.
+                return None, "not supported"
+
         # Simulate the start-order race: at start time, the resolver
         # returns None for "workspace" (not started yet). Later, when
         # the AI fires inbox_send, workspace is ready — the lazy lookup
