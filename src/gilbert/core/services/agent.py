@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.interfaces.agent import Agent, AgentStatus, InboxSignal, Run
+from gilbert.interfaces.agent import Agent, AgentMemory, AgentStatus, InboxSignal, MemoryState, Run
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.scheduler import SchedulerProvider
@@ -110,6 +110,37 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         dream_max_per_night=int(row.get("dream_max_per_night", 3)),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _memory_to_dict(m: AgentMemory) -> dict[str, Any]:
+    return {
+        "_id": m.id,
+        "agent_id": m.agent_id,
+        "content": m.content,
+        "state": m.state.value,
+        "kind": m.kind,
+        "tags": sorted(m.tags),
+        "score": m.score,
+        "created_at": m.created_at.isoformat(),
+        "last_used_at": m.last_used_at.isoformat() if m.last_used_at else None,
+    }
+
+
+def _memory_from_dict(row: dict[str, Any]) -> AgentMemory:
+    return AgentMemory(
+        id=row["_id"],
+        agent_id=row["agent_id"],
+        content=row.get("content", ""),
+        state=MemoryState(row.get("state", "short_term")),
+        kind=row.get("kind", "fact"),
+        tags=frozenset(row.get("tags", [])),
+        score=float(row.get("score", 0.0)),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        last_used_at=(
+            datetime.fromisoformat(row["last_used_at"])
+            if row.get("last_used_at") else None
+        ),
     )
 
 
@@ -382,6 +413,87 @@ class AgentService(Service):
                 f"agent {agent_id} not accessible to user {caller_user_id}"
             )
         return a
+
+    # ── AgentMemory (Task 7) ────────────────────────────────────────────
+
+    async def save_memory(
+        self,
+        *,
+        agent_id: str,
+        content: str,
+        kind: str = "fact",
+        tags: frozenset[str] | set[str] | None = None,
+        state: MemoryState = MemoryState.SHORT_TERM,
+    ) -> AgentMemory:
+        """Create and persist a new AgentMemory for the given agent."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        m = AgentMemory(
+            id=f"mem_{uuid.uuid4().hex[:12]}",
+            agent_id=agent_id,
+            content=content,
+            state=state,
+            kind=kind,
+            tags=frozenset(tags or ()),
+            score=0.0,
+            created_at=_now(),
+            last_used_at=None,
+        )
+        await self._storage.put(_AGENT_MEMORIES_COLLECTION, m.id, _memory_to_dict(m))
+        return m
+
+    async def search_memory(
+        self,
+        *,
+        agent_id: str,
+        query: str,
+        limit: int = 20,
+        state: MemoryState | None = None,
+    ) -> list[AgentMemory]:
+        """Naive substring search over an agent's memories.
+
+        Filters by ``agent_id`` first (indexed filter), then applies a
+        case-insensitive substring match on ``content``. Optional ``state``
+        filter restricts to SHORT_TERM or LONG_TERM only. Results are sorted
+        by ``created_at`` descending and capped at ``limit``.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENT_MEMORIES_COLLECTION,
+                filters=[Filter(field="agent_id", op=FilterOp.EQ, value=agent_id)],
+            )
+        )
+        out: list[AgentMemory] = []
+        q = query.lower()
+        for r in rows:
+            if state is not None and r.get("state") != state.value:
+                continue
+            content = str(r.get("content", "")).lower()
+            if not q or q in content:
+                out.append(_memory_from_dict(r))
+        # Sort recency descending, then cap.
+        out.sort(key=lambda m: m.created_at, reverse=True)
+        return out[:limit]
+
+    async def promote_memory(
+        self,
+        *,
+        memory_id: str,
+        score: float,
+        state: MemoryState = MemoryState.LONG_TERM,
+    ) -> AgentMemory:
+        """Promote a memory to a new state with an updated relevance score."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_AGENT_MEMORIES_COLLECTION, memory_id)
+        if row is None:
+            raise KeyError(memory_id)
+        row["state"] = state.value
+        row["score"] = score
+        await self._storage.put(_AGENT_MEMORIES_COLLECTION, memory_id, row)
+        return _memory_from_dict(row)
 
     # ── Run orchestration (Task 8) ───────────────────────────────────
 
