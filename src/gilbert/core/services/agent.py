@@ -1961,6 +1961,32 @@ class AgentService(Service):
             mem_block = "\n".join(f"- {m.content}" for m in long_term)
             parts.append(f"LONG-TERM MEMORY:\n{mem_block}")
 
+        # Active goal assignments — agents need to see what they're
+        # currently committed to, with a short snippet of recent
+        # war-room chatter so they can pick up context without
+        # specifically querying.
+        assignments = await self.list_assignments(agent_id=a.id, active_only=True)
+        if assignments:
+            blocks: list[str] = []
+            for asgn in assignments:
+                goal = await self.get_goal(asgn.goal_id)
+                if goal is None:
+                    continue
+                recent = await self._recent_war_room_posts(asgn.goal_id, limit=10)
+                recent_block = (
+                    "\n".join(
+                        f"  {p['author_name']}: {p['body']}" for p in recent
+                    )
+                    or "  (no posts yet)"
+                )
+                blocks.append(
+                    f"- Goal '{goal.name}' (id={goal.id}) "
+                    f"[role={asgn.role.value}, status={goal.status.value}]\n"
+                    f"{recent_block}"
+                )
+            if blocks:
+                parts.append("ACTIVE ASSIGNMENTS:\n" + "\n\n".join(blocks))
+
         return "\n\n---\n\n".join(p for p in parts if p)
 
     async def create_commitment(
