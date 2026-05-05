@@ -18,6 +18,7 @@ Task 5 implements CRUD + RBAC helper.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -97,7 +98,9 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     "agent_memory_save",
     "agent_memory_search",
     "agent_memory_review_and_promote",
-    # Phase 2 will add agent_list, agent_send_message, agent_delegate.
+    # Phase 2 — peer messaging (agent_list now; agent_send_message
+    # and agent_delegate added in subsequent commits).
+    "agent_list",
     # Phase 4 will add goal_post.
 })
 
@@ -247,6 +250,19 @@ _TOOL_AGENT_MEMORY_PROMOTE = ToolDefinition(
             required=True,
         ),
     ],
+)
+
+# ── Phase 2 — peer messaging tools ──────────────────────────────────
+
+_TOOL_AGENT_LIST = ToolDefinition(
+    name="agent_list",
+    description=(
+        "List your peer agents (other agents owned by the same user). "
+        "Returns name, role_label, status, conversation_id."
+    ),
+    parameters=[],
+    slash_command="agent_list",
+    slash_help="List your peer agents.",
 )
 
 
@@ -1580,7 +1596,7 @@ class AgentService(Service):
     # ── ToolProvider (Task 14) ───────────────────────────────────────
 
     def get_tools(self, user_ctx: Any = None) -> list[ToolDefinition]:
-        """Return the 7 core agent tool definitions."""
+        """Return the core agent tool definitions."""
         return [
             _TOOL_COMPLETE_RUN,
             _TOOL_COMMITMENT_CREATE,
@@ -1589,6 +1605,7 @@ class AgentService(Service):
             _TOOL_AGENT_MEMORY_SAVE,
             _TOOL_AGENT_MEMORY_SEARCH,
             _TOOL_AGENT_MEMORY_PROMOTE,
+            _TOOL_AGENT_LIST,
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -1607,6 +1624,8 @@ class AgentService(Service):
             return await self._exec_memory_search(arguments)
         if name == "agent_memory_review_and_promote":
             return await self._exec_memory_promote(arguments)
+        if name == "agent_list":
+            return await self._exec_agent_list(arguments)
         raise KeyError(f"unknown tool: {name}")
 
     async def _exec_complete_run(self, args: dict[str, Any]) -> str:
@@ -1713,6 +1732,28 @@ class AgentService(Service):
                 applied += 1
             # 'keep' is a no-op
         return f"reviewed {len(reviews)} memories, applied {applied}"
+
+    # ── Phase 2: peer messaging tool helpers ─────────────────────────
+
+    async def _exec_agent_list(self, args: dict[str, Any]) -> str:
+        agent_id = args.get("_agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return "error: agent_list requires _agent_id"
+        me = await self.get_agent(agent_id)
+        if me is None:
+            return "error: caller agent not found"
+        peers = await self.list_agents(owner_user_id=me.owner_user_id)
+        out = [
+            {
+                "name": p.name,
+                "role_label": p.role_label,
+                "status": p.status.value,
+                "conversation_id": p.conversation_id,
+            }
+            for p in peers
+            if p.id != me.id  # exclude self
+        ]
+        return json.dumps(out)
 
     # ── Tool argument injection (Task 15) ────────────────────────────
 
