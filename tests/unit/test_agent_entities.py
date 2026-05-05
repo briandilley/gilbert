@@ -85,6 +85,30 @@ def test_agent_provider_is_runtime_checkable() -> None:
         async def set_agent_avatar(self, agent_id, **kwargs):
             return None
 
+        async def create_goal(self, **kwargs):
+            return None
+
+        async def get_goal(self, goal_id):
+            return None
+
+        async def list_goals(self, **kwargs):
+            return []
+
+        async def update_goal_status(self, goal_id, status):
+            return None
+
+        async def list_assignments(self, **kwargs):
+            return []
+
+        async def assign_agent_to_goal(self, **kwargs):
+            return None
+
+        async def unassign_agent_from_goal(self, **kwargs):
+            return None
+
+        async def handoff_goal(self, **kwargs):
+            return None
+
     assert isinstance(FakeAgentService(), AgentProvider)
 
 

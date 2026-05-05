@@ -41,6 +41,20 @@ class RunStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class GoalStatus(StrEnum):
+    NEW = "new"
+    IN_PROGRESS = "in_progress"
+    BLOCKED = "blocked"
+    COMPLETE = "complete"
+    CANCELLED = "cancelled"
+
+
+class AssignmentRole(StrEnum):
+    DRIVER = "driver"
+    COLLABORATOR = "collaborator"
+    REVIEWER = "reviewer"
+
+
 # ── Entities ─────────────────────────────────────────────────────────
 
 
@@ -175,6 +189,50 @@ class Run:
     pending_actions: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class Goal:
+    """A multi-agent goal. One war-room conversation per goal; one or
+    more agent assignees with role DRIVER / COLLABORATOR / REVIEWER.
+
+    A DRIVER is the only assignee who can change ``status``, hand off,
+    or add/remove other assignees. ``lifetime_cost_usd`` is informational
+    in Phase 4 (no auto-disable). ``cost_cap_usd`` is stored but not
+    enforced until later phases.
+    """
+
+    id: str
+    owner_user_id: str
+    name: str
+    description: str
+    status: GoalStatus
+    war_room_conversation_id: str
+    cost_cap_usd: float | None
+    lifetime_cost_usd: float
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass
+class GoalAssignment:
+    """An agent's assignment to a goal at a given role.
+
+    Unassign sets ``removed_at`` rather than deleting the row, so the
+    history of who was on a goal is preserved. ``handoff_note`` records
+    the note supplied by ``handoff_goal`` on both the from-driver and
+    to-driver rows.
+    """
+
+    id: str
+    goal_id: str
+    agent_id: str
+    role: AssignmentRole
+    assigned_at: datetime
+    assigned_by: str          # agent_id or "user:<user_id>"
+    removed_at: datetime | None
+    handoff_note: str
+
+
 # ── Protocol ─────────────────────────────────────────────────────────
 
 
@@ -217,3 +275,65 @@ class AgentProvider(Protocol):
     async def set_agent_avatar(
         self, agent_id: str, *, filename: str
     ) -> Agent: ...
+
+    # ── Goals (Phase 4) ─────────────────────────────────────────────
+
+    async def create_goal(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        description: str = "",
+        cost_cap_usd: float | None = None,
+        assign_to: list[tuple[str, AssignmentRole]] | None = None,
+        assigned_by: str = "user:?",
+    ) -> Goal: ...
+
+    async def get_goal(self, goal_id: str) -> Goal | None: ...
+
+    async def list_goals(
+        self,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[Goal]: ...
+
+    async def update_goal_status(
+        self,
+        goal_id: str,
+        status: GoalStatus,
+    ) -> Goal: ...
+
+    async def list_assignments(
+        self,
+        *,
+        goal_id: str | None = None,
+        agent_id: str | None = None,
+        active_only: bool = True,
+    ) -> list[GoalAssignment]: ...
+
+    async def assign_agent_to_goal(
+        self,
+        *,
+        goal_id: str,
+        agent_id: str,
+        role: AssignmentRole,
+        assigned_by: str,
+        handoff_note: str = "",
+    ) -> GoalAssignment: ...
+
+    async def unassign_agent_from_goal(
+        self,
+        *,
+        goal_id: str,
+        agent_id: str,
+    ) -> GoalAssignment: ...
+
+    async def handoff_goal(
+        self,
+        *,
+        goal_id: str,
+        from_agent_id: str,
+        to_agent_id: str,
+        new_role_for_from: AssignmentRole = AssignmentRole.COLLABORATOR,
+        note: str = "",
+    ) -> tuple[GoalAssignment, GoalAssignment]: ...
