@@ -22,7 +22,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useAgentDefaults,
   useCreateAgent,
@@ -221,6 +221,7 @@ function validate(state: FormState): ValidationErrors {
 export function AgentEditForm(props: Props) {
   const navigate = useNavigate();
   const api = useWsApi();
+  const qc = useQueryClient();
   const defaultsQuery = useAgentDefaults();
   const createAgent = useCreateAgent();
   const updateAgent = useUpdateAgent();
@@ -319,6 +320,12 @@ export function AgentEditForm(props: Props) {
       // Reflect the new avatar in local state so it renders immediately.
       update("avatar_kind", updated.avatar_kind);
       update("avatar_value", updated.avatar_value);
+      // Refresh global cache so other consumers (detail / list pages) see it.
+      qc.setQueryData(["agents", "detail", props.agent._id], updated);
+      qc.invalidateQueries({
+        queryKey: ["agents", "detail", props.agent._id],
+      });
+      qc.invalidateQueries({ queryKey: ["agents", "list"] });
     } catch (e) {
       setAvatarUploadError(
         e instanceof Error ? e.message : "Upload failed.",
@@ -668,12 +675,17 @@ export function AgentEditForm(props: Props) {
           className="space-y-3 px-3 pb-3"
           title="Phase 7 — coming soon"
         >
+          <span id="dream-phase-note" className="sr-only">
+            Dreaming launches in Phase 7 — these settings are saved but not yet
+            active.
+          </span>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
               checked={state.dream_enabled}
               onChange={(e) => update("dream_enabled", e.target.checked)}
               disabled
+              aria-describedby="dream-phase-note"
             />
             <span>Dreaming enabled</span>
           </label>
@@ -686,6 +698,7 @@ export function AgentEditForm(props: Props) {
               onChange={(e) => update("dream_quiet_hours", e.target.value)}
               placeholder="22:00-06:00"
               disabled
+              aria-describedby="dream-phase-note"
             />
           </div>
 
@@ -704,6 +717,7 @@ export function AgentEditForm(props: Props) {
                 update("dream_probability", Number(e.target.value))
               }
               disabled
+              aria-describedby="dream-phase-note"
             />
             {errors.dream_probability && (
               <p className="text-xs text-destructive">
@@ -724,6 +738,7 @@ export function AgentEditForm(props: Props) {
                 update("dream_max_per_night", Number(e.target.value))
               }
               disabled
+              aria-describedby="dream-phase-note"
             />
           </div>
         </section>
