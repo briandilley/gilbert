@@ -19,14 +19,20 @@ from typing import Any
 
 import pytest
 
+from gilbert.interfaces.auth import UserContext
+
 
 class _FakeConn:
     def __init__(self, user_id: str, user_level: int = 100) -> None:
         self.user_id = user_id
         self.user_level = user_level
-        self.user_ctx = type(
-            "U", (), {"user_id": user_id, "roles": frozenset()},
-        )()
+        self.user_ctx = UserContext(
+            user_id=user_id,
+            email=f"{user_id}@test.local",
+            display_name=user_id,
+            roles=frozenset(),
+            provider="local",
+        )
 
 
 # ── Task 2: agents.runs.list ─────────────────────────────────────────
@@ -89,6 +95,54 @@ async def test_ws_runs_list_honors_limit(started_agent_service: Any) -> None:
         _FakeConn("usr_1"), {"agent_id": a.id, "limit": 3},
     )
     assert len(res["runs"]) == 3
+
+
+async def test_ws_runs_list_clamps_negative_limit(
+    started_agent_service: Any,
+) -> None:
+    """``limit`` must be clamped to ``>= 1`` so callers passing 0 or a
+    negative value get a sane response instead of "all rows except the
+    last" (the natural behaviour of ``[:-1]``-style slicing) or an
+    empty list."""
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    a = await svc.create_agent(owner_user_id="usr_1", name="r-clamp")
+
+    base = datetime.now(UTC)
+    for i in range(3):
+        rid = f"run_clamp_{i}"
+        await svc._storage.put("agent_runs", rid, {
+            "_id": rid,
+            "agent_id": a.id,
+            "triggered_by": "manual",
+            "trigger_context": {},
+            "started_at": (base - timedelta(seconds=i)).isoformat(),
+            "status": "completed",
+            "conversation_id": "",
+            "delegation_id": "",
+            "ended_at": base.isoformat(),
+            "final_message_text": None,
+            "rounds_used": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost_usd": 0.0,
+            "error": None,
+            "awaiting_user_input": False,
+            "pending_question": None,
+            "pending_actions": [],
+        })
+
+    # limit=-1 → clamped to 1.
+    res_neg = await h["agents.runs.list"](
+        _FakeConn("usr_1"), {"agent_id": a.id, "limit": -1},
+    )
+    assert len(res_neg["runs"]) == 1
+
+    # limit=0 → clamped to 1.
+    res_zero = await h["agents.runs.list"](
+        _FakeConn("usr_1"), {"agent_id": a.id, "limit": 0},
+    )
+    assert len(res_zero["runs"]) == 1
 
 
 # ── Task 3: agents.commitments.{list,create,complete} ────────────────
@@ -332,10 +386,14 @@ async def test_ws_tools_list_groups_returns_defaults(
 ) -> None:
     svc = started_agent_service
     h = svc.get_ws_handlers()
-    svc._defaults["tool_groups"] = {
-        "communication": ["notify_user"],
-        "self": ["agent_memory_save"],
+    new_config = {
+        **svc._defaults,
+        "tool_groups": {
+            "communication": ["notify_user"],
+            "self": ["agent_memory_save"],
+        },
     }
+    await svc.on_config_changed(new_config)
 
     res = await h["agents.tools.list_groups"](_FakeConn("usr_1"), {})
     assert res["groups"] == {

@@ -1762,7 +1762,7 @@ class AgentService(Service):
 
     async def _ws_runs_list(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
-        limit = int(params.get("limit", 50))
+        limit = max(1, int(params.get("limit", 50)))
         await self._load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
