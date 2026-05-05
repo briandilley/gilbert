@@ -98,9 +98,9 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     "agent_memory_save",
     "agent_memory_search",
     "agent_memory_review_and_promote",
-    # Phase 2 — peer messaging (agent_list now; agent_send_message
-    # and agent_delegate added in subsequent commits).
+    # Phase 2 — peer messaging (agent_delegate added in the next commit).
     "agent_list",
+    "agent_send_message",
     # Phase 4 will add goal_post.
 })
 
@@ -263,6 +263,31 @@ _TOOL_AGENT_LIST = ToolDefinition(
     parameters=[],
     slash_command="agent_list",
     slash_help="List your peer agents.",
+)
+
+_TOOL_AGENT_SEND_MESSAGE = ToolDefinition(
+    name="agent_send_message",
+    description=(
+        "Send a fire-and-forget direct message to a peer agent. The peer's "
+        "loop wakes (or, if running, picks up the message between rounds). "
+        "No reply is awaited — use agent_delegate if you need a response."
+    ),
+    parameters=[
+        ToolParameter(
+            name="target_name",
+            type=ToolParameterType.STRING,
+            description="The peer agent's name.",
+            required=True,
+        ),
+        ToolParameter(
+            name="body",
+            type=ToolParameterType.STRING,
+            description="Message body.",
+            required=True,
+        ),
+    ],
+    slash_command="agent_send_message",
+    slash_help="DM another agent.",
 )
 
 
@@ -1606,6 +1631,7 @@ class AgentService(Service):
             _TOOL_AGENT_MEMORY_SEARCH,
             _TOOL_AGENT_MEMORY_PROMOTE,
             _TOOL_AGENT_LIST,
+            _TOOL_AGENT_SEND_MESSAGE,
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -1626,6 +1652,8 @@ class AgentService(Service):
             return await self._exec_memory_promote(arguments)
         if name == "agent_list":
             return await self._exec_agent_list(arguments)
+        if name == "agent_send_message":
+            return await self._exec_agent_send_message(arguments)
         raise KeyError(f"unknown tool: {name}")
 
     async def _exec_complete_run(self, args: dict[str, Any]) -> str:
@@ -1735,6 +1763,36 @@ class AgentService(Service):
 
     # ── Phase 2: peer messaging tool helpers ─────────────────────────
 
+    async def _load_peer_by_name(
+        self,
+        *,
+        caller_agent_id: str,
+        target_name: str,
+    ) -> Agent:
+        """Resolve a peer agent by name within the caller's owner.
+
+        Raises ``PermissionError`` if no agent matches in the same owner
+        namespace (cross-user reach is treated as a permission failure,
+        not a missing record, to avoid leaking that the name exists).
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        me = await self.get_agent(caller_agent_id)
+        if me is None:
+            raise PermissionError("caller agent not found")
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENTS_COLLECTION,
+                filters=[
+                    Filter(field="owner_user_id", op=FilterOp.EQ, value=me.owner_user_id),
+                    Filter(field="name", op=FilterOp.EQ, value=target_name),
+                ],
+            )
+        )
+        if not rows:
+            raise PermissionError(f"no peer named {target_name!r}")
+        return _agent_from_dict(rows[0])
+
     async def _exec_agent_list(self, args: dict[str, Any]) -> str:
         agent_id = args.get("_agent_id")
         if not isinstance(agent_id, str) or not agent_id:
@@ -1754,6 +1812,41 @@ class AgentService(Service):
             if p.id != me.id  # exclude self
         ]
         return json.dumps(out)
+
+    async def _exec_agent_send_message(self, args: dict[str, Any]) -> str:
+        agent_id = args.get("_agent_id")
+        target_name = str(args.get("target_name", "")).strip()
+        body = str(args.get("body", "")).strip()
+        if not isinstance(agent_id, str) or not agent_id:
+            return "error: missing _agent_id"
+        if not target_name:
+            return "error: target_name is required"
+        if not body:
+            return "error: body is required"
+
+        me = await self.get_agent(agent_id)
+        if me is None:
+            return "error: caller agent not found"
+
+        try:
+            target = await self._load_peer_by_name(
+                caller_agent_id=agent_id, target_name=target_name,
+            )
+        except PermissionError as exc:
+            return f"error: {exc}"
+
+        if target.id == me.id:
+            return "error: cannot message yourself"
+
+        await self._signal_agent(
+            agent_id=target.id,
+            signal_kind="inbox",
+            body=body,
+            sender_kind="agent",
+            sender_id=me.id,
+            sender_name=me.name,
+        )
+        return f"sent to {target_name}"
 
     # ── Tool argument injection (Task 15) ────────────────────────────
 
