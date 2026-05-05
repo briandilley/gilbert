@@ -29,7 +29,8 @@ export interface Agent {
   avatar_value: string;
   lifetime_cost_usd: number;
   cost_cap_usd: number | null;
-  tools_allowed: string[] | null;
+  tools_include: string[] | null;
+  tools_exclude: string[] | null;
   heartbeat_enabled: boolean;
   heartbeat_interval_s: number;
   heartbeat_checklist: string;
@@ -96,8 +97,6 @@ export interface ToolDescriptor {
   required_role?: string;
 }
 
-export type ToolGroupMap = Record<string, string[]>;
-
 export interface AgentDefaults {
   default_persona?: string;
   default_system_prompt?: string;
@@ -108,11 +107,8 @@ export interface AgentDefaults {
   default_dream_quiet_hours?: string;
   default_dream_probability?: number;
   default_dream_max_per_night?: number;
-  default_profile_id?: string;
   default_avatar_kind?: AvatarKind;
   default_avatar_value?: string;
-  default_tools_allowed?: string[] | null;
-  tool_groups?: ToolGroupMap;
 }
 
 export interface MemoryFilters {
@@ -133,7 +129,8 @@ export interface AgentCreatePayload {
   avatar_kind?: AvatarKind;
   avatar_value?: string;
   cost_cap_usd?: number | null;
-  tools_allowed?: string[] | null;
+  tools_include?: string[] | null;
+  tools_exclude?: string[] | null;
   heartbeat_enabled?: boolean;
   heartbeat_interval_s?: number;
   heartbeat_checklist?: string;
