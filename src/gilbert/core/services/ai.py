@@ -11,7 +11,7 @@ import json as _json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from gilbert.core.context import (
     get_current_conversation_id,
@@ -2004,6 +2004,7 @@ class AIService(Service):
         ai_profile: str = "",
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
+        mid_round_interrupt: Callable[[], bool] | None = None,
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -2030,6 +2031,16 @@ class AIService(Service):
                 round. Used by the autonomous-agent service to deliver
                 mid-run user messages so the model sees them immediately
                 rather than waiting for the run to finish.
+            mid_round_interrupt: Optional sync callable ``() -> bool``
+                checked between tool-call execution groups inside a
+                single round. When it returns ``True``, the remaining
+                un-run tool calls in the round receive stub
+                ``ToolResult`` rows (so the model history stays
+                coherent) and ``_execute_tool_calls`` returns early.
+                Used by AgentService to interrupt a busy run when an
+                ``urgent`` peer signal arrives. When ``None`` or always
+                returns ``False``, behavior is identical to prior
+                phases.
         """
         if not self._backends:
             raise RuntimeError("No AI backends initialized")
@@ -2389,6 +2400,7 @@ class AIService(Service):
                         user_ctx=user_ctx,
                         profile=profile,
                         backend=backend,
+                        mid_round_interrupt=mid_round_interrupt,
                     )
                     all_ui_blocks.extend(round_ui_blocks)
                     messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
@@ -3161,6 +3173,7 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
         backend: AIBackend | None = None,
+        mid_round_interrupt: Callable[[], bool] | None = None,
     ) -> tuple[list[ToolResult], list[UIBlock]]:
         """Execute a batch of tool calls and return results + any UI blocks.
 
@@ -3214,7 +3227,31 @@ class AIService(Service):
         results: list[ToolResult] = []
         ui_blocks: list[UIBlock] = []
 
-        for group in groups:
+        for group_idx, group in enumerate(groups):
+            # Mid-round interrupt boundary: between groups (never inside a
+            # parallel batch). Once tripped, synthesize stub ToolResult
+            # rows for every un-run remaining ToolCall so the assistant
+            # message's tool_calls list stays aligned with the next
+            # tool_result message.
+            if (
+                group_idx > 0
+                and mid_round_interrupt is not None
+                and mid_round_interrupt()
+            ):
+                for remaining_group in groups[group_idx:]:
+                    for tc in remaining_group:
+                        results.append(
+                            ToolResult(
+                                tool_call_id=tc.tool_call_id,
+                                content=(
+                                    "(skipped — urgent interrupt; the message "
+                                    "is in the next round's inbox)"
+                                ),
+                                is_error=False,
+                            )
+                        )
+                break
+
             if len(group) == 1:
                 tr, blocks = await self._run_one_tool(
                     group[0],
