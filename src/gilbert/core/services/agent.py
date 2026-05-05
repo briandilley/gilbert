@@ -1149,11 +1149,27 @@ class AgentService(Service):
         # Service-level defaults merged into create_agent calls
         self._defaults: dict[str, Any] = {}
 
+        # Toggleable enable flag — set in ``start()`` after consulting the
+        # configuration capability. When ``False`` the service skips all
+        # capability binding and exposes no WS handlers; the web nav filter
+        # also drops the /agents and /goals groups via ``svc.enabled``.
+        self._enabled: bool = True
+
     # ── Configurable ────────────────────────────────────────────────
 
     def config_params(self) -> list[ConfigParam]:
         """Describe all operator-tunable defaults for new agents."""
         return [
+            ConfigParam(
+                key="enabled",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Whether the agent service is enabled. Disabling skips "
+                    "service start, exposes no WS handlers, and hides "
+                    "/agents and /goals from the nav."
+                ),
+                default=True,
+            ),
             ConfigParam(
                 key="default_persona",
                 type=ToolParameterType.STRING,
@@ -1257,17 +1273,12 @@ class AgentService(Service):
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         """Cache the full config section as ``_defaults``.
 
-        Normalizes ``default_tools_allowed``: an empty string is stored as
-        ``None`` (meaning "all tools allowed"); a non-empty string is split on
-        commas into a list.
+        Also caches the ``enabled`` flag onto ``self._enabled`` — note that
+        ``start()`` checks the same key separately so a disabled service
+        skips capability binding entirely.
         """
         self._defaults = dict(config)
-        raw_allowed = config.get("default_tools_allowed", "")
-        if isinstance(raw_allowed, str):
-            stripped = raw_allowed.strip()
-            self._defaults["default_tools_allowed"] = (
-                None if not stripped else [t.strip() for t in stripped.split(",")]
-            )
+        self._enabled = bool(config.get("enabled", True))
 
     # ── Service lifecycle ────────────────────────────────────────────
 
@@ -1282,6 +1293,22 @@ class AgentService(Service):
     async def start(self, resolver: ServiceResolver) -> None:
         """Bind capabilities and prepare the service for requests."""
         self._resolver = resolver
+
+        # Check enabled flag before binding any capability. When disabled,
+        # the web nav filter drops /agents and /goals via ``svc.enabled``,
+        # ``get_ws_handlers`` returns ``{}``, and no heartbeats are armed.
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.interfaces.configuration import ConfigurationReader
+
+            if isinstance(config_svc, ConfigurationReader):
+                section = config_svc.get_section(self.config_namespace)
+                if not bool(section.get("enabled", True)):
+                    self._enabled = False
+                    logger.info("AgentService disabled")
+                    return
+
+        self._enabled = True
 
         # Bind entity storage
         storage_svc = resolver.require_capability("entity_storage")
@@ -4042,6 +4069,8 @@ class AgentService(Service):
         return _wrapped
 
     def get_ws_handlers(self) -> dict[str, Any]:
+        if not self._enabled:
+            return {}
         raw: dict[str, Any] = {
             "agents.create": self._ws_create,
             "agents.get": self._ws_get,
