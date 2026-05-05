@@ -89,6 +89,11 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         self._resolver: ServiceResolver | None = None
         self._storage: Any = None
         self._event_bus: Any = None
+        # AgentProvider, bound late in start() — None until the agent
+        # service has registered. The cross-goal Deliverable resolver
+        # uses it to look up Deliverable + GoalDependency rows without
+        # depending on the concrete AgentService class.
+        self._agent_provider: Any = None
         # Captured from the ``web`` YAML section so share URLs can route
         # back to this Gilbert instance over the LAN. ``0.0.0.0`` falls
         # back to the auto-detected LAN IP when a URL actually gets
@@ -120,7 +125,9 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
             # building share URLs; ``scheduler`` hosts the hourly cleanup
             # of exhausted/expired share tokens; ``tunnel`` is consulted
             # when a caller asks for a publicly-reachable share URL.
-            optional=frozenset({"event_bus", "configuration", "scheduler", "tunnel"}),
+            optional=frozenset({
+                "event_bus", "configuration", "scheduler", "tunnel", "agent",
+            }),
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
@@ -198,6 +205,16 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                     callback=self._cleanup_file_shares,
                     system=True,
                 )
+
+        # Bind AgentProvider (Phase 5) — late-bound through the
+        # capability registry so we don't depend on the concrete
+        # AgentService class. Optional because workspace can run before
+        # / without the agent service.
+        from gilbert.interfaces.agent import AgentProvider
+
+        agent_svc = resolver.get_capability("agent")
+        if agent_svc is not None and isinstance(agent_svc, AgentProvider):
+            self._agent_provider = agent_svc
 
         self._unsubscribe_conv_destroyed: Any = None
         event_bus_svc = resolver.get_capability("event_bus")
@@ -1492,6 +1509,88 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
                             return bare_target, None
 
         return None, f"File not found: {rel_path}"
+
+    async def resolve_deliverable_for_dependent(
+        self,
+        *,
+        file_id: str,
+        viewing_agent_id: str,
+        viewing_goal_id: str,
+    ) -> tuple[Path | None, str | None]:
+        """Resolve a workspace-file path for cross-goal viewing via a
+        Deliverable + satisfied GoalDependency edge.
+
+        Steps:
+
+        1. Find the Deliverable that points at this ``file_id``. We
+           accept content_ref shapes ``"workspace_file:<id>"`` or the
+           bare ``<id>`` to be flexible across producers.
+        2. Confirm the deliverable is READY (DRAFT / OBSOLETE rejected).
+        3. Confirm a satisfied ``GoalDependency`` row exists from
+           ``viewing_goal_id`` to the deliverable's goal naming this
+           deliverable.
+        4. Resolve the file's on-disk path using the workspace_files
+           registry (which carries ``conversation_id`` + ``user_id``)
+           through ``resolve_file_path``.
+        """
+        if self._agent_provider is None:
+            return None, "agent service unavailable"
+        if self._storage is None:
+            return None, "workspace storage unavailable"
+
+        # 1. Locate the deliverable. Try the canonical
+        #    ``workspace_file:<id>`` shape first; fall back to the bare
+        #    file id.
+        deliverable = await self._agent_provider.find_deliverable_by_content_ref(
+            f"workspace_file:{file_id}",
+        )
+        if deliverable is None:
+            deliverable = await self._agent_provider.find_deliverable_by_content_ref(
+                file_id,
+            )
+        if deliverable is None:
+            return None, "no deliverable references this file"
+
+        # 2. Must be READY. (Compare on the .value to avoid binding to
+        #    the enum identity from the agent interface here.)
+        state_val = getattr(deliverable.state, "value", str(deliverable.state))
+        if state_val == "obsolete":
+            return None, "deliverable is OBSOLETE"
+        if state_val != "ready":
+            return None, "deliverable is DRAFT"
+
+        # 3. Confirm the dep edge exists and is satisfied.
+        deps = await self._agent_provider.list_goal_dependencies(
+            dependent_goal_id=viewing_goal_id,
+            source_goal_id=deliverable.goal_id,
+        )
+        match = next(
+            (
+                d for d in deps
+                if d.required_deliverable_name == deliverable.name
+                and d.satisfied_at is not None
+            ),
+            None,
+        )
+        if match is None:
+            return None, "no dependency grants access"
+
+        # 4. Resolve the file path. workspace_files rows carry the
+        #    conversation/user/rel_path triple needed by resolve_file_path.
+        file_row = await self._storage.get(
+            _WORKSPACE_FILES_COLLECTION, file_id,
+        )
+        if file_row is None:
+            return None, f"workspace file {file_id} not found"
+        user_id = str(file_row.get("user_id") or "")
+        conv_id = str(file_row.get("conversation_id") or "")
+        rel_path = str(file_row.get("rel_path") or "")
+        if not user_id or not conv_id or not rel_path:
+            return None, "workspace file row is missing user_id/conversation_id/rel_path"
+        resolved, err = self.resolve_file_path(user_id, rel_path, conv_id)
+        if err is not None or resolved is None:
+            return None, err or "file not found on disk"
+        return resolved, None
 
     @staticmethod
     def _list_files(directory: Path) -> list[dict[str, Any]]:

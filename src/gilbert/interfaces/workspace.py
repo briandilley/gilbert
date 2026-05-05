@@ -95,3 +95,21 @@ class WorkspaceProvider(Protocol):
         resolving as the on-disk shape evolves.
         """
         ...
+
+    async def resolve_deliverable_for_dependent(
+        self,
+        *,
+        file_id: str,
+        viewing_agent_id: str,
+        viewing_goal_id: str,
+    ) -> tuple[Path | None, str | None]:
+        """Resolve a workspace-file path for cross-goal viewing via a
+        Deliverable + GoalDependency edge.
+
+        Returns ``(path, None)`` iff the file is referenced by a READY
+        Deliverable on a goal that ``viewing_goal_id`` has a satisfied
+        ``GoalDependency`` on. Returns ``(None, error_message)`` on any
+        rejection (file not registered as a deliverable; deliverable is
+        DRAFT or OBSOLETE; no matching dependency edge; etc.).
+        """
+        ...
