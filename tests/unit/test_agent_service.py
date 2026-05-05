@@ -345,3 +345,18 @@ async def test_execute_agent_memory_save(started_agent_service: Any) -> None:
     assert "saved" in out.lower()
     mems = await svc.search_memory(agent_id=a.id, query="dark")
     assert any("dark mode" in m.content for m in mems)
+
+
+async def test_tool_injection_adds_agent_id(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    captured: dict[str, Any] = {}
+
+    async def fake_handler(args: dict[str, Any]) -> str:
+        captured.update(args)
+        return "ok"
+
+    tools = {"foo": (object(), fake_handler)}
+    wrapped = svc._inject_agent_id("ag_test", tools)
+    await wrapped["foo"][1]({"x": 1})
+    assert captured["_agent_id"] == "ag_test"
+    assert captured["x"] == 1

@@ -1572,6 +1572,31 @@ class AgentService(Service):
             # 'keep' is a no-op
         return f"reviewed {len(reviews)} memories, applied {applied}"
 
+    # ── Tool argument injection (Task 15) ────────────────────────────
+
+    def _inject_agent_id(
+        self, agent_id: str, tools_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Wrap each tool handler so _agent_id is injected into args.
+
+        Expects tools_dict shape: ``dict[name, tuple[ToolDefinition, callable]]``
+        matching agent_loop.run_loop's expected shape.
+
+        The wrapped handler accepts the same arguments dict and mutates it
+        to include ``_agent_id`` if absent (caller's value wins if present).
+        """
+        wrapped: dict[str, Any] = {}
+        for name, entry in tools_dict.items():
+            tool_def, handler = entry
+
+            async def _wrapped(args: dict[str, Any], _h: Any = handler) -> Any:
+                new_args = dict(args)
+                new_args.setdefault("_agent_id", agent_id)
+                return await _h(new_args)
+
+            wrapped[name] = (tool_def, _wrapped)
+        return wrapped
+
     # ── WsHandlerProvider ────────────────────────────────────────────
 
     def get_ws_handlers(self) -> dict[str, Any]:
