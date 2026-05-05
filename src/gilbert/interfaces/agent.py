@@ -84,7 +84,13 @@ class Agent:
     avatar_value: str               # emoji char, lucide icon, or workspace_file:<id>
     lifetime_cost_usd: float
     cost_cap_usd: float | None      # auto-DISABLED when exceeded
-    tools_allowed: list[str] | None # None = all tools; list = strict allowlist
+    # Tool gating — mutually exclusive. ``tools_include`` is an allowlist
+    # (core tools always kept; intersected with the owner's available
+    # set at run time so removed tools propagate). ``tools_exclude`` is
+    # a denylist (subtracted from the owner's available set; core tools
+    # always kept). Both ``None`` means "all tools the owner can use".
+    tools_include: list[str] | None
+    tools_exclude: list[str] | None
     heartbeat_enabled: bool
     heartbeat_interval_s: int
     heartbeat_checklist: str

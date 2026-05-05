@@ -117,8 +117,8 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     # Phase 4 — goal participation. ``goal_post`` is core because every
     # assignee needs to be able to post to a war room they're on.
     # The other six goal tools (create / assign / unassign / handoff /
-    # status / summary) are NOT core — operators may pin them via
-    # ``tools_allowed`` on a per-agent basis.
+    # status / summary) are NOT core — operators may pin them per-agent
+    # via ``tools_include``.
     "goal_post",
 })
 
@@ -776,7 +776,8 @@ def _agent_to_dict(a: Agent) -> dict[str, Any]:
         "avatar_value": a.avatar_value,
         "lifetime_cost_usd": a.lifetime_cost_usd,
         "cost_cap_usd": a.cost_cap_usd,
-        "tools_allowed": a.tools_allowed,
+        "tools_include": a.tools_include,
+        "tools_exclude": a.tools_exclude,
         "heartbeat_enabled": a.heartbeat_enabled,
         "heartbeat_interval_s": a.heartbeat_interval_s,
         "heartbeat_checklist": a.heartbeat_checklist,
@@ -805,7 +806,8 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         avatar_value=row.get("avatar_value", "🤖"),
         lifetime_cost_usd=float(row.get("lifetime_cost_usd", 0.0)),
         cost_cap_usd=row.get("cost_cap_usd"),
-        tools_allowed=row.get("tools_allowed"),
+        tools_include=row.get("tools_include"),
+        tools_exclude=row.get("tools_exclude"),
         heartbeat_enabled=bool(row.get("heartbeat_enabled", True)),
         heartbeat_interval_s=int(row.get("heartbeat_interval_s", 1800)),
         heartbeat_checklist=row.get("heartbeat_checklist", ""),
@@ -1375,6 +1377,15 @@ class AgentService(Service):
         if existing:
             raise ValueError(f"name already in use: {name}")
 
+        # tools_include and tools_exclude are mutually exclusive. Either
+        # an allowlist OR a denylist — never both.
+        tools_include = fields.get("tools_include")
+        tools_exclude = fields.get("tools_exclude")
+        if tools_include is not None and tools_exclude is not None:
+            raise ValueError(
+                "tools_include and tools_exclude are mutually exclusive"
+            )
+
         defaults = self._defaults
         now = _now()
         a = Agent(
@@ -1392,7 +1403,8 @@ class AgentService(Service):
             avatar_value=fields.get("avatar_value", defaults.get("default_avatar_value", "🤖")),
             lifetime_cost_usd=0.0,
             cost_cap_usd=fields.get("cost_cap_usd"),
-            tools_allowed=fields.get("tools_allowed", defaults.get("default_tools_allowed")),
+            tools_include=tools_include,
+            tools_exclude=tools_exclude,
             heartbeat_enabled=fields.get("heartbeat_enabled", True),
             heartbeat_interval_s=fields.get(
                 "heartbeat_interval_s",
@@ -1452,7 +1464,8 @@ class AgentService(Service):
         _allowed_patch_fields = {
             "role_label", "persona", "system_prompt", "procedural_rules",
             "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
-            "tools_allowed", "heartbeat_enabled", "heartbeat_interval_s",
+            "tools_include", "tools_exclude",
+            "heartbeat_enabled", "heartbeat_interval_s",
             "heartbeat_checklist", "dream_enabled", "dream_quiet_hours",
             "dream_probability", "dream_max_per_night", "status",
         }
@@ -1465,6 +1478,13 @@ class AgentService(Service):
                 row[k] = AgentStatus(v).value if not isinstance(v, AgentStatus) else v.value
             else:
                 row[k] = v
+        # Enforce the include/exclude mutex on the merged row, not just the
+        # patch — patching one to a value when the other is already set
+        # would otherwise sneak past.
+        if row.get("tools_include") is not None and row.get("tools_exclude") is not None:
+            raise ValueError(
+                "tools_include and tools_exclude are mutually exclusive"
+            )
         row["updated_at"] = _now().isoformat()
         await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
         updated = _agent_from_dict(row)
@@ -2110,16 +2130,30 @@ class AgentService(Service):
     def _compute_allowed_tool_names(self, a: Agent, *, available: set[str]) -> set[str]:
         """Compute the tool name set for an agent's run.
 
-        - tools_allowed=None → all available tools (legacy behavior).
-        - tools_allowed=[…] → core ∪ allowlist, intersected with available.
+        Three modes, mutually exclusive:
 
-        Tools removed from the available set (e.g., plugin uninstalled) are
-        silently dropped — they just don't appear in the run.
+        - ``tools_include=[…]`` → strict allowlist. Returns
+          ``(core ∪ include) ∩ available``. If the owner loses access to
+          a listed tool the agent loses it too — propagation by
+          intersection.
+        - ``tools_exclude=[…]`` → denylist. Returns
+          ``core ∪ (available - exclude)``. Core tools are kept even if
+          they appear in ``exclude``.
+        - both ``None`` → returns the full ``available`` set.
+
+        ``available`` is the OWNER's runtime tool discovery result. Core
+        tools come from the agent service's own ``ToolProvider`` (so they
+        are implicitly part of ``available`` whenever the agent is
+        running).
         """
-        if a.tools_allowed is None:
-            return set(available)
-        keep = (set(_CORE_AGENT_TOOLS) | set(a.tools_allowed)) & set(available)
-        return keep
+        core = set(_CORE_AGENT_TOOLS)
+        if a.tools_include is not None:
+            keep = (core | set(a.tools_include)) & set(available)
+            return keep
+        if a.tools_exclude is not None:
+            keep = core | (set(available) - set(a.tools_exclude))
+            return keep
+        return set(available)
 
     async def _build_system_prompt(
         self,
@@ -4096,7 +4130,8 @@ class AgentService(Service):
         allowed_fields = {
             "role_label", "persona", "system_prompt", "procedural_rules",
             "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
-            "tools_allowed", "heartbeat_enabled", "heartbeat_interval_s",
+            "tools_include", "tools_exclude",
+            "heartbeat_enabled", "heartbeat_interval_s",
             "heartbeat_checklist", "dream_enabled", "dream_quiet_hours",
             "dream_probability", "dream_max_per_night",
         }
