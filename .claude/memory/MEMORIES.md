@@ -43,6 +43,5 @@
 - [Source Inspector Service](memory-source-inspector-service.md) — read-only source-tree AI tools (list/read/grep), always injected into the proposals reflection AI
 - [run_loop primitive](memory-agent-loop.md) — pure async loop; budgets, tool dispatch, error handling
 - [NotificationService](memory-notification-service.md) — notifications + WS dispatch via per-event filter
-- [AutonomousAgentService](memory-autonomous-agent-service.md) — Goal/Run entities, mid-run user injection, request_user_input, materialized per-goal conversation
 - [Plugin UI Extensions](memory-plugin-ui-extensions.md) — Plugin.ui_panels() + <PluginPanelSlot> + per-plugin frontend/ dir
 - [Plugin runtime_dependencies](memory-runtime-dependencies.md) — Plugin.runtime_dependencies() + 'gilbert doctor' for non-pip OS deps

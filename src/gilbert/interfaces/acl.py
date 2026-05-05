@@ -97,8 +97,6 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,
-    # Autonomous agent: user-level; handlers enforce per-user ownership.
-    "agent.": 100,
     # Browser plugin: credentials and VNC sessions are scoped per user;
     # handlers enforce ownership so a user can only see / mutate their
     # own.
