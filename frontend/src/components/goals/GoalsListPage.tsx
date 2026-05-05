@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { PlusIcon, TargetIcon } from "lucide-react";
+import { PlusIcon, SparklesIcon, TargetIcon } from "lucide-react";
 import { useAgents } from "@/api/agents";
 import { useCreateGoal, useGoals } from "@/api/goals";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Textarea } from "@/components/ui/textarea";
+import { AuthorPromptDialog } from "@/components/settings/AuthorPromptDialog";
 import { GoalKanban } from "./GoalKanban";
 
 export function GoalsListPage() {
@@ -99,6 +100,7 @@ function NewGoalDialog({ open, onOpenChange, onCreated }: NewGoalDialogProps) {
   const [description, setDescription] = useState("");
   const [assigneeNames, setAssigneeNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [authorOpen, setAuthorOpen] = useState(false);
 
   const reset = () => {
     setName("");
@@ -165,7 +167,19 @@ function NewGoalDialog({ open, onOpenChange, onCreated }: NewGoalDialogProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="goal-description">Description</Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="goal-description">Description</Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={() => setAuthorOpen(true)}
+              >
+                <SparklesIcon className="size-3" />
+                Author with AI
+              </Button>
+            </div>
             <Textarea
               id="goal-description"
               value={description}
@@ -238,6 +252,15 @@ function NewGoalDialog({ open, onOpenChange, onCreated }: NewGoalDialogProps) {
             </Button>
           </DialogFooter>
         </form>
+        <AuthorPromptDialog
+          open={authorOpen}
+          onClose={() => setAuthorOpen(false)}
+          namespace="agent_service"
+          paramKey="default_goal_description"
+          paramLabel="Goal description"
+          currentText={description}
+          onApply={(next) => setDescription(next)}
+        />
       </DialogContent>
     </Dialog>
   );

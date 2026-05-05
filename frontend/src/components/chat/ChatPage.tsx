@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -57,6 +58,7 @@ export function ChatPage() {
   const { user } = useAuth();
   const api = useWsApi();
   const { connected } = useWebSocket();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [uiBlocks, setUiBlocks] = useState<UIBlock[]>([]);
@@ -395,6 +397,21 @@ export function ChatPage() {
     },
     [api],
   );
+
+  // Deep-link: ``/chat?conversation=<id>`` opens that conversation on
+  // mount (used by the "Open in Chat" link on agent detail pages).
+  // We track which id we've consumed so the effect doesn't refire when
+  // the user later clicks a different conversation in the sidebar.
+  const deepLinkedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!connected) return;
+    const targetId = searchParams.get("conversation");
+    if (!targetId) return;
+    if (deepLinkedRef.current === targetId) return;
+    deepLinkedRef.current = targetId;
+    loadConversation(targetId);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, connected, loadConversation, setSearchParams]);
 
   const handleSend = useCallback(
     async (message: string, attachments: FileAttachment[] = []) => {

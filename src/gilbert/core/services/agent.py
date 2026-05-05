@@ -89,6 +89,12 @@ _DEFAULT_HEARTBEAT_CHECKLIST = (
     "3. Any goals assigned to you that are blocked?\n"
     "4. If nothing pressing, end your turn briefly."
 )
+_DEFAULT_GOAL_DESCRIPTION = (
+    "State the outcome the goal must achieve in concrete, testable terms. "
+    "List any constraints, deliverables, and acceptance criteria. Note "
+    "stakeholders and known dependencies. Keep it focused — the description "
+    "is the working brief assigned agents read on every run."
+)
 # ── Collection names ─────────────────────────────────────────────────
 
 _AGENTS_COLLECTION = "agents"
@@ -1252,6 +1258,19 @@ class AgentService(Service):
                 type=ToolParameterType.STRING,
                 description="Default avatar value for new agents (emoji character or image URL).",
                 default="🤖",
+            ),
+            ConfigParam(
+                key="default_goal_description",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Guidance for goal descriptions — drives the 'Author with AI' "
+                    "rewriter on the New Goal dialog. The text itself is not used "
+                    "as a default for new goals; it just gives the AI rewriter a "
+                    "reference frame for what a goal description should look like."
+                ),
+                default=_DEFAULT_GOAL_DESCRIPTION,
+                multiline=True,
+                ai_prompt=True,
             ),
         ]
 
