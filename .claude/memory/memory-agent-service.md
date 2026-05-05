@@ -250,6 +250,55 @@ USER row into the target's chat conversation. A polish phase will add
 that path (along with sender-attribution UI in chat). Mid-stream
 interrupt is also deferred (Phase 3).
 
+## Phase 3 — Mid-stream interrupt
+
+A busy agent can now be interrupted between tool-call groups inside a
+single round when an `urgent` signal arrives, instead of waiting for
+the round to complete.
+
+**Tool surface:**
+- `agent_send_message` and `agent_delegate` accept an optional
+  `priority` parameter — `"urgent"` or `"normal"`.
+- `agent_send_message` defaults to `"normal"` (queue mode, Phase 2
+  behavior).
+- `agent_delegate` defaults to `"urgent"` because the caller is awaiting
+  an END_TURN reply and a busy target should drop everything.
+- Invalid values return `"error: priority must be one of: ..."` from
+  the tool — they never reach `_signal_agent`. Validation is via
+  `_parse_priority(raw, default)`.
+
+**Service-level state:**
+- `AgentService._urgent_pending: dict[str, bool]` — keyed by agent_id.
+  Set by `_signal_agent` AFTER the inbox row is persisted, only when
+  `priority == "urgent"`. Cleared unconditionally at the END of
+  `_drain_inbox` (after `processed_at` writes succeed) so a stale
+  flag never trips the next round's interrupt check.
+
+**Run-loop wiring:**
+- `_run_agent_internal` defines `_interrupt_check() -> bool: return
+  self._urgent_pending.get(a.id, False)` and passes it as
+  `mid_round_interrupt=` to `AIService.chat`. Exists alongside the
+  existing `between_rounds_callback` (Phase 2) which drains the
+  signals into the next round once the interrupt fires.
+
+**AIService.chat boundary mechanic:**
+- `AIService.chat(..., mid_round_interrupt: Callable[[], bool] | None
+  = None)` threads the callback into `_execute_tool_calls`.
+- `_execute_tool_calls` checks the callback BEFORE each tool-call
+  group iteration (skipping `group_idx == 0` so at least one group
+  always runs). On True: every remaining un-run `ToolCall` receives a
+  stub `ToolResult(content="(skipped — urgent interrupt; the message
+  is in the next round's inbox)", is_error=False)` so the assistant
+  message's tool_calls list and the next tool_results message stay
+  aligned. Loop returns early.
+- The check happens BETWEEN groups, never inside a parallel batch —
+  in-flight `asyncio.gather`'d tools run to completion.
+
+**Backwards-compat guarantee:** when `mid_round_interrupt is None` or
+the callback always returns False, `_execute_tool_calls` is
+bit-identical to its prior behavior. No existing tests changed
+semantics.
+
 ## Related
 - `src/gilbert/interfaces/agent.py`
 - `src/gilbert/core/services/agent.py`
@@ -265,9 +314,12 @@ interrupt is also deferred (Phase 3).
 - `tests/unit/test_agent_entities.py`
 - `tests/unit/test_agents_ws_rpcs.py` (Phase 1B WS RPC coverage)
 - `tests/unit/test_agent_avatar_route.py` (Phase 1B HTTP route coverage)
+- `tests/unit/test_agent_peer_messaging.py` (Phase 2 + Phase 3 coverage)
+- `tests/unit/test_ai_service_interrupt.py` (Phase 3 boundary mechanic)
 - `docs/superpowers/specs/2026-05-04-agent-messaging-design.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1a-backend.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1b-ui.md`
+- `docs/superpowers/plans/2026-05-04-agent-messaging-phase-3-mid-stream-interrupt.md`
 - `.claude/memory/memory-agent-loop.md` (run_loop primitive)
 - `.claude/memory/memory-multi-user-isolation.md`
 - `.claude/memory/memory-ai-prompts-configurable.md`
