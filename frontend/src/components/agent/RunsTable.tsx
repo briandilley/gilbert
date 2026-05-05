@@ -1,22 +1,15 @@
 import { useCallback, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { ChevronRightIcon } from "lucide-react";
 import { useAgentRuns } from "@/api/agents";
 import { useEventBus } from "@/hooks/useEventBus";
 import { Badge } from "@/components/ui/badge";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { timeAgo } from "@/lib/timeAgo";
 import type { AgentRun, RunStatus } from "@/types/agent";
 
 interface Props {
   agentId: string;
-}
-
-function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
-  const seconds = Math.floor((Date.now() - then) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
 }
 
 function formatDuration(startedAt: string, endedAt: string | null): string {
@@ -153,17 +146,37 @@ function RunRow({
     run.status === "failed"
       ? run.error || "(failed without error message)"
       : run.final_message_text || "(no final message)";
+  const detailId = `run-detail-${run._id}`;
   return (
     <>
       <tr
         className="cursor-pointer border-t hover:bg-muted/40"
         onClick={onToggle}
-        aria-expanded={open}
       >
-        <td className="px-3 py-2">
-          <Badge variant="outline" className={STATUS_COLOR[run.status]}>
-            {run.status}
-          </Badge>
+        <td className="px-3 py-2 align-middle">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              aria-expanded={open}
+              aria-controls={detailId}
+              className="inline-flex items-center justify-center rounded p-1 hover:bg-muted"
+            >
+              <ChevronRightIcon
+                className={`size-4 transition-transform ${open ? "rotate-90" : ""}`}
+                aria-hidden
+              />
+              <span className="sr-only">
+                {open ? "Collapse" : "Expand"} run details
+              </span>
+            </button>
+            <Badge variant="outline" className={STATUS_COLOR[run.status]}>
+              {run.status}
+            </Badge>
+          </div>
         </td>
         <td className="px-3 py-2 text-muted-foreground">{run.triggered_by}</td>
         <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
@@ -181,7 +194,7 @@ function RunRow({
         </td>
       </tr>
       {open && (
-        <tr className="border-t bg-muted/20">
+        <tr id={detailId} className="border-t bg-muted/20">
           <td colSpan={7} className="px-3 py-3">
             <div className="text-xs text-muted-foreground mb-1">
               {run.status === "failed" ? "Error" : "Final message"}

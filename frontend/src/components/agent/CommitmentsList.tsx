@@ -8,23 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { timeAgo } from "@/lib/timeAgo";
 import type { Commitment } from "@/types/agent";
 
 interface Props {
   agentId: string;
-}
-
-function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
-  const seconds = Math.floor((Date.now() - then) / 1000);
-  const future = seconds < 0;
-  const abs = Math.abs(seconds);
-  let value: string;
-  if (abs < 60) value = `${abs}s`;
-  else if (abs < 3600) value = `${Math.floor(abs / 60)}m`;
-  else if (abs < 86400) value = `${Math.floor(abs / 3600)}h`;
-  else value = `${Math.floor(abs / 86400)}d`;
-  return future ? `in ${value}` : `${value} ago`;
 }
 
 type DurationUnit = "h" | "d";
@@ -38,6 +26,8 @@ export function CommitmentsList({ agentId }: Props) {
   const [dueAmount, setDueAmount] = useState<string>("1");
   const [dueUnit, setDueUnit] = useState<DurationUnit>("h");
   const [showCompleted, setShowCompleted] = useState(false);
+  const [completingId, setCompletingId] = useState<string | null>(null);
+  const [completionNote, setCompletionNote] = useState("");
 
   const { active, completed } = useMemo(() => {
     const a: Commitment[] = [];
@@ -76,12 +66,30 @@ export function CommitmentsList({ agentId }: Props) {
     );
   };
 
-  const handleComplete = (commitment: Commitment) => {
-    const note = window.prompt("Optional completion note", "") ?? "";
-    completeCommitment.mutate({
-      commitmentId: commitment._id,
-      ...(note.trim() ? { note: note.trim() } : {}),
-    });
+  const startComplete = (commitment: Commitment) => {
+    setCompletingId(commitment._id);
+    setCompletionNote("");
+  };
+
+  const cancelComplete = () => {
+    setCompletingId(null);
+    setCompletionNote("");
+  };
+
+  const confirmComplete = (commitment: Commitment) => {
+    const note = completionNote.trim();
+    completeCommitment.mutate(
+      {
+        commitmentId: commitment._id,
+        ...(note ? { note } : {}),
+      },
+      {
+        onSuccess: () => {
+          setCompletingId(null);
+          setCompletionNote("");
+        },
+      },
+    );
   };
 
   return (
@@ -137,6 +145,16 @@ export function CommitmentsList({ agentId }: Props) {
             Add
           </Button>
         </div>
+        {createCommitment.isError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {createCommitment.error instanceof Error
+              ? createCommitment.error.message
+              : "Failed to create commitment."}
+          </div>
+        )}
       </form>
 
       {commitmentsQuery.isPending && <LoadingSpinner text="Loading…" />}
@@ -155,33 +173,94 @@ export function CommitmentsList({ agentId }: Props) {
           Active{" "}
           <span className="text-muted-foreground">({active.length})</span>
         </h3>
+        {completeCommitment.isError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {completeCommitment.error instanceof Error
+              ? completeCommitment.error.message
+              : "Failed to complete commitment."}
+          </div>
+        )}
         {active.length === 0 ? (
           <div className="rounded-md border border-dashed px-4 py-4 text-center text-sm text-muted-foreground">
             No active commitments.
           </div>
         ) : (
           <ul className="rounded-md border divide-y">
-            {active.map((c) => (
-              <li
-                key={c._id}
-                className="flex items-start justify-between gap-3 px-3 py-2"
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm">{c.content}</div>
-                  <div className="text-xs text-muted-foreground">
-                    Due {timeAgo(c.due_at)}
+            {active.map((c) => {
+              const isCompleting = completingId === c._id;
+              return (
+                <li key={c._id} className="px-3 py-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm">{c.content}</div>
+                      <div className="text-xs text-muted-foreground">
+                        Due {timeAgo(c.due_at)}
+                      </div>
+                    </div>
+                    {!isCompleting && (
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        disabled={
+                          completeCommitment.isPending || completingId !== null
+                        }
+                        onClick={() => startComplete(c)}
+                      >
+                        Complete
+                      </Button>
+                    )}
                   </div>
-                </div>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  disabled={completeCommitment.isPending}
-                  onClick={() => handleComplete(c)}
-                >
-                  Complete
-                </Button>
-              </li>
-            ))}
+                  {isCompleting && (
+                    <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <div className="flex-1">
+                        <Label
+                          htmlFor={`commitment-note-${c._id}`}
+                          className="text-xs"
+                        >
+                          Completion note (optional)
+                        </Label>
+                        <Input
+                          id={`commitment-note-${c._id}`}
+                          autoFocus
+                          value={completionNote}
+                          onChange={(e) => setCompletionNote(e.target.value)}
+                          placeholder="What happened?"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              confirmComplete(c);
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              cancelComplete();
+                            }
+                          }}
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          size="xs"
+                          disabled={completeCommitment.isPending}
+                          onClick={() => confirmComplete(c)}
+                        >
+                          Confirm
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={completeCommitment.isPending}
+                          onClick={cancelComplete}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -190,6 +269,7 @@ export function CommitmentsList({ agentId }: Props) {
         <button
           type="button"
           onClick={() => setShowCompleted((v) => !v)}
+          aria-expanded={showCompleted}
           className="flex items-center gap-2 text-sm font-medium hover:underline"
         >
           <span>{showCompleted ? "▾" : "▸"}</span>
