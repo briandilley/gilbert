@@ -373,6 +373,70 @@ async def test_execute_complete_run_marks_run(started_agent_service: Any) -> Non
     assert "marked" in out.lower()
 
 
+async def test_execute_tool_injects_active_agent_id(
+    started_agent_service: Any,
+) -> None:
+    """The AI tool runtime invokes ``execute_tool(name, arguments)`` with
+    no per-call wrapping — so ``_run_agent_internal`` sets a ContextVar
+    before calling chat, and ``execute_tool`` injects ``_agent_id`` from
+    it. Without this every ``_exec_*`` returns "requires _agent_id" and
+    the model concludes "agent functions unavailable".
+    """
+    from gilbert.core.services.agent import _active_agent_id
+
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="ctx-test")
+
+    # Simulate the AI runtime calling commitment_create with no
+    # ``_agent_id`` in args. Without the contextvar set, the tool errors.
+    out_no_ctx = await svc.execute_tool(
+        "commitment_create",
+        {"content": "no ctx", "due_in_seconds": 60},
+    )
+    assert out_no_ctx.startswith("error:"), out_no_ctx
+
+    # With the contextvar set (mirroring what _run_agent_internal does
+    # around ``self._ai.chat``), the same call succeeds.
+    token = _active_agent_id.set(a.id)
+    try:
+        out_with_ctx = await svc.execute_tool(
+            "commitment_create",
+            {"content": "with ctx", "due_in_seconds": 60},
+        )
+    finally:
+        _active_agent_id.reset(token)
+    assert not out_with_ctx.startswith("error:"), out_with_ctx
+
+
+async def test_execute_tool_caller_supplied_agent_id_wins(
+    started_agent_service: Any,
+) -> None:
+    """An explicit ``_agent_id`` in the args takes precedence over the
+    contextvar — handy for tests and any future code path that wants to
+    pass an explicit override."""
+    from gilbert.core.services.agent import _active_agent_id
+
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_1", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_1", name="a2")
+
+    token = _active_agent_id.set(a1.id)
+    try:
+        # Explicit _agent_id=a2 should be respected over the ctx var
+        # holding a1.
+        out = await svc.execute_tool(
+            "commitment_create",
+            {"_agent_id": a2.id, "content": "for a2", "due_in_seconds": 60},
+        )
+    finally:
+        _active_agent_id.reset(token)
+    assert not out.startswith("error:")
+    cs = await svc.list_commitments(agent_id=a2.id)
+    assert any(c.content == "for a2" for c in cs)
+    cs1 = await svc.list_commitments(agent_id=a1.id)
+    assert not any(c.content == "for a2" for c in cs1)
+
+
 async def test_execute_commitment_create(started_agent_service: Any) -> None:
     svc = started_agent_service
     a = await svc.create_agent(owner_user_id="usr_1", name="x")

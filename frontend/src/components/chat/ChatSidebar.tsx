@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "@/types/chat";
-import { MailIcon, MessageSquareIcon, UsersRoundIcon } from "lucide-react";
+import { MailIcon, MessageSquareIcon, SparklesIcon, UsersRoundIcon } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 
 interface ChatSidebarProps {
@@ -30,7 +30,15 @@ export function ChatSidebarContent({
   onDelete,
 }: ChatSidebarProps) {
   const shared = conversations.filter((c) => c.shared);
-  const personal = conversations.filter((c) => !c.shared);
+  // Agent personal conversations (created by the AgentService) get
+  // grouped into their own section beneath regular chats so the user's
+  // own threads aren't mixed in with autonomous-agent histories.
+  const agentConvs = conversations.filter(
+    (c) => !c.shared && c.kind === "agent",
+  );
+  const personal = conversations.filter(
+    (c) => !c.shared && c.kind !== "agent",
+  );
 
   return (
     <ScrollArea className="h-full w-full">
@@ -148,6 +156,55 @@ export function ChatSidebarContent({
             ))
           )}
         </div>
+
+        {agentConvs.length > 0 && (
+          <>
+            <Separator />
+            {/* Agents section — autonomous-agent personal conversations,
+                kept separate from the user's own chats. */}
+            <div className="mt-3">
+              <div className="flex items-center gap-1.5 px-2 mb-2">
+                <SparklesIcon className="size-3.5 text-muted-foreground" />
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Agents
+                </h3>
+              </div>
+              {agentConvs.map((conv) => (
+                <div
+                  key={conv.conversation_id}
+                  className={cn(
+                    "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
+                    activeId === conv.conversation_id && "bg-accent",
+                  )}
+                  onClick={() => onSelect(conv.conversation_id)}
+                >
+                  <SparklesIcon className="size-3 shrink-0 text-muted-foreground/70" />
+                  <span className="flex-1 truncate">{conv.title}</span>
+                  <span className="hidden group-hover:inline-flex gap-1 shrink-0">
+                    <button
+                      className="text-muted-foreground hover:text-foreground text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRename(conv.conversation_id);
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="text-muted-foreground hover:text-destructive text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(conv.conversation_id);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         {/* Bottom-of-sidebar slot for plugin widgets — now-playing
             music status, doorbell ring history, presence map, etc. */}

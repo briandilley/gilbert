@@ -53,6 +53,7 @@ def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
             preview = m.get("content", "")[:100]
             break
     title = c.get("title", "") or preview[:60] or "New conversation"
+    metadata = c.get("metadata") or {}
     summary: dict[str, Any] = {
         "conversation_id": c.get("_id", ""),
         "title": title,
@@ -60,6 +61,11 @@ def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
         "updated_at": c.get("updated_at", ""),
         "message_count": len(messages),
         "shared": shared,
+        # Optional grouping hint — ``"agent"`` for agent personal convs,
+        # ``"war_room"`` for goal war rooms, ``""`` for everything else.
+        # Populated by services that own conversation creation.
+        "kind": str(metadata.get("kind") or ""),
+        "agent_id": str(metadata.get("agent_id") or ""),
     }
     if shared:
         members = c.get("members", [])

@@ -22,8 +22,20 @@ import json
 import logging
 import re
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+# ContextVar threaded into the tool dispatcher so every ``_exec_*`` handler
+# can recover the active agent's id even though ``AIService.execute_tool``
+# doesn't pass per-call wrapping. ``_run_agent_internal`` sets it before
+# calling ``self._ai.chat`` and resets it afterwards. Tools read it via
+# ``_active_agent_id.get("")`` and treat the empty string as "not in a
+# run" (e.g. when invoked from a slash command outside an agent run).
+_active_agent_id: ContextVar[str] = ContextVar("_active_agent_id", default="")
+_active_delegation_chain: ContextVar[list[str]] = ContextVar(
+    "_active_delegation_chain", default=[],
+)
 
 from gilbert.interfaces.agent import (
     Agent,
@@ -2075,16 +2087,29 @@ class AgentService(Service):
             from gilbert.interfaces.auth import UserContext
             user_ctx = UserContext.from_user_id(a.owner_user_id) if hasattr(UserContext, "from_user_id") else None
 
-            result = await self._ai.chat(  # type: ignore[union-attr]
-                user_message=user_msg,
-                conversation_id=a.conversation_id or None,
-                user_ctx=user_ctx,
-                system_prompt=system_prompt,
-                ai_call=_AI_CALL_NAME,
-                ai_profile=a.profile_id,
-                between_rounds_callback=_between_rounds,
-                mid_round_interrupt=_interrupt_check,
-            )
+            # Stamp the active-agent context so every tool the AI calls
+            # during this run sees ``_agent_id`` injected — see
+            # ``execute_tool`` above. Token reset in the ``finally`` is
+            # critical: contextvars persist within a Task, so leaving the
+            # token set would corrupt subsequent runs in the same task
+            # (e.g., when scheduler ticks reuse the same loop).
+            agent_token = _active_agent_id.set(a.id)
+            chain = list(trigger_context.get("chain") or [])
+            chain_token = _active_delegation_chain.set(chain)
+            try:
+                result = await self._ai.chat(  # type: ignore[union-attr]
+                    user_message=user_msg,
+                    conversation_id=a.conversation_id or None,
+                    user_ctx=user_ctx,
+                    system_prompt=system_prompt,
+                    ai_call=_AI_CALL_NAME,
+                    ai_profile=a.profile_id,
+                    between_rounds_callback=_between_rounds,
+                    mid_round_interrupt=_interrupt_check,
+                )
+            finally:
+                _active_agent_id.reset(agent_token)
+                _active_delegation_chain.reset(chain_token)
 
             # ChatTurnResult uses `response_text`; map to run.final_message_text.
             run.final_message_text = result.response_text
@@ -2097,12 +2122,29 @@ class AgentService(Service):
             run.status = RunStatus.COMPLETED
             run.ended_at = _now()
 
-            # Capture conv_id back on the agent row if just created.
+            # Capture conv_id back on the agent row if just created, and
+            # stamp ``metadata.kind = "agent"`` (+ ``agent_id``) on the
+            # conversation row so the SPA's chat sidebar can group agent
+            # conversations into a separate section beneath regular
+            # chats. AIService creates the row without that hint; we
+            # patch it once per agent.
             if a.conversation_id == "" and run.conversation_id:
                 fresh = await self._storage.get(_AGENTS_COLLECTION, a.id)  # type: ignore[union-attr]
                 if fresh is not None:
                     fresh["conversation_id"] = run.conversation_id
                     await self._storage.put(_AGENTS_COLLECTION, a.id, fresh)  # type: ignore[union-attr]
+                conv_row = await self._storage.get(_AI_CONVERSATIONS_COLLECTION, run.conversation_id)  # type: ignore[union-attr]
+                if conv_row is not None:
+                    metadata = dict(conv_row.get("metadata") or {})
+                    metadata["kind"] = "agent"
+                    metadata["agent_id"] = a.id
+                    conv_row["metadata"] = metadata
+                    # Title the conversation after the agent so it shows
+                    # something useful in the sidebar (the user-facing
+                    # display_name when set, slug otherwise).
+                    if not conv_row.get("title"):
+                        conv_row["title"] = a.display_name or a.name
+                    await self._storage.put(_AI_CONVERSATIONS_COLLECTION, run.conversation_id, conv_row)  # type: ignore[union-attr]
 
             await self._accumulate_cost(a.id, run.cost_usd)
 
@@ -3210,7 +3252,26 @@ class AgentService(Service):
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        """Dispatch a tool call by name. Raises KeyError for unknown tools."""
+        """Dispatch a tool call by name. Raises KeyError for unknown tools.
+
+        Reads the active agent's id from the ``_active_agent_id`` ContextVar
+        and injects it as ``_agent_id`` into the tool's arguments dict
+        unless the caller already set it. ``_run_agent_internal`` sets
+        the contextvar before invoking ``AIService.chat``; without this
+        injection every ``_exec_*`` handler would see an empty
+        ``_agent_id`` and bail with "requires _agent_id (injected by
+        runtime)" — which manifests to the model as "agent functions
+        unavailable".
+        """
+        if "_agent_id" not in arguments:
+            ctx_agent_id = _active_agent_id.get("")
+            if ctx_agent_id:
+                arguments = {**arguments, "_agent_id": ctx_agent_id}
+        if "_delegation_chain" not in arguments:
+            ctx_chain = _active_delegation_chain.get([])
+            if ctx_chain:
+                arguments = {**arguments, "_delegation_chain": list(ctx_chain)}
+
         if name == "complete_run":
             return await self._exec_complete_run(arguments)
         if name == "commitment_create":

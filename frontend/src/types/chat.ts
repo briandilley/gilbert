@@ -98,6 +98,13 @@ export interface ConversationSummary {
   visibility?: "public" | "invite";
   is_member?: boolean;
   is_invited?: boolean;
+  /** Optional grouping hint set by services that own conversation
+   *  creation. ``"agent"`` for an Agent's personal conv, ``"war_room"``
+   *  for goal war rooms, empty string otherwise. */
+  kind?: string;
+  /** When ``kind === "agent"``, the owning Agent's id so the SPA can
+   *  link the sidebar entry back to ``/agents/<id>``. */
+  agent_id?: string;
 }
 
 export interface ConversationMember {
