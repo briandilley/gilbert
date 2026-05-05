@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from gilbert.interfaces.agent import (  # noqa: F401
+from gilbert.interfaces.agent import (
     Agent,
     AgentMemory,
     AgentProvider,
@@ -100,3 +100,69 @@ def test_inbox_signal_dataclass_round_trip() -> None:
         processed_at=None,
     )
     assert s.processed_at is None
+
+
+def test_agent_memory_dataclass_round_trip() -> None:
+    m = AgentMemory(
+        id="mem_1",
+        agent_id="ag_1",
+        content="the sky is blue",
+        state=MemoryState.SHORT_TERM,
+        kind="fact",
+        tags=frozenset({"test"}),
+        score=0.5,
+        created_at=datetime.now(UTC),
+        last_used_at=None,
+    )
+    assert m.state is MemoryState.SHORT_TERM
+    assert "test" in m.tags
+
+
+def test_agent_trigger_dataclass_round_trip() -> None:
+    t = AgentTrigger(
+        id="t1",
+        agent_id="ag_1",
+        trigger_type="heartbeat",
+        trigger_config={"interval_s": 1800},
+        enabled=True,
+    )
+    assert t.enabled is True
+    assert t.trigger_config["interval_s"] == 1800
+
+
+def test_commitment_dataclass_round_trip() -> None:
+    c = Commitment(
+        id="c1",
+        agent_id="ag_1",
+        content="check sonarr",
+        due_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+        completed_at=None,
+        completion_note="",
+    )
+    assert c.completed_at is None
+    assert c.completion_note == ""
+
+
+def test_run_dataclass_round_trip_default_factory() -> None:
+    run = Run(
+        id="run_1",
+        agent_id="ag_1",
+        triggered_by="heartbeat",
+        trigger_context={},
+        started_at=datetime.now(UTC),
+        status=RunStatus.RUNNING,
+        conversation_id="conv_1",
+        delegation_id="",
+        ended_at=None,
+        final_message_text=None,
+        rounds_used=0,
+        tokens_in=0,
+        tokens_out=0,
+        cost_usd=0.0,
+        error=None,
+        awaiting_user_input=False,
+        pending_question=None,
+    )
+    assert run.pending_actions == []
+    assert run.status is RunStatus.RUNNING
