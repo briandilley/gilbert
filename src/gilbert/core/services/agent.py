@@ -1882,12 +1882,14 @@ class AgentService(Service):
         result into a list of ``{name, description, required_role,
         provider}`` objects sorted by name.
         """
+        from gilbert.interfaces.auth import UserContext
+
         if self._tool_discovery is None:
             raise RuntimeError("not started")
         # Ensure caller is authenticated; the tools list is non-sensitive
         # but we keep the same gate as every other handler.
         self._caller_user_id(conn)
-        user_ctx = getattr(conn, "user_ctx", None)
+        user_ctx = getattr(conn, "user_ctx", None) or UserContext.GUEST
         discovered = self._tool_discovery.discover_tools(user_ctx=user_ctx)
         tools: list[dict[str, Any]] = []
         for name, entry in discovered.items():
