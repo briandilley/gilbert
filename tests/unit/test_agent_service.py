@@ -232,14 +232,17 @@ async def test_config_params_includes_defaults(started_agent_service: Any) -> No
     params = svc.config_params()
     keys = {p.key for p in params}
     expected = {
+        "enabled",
         "default_persona", "default_system_prompt", "default_procedural_rules",
         "default_heartbeat_interval_s", "default_heartbeat_checklist",
         "default_dream_enabled", "default_dream_quiet_hours",
         "default_dream_probability", "default_dream_max_per_night",
-        "default_profile_id", "default_avatar_kind", "default_avatar_value",
-        "default_tools_allowed", "tool_groups",
+        "default_avatar_kind", "default_avatar_value",
     }
     assert expected.issubset(keys)
+    # These keys were removed deliberately (forced selection at create time).
+    dropped = {"default_profile_id", "default_tools_allowed", "tool_groups"}
+    assert dropped.isdisjoint(keys)
 
 
 async def test_default_persona_is_ai_prompt_flagged(started_agent_service: Any) -> None:

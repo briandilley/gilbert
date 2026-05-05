@@ -5,7 +5,7 @@ Covers the SPA-facing handlers added in Phase 1B:
 - ``agents.runs.list``
 - ``agents.commitments.{list,create,complete}``
 - ``agents.memories.{list,set_state}``
-- ``agents.tools.{list_available,list_groups}``
+- ``agents.tools.list_available``
 
 All tests use the shared ``started_agent_service`` fixture from
 ``tests/unit/conftest.py`` and a small ``_FakeConn`` mirroring the
@@ -398,28 +398,7 @@ async def test_ws_memories_blocks_non_owner(
         )
 
 
-# ── Task 5: agents.tools.{list_available,list_groups} ────────────────
-
-
-async def test_ws_tools_list_groups_returns_defaults(
-    started_agent_service: Any,
-) -> None:
-    svc = started_agent_service
-    h = svc.get_ws_handlers()
-    new_config = {
-        **svc._defaults,
-        "tool_groups": {
-            "communication": ["notify_user"],
-            "self": ["agent_memory_save"],
-        },
-    }
-    await svc.on_config_changed(new_config)
-
-    res = await h["agents.tools.list_groups"](_FakeConn("usr_1"), {})
-    assert res["groups"] == {
-        "communication": ["notify_user"],
-        "self": ["agent_memory_save"],
-    }
+# ── Task 5: agents.tools.list_available ──────────────────────────────
 
 
 async def test_ws_tools_list_available_returns_discovered_shape(

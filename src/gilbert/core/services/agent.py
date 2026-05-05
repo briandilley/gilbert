@@ -77,13 +77,6 @@ _DEFAULT_HEARTBEAT_CHECKLIST = (
     "3. Any goals assigned to you that are blocked?\n"
     "4. If nothing pressing, end your turn briefly."
 )
-_DEFAULT_TOOL_GROUPS: dict[str, list[str]] = {
-    "files": ["read_workspace_file", "write_skill_workspace_file", "run_workspace_script"],
-    "knowledge": ["search_knowledge"],
-    "communication": ["notify_user"],
-    "self": ["agent_memory_save", "agent_memory_search", "commitment_create", "commitment_complete"],
-}
-
 # ── Collection names ─────────────────────────────────────────────────
 
 _AGENTS_COLLECTION = "agents"
@@ -1233,12 +1226,6 @@ class AgentService(Service):
                 default=3,
             ),
             ConfigParam(
-                key="default_profile_id",
-                type=ToolParameterType.STRING,
-                description="Default AI profile ID used for new agents.",
-                default="standard",
-            ),
-            ConfigParam(
                 key="default_avatar_kind",
                 type=ToolParameterType.STRING,
                 description="Default avatar kind for new agents (e.g. 'emoji', 'url').",
@@ -1249,24 +1236,6 @@ class AgentService(Service):
                 type=ToolParameterType.STRING,
                 description="Default avatar value for new agents (emoji character or image URL).",
                 default="🤖",
-            ),
-            ConfigParam(
-                key="default_tools_allowed",
-                type=ToolParameterType.STRING,
-                description=(
-                    "Comma-separated list of tool names new agents are allowed to call. "
-                    "Leave empty to allow all tools."
-                ),
-                default="",
-            ),
-            ConfigParam(
-                key="tool_groups",
-                type=ToolParameterType.OBJECT,
-                description=(
-                    "JSON object grouping tool names by category for the UI. "
-                    "Keys are group labels; values are lists of tool names."
-                ),
-                default=_DEFAULT_TOOL_GROUPS,
             ),
         ]
 
@@ -1416,7 +1385,7 @@ class AgentService(Service):
             persona=fields.get("persona", defaults.get("default_persona", "")),
             system_prompt=fields.get("system_prompt", defaults.get("default_system_prompt", "")),
             procedural_rules=fields.get("procedural_rules", defaults.get("default_procedural_rules", "")),
-            profile_id=fields.get("profile_id", defaults.get("default_profile_id", "standard")),
+            profile_id=fields.get("profile_id", "standard"),
             conversation_id="",
             status=AgentStatus.ENABLED,
             avatar_kind=fields.get("avatar_kind", defaults.get("default_avatar_kind", "emoji")),
@@ -4087,7 +4056,6 @@ class AgentService(Service):
             "agents.memories.list": self._ws_memories_list,
             "agents.memories.set_state": self._ws_memories_set_state,
             "agents.tools.list_available": self._ws_tools_list_available,
-            "agents.tools.list_groups": self._ws_tools_list_groups,
             # Phase 4 — goals
             "goals.create": self._ws_goals_create,
             "goals.list": self._ws_goals_list,
@@ -4352,13 +4320,6 @@ class AgentService(Service):
             })
         tools.sort(key=lambda t: t["name"])
         return {"tools": tools}
-
-    async def _ws_tools_list_groups(
-        self, conn: Any, params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return the configured ``tool_groups`` map for the SPA picker."""
-        self._caller_user_id(conn)
-        return {"groups": dict(self._defaults.get("tool_groups", {}))}
 
     # ── WS handlers — goals (Phase 4) ───────────────────────────────
 
