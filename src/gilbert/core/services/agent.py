@@ -17,13 +17,23 @@ Task 5 implements CRUD + RBAC helper.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.interfaces.agent import Agent, AgentMemory, AgentStatus, InboxSignal, MemoryState, Run
+from gilbert.interfaces.agent import (
+    Agent,
+    AgentMemory,
+    AgentStatus,
+    Commitment,
+    InboxSignal,
+    MemoryState,
+    Run,
+    RunStatus,
+)
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.scheduler import SchedulerProvider
@@ -141,6 +151,65 @@ def _memory_from_dict(row: dict[str, Any]) -> AgentMemory:
             datetime.fromisoformat(row["last_used_at"])
             if row.get("last_used_at") else None
         ),
+    )
+
+
+def _run_to_dict(r: Run) -> dict[str, Any]:
+    return {
+        "_id": r.id,
+        "agent_id": r.agent_id,
+        "triggered_by": r.triggered_by,
+        "trigger_context": r.trigger_context,
+        "started_at": r.started_at.isoformat(),
+        "status": r.status.value,
+        "conversation_id": r.conversation_id,
+        "delegation_id": r.delegation_id,
+        "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+        "final_message_text": r.final_message_text,
+        "rounds_used": r.rounds_used,
+        "tokens_in": r.tokens_in,
+        "tokens_out": r.tokens_out,
+        "cost_usd": r.cost_usd,
+        "error": r.error,
+        "awaiting_user_input": r.awaiting_user_input,
+        "pending_question": r.pending_question,
+        "pending_actions": list(r.pending_actions),
+    }
+
+
+def _run_from_dict(row: dict[str, Any]) -> Run:
+    return Run(
+        id=row["_id"],
+        agent_id=row["agent_id"],
+        triggered_by=row.get("triggered_by", "manual"),
+        trigger_context=row.get("trigger_context", {}),
+        started_at=datetime.fromisoformat(row["started_at"]),
+        status=RunStatus(row.get("status", "running")),
+        conversation_id=row.get("conversation_id", ""),
+        delegation_id=row.get("delegation_id", ""),
+        ended_at=datetime.fromisoformat(row["ended_at"]) if row.get("ended_at") else None,
+        final_message_text=row.get("final_message_text"),
+        rounds_used=int(row.get("rounds_used", 0)),
+        tokens_in=int(row.get("tokens_in", 0)),
+        tokens_out=int(row.get("tokens_out", 0)),
+        cost_usd=float(row.get("cost_usd", 0.0)),
+        error=row.get("error"),
+        awaiting_user_input=bool(row.get("awaiting_user_input", False)),
+        pending_question=row.get("pending_question"),
+        pending_actions=list(row.get("pending_actions", [])),
+    )
+
+
+def _commitment_from_dict(row: dict[str, Any]) -> Commitment:
+    """Used by _due_commitments helper. Task 9 fully wires Commitment."""
+    return Commitment(
+        id=row["_id"],
+        agent_id=row["agent_id"],
+        content=row.get("content", ""),
+        due_at=datetime.fromisoformat(row["due_at"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        completed_at=datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None,
+        completion_note=row.get("completion_note", ""),
     )
 
 
@@ -502,9 +571,218 @@ class AgentService(Service):
         agent_id: str,
         *,
         user_message: str | None = None,
+        triggered_by: str = "manual",
+        trigger_context: dict[str, Any] | None = None,
     ) -> Run:
-        """Trigger an immediate agent run. Implemented in Task 8."""
-        raise NotImplementedError("filled in by Task 8")
+        """Trigger an immediate agent run, awaiting completion.
+
+        Verifies the agent exists and is ENABLED, guards against concurrent
+        runs, then delegates to ``_run_agent_internal``.
+        """
+        if self._storage is None or self._ai is None:
+            raise RuntimeError("not started")
+        a = await self.get_agent(agent_id)
+        if a is None:
+            raise ValueError(f"agent not found: {agent_id}")
+        if a.status is not AgentStatus.ENABLED:
+            raise ValueError(f"agent {agent_id} is {a.status.value}")
+        if agent_id in self._running_agents:
+            raise ValueError(f"agent {agent_id} has a run in progress")
+
+        self._running_agents.add(agent_id)
+        try:
+            run = await asyncio.shield(
+                self._run_agent_internal(
+                    a,
+                    triggered_by=triggered_by,
+                    trigger_context=trigger_context or {},
+                    user_message=user_message,
+                )
+            )
+        finally:
+            self._running_agents.discard(agent_id)
+        return run
+
+    async def _run_agent_internal(
+        self,
+        a: Agent,
+        *,
+        triggered_by: str,
+        trigger_context: dict[str, Any],
+        user_message: str | None,
+    ) -> Run:
+        """Inner run loop — invoked under _running_agents guard.
+
+        Builds the system prompt, synthesizes a trigger message if needed,
+        calls ``self._ai.chat`` with ai_call='agent.run', and persists the
+        Run entity with cost/token totals.
+        """
+        run = Run(
+            id=f"run_{uuid.uuid4().hex[:12]}",
+            agent_id=a.id,
+            triggered_by=triggered_by,
+            trigger_context=dict(trigger_context),
+            started_at=_now(),
+            status=RunStatus.RUNNING,
+            conversation_id=a.conversation_id,
+            delegation_id="",
+            ended_at=None,
+            final_message_text=None,
+            rounds_used=0,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            error=None,
+            awaiting_user_input=False,
+            pending_question=None,
+            pending_actions=[],
+        )
+        await self._storage.put(_AGENT_RUNS_COLLECTION, run.id, _run_to_dict(run))  # type: ignore[union-attr]
+
+        try:
+            system_prompt = await self._build_system_prompt(a, triggered_by, trigger_context)
+            user_msg = user_message or self._synthesize_trigger_message(triggered_by, trigger_context)
+
+            from gilbert.interfaces.auth import UserContext
+            user_ctx = UserContext.from_user_id(a.owner_user_id) if hasattr(UserContext, "from_user_id") else None
+
+            result = await self._ai.chat(  # type: ignore[union-attr]
+                user_message=user_msg,
+                conversation_id=a.conversation_id or None,
+                user_ctx=user_ctx,
+                system_prompt=system_prompt,
+                ai_call=_AI_CALL_NAME,
+                ai_profile=a.profile_id,
+            )
+
+            # ChatTurnResult uses `response_text`; map to run.final_message_text.
+            run.final_message_text = result.response_text
+            run.conversation_id = result.conversation_id
+            tu = result.turn_usage or {}
+            run.rounds_used = int(tu.get("rounds", 0))
+            run.tokens_in = int(tu.get("input_tokens", 0))
+            run.tokens_out = int(tu.get("output_tokens", 0))
+            run.cost_usd = float(tu.get("cost_usd", 0.0))
+            run.status = RunStatus.COMPLETED
+            run.ended_at = _now()
+
+            # Capture conv_id back on the agent row if just created.
+            if a.conversation_id == "" and run.conversation_id:
+                fresh = await self._storage.get(_AGENTS_COLLECTION, a.id)  # type: ignore[union-attr]
+                if fresh is not None:
+                    fresh["conversation_id"] = run.conversation_id
+                    await self._storage.put(_AGENTS_COLLECTION, a.id, fresh)  # type: ignore[union-attr]
+
+            await self._accumulate_cost(a.id, run.cost_usd)
+
+        except Exception as exc:
+            logger.exception("agent run failed: %s", a.id)
+            run.status = RunStatus.FAILED
+            run.error = repr(exc)
+            run.ended_at = _now()
+
+        await self._storage.put(_AGENT_RUNS_COLLECTION, run.id, _run_to_dict(run))  # type: ignore[union-attr]
+        return run
+
+    def _synthesize_trigger_message(self, triggered_by: str, ctx: dict[str, Any]) -> str:
+        """Return a synthetic user message describing why the agent was triggered."""
+        if triggered_by == "manual":
+            return "Run manually triggered. Take whatever action is appropriate."
+        if triggered_by == "heartbeat":
+            return "Heartbeat — periodic self-check."
+        if triggered_by == "time":
+            return "Scheduled trigger fired."
+        if triggered_by == "event":
+            etype = ctx.get("event_type", "?")
+            return f"Event '{etype}' fired. See trigger context for the payload."
+        return f"Trigger: {triggered_by}."
+
+    async def _build_system_prompt(
+        self,
+        a: Agent,
+        triggered_by: str,
+        trigger_context: dict[str, Any],
+    ) -> str:
+        """Assemble the full system prompt from persona, rules, and context blocks."""
+        parts = [a.persona, a.system_prompt, a.procedural_rules]
+
+        if triggered_by == "heartbeat":
+            due = await self._due_commitments(a.id)
+            checklist = a.heartbeat_checklist or "(no checklist configured)"
+            due_block = (
+                "\n".join(
+                    f"- [{c.id}] {c.content} (due {c.due_at.isoformat()})"
+                    for c in due
+                )
+                or "(none)"
+            )
+            parts.append(
+                f"HEARTBEAT — periodic self-check. Read your checklist below "
+                f"and decide if anything needs action right now. If nothing is "
+                f"pressing, end your turn briefly.\n\n"
+                f"CHECKLIST:\n{checklist}\n\n"
+                f"DUE COMMITMENTS:\n{due_block}"
+            )
+
+        # Long-term memory block (top-K by recency).
+        long_term = await self.search_memory(
+            agent_id=a.id, query="", limit=20, state=MemoryState.LONG_TERM,
+        )
+        if long_term:
+            mem_block = "\n".join(f"- {m.content}" for m in long_term)
+            parts.append(f"LONG-TERM MEMORY:\n{mem_block}")
+
+        return "\n\n---\n\n".join(p for p in parts if p)
+
+    async def _due_commitments(self, agent_id: str) -> list[Commitment]:
+        """Return commitments for *agent_id* that are due now and not completed."""
+        if self._storage is None:
+            return []
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENT_COMMITMENTS_COLLECTION,
+                filters=[Filter(field="agent_id", op=FilterOp.EQ, value=agent_id)],
+            )
+        )
+        out: list[Commitment] = []
+        for r in rows:
+            if r.get("completed_at"):
+                continue
+            due = datetime.fromisoformat(r["due_at"])
+            if due <= _now():
+                out.append(_commitment_from_dict(r))
+        return out
+
+    async def _accumulate_cost(self, agent_id: str, delta: float) -> None:
+        """Add *delta* to the agent's lifetime_cost_usd; auto-DISABLE on cap breach."""
+        if delta <= 0 or self._storage is None:
+            return
+        row = await self._storage.get(_AGENTS_COLLECTION, agent_id)
+        if row is None:
+            return
+        new_total = float(row.get("lifetime_cost_usd", 0.0)) + delta
+        row["lifetime_cost_usd"] = new_total
+        cap = row.get("cost_cap_usd")
+        if cap is not None and new_total >= float(cap):
+            row["status"] = AgentStatus.DISABLED.value
+            logger.warning(
+                "Agent %s auto-DISABLED at cost cap %s (cumulative %s)",
+                agent_id, cap, new_total,
+            )
+        await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
+
+    async def list_runs(self, *, agent_id: str, limit: int = 50) -> list[Run]:
+        """Return up to *limit* runs for *agent_id*, sorted most-recent first."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENT_RUNS_COLLECTION,
+                filters=[Filter(field="agent_id", op=FilterOp.EQ, value=agent_id)],
+            )
+        )
+        rows.sort(key=lambda r: r.get("started_at", ""), reverse=True)
+        return [_run_from_dict(r) for r in rows[:limit]]
 
     # ── WsHandlerProvider ────────────────────────────────────────────
 

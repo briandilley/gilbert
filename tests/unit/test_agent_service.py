@@ -206,3 +206,19 @@ async def test_ws_rpc_delete_cascades(started_agent_service: Any) -> None:
     out = await h["agents.delete"](_FakeConn("usr_1"), {"agent_id": agent_id})
     assert out["deleted"] is True
     assert await svc.get_agent(agent_id) is None
+
+
+# ── Task 8 tests — Run lifecycle ──────────────────────────────────────
+
+
+async def test_run_agent_now_creates_run_row(started_agent_service: Any) -> None:
+    """run_agent_now spawns a run, calls AIService.chat, persists a Run."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="x")
+    run = await svc.run_agent_now(a.id, user_message="hello")
+    assert run.agent_id == a.id
+    assert run.triggered_by == "manual"
+
+    runs = await svc.list_runs(agent_id=a.id)
+    assert len(runs) == 1
+    assert runs[0].id == run.id

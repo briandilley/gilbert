@@ -38,10 +38,33 @@ class _FakeEventBusProvider:
 
 
 class _FakeAIProvider:
-    """Satisfies AIProvider (has .chat)."""
+    """Satisfies AIProvider (has .chat).
+
+    Returns a minimal ChatTurnResult so run_agent_now tests succeed without
+    a real AI backend. The turn_usage keys mirror ChatTurnResult's dict shape:
+    input_tokens / output_tokens / cost_usd / rounds.
+    """
 
     async def chat(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        raise NotImplementedError("not used in CRUD tests")
+        from gilbert.interfaces.ai import ChatTurnResult
+        return ChatTurnResult(
+            response_text="ok",
+            conversation_id="conv_test",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+            interrupted=False,
+            model="",
+            turn_usage={
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost_usd": 0.0,
+                "rounds": 1,
+            },
+        )
 
 
 class _FakeSchedulerProvider:
