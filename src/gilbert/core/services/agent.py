@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from gilbert.interfaces.agent import Agent, Run
+from gilbert.interfaces.agent import Agent, InboxSignal, Run
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.scheduler import SchedulerProvider
@@ -81,7 +81,7 @@ class AgentService(Service):
         self._running_agents: set[str] = set()
 
         # Per-agent inbox queues: agent_id → list of pending InboxSignals
-        self._inboxes: dict[str, list[Any]] = {}
+        self._inboxes: dict[str, list[InboxSignal]] = {}
 
         # Service-level defaults merged into create_agent calls
         self._defaults: dict[str, Any] = {}
