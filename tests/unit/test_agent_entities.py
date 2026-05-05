@@ -79,6 +79,12 @@ def test_agent_provider_is_runtime_checkable() -> None:
         async def run_agent_now(self, agent_id, **kwargs):
             return None
 
+        async def load_agent_for_caller(self, agent_id, **kwargs):
+            return None
+
+        async def set_agent_avatar(self, agent_id, **kwargs):
+            return None
+
     assert isinstance(FakeAgentService(), AgentProvider)
 
 
