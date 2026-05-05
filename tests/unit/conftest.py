@@ -49,16 +49,49 @@ class _FakeAIProvider:
 
     ``discover_tools`` returns an empty dict by default; tests that need a
     populated tool catalog can monkeypatch ``svc._tool_discovery`` directly.
+
+    Optional Phase 2 hooks:
+
+    - ``invoke_between_rounds`` — when True, ``chat`` invokes any
+      ``between_rounds_callback`` once before returning. The callback's
+      result is captured in ``last_between_rounds_result`` so tests can
+      inspect the messages the agent service produced.
+    - ``response_text`` — overrides the response text returned by chat
+      (default ``"ok"``).
+    - ``chat_delay_s`` — number of seconds to sleep before returning.
+      Used to test delegation timeouts.
+    - ``raise_on_chat`` — when set to an exception instance, ``chat``
+      raises it before returning. Used to test delegation failure paths.
     """
 
     def __init__(self) -> None:
         self.last_call_kwargs: dict[str, Any] = {}
+        self.invoke_between_rounds: bool = False
+        self.last_between_rounds_result: list[Any] | None = None
+        self.response_text: str = "ok"
+        self.chat_delay_s: float = 0.0
+        self.raise_on_chat: BaseException | None = None
+        self.chat_call_count: int = 0
 
     async def chat(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        self.chat_call_count += 1
         self.last_call_kwargs = dict(kwargs)
+
+        if self.invoke_between_rounds:
+            cb = kwargs.get("between_rounds_callback")
+            if cb is not None:
+                self.last_between_rounds_result = await cb()
+
+        if self.chat_delay_s > 0.0:
+            import asyncio
+            await asyncio.sleep(self.chat_delay_s)
+
+        if self.raise_on_chat is not None:
+            raise self.raise_on_chat
+
         from gilbert.interfaces.ai import ChatTurnResult
         return ChatTurnResult(
-            response_text="ok",
+            response_text=self.response_text,
             conversation_id="conv_test",
             ui_blocks=[],
             tool_usage=[],

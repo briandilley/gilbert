@@ -34,7 +34,7 @@ from gilbert.interfaces.agent import (
     Run,
     RunStatus,
 )
-from gilbert.interfaces.ai import AIProvider, AIToolDiscoveryProvider
+from gilbert.interfaces.ai import AIProvider, AIToolDiscoveryProvider, Message, MessageRole
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
@@ -1089,6 +1089,18 @@ class AgentService(Service):
                 await self._storage.put(_AGENT_INBOX_SIGNALS_COLLECTION, sig.id, row)
         return sigs
 
+    def _format_inbox_signal(self, sig: InboxSignal) -> str:
+        """Convert an InboxSignal into a one-line user-role prose snippet.
+
+        Peer / user signals format as ``[from {sender_name}]: {body}``;
+        system signals format as ``[system]: {body}``.
+        """
+        if sig.sender_kind in ("agent", "user"):
+            prefix = f"[from {sig.sender_name}]"
+        else:
+            prefix = "[system]"
+        return f"{prefix}: {sig.body}"
+
     async def _rehydrate_inboxes(self) -> None:
         """Restore unprocessed InboxSignals from storage into the in-memory cache.
 
@@ -1311,6 +1323,27 @@ class AgentService(Service):
             system_prompt = await self._build_system_prompt(a, triggered_by, trigger_context)
             user_msg = user_message or self._synthesize_trigger_message(triggered_by, trigger_context)
 
+            # Drain inbox at round 0: append any pending signals onto
+            # the lead user message in a clearly-marked INBOX block.
+            drained = await self._drain_inbox(a.id)
+            if drained:
+                inbox_block = "\n".join(self._format_inbox_signal(s) for s in drained)
+                user_msg = f"{user_msg}\n\nINBOX:\n{inbox_block}"
+
+            async def _between_rounds() -> list[Message]:
+                """Drain pending signals between rounds and inject them as
+                user-role messages so the model sees mid-run peer DMs."""
+                sigs = await self._drain_inbox(a.id)
+                if not sigs:
+                    return []
+                return [
+                    Message(
+                        role=MessageRole.USER,
+                        content=self._format_inbox_signal(s),
+                    )
+                    for s in sigs
+                ]
+
             from gilbert.interfaces.auth import UserContext
             user_ctx = UserContext.from_user_id(a.owner_user_id) if hasattr(UserContext, "from_user_id") else None
 
@@ -1321,6 +1354,7 @@ class AgentService(Service):
                 system_prompt=system_prompt,
                 ai_call=_AI_CALL_NAME,
                 ai_profile=a.profile_id,
+                between_rounds_callback=_between_rounds,
             )
 
             # ChatTurnResult uses `response_text`; map to run.final_message_text.
@@ -1372,6 +1406,18 @@ class AgentService(Service):
         if triggered_by == "event":
             etype = ctx.get("event_type", "?")
             return f"Event '{etype}' fired. See trigger context for the payload."
+        if triggered_by == "inbox":
+            return (
+                "You have new inbox messages. Read them below and "
+                "respond as appropriate."
+            )
+        if triggered_by == "delegation":
+            sender = ctx.get("sender_id", "?")
+            return (
+                "You are handling a delegation request. Read the instruction "
+                "below and end your turn with a clear conclusion — your final "
+                f"assistant message becomes the reply to {sender}."
+            )
         return f"Trigger: {triggered_by}."
 
     def _compute_allowed_tool_names(self, a: Agent, *, available: set[str]) -> set[str]:
