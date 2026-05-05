@@ -14,10 +14,10 @@
  *   helper forces ``application/json``, which would break multipart).
  *
  * Query keys:
- * - ``["agents", "list"]``
+ * - ``["agents", "list", ownerUserId | null]``
  * - ``["agents", "detail", agentId]``
  * - ``["agents", "defaults"]``
- * - ``["agents", "runs", agentId]``
+ * - ``["agents", "runs", agentId, limit | null]``
  * - ``["agents", "commitments", agentId, includeCompleted]``
  * - ``["agents", "memories", agentId, filters]``
  * - ``["agents", "tools-available"]``
@@ -197,6 +197,7 @@ export function useUpdateAgent() {
     onSuccess: (agent) => {
       qc.invalidateQueries({ queryKey: ["agents", "list"] });
       qc.setQueryData(["agents", "detail", agent._id], agent);
+      qc.invalidateQueries({ queryKey: ["agents", "detail", agent._id] });
     },
   });
 }
@@ -239,6 +240,7 @@ export function useSetAgentStatus() {
     onSuccess: (agent) => {
       qc.invalidateQueries({ queryKey: ["agents", "list"] });
       qc.setQueryData(["agents", "detail", agent._id], agent);
+      qc.invalidateQueries({ queryKey: ["agents", "detail", agent._id] });
     },
   });
 }
