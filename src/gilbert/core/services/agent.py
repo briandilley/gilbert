@@ -882,7 +882,9 @@ class AgentService(Service):
         await self._publish("agent.deleted", {"agent_id": agent_id})
         return True
 
-    async def set_agent_avatar(self, agent_id: str, filename: str) -> Agent:
+    async def set_agent_avatar(
+        self, agent_id: str, *, filename: str
+    ) -> Agent:
         """Mark *agent_id* as having an image avatar stored at *filename*.
 
         Routes update_agent so the standard ``agent.updated`` event
@@ -1112,7 +1114,7 @@ class AgentService(Service):
         if count:
             logger.info("Rehydrated %d unprocessed inbox signal(s)", count)
 
-    async def _load_agent_for_caller(
+    async def load_agent_for_caller(
         self,
         agent_id: str,
         *,
@@ -1741,7 +1743,7 @@ class AgentService(Service):
 
     async def _ws_get(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
-        a = await self._load_agent_for_caller(
+        a = await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1759,7 +1761,7 @@ class AgentService(Service):
 
     async def _ws_update(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1771,7 +1773,7 @@ class AgentService(Service):
 
     async def _ws_delete(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1785,7 +1787,7 @@ class AgentService(Service):
             status = AgentStatus(status_raw)
         except ValueError:
             raise ValueError(f"unknown status: {status_raw}") from None
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1797,7 +1799,7 @@ class AgentService(Service):
     async def _ws_run_now(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
         user_message = params.get("user_message")
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1810,7 +1812,7 @@ class AgentService(Service):
     async def _ws_runs_list(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
         limit = max(1, int(params.get("limit", 50)))
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1822,7 +1824,7 @@ class AgentService(Service):
     ) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
         include_completed = bool(params.get("include_completed", False))
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1838,7 +1840,7 @@ class AgentService(Service):
         content = str(params.get("content", "")).strip()
         if not content:
             raise ValueError("content is required")
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1867,7 +1869,7 @@ class AgentService(Service):
         if row is None:
             raise KeyError(commitment_id)
         # Authorize via the owning agent.
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             row["agent_id"], caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1878,7 +1880,7 @@ class AgentService(Service):
         self, conn: Any, params: dict[str, Any],
     ) -> dict[str, Any]:
         agent_id = str(params.get("agent_id", ""))
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             agent_id, caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )
@@ -1908,7 +1910,7 @@ class AgentService(Service):
         row = await self._storage.get(_AGENT_MEMORIES_COLLECTION, memory_id)
         if row is None:
             raise KeyError(memory_id)
-        await self._load_agent_for_caller(
+        await self.load_agent_for_caller(
             row["agent_id"], caller_user_id=self._caller_user_id(conn),
             admin=self._is_admin(conn),
         )

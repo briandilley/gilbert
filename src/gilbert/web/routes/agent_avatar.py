@@ -16,7 +16,7 @@ GET endpoint reconstructs the full disk path from
 ``agent_id + agent.avatar_value`` and streams the bytes back.
 
 Both endpoints require authentication and load the agent through
-``AgentService._load_agent_for_caller`` so a user can only upload to /
+``AgentProvider.load_agent_for_caller`` so a user can only upload to /
 download from agents they own (admins bypass the ownership check, same
 as the agents.* WS RPCs).
 """
@@ -34,7 +34,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from gilbert.config import DATA_DIR
-from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.agent import Agent, AgentProvider
+from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.web.auth import require_authenticated
 
 logger = logging.getLogger(__name__)
@@ -109,38 +110,51 @@ def _avatar_dir(agent_id: str) -> Path:
     return _AVATAR_ROOT / safe_id
 
 
-def _resolve_agent_service(request: Request) -> Any:
-    """Return the running ``AgentService`` (capability ``agent``).
+def _resolve_agent_service(request: Request) -> AgentProvider:
+    """Return the running agent service typed as ``AgentProvider``.
 
     Returns 503 when Gilbert isn't running or the capability isn't
-    registered, matching the error model used by ``chat_uploads``.
+    registered, matching the error model used by ``chat_uploads``. We
+    isinstance-check against the runtime-checkable protocol so the
+    route never depends on the concrete ``AgentService`` class.
     """
     gilbert = getattr(request.app.state, "gilbert", None)
     if gilbert is None:
         raise HTTPException(status_code=503, detail="Gilbert is not running")
     resolver = gilbert.service_manager
     agent_svc = resolver.get_by_capability("agent")
-    if agent_svc is None:
+    if not isinstance(agent_svc, AgentProvider):
         raise HTTPException(status_code=503, detail="Agent service unavailable")
     return agent_svc
 
 
-def _is_admin(user: UserContext) -> bool:
-    """True if *user* has the admin role (or root).
+def _is_admin(request: Request, user: UserContext) -> bool:
+    """True if *user* is an admin (effective level ``<= 0``).
 
-    The HTTP route can't reach ``conn.user_level`` the way the WS RPC
-    handlers can, so we approximate the same check via the role
-    membership. ``admin`` is the canonical admin role; ``root`` is the
-    bootstrap superuser. Either grants cross-owner access.
+    Routes the check through the ``AccessControlProvider`` capability
+    so the HTTP path agrees with the WS path. The WS handlers compare
+    ``conn.user_level <= 0`` where ``user_level`` was resolved via
+    ``AccessControlProvider.get_effective_level(user_ctx)``; we mirror
+    that exactly. Falls back to non-admin when the ACL service is
+    unavailable, matching the WS welcome path's safe default.
     """
-    return "admin" in user.roles or "root" in user.roles
+    gilbert = getattr(request.app.state, "gilbert", None)
+    if gilbert is None:
+        return False
+    acl_svc = gilbert.service_manager.get_by_capability("access_control")
+    if not isinstance(acl_svc, AccessControlProvider):
+        return False
+    try:
+        return acl_svc.get_effective_level(user) <= 0
+    except Exception:
+        return False
 
 
 async def _authorize_agent(
     request: Request,
     agent_id: str,
     user: UserContext,
-) -> tuple[Any, Any]:
+) -> tuple[AgentProvider, Agent]:
     """Look up the agent and enforce ownership.
 
     Returns ``(agent_service, agent)`` so the caller can act on either
@@ -152,10 +166,10 @@ async def _authorize_agent(
     """
     agent_svc = _resolve_agent_service(request)
     try:
-        agent = await agent_svc._load_agent_for_caller(
+        agent = await agent_svc.load_agent_for_caller(
             agent_id,
             caller_user_id=user.user_id,
-            admin=_is_admin(user),
+            admin=_is_admin(request, user),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Agent not found") from exc
@@ -285,7 +299,7 @@ async def upload_agent_avatar(
     # Persist via the service so ``agent.updated`` fires for the WS
     # subscribers — the route never hand-rolls an update_agent patch.
     try:
-        updated = await agent_svc.set_agent_avatar(agent_id, filename)
+        updated = await agent_svc.set_agent_avatar(agent_id, filename=filename)
     except Exception:
         # Roll back the on-disk file so we don't leave orphans behind.
         dest.unlink(missing_ok=True)

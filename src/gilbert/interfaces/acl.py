@@ -120,7 +120,7 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # private to the caller, and never touch shared state.
     "mcp.bridge.": 100,
     # Agent RPCs: any authenticated user can manage their own agents.
-    # Handlers enforce per-agent ownership via _load_agent_for_caller.
+    # Handlers enforce per-agent ownership via load_agent_for_caller.
     "agents.": 100,
     # MCP server (Gilbert-as-MCP): managing client registrations is
     # admin-only because creating a client grants an external

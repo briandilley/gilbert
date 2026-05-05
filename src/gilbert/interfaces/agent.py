@@ -205,3 +205,15 @@ class AgentProvider(Protocol):
         *,
         user_message: str | None = None,
     ) -> Run: ...
+
+    async def load_agent_for_caller(
+        self,
+        agent_id: str,
+        *,
+        caller_user_id: str,
+        admin: bool = False,
+    ) -> Agent: ...
+
+    async def set_agent_avatar(
+        self, agent_id: str, *, filename: str
+    ) -> Agent: ...

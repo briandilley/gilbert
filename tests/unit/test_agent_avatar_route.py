@@ -32,9 +32,6 @@ from gilbert.interfaces.agent import Agent, AgentStatus
 from gilbert.interfaces.auth import UserContext
 from gilbert.web.auth import require_authenticated
 from gilbert.web.routes.agent_avatar import (
-    _MAX_AVATAR_BYTES,
-)
-from gilbert.web.routes.agent_avatar import (
     router as agent_avatar_router,
 )
 
@@ -76,15 +73,17 @@ def _make_agent(agent_id: str, owner_user_id: str) -> Agent:
 class _FakeAgentService:
     """Stand-in for AgentService.
 
-    Implements only the surface the avatar route touches:
-    ``_load_agent_for_caller`` (auth gate) and ``set_agent_avatar``
-    (the persistence hook the route calls after writing bytes).
+    Satisfies the ``AgentProvider`` runtime-checkable protocol so the
+    route's ``isinstance(agent_svc, AgentProvider)`` gate passes. Only
+    the two methods the avatar route actually invokes are wired up;
+    the rest raise ``NotImplementedError`` to make accidental use
+    obvious.
     """
 
     def __init__(self, agents: dict[str, Agent]) -> None:
         self._agents = agents
 
-    async def _load_agent_for_caller(
+    async def load_agent_for_caller(
         self,
         agent_id: str,
         *,
@@ -101,12 +100,27 @@ class _FakeAgentService:
         return a
 
     async def set_agent_avatar(
-        self, agent_id: str, filename: str
+        self, agent_id: str, *, filename: str
     ) -> Agent:
         a = self._agents[agent_id]
         a.avatar_kind = "image"
         a.avatar_value = filename
         return a
+
+    # — Remaining ``AgentProvider`` surface — stubbed so the runtime
+    # protocol check accepts the fake. The avatar route never calls
+    # these.
+    async def create_agent(self, **kwargs: Any) -> Agent:
+        raise NotImplementedError
+
+    async def get_agent(self, agent_id: str) -> Agent | None:
+        raise NotImplementedError
+
+    async def list_agents(self, **kwargs: Any) -> list[Agent]:
+        raise NotImplementedError
+
+    async def run_agent_now(self, agent_id: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
 
 
 class _FakeServiceManager:
@@ -304,10 +318,21 @@ def test_upload_oversized_rejected(
     app: FastAPI,
     _isolate_avatar_root: Path,
     agents: dict[str, Agent],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _override_auth(app, _OWNER)
+    # Shrink the cap so we exercise the rejection path with a tiny
+    # payload (allocating 4 MiB+ in a unit test is wasteful and slow).
+    # ``_CHUNK_SIZE`` must stay <= the cap so the partial-read accounting
+    # in the route's chunk loop is still exercised the same way.
+    monkeypatch.setattr(
+        "gilbert.web.routes.agent_avatar._MAX_AVATAR_BYTES", 100
+    )
+    monkeypatch.setattr(
+        "gilbert.web.routes.agent_avatar._CHUNK_SIZE", 64
+    )
     client = TestClient(app)
-    payload = b"\x00" * (_MAX_AVATAR_BYTES + 1)
+    payload = b"\x00" * 101
     resp = client.post(
         "/api/agents/ag_owned/avatar",
         files={"file": ("huge.png", payload, "image/png")},
@@ -373,13 +398,12 @@ async def test_remove_avatar_dir_deletes_directory_tree(
     the whole subtree is gone.
     """
     fake_data_dir = tmp_path / "data"
-    monkeypatch.setattr(
-        "gilbert.core.services.agent.DATA_DIR",
-        fake_data_dir,
-        raising=False,
-    )
-    # The helper imports DATA_DIR locally so the monkeypatch above
-    # doesn't reach it; patch the module the helper imports from too.
+    # The helper imports ``DATA_DIR`` from ``gilbert.config`` at call
+    # time, so patching the source module is what actually takes
+    # effect. If the implementation later switches to a top-level
+    # import, this patch will need to also cover
+    # ``gilbert.core.services.agent.DATA_DIR`` — the test will fail
+    # loudly when that happens.
     monkeypatch.setattr("gilbert.config.DATA_DIR", fake_data_dir)
 
     svc = started_agent_service

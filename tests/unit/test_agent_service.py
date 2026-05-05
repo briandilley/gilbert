@@ -5,7 +5,7 @@ Covers:
 - AgentService satisfies the AgentProvider runtime-checkable protocol.
 - CRUD: create / get / list / update / delete.
 - Uniqueness enforcement (same-owner, same-name).
-- _load_agent_for_caller ownership check.
+- load_agent_for_caller ownership check.
 """
 
 from __future__ import annotations
@@ -122,18 +122,18 @@ async def test_delete_agent_removes_row(started_agent_service: Any) -> None:
     assert await svc.get_agent(a.id) is None
 
 
-async def test_load_agent_for_caller_owner_match(started_agent_service: Any) -> None:
+async def testload_agent_for_caller_owner_match(started_agent_service: Any) -> None:
     svc = started_agent_service
     a = await svc.create_agent(owner_user_id="usr_1", name="x")
-    found = await svc._load_agent_for_caller(a.id, caller_user_id="usr_1")
+    found = await svc.load_agent_for_caller(a.id, caller_user_id="usr_1")
     assert found.id == a.id
 
 
-async def test_load_agent_for_caller_owner_mismatch(started_agent_service: Any) -> None:
+async def testload_agent_for_caller_owner_mismatch(started_agent_service: Any) -> None:
     svc = started_agent_service
     a = await svc.create_agent(owner_user_id="usr_1", name="x")
     with pytest.raises(PermissionError):
-        await svc._load_agent_for_caller(a.id, caller_user_id="usr_2")
+        await svc.load_agent_for_caller(a.id, caller_user_id="usr_2")
 
 
 # ── Task 6 tests — WS RPC handlers ───────────────────────────────────
