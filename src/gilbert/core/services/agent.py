@@ -34,7 +34,7 @@ from gilbert.interfaces.agent import (
     Run,
     RunStatus,
 )
-from gilbert.interfaces.ai import AIProvider
+from gilbert.interfaces.ai import AIProvider, AIToolDiscoveryProvider
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
@@ -490,6 +490,10 @@ class AgentService(Service):
         # AIProvider capability (bound in start())
         self._ai: AIProvider | None = None
 
+        # AIToolDiscoveryProvider capability (bound in start())
+        # — used by agents.tools.list_available to enumerate tools.
+        self._tool_discovery: AIToolDiscoveryProvider | None = None
+
         # ServiceResolver reference for late-bound capability lookups
         self._resolver: ServiceResolver | None = None
 
@@ -662,6 +666,16 @@ class AgentService(Service):
                 "ai_chat capability does not implement AIProvider"
             )
         self._ai = ai_svc
+
+        # The same service must also expose AIToolDiscoveryProvider so the
+        # agents.tools.list_available handler can enumerate tools without
+        # importing the concrete AI service. AIService satisfies both, so
+        # this is a hard requirement.
+        if not isinstance(ai_svc, AIToolDiscoveryProvider):
+            raise RuntimeError(
+                "ai_chat capability does not implement AIToolDiscoveryProvider"
+            )
+        self._tool_discovery = ai_svc
 
         # Bind scheduler capability
         scheduler_svc = resolver.require_capability("scheduler")
@@ -1648,6 +1662,8 @@ class AgentService(Service):
             "agents.commitments.complete": self._ws_commitments_complete,
             "agents.memories.list": self._ws_memories_list,
             "agents.memories.set_state": self._ws_memories_set_state,
+            "agents.tools.list_available": self._ws_tools_list_available,
+            "agents.tools.list_groups": self._ws_tools_list_groups,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -1855,6 +1871,48 @@ class AgentService(Service):
             state=MemoryState(state_raw),
         )
         return {"memory": _memory_to_dict(updated)}
+
+    async def _ws_tools_list_available(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Enumerate tools the caller could grant to an agent.
+
+        Delegates to the bound AIToolDiscoveryProvider — same path used
+        by the MCP server tools-preview endpoint. Flattens the discovery
+        result into a list of ``{name, description, required_role,
+        provider}`` objects sorted by name.
+        """
+        if self._tool_discovery is None:
+            raise RuntimeError("not started")
+        # Ensure caller is authenticated; the tools list is non-sensitive
+        # but we keep the same gate as every other handler.
+        self._caller_user_id(conn)
+        user_ctx = getattr(conn, "user_ctx", None)
+        discovered = self._tool_discovery.discover_tools(user_ctx=user_ctx)
+        tools: list[dict[str, Any]] = []
+        for name, entry in discovered.items():
+            # discover_tools returns dict[str, tuple[ToolProvider, ToolDefinition]].
+            if isinstance(entry, tuple) and len(entry) == 2:
+                provider, tool_def = entry
+                provider_name = getattr(provider, "tool_provider_name", "")
+            else:
+                tool_def = entry
+                provider_name = ""
+            tools.append({
+                "name": getattr(tool_def, "name", name),
+                "description": getattr(tool_def, "description", ""),
+                "required_role": getattr(tool_def, "required_role", "user"),
+                "provider": provider_name,
+            })
+        tools.sort(key=lambda t: t["name"])
+        return {"tools": tools}
+
+    async def _ws_tools_list_groups(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the configured ``tool_groups`` map for the SPA picker."""
+        self._caller_user_id(conn)
+        return {"groups": dict(self._defaults.get("tool_groups", {}))}
 
     # ── Event publishing helper ─────────────────────────────────────
 

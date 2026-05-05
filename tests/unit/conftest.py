@@ -38,7 +38,7 @@ class _FakeEventBusProvider:
 
 
 class _FakeAIProvider:
-    """Satisfies AIProvider (has .chat).
+    """Satisfies AIProvider (has .chat) and AIToolDiscoveryProvider.
 
     Returns a minimal ChatTurnResult so run_agent_now tests succeed without
     a real AI backend. The turn_usage keys mirror ChatTurnResult's dict shape:
@@ -46,6 +46,9 @@ class _FakeAIProvider:
 
     Records the kwargs from the most recent chat() call in last_call_kwargs
     so tests can assert on system_prompt and other arguments.
+
+    ``discover_tools`` returns an empty dict by default; tests that need a
+    populated tool catalog can monkeypatch ``svc._tool_discovery`` directly.
     """
 
     def __init__(self) -> None:
@@ -72,6 +75,11 @@ class _FakeAIProvider:
                 "rounds": 1,
             },
         )
+
+    def discover_tools(
+        self, *, user_ctx: Any = None, profile_name: str | None = None,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        return {}
 
 
 class _FakeSchedulerProvider:
