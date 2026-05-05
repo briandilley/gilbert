@@ -29,7 +29,11 @@ from gilbert.interfaces.agent import (
     Agent,
     AgentMemory,
     AgentStatus,
+    AssignmentRole,
     Commitment,
+    Goal,
+    GoalAssignment,
+    GoalStatus,
     InboxSignal,
     MemoryState,
     Run,
@@ -85,6 +89,16 @@ _AGENT_TRIGGERS_COLLECTION = "agent_triggers"
 _AGENT_COMMITMENTS_COLLECTION = "agent_commitments"
 _AGENT_INBOX_SIGNALS_COLLECTION = "agent_inbox_signals"
 _AGENT_RUNS_COLLECTION = "agent_runs"
+_GOALS_COLLECTION = "goals"
+_GOAL_ASSIGNMENTS_COLLECTION = "goal_assignments"
+
+# AI conversation rows live here. The same constant is declared on
+# AIService (``core/services/ai.py`` _COLLECTION). We re-declare instead
+# of importing because ``core/services/`` modules must not depend on
+# each other — the agent service writes the war-room conversation row
+# directly rather than going through AIService.
+_AI_CONVERSATIONS_COLLECTION = "ai_conversations"
+
 _AI_CALL_NAME = "agent.run"
 
 _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
@@ -583,6 +597,70 @@ def _commitment_to_dict(c: Commitment) -> dict[str, Any]:
         "completed_at": c.completed_at.isoformat() if c.completed_at else None,
         "completion_note": c.completion_note,
     }
+
+
+def _goal_to_dict(g: Goal) -> dict[str, Any]:
+    return {
+        "_id": g.id,
+        "owner_user_id": g.owner_user_id,
+        "name": g.name,
+        "description": g.description,
+        "status": g.status.value,
+        "war_room_conversation_id": g.war_room_conversation_id,
+        "cost_cap_usd": g.cost_cap_usd,
+        "lifetime_cost_usd": g.lifetime_cost_usd,
+        "created_at": g.created_at.isoformat(),
+        "updated_at": g.updated_at.isoformat(),
+        "completed_at": g.completed_at.isoformat() if g.completed_at else None,
+    }
+
+
+def _goal_from_dict(row: dict[str, Any]) -> Goal:
+    return Goal(
+        id=row["_id"],
+        owner_user_id=row["owner_user_id"],
+        name=row.get("name", ""),
+        description=row.get("description", ""),
+        status=GoalStatus(row.get("status", "new")),
+        war_room_conversation_id=row.get("war_room_conversation_id", ""),
+        cost_cap_usd=row.get("cost_cap_usd"),
+        lifetime_cost_usd=float(row.get("lifetime_cost_usd", 0.0)),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        completed_at=(
+            datetime.fromisoformat(row["completed_at"])
+            if row.get("completed_at") else None
+        ),
+    )
+
+
+def _goal_assignment_to_dict(ga: GoalAssignment) -> dict[str, Any]:
+    return {
+        "_id": ga.id,
+        "goal_id": ga.goal_id,
+        "agent_id": ga.agent_id,
+        "role": ga.role.value,
+        "assigned_at": ga.assigned_at.isoformat(),
+        "assigned_by": ga.assigned_by,
+        "removed_at": ga.removed_at.isoformat() if ga.removed_at else None,
+        "handoff_note": ga.handoff_note,
+    }
+
+
+def _goal_assignment_from_dict(row: dict[str, Any]) -> GoalAssignment:
+    return GoalAssignment(
+        id=row["_id"],
+        goal_id=row["goal_id"],
+        agent_id=row["agent_id"],
+        role=AssignmentRole(row.get("role", "collaborator")),
+        assigned_at=datetime.fromisoformat(row["assigned_at"]),
+        assigned_by=row.get("assigned_by", ""),
+        removed_at=(
+            datetime.fromisoformat(row["removed_at"])
+            if row.get("removed_at") else None
+        ),
+        handoff_note=row.get("handoff_note", ""),
+    )
 
 
 class AgentService(Service):
@@ -1774,6 +1852,415 @@ class AgentService(Service):
         )
         rows.sort(key=lambda r: r.get("started_at", ""), reverse=True)
         return [_run_from_dict(r) for r in rows[:limit]]
+
+    # ── Goals (Phase 4) ──────────────────────────────────────────────
+
+    async def create_goal(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        description: str = "",
+        cost_cap_usd: float | None = None,
+        assign_to: list[tuple[str, AssignmentRole]] | None = None,
+        assigned_by: str = "user:?",
+    ) -> Goal:
+        """Create a goal + war-room conversation + initial assignments.
+
+        ``assign_to`` is a list of ``(agent_name, role)`` tuples. Agent
+        names are resolved owner-scoped: only same-owner agents may be
+        assigned. If ``assign_to`` is non-empty and none of the entries
+        is DRIVER, the first entry is promoted to DRIVER.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+
+        goal_id = f"goal_{uuid.uuid4().hex[:12]}"
+        now = _now()
+
+        # War-room conversation row — written directly to the
+        # ai_conversations collection so AIService can pick it up via
+        # its existing chat history machinery without any additional
+        # plumbing. See _AI_CONVERSATIONS_COLLECTION above for the
+        # rationale on the duplicate constant.
+        conv_id = uuid.uuid4().hex
+        conv_row = {
+            "_id": conv_id,
+            "title": name,
+            "user_id": owner_user_id,
+            "messages": [],
+            "metadata": {"goal_id": goal_id, "kind": "war_room"},
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        await self._storage.put(_AI_CONVERSATIONS_COLLECTION, conv_id, conv_row)
+
+        g = Goal(
+            id=goal_id,
+            owner_user_id=owner_user_id,
+            name=name,
+            description=description,
+            status=GoalStatus.NEW,
+            war_room_conversation_id=conv_id,
+            cost_cap_usd=cost_cap_usd,
+            lifetime_cost_usd=0.0,
+            created_at=now,
+            updated_at=now,
+            completed_at=None,
+        )
+        await self._storage.put(_GOALS_COLLECTION, g.id, _goal_to_dict(g))
+        await self._publish(
+            "goal.created",
+            {"goal_id": g.id, "owner_user_id": owner_user_id, "name": name},
+        )
+
+        # Materialize initial assignments. If a DRIVER was specified,
+        # honor the user's roles verbatim; else, promote the first
+        # entry to DRIVER.
+        if assign_to:
+            roles = [r for (_, r) in assign_to]
+            promote_first = AssignmentRole.DRIVER not in roles
+            for idx, (agent_name, role) in enumerate(assign_to):
+                # Look up the agent owner-scoped — same logic as
+                # _load_peer_by_name but without a caller agent.
+                rows = await self._storage.query(
+                    Query(
+                        collection=_AGENTS_COLLECTION,
+                        filters=[
+                            Filter(field="owner_user_id", op=FilterOp.EQ, value=owner_user_id),
+                            Filter(field="name", op=FilterOp.EQ, value=agent_name),
+                        ],
+                    )
+                )
+                if not rows:
+                    raise ValueError(f"no agent named {agent_name!r} for owner {owner_user_id}")
+                agent_row = rows[0]
+                final_role = (
+                    AssignmentRole.DRIVER
+                    if (idx == 0 and promote_first) else role
+                )
+                await self.assign_agent_to_goal(
+                    goal_id=g.id,
+                    agent_id=agent_row["_id"],
+                    role=final_role,
+                    assigned_by=assigned_by,
+                )
+
+        return g
+
+    async def get_goal(self, goal_id: str) -> Goal | None:
+        """Fetch a Goal by ID. Returns None if not found."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_GOALS_COLLECTION, goal_id)
+        if row is None:
+            return None
+        return _goal_from_dict(row)
+
+    async def list_goals(
+        self,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[Goal]:
+        """List goals, optionally filtered by owner."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        filters = (
+            []
+            if owner_user_id is None
+            else [Filter(field="owner_user_id", op=FilterOp.EQ, value=owner_user_id)]
+        )
+        rows = await self._storage.query(
+            Query(collection=_GOALS_COLLECTION, filters=filters)
+        )
+        return [_goal_from_dict(r) for r in rows]
+
+    async def update_goal_status(
+        self,
+        goal_id: str,
+        status: GoalStatus,
+    ) -> Goal:
+        """Set the goal's status, stamp completed_at on COMPLETE, publish event."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_GOALS_COLLECTION, goal_id)
+        if row is None:
+            raise KeyError(goal_id)
+        row["status"] = status.value
+        now = _now()
+        row["updated_at"] = now.isoformat()
+        if status is GoalStatus.COMPLETE and not row.get("completed_at"):
+            row["completed_at"] = now.isoformat()
+        await self._storage.put(_GOALS_COLLECTION, goal_id, row)
+        g = _goal_from_dict(row)
+        await self._publish(
+            "goal.status.changed",
+            {"goal_id": g.id, "status": g.status.value},
+        )
+        await self._publish("goal.updated", {"goal_id": g.id})
+        return g
+
+    async def list_assignments(
+        self,
+        *,
+        goal_id: str | None = None,
+        agent_id: str | None = None,
+        active_only: bool = True,
+    ) -> list[GoalAssignment]:
+        """List assignments, optionally filtered by goal_id, agent_id, or
+        active status. Active means ``removed_at IS NULL``."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        filters = []
+        if goal_id is not None:
+            filters.append(Filter(field="goal_id", op=FilterOp.EQ, value=goal_id))
+        if agent_id is not None:
+            filters.append(Filter(field="agent_id", op=FilterOp.EQ, value=agent_id))
+        rows = await self._storage.query(
+            Query(collection=_GOAL_ASSIGNMENTS_COLLECTION, filters=filters)
+        )
+        out: list[GoalAssignment] = []
+        for r in rows:
+            if active_only and r.get("removed_at"):
+                continue
+            out.append(_goal_assignment_from_dict(r))
+        out.sort(key=lambda a: a.assigned_at)
+        return out
+
+    async def assign_agent_to_goal(
+        self,
+        *,
+        goal_id: str,
+        agent_id: str,
+        role: AssignmentRole,
+        assigned_by: str,
+        handoff_note: str = "",
+    ) -> GoalAssignment:
+        """Assign an agent to a goal at the given role.
+
+        Idempotent: if the agent already has an active assignment on the
+        goal at the same role, returns the existing row. If active at a
+        different role, the existing row's role is updated in place.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+
+        existing = await self._storage.query(
+            Query(
+                collection=_GOAL_ASSIGNMENTS_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=goal_id),
+                    Filter(field="agent_id", op=FilterOp.EQ, value=agent_id),
+                ],
+            )
+        )
+        active_row = next((r for r in existing if not r.get("removed_at")), None)
+        if active_row is not None:
+            if active_row.get("role") == role.value:
+                return _goal_assignment_from_dict(active_row)
+            # Role change: update in place rather than insert a new row.
+            active_row["role"] = role.value
+            if handoff_note:
+                active_row["handoff_note"] = handoff_note
+            await self._storage.put(
+                _GOAL_ASSIGNMENTS_COLLECTION, active_row["_id"], active_row,
+            )
+            await self._publish(
+                "goal.assignment.changed",
+                {"goal_id": goal_id, "agent_id": agent_id, "role": role.value},
+            )
+            return _goal_assignment_from_dict(active_row)
+
+        ga = GoalAssignment(
+            id=f"ga_{uuid.uuid4().hex[:12]}",
+            goal_id=goal_id,
+            agent_id=agent_id,
+            role=role,
+            assigned_at=_now(),
+            assigned_by=assigned_by,
+            removed_at=None,
+            handoff_note=handoff_note,
+        )
+        await self._storage.put(
+            _GOAL_ASSIGNMENTS_COLLECTION, ga.id, _goal_assignment_to_dict(ga),
+        )
+        # Signal the assigned agent so it's aware of the new assignment
+        # at the next safe moment. Best-effort: failure to signal is
+        # logged but doesn't roll back the assignment.
+        try:
+            goal = await self.get_goal(goal_id)
+            goal_name = goal.name if goal else goal_id
+            await self._signal_agent(
+                agent_id=agent_id,
+                signal_kind="goal_assigned",
+                body=f"You have been assigned to goal '{goal_name}' as {role.value}.",
+                sender_kind="system",
+                sender_id="system",
+                sender_name="system",
+                metadata={"goal_id": goal_id, "role": role.value},
+            )
+        except Exception:
+            logger.exception("failed to signal agent %s for goal %s", agent_id, goal_id)
+        await self._publish(
+            "goal.assignment.changed",
+            {"goal_id": goal_id, "agent_id": agent_id, "role": role.value},
+        )
+        return ga
+
+    async def unassign_agent_from_goal(
+        self,
+        *,
+        goal_id: str,
+        agent_id: str,
+    ) -> GoalAssignment:
+        """Mark the active assignment as removed (preserves the row)."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        rows = await self._storage.query(
+            Query(
+                collection=_GOAL_ASSIGNMENTS_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=goal_id),
+                    Filter(field="agent_id", op=FilterOp.EQ, value=agent_id),
+                ],
+            )
+        )
+        active = next((r for r in rows if not r.get("removed_at")), None)
+        if active is None:
+            raise KeyError(f"no active assignment for agent {agent_id} on goal {goal_id}")
+        active["removed_at"] = _now().isoformat()
+        await self._storage.put(
+            _GOAL_ASSIGNMENTS_COLLECTION, active["_id"], active,
+        )
+        await self._publish(
+            "goal.assignment.changed",
+            {"goal_id": goal_id, "agent_id": agent_id, "removed": True},
+        )
+        return _goal_assignment_from_dict(active)
+
+    async def handoff_goal(
+        self,
+        *,
+        goal_id: str,
+        from_agent_id: str,
+        to_agent_id: str,
+        new_role_for_from: AssignmentRole = AssignmentRole.COLLABORATOR,
+        note: str = "",
+    ) -> tuple[GoalAssignment, GoalAssignment]:
+        """Hand off DRIVER from one agent to another.
+
+        Asserts ``from_agent_id`` is currently DRIVER on ``goal_id``.
+        Demotes the from-agent to ``new_role_for_from`` (defaults
+        COLLABORATOR), promotes the to-agent to DRIVER. Both rows get
+        the ``handoff_note`` stamped. Returns ``(from_assignment,
+        to_assignment)``.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+
+        # Find the current DRIVER row for from_agent.
+        from_rows = await self._storage.query(
+            Query(
+                collection=_GOAL_ASSIGNMENTS_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=goal_id),
+                    Filter(field="agent_id", op=FilterOp.EQ, value=from_agent_id),
+                ],
+            )
+        )
+        from_active = next((r for r in from_rows if not r.get("removed_at")), None)
+        if from_active is None:
+            raise KeyError(f"agent {from_agent_id} is not assigned to goal {goal_id}")
+        if from_active.get("role") != AssignmentRole.DRIVER.value:
+            raise ValueError(
+                f"agent {from_agent_id} is not DRIVER on goal {goal_id}"
+            )
+
+        # Demote from-agent.
+        from_active["role"] = new_role_for_from.value
+        from_active["handoff_note"] = note
+        await self._storage.put(
+            _GOAL_ASSIGNMENTS_COLLECTION, from_active["_id"], from_active,
+        )
+
+        # Promote (or insert) to-agent as DRIVER.
+        to_rows = await self._storage.query(
+            Query(
+                collection=_GOAL_ASSIGNMENTS_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=goal_id),
+                    Filter(field="agent_id", op=FilterOp.EQ, value=to_agent_id),
+                ],
+            )
+        )
+        to_active = next((r for r in to_rows if not r.get("removed_at")), None)
+        if to_active is None:
+            ga = GoalAssignment(
+                id=f"ga_{uuid.uuid4().hex[:12]}",
+                goal_id=goal_id,
+                agent_id=to_agent_id,
+                role=AssignmentRole.DRIVER,
+                assigned_at=_now(),
+                assigned_by=f"agent:{from_agent_id}",
+                removed_at=None,
+                handoff_note=note,
+            )
+            await self._storage.put(
+                _GOAL_ASSIGNMENTS_COLLECTION, ga.id, _goal_assignment_to_dict(ga),
+            )
+            to_assignment_row = _goal_assignment_to_dict(ga)
+        else:
+            to_active["role"] = AssignmentRole.DRIVER.value
+            to_active["handoff_note"] = note
+            await self._storage.put(
+                _GOAL_ASSIGNMENTS_COLLECTION, to_active["_id"], to_active,
+            )
+            to_assignment_row = to_active
+
+        await self._publish(
+            "goal.assignment.changed",
+            {
+                "goal_id": goal_id,
+                "from_agent_id": from_agent_id,
+                "to_agent_id": to_agent_id,
+                "kind": "handoff",
+            },
+        )
+        return (
+            _goal_assignment_from_dict(from_active),
+            _goal_assignment_from_dict(to_assignment_row),
+        )
+
+    async def _recent_war_room_posts(
+        self, goal_id: str, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return the last *limit* user-role posts from the goal's
+        war-room conv, oldest-to-newest. Each entry has
+        ``{author_name, body, ts}``."""
+        if self._storage is None:
+            return []
+        goal = await self.get_goal(goal_id)
+        if goal is None or not goal.war_room_conversation_id:
+            return []
+        conv_row = await self._storage.get(
+            _AI_CONVERSATIONS_COLLECTION, goal.war_room_conversation_id,
+        )
+        if conv_row is None:
+            return []
+        msgs = conv_row.get("messages", []) or []
+        out: list[dict[str, Any]] = []
+        for m in msgs:
+            if m.get("role") != "user":
+                continue
+            sender = m.get("metadata", {}).get("sender", {}) or {}
+            out.append({
+                "author_id": sender.get("id", ""),
+                "author_name": sender.get("name", ""),
+                "author_kind": sender.get("kind", ""),
+                "body": m.get("content", ""),
+                "ts": m.get("ts", ""),
+            })
+        return out[-limit:]
 
     # ── ToolProvider (Task 14) ───────────────────────────────────────
 

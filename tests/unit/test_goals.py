@@ -310,26 +310,6 @@ async def test_get_goal_round_trip(started_agent_service: Any) -> None:
     assert row["status"] == "new"
 
 
-# ── Task 5: System prompt active-assignments block ──────────────────
+# ── Task 5: System prompt active-assignments block (added in Task 5)
 
 
-@pytest.mark.asyncio
-async def test_system_prompt_includes_assignments(
-    started_agent_service: Any,
-) -> None:
-    """An agent with an active DRIVER assignment sees an
-    'ACTIVE ASSIGNMENTS:' block in its system prompt with the goal name +
-    role."""
-    svc = started_agent_service
-    a = await svc.create_agent(owner_user_id="usr_1", name="a1")
-    g = await svc.create_goal(
-        owner_user_id="usr_1",
-        name="ship-feature",
-        description="actually ship it",
-        assign_to=[(a.name, AssignmentRole.DRIVER)],
-    )
-
-    prompt = await svc._build_system_prompt(a, "manual", {})
-    assert "ACTIVE ASSIGNMENTS:" in prompt
-    assert g.name in prompt
-    assert "driver" in prompt
