@@ -40,7 +40,7 @@ from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, Query, StorageBackend, StorageProvider
-from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.tools import ToolDefinition, ToolParameter, ToolParameterType
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,154 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     # Phase 2 will add agent_list, agent_send_message, agent_delegate.
     # Phase 4 will add goal_post.
 })
+
+
+# ── ToolDefinitions (Task 14) ────────────────────────────────────────
+
+_TOOL_COMPLETE_RUN = ToolDefinition(
+    name="complete_run",
+    description=(
+        "Flag the current agent run as having met its success criteria. "
+        "Use this when you've completed the work you were triggered for "
+        "and have nothing else to do this turn. Reason is logged onto the "
+        "Run entity."
+    ),
+    parameters=[
+        ToolParameter(
+            name="reason",
+            type=ToolParameterType.STRING,
+            description="One-line success reason logged onto the Run.",
+            required=True,
+        ),
+    ],
+    slash_command="complete_run",
+    slash_help="Mark the current run as successfully complete.",
+)
+
+_TOOL_COMMITMENT_CREATE = ToolDefinition(
+    name="commitment_create",
+    description=(
+        "Create a follow-up commitment for yourself. Surfaces in the "
+        "next heartbeat whose schedule is at-or-after due_at."
+    ),
+    parameters=[
+        ToolParameter(
+            name="content",
+            type=ToolParameterType.STRING,
+            description="What to follow up on",
+            required=True,
+        ),
+        ToolParameter(
+            name="due_in_seconds",
+            type=ToolParameterType.NUMBER,
+            description="Surface at-or-after this many seconds from now.",
+            required=False,
+        ),
+        ToolParameter(
+            name="due_at",
+            type=ToolParameterType.STRING,
+            description="ISO-8601 absolute time alternative to due_in_seconds.",
+            required=False,
+        ),
+    ],
+)
+
+_TOOL_COMMITMENT_COMPLETE = ToolDefinition(
+    name="commitment_complete",
+    description="Mark a previously-created commitment as complete.",
+    parameters=[
+        ToolParameter(
+            name="commitment_id",
+            type=ToolParameterType.STRING,
+            description="The commitment id.",
+            required=True,
+        ),
+        ToolParameter(
+            name="note",
+            type=ToolParameterType.STRING,
+            description="Optional completion note.",
+            required=False,
+        ),
+    ],
+)
+
+_TOOL_COMMITMENT_LIST = ToolDefinition(
+    name="commitment_list",
+    description="List your commitments. By default only unfinished ones.",
+    parameters=[
+        ToolParameter(
+            name="include_completed",
+            type=ToolParameterType.BOOLEAN,
+            description="Include already-completed commitments.",
+            required=False,
+        ),
+    ],
+)
+
+_TOOL_AGENT_MEMORY_SAVE = ToolDefinition(
+    name="agent_memory_save",
+    description=(
+        "Save a learned fact to your own memory. SHORT_TERM by default; "
+        "use kind='preference' or kind='decision' or kind='fact' as "
+        "appropriate. Tags are free-form."
+    ),
+    parameters=[
+        ToolParameter(
+            name="content",
+            type=ToolParameterType.STRING,
+            description="The memory text.",
+            required=True,
+        ),
+        ToolParameter(
+            name="kind",
+            type=ToolParameterType.STRING,
+            description="'fact' | 'preference' | 'decision' | 'daily' | 'dream'.",
+            required=False,
+        ),
+        ToolParameter(
+            name="tags",
+            type=ToolParameterType.ARRAY,
+            description="Free-form tags.",
+            required=False,
+        ),
+    ],
+)
+
+_TOOL_AGENT_MEMORY_SEARCH = ToolDefinition(
+    name="agent_memory_search",
+    description="Search your own memories by substring match. Recency-ordered.",
+    parameters=[
+        ToolParameter(
+            name="query",
+            type=ToolParameterType.STRING,
+            description="Substring to match. Empty = recent.",
+            required=False,
+        ),
+        ToolParameter(
+            name="limit",
+            type=ToolParameterType.NUMBER,
+            description="Max results (default 20).",
+            required=False,
+        ),
+    ],
+)
+
+_TOOL_AGENT_MEMORY_PROMOTE = ToolDefinition(
+    name="agent_memory_review_and_promote",
+    description=(
+        "Review recent SHORT_TERM memories and promote durable ones to "
+        "LONG_TERM with a score. Pass an array of {memory_id, score, "
+        "decision} triplets (decision='promote'|'demote'|'keep')."
+    ),
+    parameters=[
+        ToolParameter(
+            name="reviews",
+            type=ToolParameterType.ARRAY,
+            description="List of {memory_id, score, decision}.",
+            required=True,
+        ),
+    ],
+)
 
 
 # ── Module-level helpers ─────────────────────────────────────────────
@@ -1285,6 +1433,144 @@ class AgentService(Service):
         )
         rows.sort(key=lambda r: r.get("started_at", ""), reverse=True)
         return [_run_from_dict(r) for r in rows[:limit]]
+
+    # ── ToolProvider (Task 14) ───────────────────────────────────────
+
+    def get_tools(self, user_ctx: Any = None) -> list[ToolDefinition]:
+        """Return the 7 core agent tool definitions."""
+        return [
+            _TOOL_COMPLETE_RUN,
+            _TOOL_COMMITMENT_CREATE,
+            _TOOL_COMMITMENT_COMPLETE,
+            _TOOL_COMMITMENT_LIST,
+            _TOOL_AGENT_MEMORY_SAVE,
+            _TOOL_AGENT_MEMORY_SEARCH,
+            _TOOL_AGENT_MEMORY_PROMOTE,
+        ]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Dispatch a tool call by name. Raises KeyError for unknown tools."""
+        if name == "complete_run":
+            return await self._exec_complete_run(arguments)
+        if name == "commitment_create":
+            return await self._exec_commitment_create(arguments)
+        if name == "commitment_complete":
+            return await self._exec_commitment_complete(arguments)
+        if name == "commitment_list":
+            return await self._exec_commitment_list(arguments)
+        if name == "agent_memory_save":
+            return await self._exec_memory_save(arguments)
+        if name == "agent_memory_search":
+            return await self._exec_memory_search(arguments)
+        if name == "agent_memory_review_and_promote":
+            return await self._exec_memory_promote(arguments)
+        raise KeyError(f"unknown tool: {name}")
+
+    async def _exec_complete_run(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        reason = str(args.get("reason", "")).strip() or "(no reason given)"
+        if not agent_id:
+            return "error: complete_run requires _agent_id (injected by runtime)"
+        rows = await self._storage.query(  # type: ignore[union-attr]
+            Query(
+                collection=_AGENT_RUNS_COLLECTION,
+                filters=[
+                    Filter(field="agent_id", op=FilterOp.EQ, value=agent_id),
+                    Filter(field="status", op=FilterOp.EQ, value="running"),
+                ],
+            )
+        )
+        if not rows:
+            return f"no active run for agent {agent_id}"
+        row = sorted(rows, key=lambda r: r.get("started_at", ""), reverse=True)[0]
+        row["status"] = RunStatus.COMPLETED.value
+        row["ended_at"] = _now().isoformat()
+        row["final_message_text"] = reason
+        await self._storage.put(_AGENT_RUNS_COLLECTION, row["_id"], row)  # type: ignore[union-attr]
+        return f"run {row['_id']} marked complete: {reason}"
+
+    async def _exec_commitment_create(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        content = str(args.get("content", "")).strip()
+        if not agent_id or not content:
+            return "error: commitment_create requires _agent_id and content"
+        if args.get("due_at"):
+            due_at = datetime.fromisoformat(str(args["due_at"]))
+        else:
+            from datetime import timedelta
+            seconds = float(args.get("due_in_seconds", 1800))
+            due_at = _now() + timedelta(seconds=seconds)
+        c = await self.create_commitment(agent_id=agent_id, content=content, due_at=due_at)
+        return f"commitment {c.id} created, due {c.due_at.isoformat()}"
+
+    async def _exec_commitment_complete(self, args: dict[str, Any]) -> str:
+        cid = str(args.get("commitment_id", ""))
+        if not cid:
+            return "error: commitment_complete requires commitment_id"
+        c = await self.complete_commitment(cid, note=str(args.get("note", "")))
+        return f"commitment {c.id} completed"
+
+    async def _exec_commitment_list(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        if not agent_id:
+            return "error: commitment_list requires _agent_id"
+        include = bool(args.get("include_completed", False))
+        cs = await self.list_commitments(agent_id=agent_id, include_completed=include)
+        if not cs:
+            return "(no commitments)"
+        lines = [
+            f"- [{c.id}] {c.content} — due {c.due_at.isoformat()}"
+            + (f" (completed: {c.completion_note})" if c.completed_at else "")
+            for c in cs
+        ]
+        return "\n".join(lines)
+
+    async def _exec_memory_save(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        content = str(args.get("content", "")).strip()
+        if not agent_id or not content:
+            return "error: agent_memory_save requires _agent_id and content"
+        kind = str(args.get("kind", "fact"))
+        tags_raw = args.get("tags") or []
+        tags = frozenset(str(t) for t in tags_raw if str(t).strip())
+        m = await self.save_memory(agent_id=agent_id, content=content, kind=kind, tags=tags)
+        return f"memory {m.id} saved (state={m.state.value}, kind={m.kind})"
+
+    async def _exec_memory_search(self, args: dict[str, Any]) -> str:
+        agent_id = str(args.get("_agent_id", ""))
+        if not agent_id:
+            return "error: agent_memory_search requires _agent_id"
+        query = str(args.get("query", "")).strip()
+        limit = int(args.get("limit", 20))
+        out = await self.search_memory(agent_id=agent_id, query=query, limit=limit)
+        if not out:
+            return "(no matches)"
+        return "\n".join(f"- [{m.id}] ({m.state.value}, {m.kind}) {m.content}" for m in out)
+
+    async def _exec_memory_promote(self, args: dict[str, Any]) -> str:
+        reviews = args.get("reviews") or []
+        if not isinstance(reviews, list):
+            return "error: reviews must be an array"
+        applied = 0
+        for r in reviews:
+            if not isinstance(r, dict):
+                continue
+            mid = str(r.get("memory_id", ""))
+            decision = str(r.get("decision", ""))
+            if not mid or decision not in {"promote", "demote", "keep"}:
+                continue
+            if decision == "promote":
+                await self.promote_memory(memory_id=mid, score=float(r.get("score", 0.5)))
+                applied += 1
+            elif decision == "demote":
+                await self.promote_memory(
+                    memory_id=mid,
+                    score=float(r.get("score", 0.0)),
+                    state=MemoryState.SHORT_TERM,
+                )
+                applied += 1
+            # 'keep' is a no-op
+        return f"reviewed {len(reviews)} memories, applied {applied}"
 
     # ── WsHandlerProvider ────────────────────────────────────────────
 

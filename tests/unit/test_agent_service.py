@@ -264,3 +264,84 @@ async def test_agents_get_defaults_rpc_returns_current(started_agent_service: An
     h = svc.get_ws_handlers()
     res = await h["agents.get_defaults"](_FakeConn("usr_1"), {})
     assert res["defaults"]["default_persona"] == "X"
+
+
+# ── Task 14 tests — ToolProvider ─────────────────────────────────────
+
+
+async def test_get_tools_returns_core_set(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    tools = svc.get_tools(user_ctx=None)
+    names = {t.name for t in tools}
+    assert "complete_run" in names
+    assert "commitment_create" in names
+    assert "commitment_complete" in names
+    assert "commitment_list" in names
+    assert "agent_memory_save" in names
+    assert "agent_memory_search" in names
+    assert "agent_memory_review_and_promote" in names
+
+
+async def test_execute_complete_run_marks_run(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="x")
+
+    # Manually insert a run row in "running" status to simulate an in-flight run.
+    # (run_agent_now completes before returning, so we can't use it for this test.)
+    from datetime import UTC, datetime
+    run_id = "run_test_99"
+    run_row = {
+        "_id": run_id,
+        "agent_id": a.id,
+        "triggered_by": "manual",
+        "trigger_context": {},
+        "started_at": datetime.now(UTC).isoformat(),
+        "status": "running",
+        "conversation_id": "",
+        "delegation_id": "",
+        "ended_at": None,
+        "final_message_text": None,
+        "rounds_used": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "error": None,
+        "awaiting_user_input": False,
+        "pending_question": None,
+        "pending_actions": [],
+    }
+    await svc._storage.put("agent_runs", run_id, run_row)
+
+    out = await svc.execute_tool("complete_run", {
+        "_agent_id": a.id,
+        "_user_id": "usr_1",
+        "_conversation_id": "",
+        "reason": "did the thing",
+    })
+    assert "marked" in out.lower()
+
+
+async def test_execute_commitment_create(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="x")
+    out = await svc.execute_tool("commitment_create", {
+        "_agent_id": a.id,
+        "_user_id": "usr_1",
+        "content": "check sonarr",
+        "due_in_seconds": 1800,
+    })
+    assert "scheduled" in out.lower() or "created" in out.lower()
+
+
+async def test_execute_agent_memory_save(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="x")
+    out = await svc.execute_tool("agent_memory_save", {
+        "_agent_id": a.id,
+        "_user_id": "usr_1",
+        "content": "user prefers dark mode",
+        "kind": "preference",
+    })
+    assert "saved" in out.lower()
+    mems = await svc.search_memory(agent_id=a.id, query="dark")
+    assert any("dark mode" in m.content for m in mems)
