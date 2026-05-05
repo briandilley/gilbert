@@ -146,3 +146,57 @@ export interface AgentCreatePayload {
 export type AgentUpdatePayload = Partial<AgentCreatePayload> & {
   status?: AgentStatus;
 };
+
+// ── Multi-agent goals (Phase 4) ───────────────────────────────────
+
+export type GoalStatus =
+  | "new"
+  | "in_progress"
+  | "blocked"
+  | "complete"
+  | "cancelled";
+export type AssignmentRole = "driver" | "collaborator" | "reviewer";
+
+export interface Goal {
+  _id: string;
+  owner_user_id: string;
+  name: string;
+  description: string;
+  status: GoalStatus;
+  war_room_conversation_id: string;
+  cost_cap_usd: number | null;
+  lifetime_cost_usd: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface GoalAssignment {
+  _id: string;
+  goal_id: string;
+  agent_id: string;
+  role: AssignmentRole;
+  assigned_at: string;
+  assigned_by: string;
+  removed_at: string | null;
+  handoff_note: string;
+}
+
+export interface WarRoomPost {
+  author_id: string;
+  author_name: string;
+  author_kind: "agent" | "user";
+  body: string;
+  ts: string;
+}
+
+export interface GoalSummary {
+  goal: Goal;
+  assignees: Array<{
+    agent_id: string;
+    agent_name: string;
+    role: AssignmentRole;
+  }>;
+  recent_posts: WarRoomPost[];
+  is_dependency_blocked: boolean;
+}
