@@ -200,6 +200,47 @@ def _run_from_dict(row: dict[str, Any]) -> Run:
     )
 
 
+def _signal_to_dict(s: InboxSignal) -> dict[str, Any]:
+    return {
+        "_id": s.id,
+        "agent_id": s.agent_id,
+        "signal_kind": s.signal_kind,
+        "body": s.body,
+        "sender_kind": s.sender_kind,
+        "sender_id": s.sender_id,
+        "sender_name": s.sender_name,
+        "source_conv_id": s.source_conv_id,
+        "source_message_id": s.source_message_id,
+        "delegation_id": s.delegation_id,
+        "metadata": s.metadata,
+        "priority": s.priority,
+        "created_at": s.created_at.isoformat(),
+        "processed_at": s.processed_at.isoformat() if s.processed_at else None,
+    }
+
+
+def _signal_from_dict(row: dict[str, Any]) -> InboxSignal:
+    return InboxSignal(
+        id=row["_id"],
+        agent_id=row["agent_id"],
+        signal_kind=row.get("signal_kind", "inbox"),
+        body=row.get("body", ""),
+        sender_kind=row.get("sender_kind", "user"),
+        sender_id=row.get("sender_id", ""),
+        sender_name=row.get("sender_name", ""),
+        source_conv_id=row.get("source_conv_id", ""),
+        source_message_id=row.get("source_message_id", ""),
+        delegation_id=row.get("delegation_id", ""),
+        metadata=row.get("metadata", {}),
+        priority=row.get("priority", "normal"),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        processed_at=(
+            datetime.fromisoformat(row["processed_at"])
+            if row.get("processed_at") else None
+        ),
+    )
+
+
 def _commitment_from_dict(row: dict[str, Any]) -> Commitment:
     return Commitment(
         id=row["_id"],
@@ -329,10 +370,14 @@ class AgentService(Service):
             if a.status is AgentStatus.ENABLED and a.heartbeat_enabled:
                 await self._arm_heartbeat(a)
 
+        # Restore unprocessed inbox signals into in-memory cache.
+        await self._rehydrate_inboxes()
+
         logger.info("AgentService started")
 
     async def stop(self) -> None:
         """Graceful shutdown — disarm all heartbeat scheduler jobs."""
+        self._inboxes.clear()
         if self._storage:
             rows = await self._storage.query(Query(collection=_AGENTS_COLLECTION, filters=[]))
             for r in rows:
@@ -546,6 +591,142 @@ class AgentService(Service):
             )
         finally:
             self._running_agents.discard(agent_id)
+
+    # ── InboxSignal dispatch (Task 11) ──────────────────────────────────
+
+    async def _signal_agent(
+        self,
+        *,
+        agent_id: str,
+        signal_kind: str,
+        body: str,
+        sender_kind: str,
+        sender_id: str,
+        sender_name: str,
+        source_conv_id: str = "",
+        source_message_id: str = "",
+        delegation_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        priority: str = "normal",
+    ) -> InboxSignal:
+        """Create, persist, and dispatch an InboxSignal for *agent_id*.
+
+        If the agent is currently idle (not in ``_running_agents``) and
+        ENABLED, a new run is spawned via ``asyncio.create_task``; the
+        dispatcher returns immediately without waiting for the run to finish.
+
+        If the agent is busy, the signal is enqueued in the in-memory cache
+        and persisted; the next round will drain it via ``_drain_inbox``.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+
+        sig = InboxSignal(
+            id=f"sig_{uuid.uuid4().hex[:12]}",
+            agent_id=agent_id,
+            signal_kind=signal_kind,
+            body=body,
+            sender_kind=sender_kind,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            source_conv_id=source_conv_id,
+            source_message_id=source_message_id,
+            delegation_id=delegation_id,
+            metadata=metadata or {},
+            priority=priority,
+            created_at=_now(),
+            processed_at=None,
+        )
+
+        # Persist before touching in-memory state so restart survives a crash here.
+        await self._storage.put(
+            _AGENT_INBOX_SIGNALS_COLLECTION, sig.id, _signal_to_dict(sig)
+        )
+
+        # Append to in-memory inbox cache.
+        self._inboxes.setdefault(agent_id, []).append(sig)
+
+        # If the agent is idle and ENABLED, fire a run immediately.
+        if agent_id not in self._running_agents:
+            a = await self.get_agent(agent_id)
+            if a is not None and a.status is AgentStatus.ENABLED:
+                asyncio.create_task(
+                    self._run_with_signal(agent_id, signal_kind, sig),
+                    name=f"agent-run-{agent_id}",
+                )
+
+        return sig
+
+    async def _run_with_signal(
+        self,
+        agent_id: str,
+        signal_kind: str,
+        sig: InboxSignal,
+    ) -> None:
+        """Spawn point for signal-triggered agent runs.
+
+        Re-checks that the agent is still idle (race-safe), re-fetches it
+        (could have been disabled between dispatch and now), then runs the
+        agent under the ``_running_agents`` guard.
+        """
+        if agent_id in self._running_agents:
+            # Raced with another trigger — skip; the in-flight run will
+            # pick up the signal via _drain_inbox on its next round.
+            return
+        a = await self.get_agent(agent_id)
+        if a is None or a.status is not AgentStatus.ENABLED:
+            return
+        self._running_agents.add(agent_id)
+        try:
+            await self._run_agent_internal(
+                a,
+                triggered_by=signal_kind,
+                trigger_context={"signal_id": sig.id, "sender_id": sig.sender_id},
+                user_message=None,
+            )
+        finally:
+            self._running_agents.discard(agent_id)
+
+    async def _drain_inbox(self, agent_id: str) -> list[InboxSignal]:
+        """Pop all pending inbox signals for *agent_id*, mark them processed,
+        and return them so the caller can include them in the next round's prompt.
+        """
+        if self._storage is None:
+            return []
+
+        sigs = self._inboxes.pop(agent_id, [])
+        now_iso = _now().isoformat()
+        for sig in sigs:
+            row = await self._storage.get(_AGENT_INBOX_SIGNALS_COLLECTION, sig.id)
+            if row is not None:
+                row["processed_at"] = now_iso
+                await self._storage.put(_AGENT_INBOX_SIGNALS_COLLECTION, sig.id, row)
+        return sigs
+
+    async def _rehydrate_inboxes(self) -> None:
+        """Restore unprocessed InboxSignals from storage into the in-memory cache.
+
+        Called during ``start()`` so signals survive process restarts.
+
+        Decision: ``FilterOp.EQ`` with ``value=None`` generates ``= NULL`` in
+        SQL which never matches.  Instead we use ``FilterOp.EXISTS`` with
+        ``value=False`` which generates ``IS NULL`` — the correct SQL predicate.
+        """
+        if self._storage is None:
+            return
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENT_INBOX_SIGNALS_COLLECTION,
+                filters=[Filter(field="processed_at", op=FilterOp.EXISTS, value=False)],
+            )
+        )
+        count = 0
+        for row in rows:
+            sig = _signal_from_dict(row)
+            self._inboxes.setdefault(sig.agent_id, []).append(sig)
+            count += 1
+        if count:
+            logger.info("Rehydrated %d unprocessed inbox signal(s)", count)
 
     async def _load_agent_for_caller(
         self,
