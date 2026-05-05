@@ -71,11 +71,12 @@ producer.
 **Per-agent tool gating:** `_compute_allowed_tool_names` returns the
 final tool name set: if `tools_allowed=None` → all available; if a
 list → core ∪ allowlist intersected with available. Core
-(force-include) constant: `_CORE_AGENT_TOOLS`. Phase 1A core set:
+(force-include) constant: `_CORE_AGENT_TOOLS`. Phase 1A added:
 `complete_run`, `request_user_input`, `notify_user`,
 `commitment_create`, `commitment_complete`, `commitment_list`,
 `agent_memory_save`, `agent_memory_search`,
-`agent_memory_review_and_promote`. Phase 2/4 add to it.
+`agent_memory_review_and_promote`. Phase 2 adds: `agent_list`,
+`agent_send_message`, `agent_delegate`. Phase 4 will add `goal_post`.
 
 **Tool argument injection:** `_inject_agent_id(agent_id, tools_dict)`
 wraps each `(ToolDefinition, handler)` tuple so every tool call's
@@ -169,6 +170,85 @@ with `Filter(field=..., op=FilterOp.EQ, value=...)`. Don't use
 dict-shaped filters — they don't match the real API. For
 `processed_at IS NULL`-style queries, use
 `FilterOp.EXISTS` with `value=False`.
+
+## Phase 2 — Peer messaging (queue mode)
+
+Three new core tools, all force-included via `_CORE_AGENT_TOOLS`. They
+share the existing `_signal_agent` dispatch primitive — Phase 2 added
+*producers*; the inbox-drain consumer was already in place from
+Phase 1A storage and gets activated in Phase 2 by wiring it into the
+run loop.
+
+**Tools added:**
+- **`agent_list`** — no parameters. Returns a JSON-encoded list of
+  peer agents under the same owner (self excluded). Each entry is
+  `{name, role_label, status, conversation_id}`. Slash:
+  `/agents agent_list`.
+- **`agent_send_message(target_name, body)`** — fire-and-forget DM.
+  Resolves the target via `_load_peer_by_name` (same-owner namespace),
+  dispatches an `inbox`-kind `InboxSignal` via `_signal_agent`. No
+  reply awaited. Slash: `/agents agent_send_message`.
+- **`agent_delegate(target_name, instruction, max_wait_s=600)`** —
+  send-and-await. Caller awaits an `asyncio.Future` that the target's
+  run resolves on completion. Slash: `/agents agent_delegate`.
+
+**Inbox drain into the run loop:** `_run_agent_internal` now drains
+pending signals at round 0 and appends them (one line each, formatted
+by `_format_inbox_signal`) onto the lead user message under an
+`INBOX:` block. It also passes a `_between_rounds` async closure to
+`AIService.chat` as `between_rounds_callback` — the closure drains the
+inbox and returns a list of `Message(role=USER, …)` so signals
+arriving mid-run are visible at the next round. `_format_inbox_signal`
+formats peer/user signals as `[from {sender_name}]: {body}` and
+system signals as `[system]: {body}`.
+
+**Delegation mechanics:**
+- `_pending_delegations: dict[str, asyncio.Future[str]]` lives on the
+  service. Keyed by `delegation_id`. The handler creates the future,
+  fires the signal, awaits with `wait_for(timeout=max_wait_s)`, and
+  always pops the entry in a finally.
+- `_run_with_signal` reads `metadata['chain']` and `sig.delegation_id`
+  off the InboxSignal and forwards them in `trigger_context` so
+  `_run_agent_internal` can stamp `run.delegation_id` and resolve the
+  future at end-of-run (success → `set_result(final_message_text)`;
+  FAILED/etc. → `set_exception(RuntimeError(...))`).
+- `_inject_agent_id` grew an optional `delegation_chain` kwarg. When
+  set, wrapped tool handlers also see `_delegation_chain` in their
+  args, so a delegated-to agent that itself calls `agent_delegate`
+  forwards the chain automatically.
+- `_build_system_prompt` appends a "you are handling a delegation"
+  block when `triggered_by == "delegation"`. `_synthesize_trigger_message`
+  produces the matching user-message text.
+
+**Cycle + depth + timeout policies:**
+- **Cycle**: handler appends caller to chain, then rejects if
+  `target.id ∈ chain`. So A→B→A is rejected before any signal fires.
+- **Depth cap**: `_DELEGATION_DEPTH_CAP = 5`. After append, if
+  `len(chain) >= cap`, reject.
+- **Timeout**: `max_wait_s` (default 600). On `TimeoutError` the tool
+  returns an error string. The target's run is NOT cancelled — only
+  the caller's await is abandoned. The future still in
+  `_pending_delegations` is popped by the finally; if the target
+  finishes after the timeout, `set_result` no-ops because the entry
+  is already gone.
+- **Target failure**: target run lands in FAILED → end-of-run sets
+  the future's exception → handler catches it as `Exception` and
+  returns `f"error: target run {exc}"` so the AI tool runtime
+  receives a clean string, not a raised exception.
+
+**Same-owner enforcement:** both `agent_send_message` and
+`agent_delegate` go through `_load_peer_by_name(caller_agent_id, target_name)`
+which queries the agents collection filtered by the caller's
+`owner_user_id`. Cross-owner reach raises `PermissionError(
+'no peer named …')` — same wording as a missing name, so existence
+of names in another owner's namespace doesn't leak.
+
+**Out of scope for Phase 2 (deferred):** chat-conversation persistence
+of peer-message bodies. The body lives in `InboxSignal.body` and gets
+formatted into the next round's prompt; it does NOT get inserted as a
+USER row into the target's chat conversation. A polish phase will add
+that path (along with sender-attribution UI in chat). Mid-stream
+interrupt is also deferred (Phase 3).
 
 ## Related
 - `src/gilbert/interfaces/agent.py`
