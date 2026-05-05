@@ -848,6 +848,9 @@ class AgentService(Service):
         commitments, inbox signals, and runs.
 
         Returns True if the agent existed and was deleted, False if not found.
+        Also removes the agent's avatar directory if any avatar bytes
+        were ever uploaded for it (best-effort — logs and continues on
+        I/O failure so a borked filesystem can't keep an agent row alive).
         """
         if self._storage is None:
             raise RuntimeError("not started")
@@ -872,8 +875,52 @@ class AgentService(Service):
             )
             for r in related:
                 await self._storage.delete(coll, r["_id"])
+        # Drop the on-disk avatar bytes if any were uploaded. Done
+        # after the storage row is gone so a half-deleted state can't
+        # resurrect a stale avatar pointer.
+        self._remove_avatar_dir(agent_id)
         await self._publish("agent.deleted", {"agent_id": agent_id})
         return True
+
+    async def set_agent_avatar(self, agent_id: str, filename: str) -> Agent:
+        """Mark *agent_id* as having an image avatar stored at *filename*.
+
+        Routes update_agent so the standard ``agent.updated`` event
+        fires for WS subscribers — keeps the avatar upload route a thin
+        bytes-handling layer with no entity-shape knowledge.
+        """
+        return await self.update_agent(
+            agent_id,
+            {"avatar_kind": "image", "avatar_value": filename},
+        )
+
+    def _remove_avatar_dir(self, agent_id: str) -> None:
+        """Delete the on-disk avatar directory for *agent_id* if present.
+
+        Avatars live under ``<DATA_DIR>/agent-avatars/<agent_id>/``.
+        Best-effort by design: a borked filesystem must not block
+        deletion of the entity row, so I/O errors are logged and
+        swallowed rather than re-raised.
+
+        Path resolution is duplicated here (the avatar route also
+        knows the layout) rather than imported from ``web.routes`` to
+        keep ``core/services/`` from depending on ``web/`` — the layer
+        rules are unambiguous on that direction.
+        """
+        import shutil
+        from pathlib import Path
+
+        from gilbert.config import DATA_DIR
+
+        # ``Path.name`` strips path components from the supplied id as
+        # a defense-in-depth measure even though ids come from storage.
+        target = DATA_DIR / "agent-avatars" / Path(agent_id).name
+        if not target.exists():
+            return
+        try:
+            shutil.rmtree(target)
+        except Exception:
+            logger.exception("failed to remove avatar dir for agent %s", agent_id)
 
     # ── Heartbeat scheduling (Task 10) ──────────────────────────────
 
