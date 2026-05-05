@@ -35,16 +35,46 @@ from gilbert.interfaces.agent import (
     RunStatus,
 )
 from gilbert.interfaces.ai import AIProvider
+from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, Query, StorageBackend, StorageProvider
+from gilbert.interfaces.tools import ToolParameterType
 
 logger = logging.getLogger(__name__)
 
 # ── Name validation ──────────────────────────────────────────────────
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+# ── Default ConfigParam values ───────────────────────────────────────
+
+_DEFAULT_PERSONA = "You are an autonomous AI agent."
+_DEFAULT_SYSTEM_PROMPT = (
+    "Take whatever action is appropriate to advance the goals you have "
+    "been assigned. Use your tools deliberately. End your turn briefly "
+    "when there is nothing pressing."
+)
+_DEFAULT_PROCEDURAL_RULES = (
+    "When you ask a question or need user input, MUST call "
+    "request_user_input first so the user gets a notification.\n\n"
+    "When you make a follow-up commitment, call commitment_create.\n\n"
+    "When you learn a durable fact about the user or their context, "
+    "call agent_memory_save with kind='preference' or kind='fact'."
+)
+_DEFAULT_HEARTBEAT_CHECKLIST = (
+    "1. Are there any due commitments to action?\n"
+    "2. Anything inbound in your inbox you haven't seen?\n"
+    "3. Any goals assigned to you that are blocked?\n"
+    "4. If nothing pressing, end your turn briefly."
+)
+_DEFAULT_TOOL_GROUPS: dict[str, list[str]] = {
+    "files": ["read_workspace_file", "write_skill_workspace_file", "run_workspace_script"],
+    "knowledge": ["search_knowledge"],
+    "communication": ["notify_user"],
+    "self": ["agent_memory_save", "agent_memory_search", "commitment_create", "commitment_complete"],
+}
 
 # ── Collection names ─────────────────────────────────────────────────
 
@@ -311,6 +341,126 @@ class AgentService(Service):
 
         # Service-level defaults merged into create_agent calls
         self._defaults: dict[str, Any] = {}
+
+    # ── Configurable ────────────────────────────────────────────────
+
+    def config_params(self) -> list[ConfigParam]:
+        """Describe all operator-tunable defaults for new agents."""
+        return [
+            ConfigParam(
+                key="default_persona",
+                type=ToolParameterType.STRING,
+                description="Default persona text injected into new agents' system prompt.",
+                default=_DEFAULT_PERSONA,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="default_system_prompt",
+                type=ToolParameterType.STRING,
+                description="Default system-prompt body for new agents.",
+                default=_DEFAULT_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="default_procedural_rules",
+                type=ToolParameterType.STRING,
+                description="Default procedural rules injected into new agents' system prompt.",
+                default=_DEFAULT_PROCEDURAL_RULES,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="default_heartbeat_interval_s",
+                type=ToolParameterType.NUMBER,
+                description="Default heartbeat interval in seconds for new agents.",
+                default=1800,
+            ),
+            ConfigParam(
+                key="default_heartbeat_checklist",
+                type=ToolParameterType.STRING,
+                description="Default heartbeat checklist for new agents.",
+                default=_DEFAULT_HEARTBEAT_CHECKLIST,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="default_dream_enabled",
+                type=ToolParameterType.BOOLEAN,
+                description="Whether dreaming is enabled by default for new agents.",
+                default=False,
+            ),
+            ConfigParam(
+                key="default_dream_quiet_hours",
+                type=ToolParameterType.STRING,
+                description="Default dream quiet-hours window for new agents (e.g. '22:00-06:00').",
+                default="22:00-06:00",
+            ),
+            ConfigParam(
+                key="default_dream_probability",
+                type=ToolParameterType.NUMBER,
+                description="Default probability (0–1) that a dream run fires in each heartbeat.",
+                default=0.1,
+            ),
+            ConfigParam(
+                key="default_dream_max_per_night",
+                type=ToolParameterType.INTEGER,
+                description="Default maximum dream runs allowed per night for new agents.",
+                default=3,
+            ),
+            ConfigParam(
+                key="default_profile_id",
+                type=ToolParameterType.STRING,
+                description="Default AI profile ID used for new agents.",
+                default="standard",
+            ),
+            ConfigParam(
+                key="default_avatar_kind",
+                type=ToolParameterType.STRING,
+                description="Default avatar kind for new agents (e.g. 'emoji', 'url').",
+                default="emoji",
+            ),
+            ConfigParam(
+                key="default_avatar_value",
+                type=ToolParameterType.STRING,
+                description="Default avatar value for new agents (emoji character or image URL).",
+                default="🤖",
+            ),
+            ConfigParam(
+                key="default_tools_allowed",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Comma-separated list of tool names new agents are allowed to call. "
+                    "Leave empty to allow all tools."
+                ),
+                default="",
+            ),
+            ConfigParam(
+                key="tool_groups",
+                type=ToolParameterType.OBJECT,
+                description=(
+                    "JSON object grouping tool names by category for the UI. "
+                    "Keys are group labels; values are lists of tool names."
+                ),
+                default=_DEFAULT_TOOL_GROUPS,
+            ),
+        ]
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        """Cache the full config section as ``_defaults``.
+
+        Normalizes ``default_tools_allowed``: an empty string is stored as
+        ``None`` (meaning "all tools allowed"); a non-empty string is split on
+        commas into a list.
+        """
+        self._defaults = dict(config)
+        raw_allowed = config.get("default_tools_allowed", "")
+        if isinstance(raw_allowed, str):
+            stripped = raw_allowed.strip()
+            self._defaults["default_tools_allowed"] = (
+                None if not stripped else [t.strip() for t in stripped.split(",")]
+            )
 
     # ── Service lifecycle ────────────────────────────────────────────
 

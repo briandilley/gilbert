@@ -222,3 +222,45 @@ async def test_run_agent_now_creates_run_row(started_agent_service: Any) -> None
     runs = await svc.list_runs(agent_id=a.id)
     assert len(runs) == 1
     assert runs[0].id == run.id
+
+
+# ── Task 12 tests — ConfigParam defaults + on_config_changed ──────────
+
+
+async def test_config_params_includes_defaults(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    params = svc.config_params()
+    keys = {p.key for p in params}
+    expected = {
+        "default_persona", "default_system_prompt", "default_procedural_rules",
+        "default_heartbeat_interval_s", "default_heartbeat_checklist",
+        "default_dream_enabled", "default_dream_quiet_hours",
+        "default_dream_probability", "default_dream_max_per_night",
+        "default_profile_id", "default_avatar_kind", "default_avatar_value",
+        "default_tools_allowed", "tool_groups",
+    }
+    assert expected.issubset(keys)
+
+
+async def test_default_persona_is_ai_prompt_flagged(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    params = {p.key: p for p in svc.config_params()}
+    assert params["default_persona"].ai_prompt is True
+    assert params["default_persona"].multiline is True
+    assert params["default_system_prompt"].ai_prompt is True
+    assert params["default_procedural_rules"].ai_prompt is True
+    assert params["default_heartbeat_checklist"].ai_prompt is True
+
+
+async def test_on_config_changed_caches_defaults(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    await svc.on_config_changed({"default_persona": "I am helpful."})
+    assert svc._defaults["default_persona"] == "I am helpful."
+
+
+async def test_agents_get_defaults_rpc_returns_current(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    await svc.on_config_changed({"default_persona": "X"})
+    h = svc.get_ws_handlers()
+    res = await h["agents.get_defaults"](_FakeConn("usr_1"), {})
+    assert res["defaults"]["default_persona"] == "X"
