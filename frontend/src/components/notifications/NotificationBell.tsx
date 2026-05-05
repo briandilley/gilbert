@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellIcon, BellRingIcon, XIcon } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -80,21 +80,20 @@ interface UrgentToast {
 
 export function NotificationBell() {
   const navigate = useNavigate();
-  const location = useLocation();
 
   // Suppress urgent toasts + audio when the user is already viewing
   // the agent chat for the goal that fired the notification — they're
   // staring at the conversation; popping a toast on top of it is
   // noise. The bell still pulses (cheap visual cue) and the
   // notifications list still records it.
+  // TODO(phase-4): map goal references when Goal entities return.
+  // For now the legacy goal_id can't be resolved to an agent_id, so
+  // this suppression is a no-op until the new mapping lands.
   const isViewingGoalChat = useCallback(
-    (goalId?: string): boolean => {
-      if (!goalId) return false;
-      if (location.pathname !== "/agents") return false;
-      const params = new URLSearchParams(location.search);
-      return params.get("goal") === goalId;
+    (_goalId?: string): boolean => {
+      return false;
     },
-    [location.pathname, location.search],
+    [],
   );
   const queryClient = useQueryClient();
   const api = useWsApi();
@@ -233,7 +232,10 @@ export function NotificationBell() {
         // best effort
       }
       if (toast.goalId) {
-        navigate(`/agents?goal=${toast.goalId}`);
+        // TODO(phase-4): map goal references when Goal entities return.
+        // The legacy goal_id is no longer routable, so fall back to the
+        // agents list rather than constructing a broken URL.
+        navigate("/agents");
       } else {
         navigate("/notifications");
       }
@@ -261,13 +263,15 @@ export function NotificationBell() {
         // best-effort; the user can still navigate
       }
     }
-    // Deep-link if source_ref names a known shape — agent goal_id
-    // routes to the agent CHAT page (where you'd answer), not the
-    // settings page.
+    // Deep-link if source_ref names a known shape.
+    // TODO(phase-4): map goal references when Goal entities return.
+    // The legacy goal_id no longer maps cleanly to an agent_id, so we
+    // fall back to the agents list rather than constructing a broken
+    // URL. Once Goal entities return we should resolve goal_id → the
+    // owning agent and route to /agents/<agent_id>.
     const ref = n.source_ref ?? null;
     if (ref && typeof ref === "object" && "goal_id" in ref) {
-      const goalId = String((ref as { goal_id: string }).goal_id);
-      navigate(`/agents?goal=${goalId}`);
+      navigate("/agents");
     } else {
       navigate("/notifications");
     }
