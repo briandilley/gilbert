@@ -324,7 +324,9 @@ class Gilbert:
 
         self.service_manager.register(NotificationService())
 
-        # AgentService registration goes here (Task 4 of Phase 1A rebuild)
+        from gilbert.core.services.agent import AgentService
+
+        self.service_manager.register(AgentService())
 
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
