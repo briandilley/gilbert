@@ -4,10 +4,16 @@
 Replaces AutonomousAgentService with the multi-agent design from
 docs/superpowers/specs/2026-05-04-agent-messaging-design.md. `Agent`
 is a durable identity (persona + system_prompt + procedural_rules +
-heartbeat + memory + commitments + tool allowlist + avatar). Lives in
-src/gilbert/core/services/agent.py. Phase 1A is the backend foundation;
-Phase 1B adds the SPA management UI; Phases 2-5 add peer messaging,
-mid-stream interrupt, multi-agent goals, and deliverables.
+heartbeat + memory + commitments + tool include/exclude + avatar).
+Lives in src/gilbert/core/services/agent.py. Phase 1A is the backend
+foundation; Phase 1B adds the SPA management UI; Phases 2-5 add peer
+messaging, mid-stream interrupt, multi-agent goals, and deliverables.
+
+The whole service is toggleable via the ``enabled`` ConfigParam
+(default True). When disabled, ``start()`` early-returns before
+binding any capability, ``get_ws_handlers()`` returns ``{}``, and the
+``/agents`` and ``/goals`` nav groups (both ``requires_capability:
+"agent"`` in ``web_api.build_layout``) disappear from the SPA nav.
 
 ## Details
 
@@ -69,9 +75,17 @@ op=FilterOp.EXISTS, value=False)`). Phase 2 will add the producers
 producer.
 
 **Per-agent tool gating:** `_compute_allowed_tool_names` returns the
-final tool name set: if `tools_allowed=None` → all available; if a
-list → core ∪ allowlist intersected with available. Core
-(force-include) constant: `_CORE_AGENT_TOOLS`. Phase 1A added:
+final tool name set. The agent has two mutually-exclusive fields:
+`tools_include: list[str] | None` (allowlist; returns
+`(core ∪ include) ∩ available`) and `tools_exclude: list[str] | None`
+(denylist; returns `core ∪ (available - exclude)` — core kept
+regardless). Both `None` returns the full owner-available set.
+`available` is the OWNER's runtime tool discovery result, so when the
+owner loses access to a tool the agent loses it too (intersection
+propagation in include mode; subtraction propagation in exclude mode).
+Mutex enforced in both `create_agent` and `update_agent` (raises
+`ValueError` when both fields end up non-None on the merged row).
+Core (force-include) constant: `_CORE_AGENT_TOOLS`. Phase 1A added:
 `complete_run`, `request_user_input`, `notify_user`,
 `commitment_create`, `commitment_complete`, `commitment_list`,
 `agent_memory_save`, `agent_memory_search`,
@@ -109,7 +123,6 @@ the tool catalog through:
 - `agents.tools.list_available` — backed by `AIToolDiscoveryProvider.discover_tools(user_ctx=...)`
   bound as a hard requirement in `start()`. Returns `[{name, description, provider, required_role?}]`
   shape; tuple-unpacks the `(provider, ToolDefinition)` returned by `AIService`.
-- `agents.tools.list_groups` — returns `_defaults["tool_groups"]`.
 
 **HTTP routes (Phase 1B):** `web/routes/agent_avatar.py` mounts:
 - `POST /api/agents/{agent_id}/avatar` — multipart `file=<image>`. MIME
@@ -133,12 +146,15 @@ caller_user_id, admin=False)` and `set_agent_avatar(agent_id, *,
 filename)`. The HTTP routes use `isinstance(svc, AgentProvider)` rather
 than reaching into private internals.
 
-**Defaults (ConfigParam):** `default_persona`, `default_system_prompt`,
+**Defaults (ConfigParam):** `enabled` (BOOLEAN, default True; the
+service-level toggle). `default_persona`, `default_system_prompt`,
 `default_procedural_rules`, `default_heartbeat_checklist` are flagged
 `multiline=True, ai_prompt=True` for the prompt-author UI.
-`tool_groups` is `ToolParameterType.OBJECT` for operator-editable JSON.
-`default_tools_allowed` is a comma-separated string normalized in
-`on_config_changed` (empty → `None`).
+`default_heartbeat_interval_s`, `default_dream_*` cover heartbeat
+defaults, plus `default_avatar_kind` / `default_avatar_value`.
+Deliberately NOT exposed as config: `default_profile_id`,
+`default_tools_allowed`, `tool_groups` — the operator picks profile
+and tool include/exclude explicitly per agent at create time.
 
 **RBAC:** all `agents.*` WS RPCs are user-level (100 in
 `DEFAULT_RPC_PERMISSIONS`). Handlers enforce per-user ownership via
