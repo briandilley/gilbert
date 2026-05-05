@@ -3216,6 +3216,17 @@ class AgentService(Service):
             "agents.memories.set_state": self._ws_memories_set_state,
             "agents.tools.list_available": self._ws_tools_list_available,
             "agents.tools.list_groups": self._ws_tools_list_groups,
+            # Phase 4 — goals
+            "goals.create": self._ws_goals_create,
+            "goals.list": self._ws_goals_list,
+            "goals.get": self._ws_goals_get,
+            "goals.update_status": self._ws_goals_update_status,
+            "goals.assignments.list": self._ws_goals_assignments_list,
+            "goals.assignments.add": self._ws_goals_assignments_add,
+            "goals.assignments.remove": self._ws_goals_assignments_remove,
+            "goals.assignments.handoff": self._ws_goals_assignments_handoff,
+            "goals.summary": self._ws_goals_summary,
+            "goals.posts.list": self._ws_goals_posts_list,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -3467,6 +3478,226 @@ class AgentService(Service):
         """Return the configured ``tool_groups`` map for the SPA picker."""
         self._caller_user_id(conn)
         return {"groups": dict(self._defaults.get("tool_groups", {}))}
+
+    # ── WS handlers — goals (Phase 4) ───────────────────────────────
+
+    async def _load_goal_for_caller(
+        self, goal_id: str, conn: Any,
+    ) -> Goal:
+        """Fetch a goal and enforce caller ownership.
+
+        Same pattern as ``load_agent_for_caller`` but for goals. Admins
+        bypass the owner check.
+        """
+        goal = await self.get_goal(goal_id)
+        if goal is None:
+            raise KeyError(goal_id)
+        if not self._is_admin(conn) and goal.owner_user_id != self._caller_user_id(conn):
+            raise PermissionError(
+                f"goal {goal_id} not accessible to user {self._caller_user_id(conn)}"
+            )
+        return goal
+
+    async def _ws_goals_create(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        owner = self._caller_user_id(conn)
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("name is required")
+        description = str(params.get("description", ""))
+        cost_cap_raw = params.get("cost_cap_usd")
+        cost_cap = float(cost_cap_raw) if cost_cap_raw is not None else None
+
+        # ``assign_to`` may be a list of {agent_name, role} or strings.
+        assign_to: list[tuple[str, AssignmentRole]] = []
+        raw = params.get("assign_to") or []
+        if not isinstance(raw, list):
+            raise ValueError("assign_to must be an array")
+        for entry in raw:
+            if isinstance(entry, str):
+                assign_to.append((entry.strip(), AssignmentRole.COLLABORATOR))
+            elif isinstance(entry, dict):
+                aname = str(entry.get("agent_name", "")).strip()
+                if not aname:
+                    raise ValueError("assign_to entry missing agent_name")
+                role_raw = entry.get("role", "collaborator")
+                try:
+                    role = AssignmentRole(str(role_raw).lower().strip())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid role {role_raw!r} in assign_to"
+                    ) from exc
+                assign_to.append((aname, role))
+            else:
+                raise ValueError("assign_to entries must be strings or {agent_name, role} objects")
+
+        g = await self.create_goal(
+            owner_user_id=owner,
+            name=name,
+            description=description,
+            cost_cap_usd=cost_cap,
+            assign_to=assign_to,
+            assigned_by=f"user:{owner}",
+        )
+        return {"goal": _goal_to_dict(g)}
+
+    async def _ws_goals_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        admin = self._is_admin(conn)
+        owner_param = params.get("owner_user_id")
+        if admin and owner_param is not None:
+            goals = await self.list_goals(owner_user_id=str(owner_param))
+        elif admin:
+            goals = await self.list_goals()
+        else:
+            goals = await self.list_goals(owner_user_id=self._caller_user_id(conn))
+        return {"goals": [_goal_to_dict(g) for g in goals]}
+
+    async def _ws_goals_get(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        g = await self._load_goal_for_caller(goal_id, conn)
+        return {"goal": _goal_to_dict(g)}
+
+    async def _ws_goals_update_status(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        await self._load_goal_for_caller(goal_id, conn)
+        status_raw = str(params.get("status", "")).strip()
+        try:
+            status = GoalStatus(status_raw)
+        except ValueError as exc:
+            raise ValueError(f"unknown status: {status_raw}") from exc
+        g = await self.update_goal_status(goal_id, status)
+        return {"goal": _goal_to_dict(g)}
+
+    async def _ws_goals_assignments_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id_raw = params.get("goal_id")
+        agent_id_raw = params.get("agent_id")
+        active_only = bool(params.get("active_only", True))
+        if goal_id_raw is not None:
+            await self._load_goal_for_caller(str(goal_id_raw), conn)
+        elif agent_id_raw is not None:
+            # Auth via the agent (not the goal).
+            await self.load_agent_for_caller(
+                str(agent_id_raw),
+                caller_user_id=self._caller_user_id(conn),
+                admin=self._is_admin(conn),
+            )
+        else:
+            raise ValueError("goal_id or agent_id required")
+        asgns = await self.list_assignments(
+            goal_id=str(goal_id_raw) if goal_id_raw else None,
+            agent_id=str(agent_id_raw) if agent_id_raw else None,
+            active_only=active_only,
+        )
+        return {"assignments": [_goal_assignment_to_dict(a) for a in asgns]}
+
+    async def _ws_goals_assignments_add(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        agent_id = str(params.get("agent_id", ""))
+        role_raw = str(params.get("role", "")).strip()
+        try:
+            role = AssignmentRole(role_raw)
+        except ValueError as exc:
+            raise ValueError(f"unknown role: {role_raw}") from exc
+        await self._load_goal_for_caller(goal_id, conn)
+        # Confirm the agent is owned by the same user (no cross-owner).
+        await self.load_agent_for_caller(
+            agent_id,
+            caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        ga = await self.assign_agent_to_goal(
+            goal_id=goal_id,
+            agent_id=agent_id,
+            role=role,
+            assigned_by=f"user:{self._caller_user_id(conn)}",
+        )
+        return {"assignment": _goal_assignment_to_dict(ga)}
+
+    async def _ws_goals_assignments_remove(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        agent_id = str(params.get("agent_id", ""))
+        await self._load_goal_for_caller(goal_id, conn)
+        ga = await self.unassign_agent_from_goal(goal_id=goal_id, agent_id=agent_id)
+        return {"assignment": _goal_assignment_to_dict(ga)}
+
+    async def _ws_goals_assignments_handoff(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        from_agent_id = str(params.get("from_agent_id", ""))
+        to_agent_id = str(params.get("to_agent_id", ""))
+        note = str(params.get("note", ""))
+        await self._load_goal_for_caller(goal_id, conn)
+        # Both agents must belong to the same owner; load_agent_for_caller
+        # enforces that.
+        await self.load_agent_for_caller(
+            from_agent_id,
+            caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        await self.load_agent_for_caller(
+            to_agent_id,
+            caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        from_a, to_a = await self.handoff_goal(
+            goal_id=goal_id,
+            from_agent_id=from_agent_id,
+            to_agent_id=to_agent_id,
+            note=note,
+        )
+        return {
+            "from_assignment": _goal_assignment_to_dict(from_a),
+            "to_assignment": _goal_assignment_to_dict(to_a),
+        }
+
+    async def _ws_goals_summary(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        goal = await self._load_goal_for_caller(goal_id, conn)
+        asgns = await self.list_assignments(goal_id=goal_id, active_only=True)
+        names: dict[str, str] = {}
+        for a in asgns:
+            ag = await self.get_agent(a.agent_id)
+            if ag is not None:
+                names[a.agent_id] = ag.name
+        recent = await self._recent_war_room_posts(goal_id, limit=10)
+        return {
+            "goal": _goal_to_dict(goal),
+            "assignees": [
+                {
+                    "agent_id": a.agent_id,
+                    "agent_name": names.get(a.agent_id, ""),
+                    "role": a.role.value,
+                }
+                for a in asgns
+            ],
+            "recent_posts": recent,
+            "is_dependency_blocked": False,
+        }
+
+    async def _ws_goals_posts_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        limit = max(1, int(params.get("limit", 50)))
+        await self._load_goal_for_caller(goal_id, conn)
+        posts = await self._recent_war_room_posts(goal_id, limit=limit)
+        return {"posts": posts}
 
     # ── Event publishing helper ─────────────────────────────────────
 

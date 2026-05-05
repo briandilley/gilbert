@@ -122,6 +122,10 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # Agent RPCs: any authenticated user can manage their own agents.
     # Handlers enforce per-agent ownership via load_agent_for_caller.
     "agents.": 100,
+    # Goal RPCs: any authenticated user can manage their own goals.
+    # Handlers enforce per-goal ownership (caller must own the goal,
+    # i.e., goal.owner_user_id == caller.user_id) or be admin.
+    "goals.": 100,
     # MCP server (Gilbert-as-MCP): managing client registrations is
     # admin-only because creating a client grants an external
     # process permission to impersonate a Gilbert user's identity.
