@@ -240,3 +240,75 @@ async def test_load_agent_for_caller_owner_mismatch(started_agent_service: Any) 
     a = await svc.create_agent(owner_user_id="usr_1", name="x")
     with pytest.raises(PermissionError):
         await svc._load_agent_for_caller(a.id, caller_user_id="usr_2")
+
+
+# ── Task 6 tests — WS RPC handlers ───────────────────────────────────
+
+
+class _FakeConn:
+    def __init__(self, user_id: str, user_level: int = 100):
+        self.user_id = user_id
+        self.user_level = user_level
+        self.user_ctx = type("U", (), {"user_id": user_id, "roles": frozenset()})()
+
+
+async def test_ws_rpc_create_agent_returns_id(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    handlers = svc.get_ws_handlers()
+    assert "agents.create" in handlers
+
+    conn = _FakeConn("usr_1")
+    result = await handlers["agents.create"](
+        conn, {"name": "x", "role_label": "Tester"},
+    )
+    assert "agent" in result
+    assert result["agent"]["name"] == "x"
+    assert result["agent"]["owner_user_id"] == "usr_1"
+
+
+async def test_ws_rpc_list_filters_by_caller_unless_admin(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+
+    # User 1 creates 2.
+    await h["agents.create"](_FakeConn("usr_1"), {"name": "a1"})
+    await h["agents.create"](_FakeConn("usr_1"), {"name": "a2"})
+    # User 2 creates 1.
+    await h["agents.create"](_FakeConn("usr_2"), {"name": "b1"})
+
+    # User 1 sees their own only.
+    res = await h["agents.list"](_FakeConn("usr_1"), {})
+    assert {a["name"] for a in res["agents"]} == {"a1", "a2"}
+
+    # Admin sees all.
+    admin = _FakeConn("usr_admin", user_level=0)
+    res = await h["agents.list"](admin, {})
+    assert {a["name"] for a in res["agents"]} == {"a1", "a2", "b1"}
+
+
+async def test_ws_rpc_update_rejects_cross_user(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    res = await h["agents.create"](_FakeConn("usr_1"), {"name": "x"})
+    agent_id = res["agent"]["_id"]
+    with pytest.raises(PermissionError):
+        await h["agents.update"](_FakeConn("usr_2"), {"agent_id": agent_id, "patch": {"role_label": "X"}})
+
+
+async def test_ws_rpc_set_status_toggles(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    res = await h["agents.create"](_FakeConn("usr_1"), {"name": "x"})
+    agent_id = res["agent"]["_id"]
+    out = await h["agents.set_status"](_FakeConn("usr_1"), {"agent_id": agent_id, "status": "disabled"})
+    assert out["agent"]["status"] == "disabled"
+
+
+async def test_ws_rpc_delete_cascades(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    h = svc.get_ws_handlers()
+    res = await h["agents.create"](_FakeConn("usr_1"), {"name": "x"})
+    agent_id = res["agent"]["_id"]
+    out = await h["agents.delete"](_FakeConn("usr_1"), {"agent_id": agent_id})
+    assert out["deleted"] is True
+    assert await svc.get_agent(agent_id) is None

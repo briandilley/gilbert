@@ -393,3 +393,116 @@ class AgentService(Service):
     ) -> Run:
         """Trigger an immediate agent run. Implemented in Task 8."""
         raise NotImplementedError("filled in by Task 8")
+
+    # ── WsHandlerProvider ────────────────────────────────────────────
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "agents.create": self._ws_create,
+            "agents.get": self._ws_get,
+            "agents.list": self._ws_list,
+            "agents.update": self._ws_update,
+            "agents.delete": self._ws_delete,
+            "agents.set_status": self._ws_set_status,
+            "agents.run_now": self._ws_run_now,
+            "agents.get_defaults": self._ws_get_defaults,
+        }
+
+    def _is_admin(self, conn: Any) -> bool:
+        return getattr(conn, "user_level", 999) <= 0
+
+    def _caller_user_id(self, conn: Any) -> str:
+        uid = getattr(conn, "user_id", "") or ""
+        if not uid:
+            raise PermissionError("anonymous caller")
+        return uid
+
+    async def _ws_create(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        owner = self._caller_user_id(conn)
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("name is required")
+        # Drop unknown fields; create_agent accepts a tight allowlist.
+        allowed_fields = {
+            "role_label", "persona", "system_prompt", "procedural_rules",
+            "profile_id", "avatar_kind", "avatar_value", "cost_cap_usd",
+            "tools_allowed", "heartbeat_enabled", "heartbeat_interval_s",
+            "heartbeat_checklist", "dream_enabled", "dream_quiet_hours",
+            "dream_probability", "dream_max_per_night",
+        }
+        fields = {k: v for k, v in params.items() if k in allowed_fields}
+        a = await self.create_agent(owner_user_id=owner, name=name, **fields)
+        return {"agent": _agent_to_dict(a)}
+
+    async def _ws_get(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        a = await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        return {"agent": _agent_to_dict(a)}
+
+    async def _ws_list(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        admin = self._is_admin(conn)
+        if admin and params.get("owner_user_id") is not None:
+            agents = await self.list_agents(owner_user_id=str(params["owner_user_id"]))
+        elif admin:
+            agents = await self.list_agents()
+        else:
+            agents = await self.list_agents(owner_user_id=self._caller_user_id(conn))
+        return {"agents": [_agent_to_dict(a) for a in agents]}
+
+    async def _ws_update(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        patch = params.get("patch") or {}
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        a = await self.update_agent(agent_id, patch)
+        return {"agent": _agent_to_dict(a)}
+
+    async def _ws_delete(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        ok = await self.delete_agent(agent_id)
+        return {"deleted": ok}
+
+    async def _ws_set_status(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        status_raw = str(params.get("status", "")).strip()
+        try:
+            status = AgentStatus(status_raw)
+        except ValueError:
+            raise ValueError(f"unknown status: {status_raw}") from None
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_AGENTS_COLLECTION, agent_id)
+        if row is None:
+            raise KeyError(agent_id)
+        row["status"] = status.value
+        row["updated_at"] = _now().isoformat()
+        await self._storage.put(_AGENTS_COLLECTION, agent_id, row)
+        return {"agent": _agent_to_dict(_agent_from_dict(row))}
+
+    async def _ws_run_now(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        user_message = params.get("user_message")
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        run = await self.run_agent_now(agent_id, user_message=user_message)
+        return {"run_id": run.id, "status": run.status.value}
+
+    async def _ws_get_defaults(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        return {"defaults": dict(self._defaults)}
