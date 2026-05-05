@@ -363,6 +363,8 @@ class AgentProvider(Protocol):
         status: GoalStatus,
     ) -> Goal: ...
 
+    async def delete_goal(self, goal_id: str) -> bool: ...
+
     async def list_assignments(
         self,
         *,

@@ -24,10 +24,11 @@
  */
 
 import { useCallback, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAgents } from "@/api/agents";
 import {
+  useDeleteGoal,
   useGoalPosts,
   useGoalSummary,
   useHandoffGoal,
@@ -82,12 +83,28 @@ export function WarRoomPage() {
   const params = useParams<{ goalId: string }>();
   const goalId = params.goalId ?? "";
   const qc = useQueryClient();
+  const navigate = useNavigate();
 
   const summaryQuery = useGoalSummary(goalId);
   const postsQuery = useGoalPosts(goalId, 100);
+  const deleteGoal = useDeleteGoal();
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
+  const handleDelete = async () => {
+    setActionError(null);
+    try {
+      await deleteGoal.mutateAsync({ goalId });
+      setConfirmDeleteOpen(false);
+      navigate("/goals");
+    } catch (e) {
+      setActionError(
+        e instanceof Error ? e.message : "Failed to delete goal.",
+      );
+    }
+  };
 
   // ── Real-time event subscriptions ─────────────────────────────────
 
@@ -212,6 +229,13 @@ export function WarRoomPage() {
               >
                 Handoff
               </Button>
+              <Button
+                variant="outline"
+                onClick={() => setConfirmDeleteOpen(true)}
+                disabled={deleteGoal.isPending}
+              >
+                Delete
+              </Button>
             </div>
           </div>
 
@@ -287,6 +311,39 @@ export function WarRoomPage() {
           });
         }}
       />
+
+      <Dialog
+        open={confirmDeleteOpen}
+        onOpenChange={(o) => !deleteGoal.isPending && setConfirmDeleteOpen(o)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete goal?</DialogTitle>
+            <DialogDescription>
+              This permanently deletes <strong>{goal.name}</strong> along with
+              its war-room conversation, assignments, deliverables, and
+              dependency edges. This cannot be undone — use Cancelled status
+              instead if you want to keep history.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmDeleteOpen(false)}
+              disabled={deleteGoal.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleteGoal.isPending}
+            >
+              {deleteGoal.isPending ? "Deleting…" : "Delete goal"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
     </div>
   );

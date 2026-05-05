@@ -2576,6 +2576,75 @@ class AgentService(Service):
         await self._publish("goal.updated", {"goal_id": g.id})
         return g
 
+    async def delete_goal(self, goal_id: str) -> bool:
+        """Hard-delete a goal and cascade-delete its dependents.
+
+        Cancellation (soft-delete) is what ``update_goal_status(...,
+        CANCELLED)`` is for — that preserves history. ``delete_goal``
+        is the hard path: the goal row, its war-room conversation,
+        every assignment row, every deliverable, every dependency
+        edge in either direction, and every InboxSignal tagged with
+        ``metadata.goal_id == goal_id`` are removed.
+
+        Returns True if the goal existed and was deleted, False if not
+        found. ``goal.deleted`` is published on success."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_GOALS_COLLECTION, goal_id)
+        if row is None:
+            return False
+
+        # War-room conversation — referenced by id on the goal row.
+        war_room_id = row.get("war_room_conversation_id") or ""
+        if war_room_id:
+            await self._storage.delete(_AI_CONVERSATIONS_COLLECTION, war_room_id)
+
+        # Assignments / deliverables: simple goal_id-keyed cascade.
+        for coll in (
+            _GOAL_ASSIGNMENTS_COLLECTION,
+            _DELIVERABLES_COLLECTION,
+        ):
+            related = await self._storage.query(
+                Query(
+                    collection=coll,
+                    filters=[Filter(field="goal_id", op=FilterOp.EQ, value=goal_id)],
+                )
+            )
+            for r in related:
+                await self._storage.delete(coll, r["_id"])
+
+        # Dependencies edge in either direction — the goal might be a
+        # dependent OR a source. Two queries, since OR isn't supported.
+        for field_name in ("dependent_goal_id", "source_goal_id"):
+            edges = await self._storage.query(
+                Query(
+                    collection=_DEPENDENCIES_COLLECTION,
+                    filters=[Filter(field=field_name, op=FilterOp.EQ, value=goal_id)],
+                )
+            )
+            for r in edges:
+                await self._storage.delete(_DEPENDENCIES_COLLECTION, r["_id"])
+
+        # Inbox signals tagged with this goal_id in metadata. Storage
+        # backends don't all support nested-field equality reliably,
+        # so scan + Python-side filter — the inbox tends to be small
+        # relative to the rest of the DB.
+        all_signals = await self._storage.query(
+            Query(collection=_AGENT_INBOX_SIGNALS_COLLECTION)
+        )
+        for sig in all_signals:
+            md = sig.get("metadata") or {}
+            if isinstance(md, dict) and md.get("goal_id") == goal_id:
+                await self._storage.delete(
+                    _AGENT_INBOX_SIGNALS_COLLECTION, sig["_id"]
+                )
+
+        # Goal row last so a half-deleted state can't leave the row
+        # alive but the dependents gone.
+        await self._storage.delete(_GOALS_COLLECTION, goal_id)
+        await self._publish("goal.deleted", {"goal_id": goal_id})
+        return True
+
     async def list_assignments(
         self,
         *,
@@ -4212,6 +4281,7 @@ class AgentService(Service):
             "goals.list": self._ws_goals_list,
             "goals.get": self._ws_goals_get,
             "goals.update_status": self._ws_goals_update_status,
+            "goals.delete": self._ws_goals_delete,
             "goals.assignments.list": self._ws_goals_assignments_list,
             "goals.assignments.add": self._ws_goals_assignments_add,
             "goals.assignments.remove": self._ws_goals_assignments_remove,
@@ -4569,6 +4639,16 @@ class AgentService(Service):
             raise ValueError(f"unknown status: {status_raw}") from exc
         g = await self.update_goal_status(goal_id, status)
         return {"goal": _goal_to_dict(g)}
+
+    async def _ws_goals_delete(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", ""))
+        # Owner-scope check before delete — same gate as every other
+        # goal mutation.
+        await self._load_goal_for_caller(goal_id, conn)
+        ok = await self.delete_goal(goal_id)
+        return {"deleted": ok}
 
     async def _ws_goals_assignments_list(
         self, conn: Any, params: dict[str, Any],

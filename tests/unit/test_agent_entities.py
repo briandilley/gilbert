@@ -99,6 +99,9 @@ def test_agent_provider_is_runtime_checkable() -> None:
         async def update_goal_status(self, goal_id, status):
             return None
 
+        async def delete_goal(self, goal_id):
+            return True
+
         async def list_assignments(self, **kwargs):
             return []
 

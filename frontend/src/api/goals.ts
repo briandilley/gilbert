@@ -174,6 +174,23 @@ export function useUpdateGoalStatus() {
   });
 }
 
+export function useDeleteGoal() {
+  const { rpc } = useWebSocket();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ goalId }: { goalId: string }) =>
+      rpc<{ deleted: boolean }>({
+        type: "goals.delete",
+        goal_id: goalId,
+      }).then((r) => ({ goalId, deleted: r.deleted })),
+    onSuccess: ({ goalId }) => {
+      qc.removeQueries({ queryKey: ["goals", "detail", goalId] });
+      qc.removeQueries({ queryKey: ["goals", "summary", goalId] });
+      qc.invalidateQueries({ queryKey: ["goals", "list"] });
+    },
+  });
+}
+
 export function useAssignAgentToGoal() {
   const { rpc } = useWebSocket();
   const qc = useQueryClient();

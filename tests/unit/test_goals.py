@@ -309,6 +309,124 @@ async def test_get_goal_round_trip(started_agent_service: Any) -> None:
     assert row["status"] == "new"
 
 
+@pytest.mark.asyncio
+async def test_delete_goal_cascades_dependents(
+    started_agent_service: Any,
+) -> None:
+    """delete_goal hard-removes the goal row plus war-room conversation,
+    assignments, deliverables, dependencies (in either direction), and
+    inbox signals tagged with ``metadata.goal_id``. ``goal.deleted`` is
+    published. Returns False on a missing id."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_1", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_1", name="a2")
+
+    target = await svc.create_goal(
+        owner_user_id="usr_1",
+        name="target",
+        assign_to=[(a1.name, AssignmentRole.DRIVER)],
+    )
+    other = await svc.create_goal(
+        owner_user_id="usr_1",
+        name="other",
+        assign_to=[(a2.name, AssignmentRole.DRIVER)],
+    )
+    war_room_id = target.war_room_conversation_id
+
+    # Deliverable on the target goal.
+    deliverable = await svc.create_deliverable(
+        goal_id=target.id,
+        name="report",
+        kind="document",
+        produced_by_agent_id=a1.id,
+        content_ref="inline:report-body",
+    )
+
+    # Dependency edges in BOTH directions: target depends on other,
+    # and other depends on target. Deleting target must clean both.
+    dep_in = await svc.add_goal_dependency(
+        dependent_goal_id=target.id,
+        source_goal_id=other.id,
+        required_deliverable_name="upstream",
+    )
+    dep_out = await svc.add_goal_dependency(
+        dependent_goal_id=other.id,
+        source_goal_id=target.id,
+        required_deliverable_name="report",
+    )
+
+    # An InboxSignal tagged for the target — assigning a1 just above
+    # already produced one. Confirm it exists, plus add a second one
+    # tied to a different goal that must NOT be deleted.
+    target_signals = await svc._storage.query(
+        Query(collection="agent_inbox_signals")
+    )
+    target_tagged = [
+        s
+        for s in target_signals
+        if (s.get("metadata") or {}).get("goal_id") == target.id
+    ]
+    other_tagged = [
+        s
+        for s in target_signals
+        if (s.get("metadata") or {}).get("goal_id") == other.id
+    ]
+    assert target_tagged, "expected at least one inbox signal for target"
+    assert other_tagged, "expected at least one inbox signal for other"
+
+    # Capture the goal.deleted event so we can assert it fires.
+    captured: list[Event] = []
+
+    async def _capture(ev: Event) -> None:
+        captured.append(ev)
+
+    svc._event_bus.subscribe("goal.deleted", _capture)
+
+    ok = await svc.delete_goal(target.id)
+    assert ok is True
+
+    # Goal row gone.
+    assert await svc.get_goal(target.id) is None
+    # War-room conversation gone.
+    assert (
+        await svc._storage.get("ai_conversations", war_room_id) is None
+    )
+    # Assignments for target gone (other goal's assignments survive).
+    target_asgns = await svc.list_assignments(goal_id=target.id, active_only=False)
+    assert target_asgns == []
+    other_asgns = await svc.list_assignments(goal_id=other.id, active_only=False)
+    assert len(other_asgns) == 1
+    # Deliverable gone.
+    assert await svc._storage.get("goal_deliverables", deliverable.id) is None
+    # Both dependency edges gone.
+    assert await svc._storage.get("goal_dependencies", dep_in.id) is None
+    assert await svc._storage.get("goal_dependencies", dep_out.id) is None
+    # Target-tagged inbox signals gone, other-tagged signals untouched.
+    remaining = await svc._storage.query(Query(collection="agent_inbox_signals"))
+    remaining_target = [
+        s for s in remaining if (s.get("metadata") or {}).get("goal_id") == target.id
+    ]
+    remaining_other = [
+        s for s in remaining if (s.get("metadata") or {}).get("goal_id") == other.id
+    ]
+    assert remaining_target == []
+    assert len(remaining_other) >= 1
+    # The other goal still exists.
+    assert await svc.get_goal(other.id) is not None
+    # Event fired.
+    assert any(ev.event_type == "goal.deleted" for ev in captured)
+    assert captured[-1].data["goal_id"] == target.id
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_returns_false_when_missing(
+    started_agent_service: Any,
+) -> None:
+    """delete_goal on a non-existent id returns False without raising."""
+    svc = started_agent_service
+    assert await svc.delete_goal("goal_does_not_exist") is False
+
+
 # ── Task 5: System prompt active-assignments block ──────────────────
 
 

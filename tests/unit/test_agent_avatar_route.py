@@ -138,6 +138,9 @@ class _FakeAgentService:
     async def update_goal_status(self, goal_id: str, status: Any) -> Any:
         raise NotImplementedError
 
+    async def delete_goal(self, goal_id: str) -> bool:
+        raise NotImplementedError
+
     async def list_assignments(self, **kwargs: Any) -> Any:
         raise NotImplementedError
 
