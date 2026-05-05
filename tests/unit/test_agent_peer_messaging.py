@@ -172,3 +172,171 @@ async def test_agent_send_message_idle_peer_fires_run(started_agent_service):
         pytest.fail("expected a completed run row for a2 after signal-fired wake-up")
     assert any(r.get("triggered_by") == "inbox" for r in rows)
     assert a2.id not in svc._running_agents
+
+
+# ── agent_delegate ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_round_trip(started_agent_service):
+    """A1 delegates to A2; A2's final assistant message returns to A1."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    svc._ai.response_text = "hello back"
+
+    result = await asyncio.wait_for(
+        svc._exec_agent_delegate({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "instruction": "say hi",
+            "max_wait_s": 5,
+        }),
+        timeout=5.0,
+    )
+    assert result == "hello back"
+
+    # Sanity: a2's run was triggered_by="delegation" and carries the
+    # delegation_id on its run row.
+    runs = await svc._storage.query(
+        Query(
+            collection=_AGENT_RUNS_COLLECTION,
+            filters=[Filter(field="agent_id", op=FilterOp.EQ, value=a2.id)],
+        )
+    )
+    assert any(r.get("triggered_by") == "delegation" for r in runs)
+    assert any(r.get("delegation_id") for r in runs)
+    # And the pending-delegations dict was cleaned up.
+    assert svc._pending_delegations == {}
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_cycle_rejected(started_agent_service):
+    """A→B→A is rejected up-front by the chain check.
+
+    Setup: a1 originally delegated to a2. While a2 is processing, it
+    tries to delegate back to a1 — i.e., the call carries a chain of
+    ``[a1.id]`` and target=a1. After the handler appends the caller
+    (a2.id) to chain, target.id ∈ chain becomes ``a1.id ∈ [a1, a2]``
+    → cycle.
+    """
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    result = await svc._exec_agent_delegate({
+        "_agent_id": a2.id,
+        "target_name": "a1",
+        "instruction": "back to you",
+        "_delegation_chain": [a1.id],
+    })
+    assert result.startswith("error:")
+    assert "cycle" in result
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_depth_cap(started_agent_service):
+    """Chain length 4 + caller pushes past the cap of 5."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    # a2 must exist for _load_peer_by_name resolution; we don't need
+    # the handle directly since the depth check fires before any signal
+    # is sent.
+    await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    # 4 distinct prior delegators in the chain; appending the caller
+    # makes len(chain) == 5 ≥ cap, which should reject.
+    fake_chain = ["ag_p1", "ag_p2", "ag_p3", "ag_p4"]
+    result = await svc._exec_agent_delegate({
+        "_agent_id": a1.id,
+        "target_name": "a2",
+        "instruction": "do the thing",
+        "_delegation_chain": fake_chain,
+    })
+    assert result.startswith("error:")
+    assert "depth cap" in result
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_timeout(started_agent_service):
+    """max_wait_s=1 with a slow target → timeout error string."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    a2 = await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    # Make A2's chat hang for longer than max_wait_s.
+    svc._ai.chat_delay_s = 5.0
+    svc._ai.response_text = "ignored"
+
+    result = await asyncio.wait_for(
+        svc._exec_agent_delegate({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "instruction": "slow work",
+            "max_wait_s": 1,
+        }),
+        timeout=3.0,
+    )
+    assert result.startswith("error:")
+    assert "timed out" in result.lower()
+    # The Future was abandoned; the dict entry is cleaned by the finally.
+    assert svc._pending_delegations == {}
+
+    # Wait for A2's spawned run to finish so sqlite isn't torn down
+    # mid-write.
+    deadline = asyncio.get_running_loop().time() + 8.0
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+        runs = await svc._storage.query(
+            Query(
+                collection=_AGENT_RUNS_COLLECTION,
+                filters=[Filter(field="agent_id", op=FilterOp.EQ, value=a2.id)],
+            )
+        )
+        if runs and any(r.get("status") in {"completed", "failed"} for r in runs):
+            break
+    # Sanity: a2 idle now.
+    assert a2.id not in svc._running_agents
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_target_failure(started_agent_service):
+    """Target run raises → caller receives an error string."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+    await svc.create_agent(owner_user_id="usr_a", name="a2")
+
+    # Force a2's chat to raise — the run goes to FAILED, the future's
+    # set_exception path fires, and _exec_agent_delegate's exception
+    # arm returns an error string (does NOT propagate).
+    svc._ai.raise_on_chat = RuntimeError("kaboom")
+
+    result = await asyncio.wait_for(
+        svc._exec_agent_delegate({
+            "_agent_id": a1.id,
+            "target_name": "a2",
+            "instruction": "will fail",
+            "max_wait_s": 5,
+        }),
+        timeout=5.0,
+    )
+    assert result.startswith("error:")
+    assert "target run" in result
+    assert svc._pending_delegations == {}
+
+
+@pytest.mark.asyncio
+async def test_agent_delegate_rejects_self(started_agent_service):
+    """Delegating to self is rejected before the future is created."""
+    svc = started_agent_service
+    a1 = await svc.create_agent(owner_user_id="usr_a", name="a1")
+
+    result = await svc._exec_agent_delegate({
+        "_agent_id": a1.id,
+        "target_name": "a1",
+        "instruction": "do it yourself",
+    })
+    assert result.startswith("error:")
+    assert "yourself" in result
+    assert svc._pending_delegations == {}

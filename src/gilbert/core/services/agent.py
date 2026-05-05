@@ -98,9 +98,10 @@ _CORE_AGENT_TOOLS: frozenset[str] = frozenset({
     "agent_memory_save",
     "agent_memory_search",
     "agent_memory_review_and_promote",
-    # Phase 2 — peer messaging (agent_delegate added in the next commit).
+    # Phase 2 — peer messaging
     "agent_list",
     "agent_send_message",
+    "agent_delegate",
     # Phase 4 will add goal_post.
 })
 
@@ -289,6 +290,44 @@ _TOOL_AGENT_SEND_MESSAGE = ToolDefinition(
     slash_command="agent_send_message",
     slash_help="DM another agent.",
 )
+
+_TOOL_AGENT_DELEGATE = ToolDefinition(
+    name="agent_delegate",
+    description=(
+        "Send a message to a peer and await its END_TURN reply. The peer "
+        "gets a system-prompt note saying it is handling a delegation; its "
+        "final assistant message becomes your tool result. Errors on "
+        "circular delegations or when the delegation chain depth would "
+        "exceed 5. Default timeout is 600 seconds."
+    ),
+    parameters=[
+        ToolParameter(
+            name="target_name",
+            type=ToolParameterType.STRING,
+            description="The peer agent's name.",
+            required=True,
+        ),
+        ToolParameter(
+            name="instruction",
+            type=ToolParameterType.STRING,
+            description="What you want the peer to do.",
+            required=True,
+        ),
+        ToolParameter(
+            name="max_wait_s",
+            type=ToolParameterType.NUMBER,
+            description="Timeout in seconds (default 600).",
+            required=False,
+        ),
+    ],
+    slash_command="agent_delegate",
+    slash_help="Delegate work to another agent and await its reply.",
+)
+
+
+# Maximum allowed delegation chain depth (caller + targets). The 5th
+# delegation in a chain is rejected before the signal fires.
+_DELEGATION_DEPTH_CAP = 5
 
 
 # ── Module-level helpers ─────────────────────────────────────────────
@@ -546,6 +585,11 @@ class AgentService(Service):
 
         # Per-agent inbox queues: agent_id → list of pending InboxSignals
         self._inboxes: dict[str, list[InboxSignal]] = {}
+
+        # Pending delegations: delegation_id → Future awaiting target's
+        # final assistant message. Resolved in _run_agent_internal when
+        # a delegation-triggered run finishes.
+        self._pending_delegations: dict[str, asyncio.Future[str]] = {}
 
         # Service-level defaults merged into create_agent calls
         self._defaults: dict[str, Any] = {}
@@ -1095,6 +1139,11 @@ class AgentService(Service):
         Re-checks that the agent is still idle (race-safe), re-fetches it
         (could have been disabled between dispatch and now), then runs the
         agent under the ``_running_agents`` guard.
+
+        Forwards the delegation chain (carried in ``sig.metadata['chain']``)
+        and ``sig.delegation_id`` into ``trigger_context`` so the run can
+        propagate them to nested delegations and resolve the awaiting Future
+        on completion.
         """
         if agent_id in self._running_agents:
             # Raced with another trigger — skip; the in-flight run will
@@ -1105,10 +1154,17 @@ class AgentService(Service):
             return
         self._running_agents.add(agent_id)
         try:
+            chain_raw = sig.metadata.get("chain", []) if sig.metadata else []
+            chain = [str(x) for x in chain_raw] if isinstance(chain_raw, list) else []
             await self._run_agent_internal(
                 a,
                 triggered_by=signal_kind,
-                trigger_context={"signal_id": sig.id, "sender_id": sig.sender_id},
+                trigger_context={
+                    "signal_id": sig.id,
+                    "sender_id": sig.sender_id,
+                    "chain": chain,
+                    "delegation_id": sig.delegation_id,
+                },
                 user_message=None,
             )
         finally:
@@ -1342,7 +1398,7 @@ class AgentService(Service):
             started_at=_now(),
             status=RunStatus.RUNNING,
             conversation_id=a.conversation_id,
-            delegation_id="",
+            delegation_id=str(trigger_context.get("delegation_id", "")),
             ended_at=None,
             final_message_text=None,
             rounds_used=0,
@@ -1434,6 +1490,21 @@ class AgentService(Service):
                 "cost_usd": run.cost_usd,
             },
         )
+
+        # Resolve any awaiting delegation Future. A run that completes
+        # successfully delivers its final assistant message to the
+        # delegator; a failed/timed-out run propagates an exception so
+        # the caller's _exec_agent_delegate surfaces the error.
+        delegation_id = str(trigger_context.get("delegation_id", ""))
+        if delegation_id:
+            fut = self._pending_delegations.get(delegation_id)
+            if fut is not None and not fut.done():
+                if run.status is RunStatus.COMPLETED:
+                    fut.set_result(run.final_message_text or "")
+                else:
+                    fut.set_exception(
+                        RuntimeError(f"delegation target run {run.status.value}")
+                    )
         return run
 
     def _synthesize_trigger_message(self, triggered_by: str, ctx: dict[str, Any]) -> str:
@@ -1500,6 +1571,13 @@ class AgentService(Service):
                 f"pressing, end your turn briefly.\n\n"
                 f"CHECKLIST:\n{checklist}\n\n"
                 f"DUE COMMITMENTS:\n{due_block}"
+            )
+        elif triggered_by == "delegation":
+            parts.append(
+                "You are handling a delegation from a peer. Read the request "
+                "(in the inbox below) and respond. Your final assistant "
+                "message is returned as the reply — end your turn cleanly "
+                "with a complete answer, no follow-up actions."
             )
 
         # Long-term memory block (top-K by recency).
@@ -1632,6 +1710,7 @@ class AgentService(Service):
             _TOOL_AGENT_MEMORY_PROMOTE,
             _TOOL_AGENT_LIST,
             _TOOL_AGENT_SEND_MESSAGE,
+            _TOOL_AGENT_DELEGATE,
         ]
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -1654,6 +1733,8 @@ class AgentService(Service):
             return await self._exec_agent_list(arguments)
         if name == "agent_send_message":
             return await self._exec_agent_send_message(arguments)
+        if name == "agent_delegate":
+            return await self._exec_agent_delegate(arguments)
         raise KeyError(f"unknown tool: {name}")
 
     async def _exec_complete_run(self, args: dict[str, Any]) -> str:
@@ -1848,26 +1929,119 @@ class AgentService(Service):
         )
         return f"sent to {target_name}"
 
+    async def _exec_agent_delegate(self, args: dict[str, Any]) -> str:
+        agent_id = args.get("_agent_id")
+        target_name = str(args.get("target_name", "")).strip()
+        instruction = str(args.get("instruction", "")).strip()
+        max_wait_s_raw = args.get("max_wait_s", 600)
+        try:
+            max_wait_s = max(1, int(max_wait_s_raw))
+        except (TypeError, ValueError):
+            return "error: max_wait_s must be a number"
+        if not isinstance(agent_id, str) or not agent_id:
+            return "error: missing _agent_id"
+        if not target_name or not instruction:
+            return "error: target_name and instruction are required"
+
+        me = await self.get_agent(agent_id)
+        if me is None:
+            return "error: caller agent not found"
+
+        try:
+            target = await self._load_peer_by_name(
+                caller_agent_id=agent_id, target_name=target_name,
+            )
+        except PermissionError as exc:
+            return f"error: {exc}"
+
+        if target.id == me.id:
+            return "error: cannot delegate to yourself"
+
+        # Cycle + depth check. The chain is the list of agent IDs that
+        # have already initiated a delegation in the current call stack;
+        # we append the current caller before checking, so a chain that
+        # would loop back to a prior delegator (target.id ∈ chain) or
+        # would push depth past the cap is rejected before fire.
+        chain_raw = args.get("_delegation_chain", [])
+        if not isinstance(chain_raw, list):
+            chain_raw = []
+        chain: list[str] = [str(x) for x in chain_raw]
+        chain.append(me.id)
+        if target.id in chain:
+            return f"error: delegation cycle — {target.name} already in chain"
+        if len(chain) >= _DELEGATION_DEPTH_CAP:
+            return (
+                f"error: delegation depth cap reached "
+                f"({_DELEGATION_DEPTH_CAP})"
+            )
+
+        delegation_id = f"del_{uuid.uuid4().hex[:12]}"
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._pending_delegations[delegation_id] = future
+
+        try:
+            await self._signal_agent(
+                agent_id=target.id,
+                signal_kind="delegation",
+                body=instruction,
+                sender_kind="agent",
+                sender_id=me.id,
+                sender_name=me.name,
+                delegation_id=delegation_id,
+                metadata={"chain": chain},
+            )
+            try:
+                reply = await asyncio.wait_for(future, timeout=max_wait_s)
+            except TimeoutError:
+                return (
+                    f"error: delegation to {target_name} timed out after "
+                    f"{max_wait_s}s"
+                )
+            except Exception as exc:
+                # Target run failed (FAILED / TIMED_OUT etc.) — surface
+                # to the caller as an error string rather than letting
+                # the exception propagate into the AI tool runtime.
+                return f"error: target run {exc}"
+            return reply
+        finally:
+            self._pending_delegations.pop(delegation_id, None)
+
     # ── Tool argument injection (Task 15) ────────────────────────────
 
     def _inject_agent_id(
-        self, agent_id: str, tools_dict: dict[str, Any],
+        self,
+        agent_id: str,
+        tools_dict: dict[str, Any],
+        *,
+        delegation_chain: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Wrap each tool handler so _agent_id is injected into args.
+        """Wrap each tool handler so ``_agent_id`` (and, when
+        ``delegation_chain`` is non-empty, ``_delegation_chain``) get
+        injected into the call's argument dict.
 
         Expects tools_dict shape: ``dict[name, tuple[ToolDefinition, callable]]``
         matching agent_loop.run_loop's expected shape.
 
         The wrapped handler accepts the same arguments dict and mutates it
         to include ``_agent_id`` if absent (caller's value wins if present).
+        ``_delegation_chain`` is only injected when the active run is
+        delegation-triggered, so non-delegation runs see the same shape
+        they always have.
         """
+        chain_to_inject = list(delegation_chain) if delegation_chain else None
         wrapped: dict[str, Any] = {}
         for name, entry in tools_dict.items():
             tool_def, handler = entry
 
-            async def _wrapped(args: dict[str, Any], _h: Any = handler) -> Any:
+            async def _wrapped(
+                args: dict[str, Any],
+                _h: Any = handler,
+                _chain: list[str] | None = chain_to_inject,
+            ) -> Any:
                 new_args = dict(args)
                 new_args.setdefault("_agent_id", agent_id)
+                if _chain is not None:
+                    new_args.setdefault("_delegation_chain", list(_chain))
                 return await _h(new_args)
 
             wrapped[name] = (tool_def, _wrapped)
