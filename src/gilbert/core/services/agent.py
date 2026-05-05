@@ -2903,9 +2903,11 @@ class AgentService(Service):
         if not isinstance(assign_raw, list):
             return "error: assign_to must be an array"
         for entry in assign_raw:
+            target_name: str
+            role: AssignmentRole
             if isinstance(entry, str):
                 target_name = entry.strip()
-                role: AssignmentRole | None = AssignmentRole.COLLABORATOR
+                role = AssignmentRole.COLLABORATOR
             elif isinstance(entry, dict):
                 target_name = str(entry.get("agent_name", "")).strip()
                 role = self._coerce_role(entry.get("role")) or AssignmentRole.COLLABORATOR
@@ -3073,8 +3075,9 @@ class AgentService(Service):
             return "error: war room conversation missing"
         msgs = list(conv_row.get("messages", []) or [])
         now = _now()
-        msg = {
-            "id": f"msg_{uuid.uuid4().hex[:12]}",
+        msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        msg: dict[str, Any] = {
+            "id": msg_id,
             "role": "user",
             "content": body,
             "ts": now.isoformat(),
@@ -3113,7 +3116,7 @@ class AgentService(Service):
                     sender_id=me.id,
                     sender_name=me.name,
                     source_conv_id=conv_id,
-                    source_message_id=msg["id"],
+                    source_message_id=msg_id,
                     metadata={"goal_id": goal_id, "kind": "war_room_mention"},
                 )
                 mention_count += 1

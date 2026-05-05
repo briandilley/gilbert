@@ -23,7 +23,6 @@ from gilbert.interfaces.agent import (
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.storage import Filter, FilterOp, Query
 
-
 # ── Task 1: entity round-trip + enum coverage ────────────────────────
 
 
