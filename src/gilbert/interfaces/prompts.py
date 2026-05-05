@@ -2,8 +2,8 @@
 
 Lets plugins (or any service) contribute fragments to a target system
 prompt without core knowing about them. The owning service of an
-extensible prompt (e.g. ``AutonomousAgentService`` for the agent's
-system prompt) renders its base template, then concatenates every
+extensible prompt (e.g. ``AgentService`` for the agent's system
+prompt) renders its base template, then concatenates every
 ``enabled`` fragment whose ``target`` matches.
 
 Each fragment is owned by ONE service. That service is responsible
@@ -35,7 +35,7 @@ class PromptFragment:
     ``target`` is a stable string that the prompt's owning service
     (the consumer of fragments) checks against. Conventional values:
 
-    - ``"agent.system_prompt"`` — appended to AutonomousAgentService's
+    - ``"agent.system_prompt"`` — appended to AgentService's
       per-run system frame.
 
     Pages may add more targets over time; this dataclass is the

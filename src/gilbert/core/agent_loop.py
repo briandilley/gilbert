@@ -1,7 +1,7 @@
 """Pure async loop primitive for AI tool-use loops.
 
 Used by both ``AIService.chat()`` (after refactor) and the upcoming
-``AutonomousAgentService.run_goal()``. The loop drives one
+``AgentService.run_agent_now()``. The loop drives one
 ``AIBackend.generate_stream()`` per round, consumes events to find
 ``MESSAGE_COMPLETE``, and on ``TOOL_USE`` executes tools (in parallel
 when the backend supports it) and iterates. Termination: ``END_TURN``,
