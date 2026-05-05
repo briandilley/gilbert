@@ -21,7 +21,6 @@
  * - ``["agents", "commitments", agentId, includeCompleted]``
  * - ``["agents", "memories", agentId, filters]``
  * - ``["agents", "tools-available"]``
- * - ``["agents", "tool-groups"]``
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -39,7 +38,6 @@ import type {
   MemoryFilters,
   MemoryState,
   ToolDescriptor,
-  ToolGroupMap,
 } from "@/types/agent";
 
 // ── Reads ─────────────────────────────────────────────────────────
@@ -145,18 +143,6 @@ export function useAvailableTools() {
       rpc<{ tools: ToolDescriptor[] }>({
         type: "agents.tools.list_available",
       }).then((r) => r.tools),
-    enabled: connected,
-  });
-}
-
-export function useToolGroups() {
-  const { rpc, connected } = useWebSocket();
-  return useQuery({
-    queryKey: ["agents", "tool-groups"],
-    queryFn: () =>
-      rpc<{ groups: ToolGroupMap }>({
-        type: "agents.tools.list_groups",
-      }).then((r) => r.groups),
     enabled: connected,
   });
 }
