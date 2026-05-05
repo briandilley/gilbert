@@ -122,6 +122,32 @@ class _FakeAgentService:
     async def run_agent_now(self, agent_id: str, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    # Phase 4 additions to ``AgentProvider`` — goal CRUD + assignments.
+    # Stubbed; the avatar route never calls these.
+    async def create_goal(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def get_goal(self, goal_id: str) -> Any:
+        raise NotImplementedError
+
+    async def list_goals(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def update_goal_status(self, goal_id: str, status: Any) -> Any:
+        raise NotImplementedError
+
+    async def list_assignments(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def assign_agent_to_goal(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def unassign_agent_from_goal(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def handoff_goal(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
 
 class _FakeServiceManager:
     def __init__(self, agent_svc: _FakeAgentService) -> None:

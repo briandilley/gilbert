@@ -441,6 +441,7 @@ function HandoffDialog({
         goalId: summary.goal._id,
         fromAgentId: driver.agent_id,
         toAgentId,
+        newRoleForFrom,
         ...(note.trim() ? { note: note.trim() } : {}),
       });
       reset();
@@ -511,12 +512,6 @@ function HandoffDialog({
                 <SelectItem value="reviewer">Reviewer</SelectItem>
               </SelectContent>
             </Select>
-            {/*
-             * The handoff RPC currently bakes in COLLABORATOR for the
-             * outgoing driver. We surface this control for forward
-             * compatibility but submit as-is; tweaking it is a Phase
-             * 4-bis enhancement once the backend accepts the role.
-             */}
           </div>
 
           <div className="space-y-2">

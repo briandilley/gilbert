@@ -236,11 +236,13 @@ export function useHandoffGoal() {
       goalId,
       fromAgentId,
       toAgentId,
+      newRoleForFrom,
       note,
     }: {
       goalId: string;
       fromAgentId: string;
       toAgentId: string;
+      newRoleForFrom?: AssignmentRole;
       note?: string;
     }) =>
       rpc<{
@@ -251,6 +253,7 @@ export function useHandoffGoal() {
         goal_id: goalId,
         from_agent_id: fromAgentId,
         to_agent_id: toAgentId,
+        ...(newRoleForFrom ? { new_role_for_from: newRoleForFrom } : {}),
         ...(note ? { note } : {}),
       }),
     onSuccess: (_data, vars) => {

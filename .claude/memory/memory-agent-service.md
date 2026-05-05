@@ -299,6 +299,109 @@ the callback always returns False, `_execute_tool_calls` is
 bit-identical to its prior behavior. No existing tests changed
 semantics.
 
+## Phase 4 — Multi-agent goals
+
+First-class `Goal` entity with one or more agent assignees. A Goal
+owns a war-room conversation; assignments come in three roles —
+DRIVER (the responsible owner), COLLABORATOR (peer worker), REVIEWER
+(read-mostly). Same-owner only in Phase 4; cross-user is Phase 6.
+
+**Entities** (`src/gilbert/interfaces/agent.py`):
+- `Goal` — id, owner_user_id, name, description, status (NEW /
+  IN_PROGRESS / BLOCKED / COMPLETE / CANCELLED),
+  war_room_conversation_id, cost_cap_usd, lifetime_cost_usd,
+  created_at, updated_at, completed_at.
+- `GoalAssignment` — id, goal_id, agent_id, role (driver /
+  collaborator / reviewer), assigned_at, assigned_by ("user:<uid>"
+  or "<agent_id>"), removed_at, handoff_note.
+
+**Collections:** `goals`, `goal_assignments`. War-room conversations
+reuse the existing `ai_conversations` collection with
+`metadata={"goal_id": …, "kind": "war_room"}` so consumers can find
+them.
+
+**`AgentService` methods:** `create_goal` (creates row + war-room
+conv + initial assignments — first listed assignee defaults DRIVER
+when none specified), `get_goal`, `list_goals`,
+`update_goal_status`, `list_assignments` (filterable by goal_id,
+agent_id, active_only), `assign_agent_to_goal` (idempotent on
+same-role), `unassign_agent_from_goal` (marks `removed_at`, doesn't
+delete), `handoff_goal` (atomically demotes DRIVER →
+`new_role_for_from` (default COLLABORATOR) and promotes target →
+DRIVER). `_recent_war_room_posts(goal_id, limit)` reads the conv's
+last N user-role messages for prompt assembly.
+
+**Tools (seven new):**
+- `goal_create` — creates goal + assignments. Caller becomes the
+  owner. Resolves `assign_to` agent names via `_load_peer_by_name`.
+- `goal_assign` — DRIVER-only.
+- `goal_unassign` — DRIVER-only OR self-unassign.
+- `goal_handoff` — current DRIVER only. Defaults `new_role_for_from`
+  to COLLABORATOR.
+- `goal_post(goal_id, body, mention=[])` — assignee-only. Appends
+  USER-role row to the war-room conv with
+  `metadata.sender = {kind, id, name}`. Mentioned peers receive an
+  `inbox` signal with body `[mentioned in war room <name>]: <body>`.
+  Joins `_CORE_AGENT_TOOLS`.
+- `goal_status(goal_id, new_status)` — DRIVER-only.
+- `goal_summary(goal_id)` — assignee-only. Returns JSON
+  `{name, description, status, assignees, recent_posts (last 10),
+  lifetime_cost_usd, is_dependency_blocked: false}`.
+  `is_dependency_blocked` is hardwired False in Phase 4; Phase 5
+  computes it from real GoalDependency rows.
+
+**WS RPCs** (all `goals.*`, owner-scoped or admin):
+`goals.create / list / get / update_status` for goal CRUD,
+`goals.assignments.list / add / remove / handoff` for assignment
+management, `goals.summary` and `goals.posts.list` for war-room
+reads. ACL: `"goals.": 100` in `interfaces/acl.py`.
+
+**System prompt — ACTIVE ASSIGNMENTS block:** every run, after the
+LONG_TERM memory block, the agent's active assignments are appended:
+
+```
+ACTIVE ASSIGNMENTS:
+- Goal 'name' (id=goal_id) [role=driver, status=in_progress]
+  alice: hi everyone
+  bob: kicking off the spec
+- Goal 'other-name' …
+```
+
+Recent posts default to last 10. The block is omitted entirely when
+the agent has no active assignments.
+
+**Events:** `goal.created`, `goal.updated`, `goal.status.changed`,
+`goal.assignment.changed` published by the relevant methods. The
+SPA subscribes for live refresh of the kanban + war-room.
+
+**Frontend (Phase 4):**
+- New types in `frontend/src/types/agent.ts` (Goal /
+  GoalAssignment / WarRoomPost / GoalSummary / GoalStatus /
+  AssignmentRole).
+- React Query client at `frontend/src/api/goals.ts` mirroring
+  `agents.ts` patterns.
+- `/goals` route — `GoalsListPage` + `GoalKanban` + `GoalCard`. Five
+  columns (NEW / IN_PROGRESS / BLOCKED / COMPLETE / CANCELLED).
+  Native HTML5 drag-and-drop between columns calls
+  `useUpdateGoalStatus`. "New goal" Dialog with name, description,
+  multi-select assignee picker.
+- `/goals/<id>` route — `WarRoomPage` with header (name, status,
+  cost, Status/Handoff/Add-assignee actions), `AssigneesStrip`,
+  scrollable read-only post list, right-rail Phase 5 placeholders
+  (Deliverables / Dependencies). No composer in Phase 4.
+- "Goals" nav group registered in `web_api.py` (icon: `target`,
+  required_role: `user`).
+
+**Out of scope (Phase 4):**
+- War-room composer for human posting. Posts come via `goal_post`
+  from agents only. Polish follow-up.
+- Goal deletion / purge. CANCELLED is the closure path.
+- Run-cost rollup onto `Goal.lifetime_cost_usd` (field exists; not
+  populated automatically — needs a run→goal linkage).
+- Direct conv-row write contract — `goal_post` mutates
+  `ai_conversations.<id>.messages` directly. A capability-protocol
+  `append_message_to_conversation` would be cleaner; deferred.
+
 ## Related
 - `src/gilbert/interfaces/agent.py`
 - `src/gilbert/core/services/agent.py`
@@ -316,10 +419,18 @@ semantics.
 - `tests/unit/test_agent_avatar_route.py` (Phase 1B HTTP route coverage)
 - `tests/unit/test_agent_peer_messaging.py` (Phase 2 + Phase 3 coverage)
 - `tests/unit/test_ai_service_interrupt.py` (Phase 3 boundary mechanic)
+- `tests/unit/test_goals.py` (Phase 4 entities + service)
+- `tests/unit/test_goal_tools.py` (Phase 4 agent tools)
+- `tests/unit/test_goal_assignments.py` (Phase 4 WS RPCs)
+- `tests/unit/test_war_room_acl.py` (Phase 4 RBAC)
+- `frontend/src/api/goals.ts` (Phase 4 SPA client)
+- `frontend/src/components/goals/` (Phase 4 SPA components)
 - `docs/superpowers/specs/2026-05-04-agent-messaging-design.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1a-backend.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-1b-ui.md`
+- `docs/superpowers/plans/2026-05-04-agent-messaging-phase-2-peer-messaging.md`
 - `docs/superpowers/plans/2026-05-04-agent-messaging-phase-3-mid-stream-interrupt.md`
+- `docs/superpowers/plans/2026-05-04-agent-messaging-phase-4-goals.md`
 - `.claude/memory/memory-agent-loop.md` (run_loop primitive)
 - `.claude/memory/memory-multi-user-isolation.md`
 - `.claude/memory/memory-ai-prompts-configurable.md`

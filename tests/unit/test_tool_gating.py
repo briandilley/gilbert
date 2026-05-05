@@ -10,6 +10,8 @@ _CORE = {
     "agent_memory_review_and_promote",
     # Phase 2 — peer messaging
     "agent_list", "agent_send_message", "agent_delegate",
+    # Phase 4 — multi-agent goals (war-room post)
+    "goal_post",
 }
 
 

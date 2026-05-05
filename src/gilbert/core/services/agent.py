@@ -3669,6 +3669,14 @@ class AgentService(Service):
         from_agent_id = str(params.get("from_agent_id", ""))
         to_agent_id = str(params.get("to_agent_id", ""))
         note = str(params.get("note", ""))
+        new_role_raw = str(params.get("new_role_for_from", "")).strip()
+        if new_role_raw:
+            try:
+                new_role_for_from = AssignmentRole(new_role_raw)
+            except ValueError:
+                raise ValueError(f"unknown role: {new_role_raw}") from None
+        else:
+            new_role_for_from = AssignmentRole.COLLABORATOR
         await self._load_goal_for_caller(goal_id, conn)
         # Both agents must belong to the same owner; load_agent_for_caller
         # enforces that.
@@ -3686,6 +3694,7 @@ class AgentService(Service):
             goal_id=goal_id,
             from_agent_id=from_agent_id,
             to_agent_id=to_agent_id,
+            new_role_for_from=new_role_for_from,
             note=note,
         )
         return {
