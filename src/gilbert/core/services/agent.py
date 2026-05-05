@@ -201,7 +201,6 @@ def _run_from_dict(row: dict[str, Any]) -> Run:
 
 
 def _commitment_from_dict(row: dict[str, Any]) -> Commitment:
-    """Used by _due_commitments helper. Task 9 fully wires Commitment."""
     return Commitment(
         id=row["_id"],
         agent_id=row["agent_id"],
@@ -211,6 +210,18 @@ def _commitment_from_dict(row: dict[str, Any]) -> Commitment:
         completed_at=datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None,
         completion_note=row.get("completion_note", ""),
     )
+
+
+def _commitment_to_dict(c: Commitment) -> dict[str, Any]:
+    return {
+        "_id": c.id,
+        "agent_id": c.agent_id,
+        "content": c.content,
+        "due_at": c.due_at.isoformat(),
+        "created_at": c.created_at.isoformat(),
+        "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+        "completion_note": c.completion_note,
+    }
 
 
 class AgentService(Service):
@@ -733,6 +744,62 @@ class AgentService(Service):
             parts.append(f"LONG-TERM MEMORY:\n{mem_block}")
 
         return "\n\n---\n\n".join(p for p in parts if p)
+
+    async def create_commitment(
+        self, *, agent_id: str, content: str, due_at: datetime,
+    ) -> Commitment:
+        """Persist a new commitment and return it."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        c = Commitment(
+            id=f"com_{uuid.uuid4().hex[:12]}",
+            agent_id=agent_id,
+            content=content,
+            due_at=due_at,
+            created_at=_now(),
+            completed_at=None,
+            completion_note="",
+        )
+        await self._storage.put(_AGENT_COMMITMENTS_COLLECTION, c.id, _commitment_to_dict(c))
+        return c
+
+    async def complete_commitment(
+        self, commitment_id: str, *, note: str = "",
+    ) -> Commitment:
+        """Mark a commitment complete with an optional note."""
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_AGENT_COMMITMENTS_COLLECTION, commitment_id)
+        if row is None:
+            raise KeyError(commitment_id)
+        row["completed_at"] = _now().isoformat()
+        row["completion_note"] = note
+        await self._storage.put(_AGENT_COMMITMENTS_COLLECTION, commitment_id, row)
+        return _commitment_from_dict(row)
+
+    async def list_commitments(
+        self, *, agent_id: str, include_completed: bool = False,
+    ) -> list[Commitment]:
+        """Return commitments for *agent_id*, sorted by due_at ascending.
+
+        By default only unfinished commitments are returned; pass
+        ``include_completed=True`` to include completed ones.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        rows = await self._storage.query(
+            Query(
+                collection=_AGENT_COMMITMENTS_COLLECTION,
+                filters=[Filter(field="agent_id", op=FilterOp.EQ, value=agent_id)],
+            )
+        )
+        out: list[Commitment] = []
+        for r in rows:
+            if not include_completed and r.get("completed_at"):
+                continue
+            out.append(_commitment_from_dict(r))
+        out.sort(key=lambda c: c.due_at)
+        return out
 
     async def _due_commitments(self, agent_id: str) -> list[Commitment]:
         """Return commitments for *agent_id* that are due now and not completed."""
