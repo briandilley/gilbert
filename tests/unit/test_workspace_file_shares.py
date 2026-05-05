@@ -342,7 +342,7 @@ async def test_cleanup_removes_expired_and_exhausted(
         rel_path="uploads/c.bin",
     )
 
-    from gilbert.interfaces.storage import Filter, FilterOp, Query
+    from gilbert.interfaces.storage import Query
 
     records = await sqlite_storage.query(
         Query(collection=_WORKSPACE_SHARES_COLLECTION)

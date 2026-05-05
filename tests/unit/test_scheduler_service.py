@@ -64,7 +64,8 @@ def test_schedule_once() -> None:
 
 # --- Schedule bounds & windows ---
 
-from datetime import datetime, time as dtime, timedelta  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+from datetime import time as dtime
 
 from gilbert.core.services.scheduler import (  # noqa: E402
     _clamp_to_daily_window,

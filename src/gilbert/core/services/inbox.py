@@ -56,12 +56,12 @@ from gilbert.interfaces.storage import (
     SortField,
     StorageProvider,
 )
-from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.workspace import WorkspaceProvider
 
 logger = logging.getLogger(__name__)
 

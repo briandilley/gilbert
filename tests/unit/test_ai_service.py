@@ -2745,7 +2745,6 @@ async def test_maybe_compress_history_backend_failure(
 
 from gilbert.core.services.ai import _COMPRESSION_SYSTEM_PROMPT
 
-
 # --- Parallel tool invocation ---
 
 
