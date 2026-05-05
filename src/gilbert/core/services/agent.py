@@ -4046,6 +4046,14 @@ class AgentService(Service):
             "goals.assignments.handoff": self._ws_goals_assignments_handoff,
             "goals.summary": self._ws_goals_summary,
             "goals.posts.list": self._ws_goals_posts_list,
+            # Phase 5 — deliverables + dependencies
+            "deliverables.list": self._ws_deliverables_list,
+            "deliverables.create": self._ws_deliverables_create,
+            "deliverables.finalize": self._ws_deliverables_finalize,
+            "deliverables.supersede": self._ws_deliverables_supersede,
+            "goals.dependencies.list": self._ws_goal_dependencies_list,
+            "goals.dependencies.add": self._ws_goal_dependencies_add,
+            "goals.dependencies.remove": self._ws_goal_dependencies_remove,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -4529,6 +4537,156 @@ class AgentService(Service):
         await self._load_goal_for_caller(goal_id, conn)
         posts = await self._recent_war_room_posts(goal_id, limit=limit)
         return {"posts": posts}
+
+    # ── WS handlers — deliverables + dependencies (Phase 5) ─────────
+
+    async def _load_deliverable_for_caller(
+        self, deliverable_id: str, conn: Any,
+    ) -> Deliverable:
+        """Fetch a deliverable, enforcing caller ownership of its goal."""
+        d = await self.get_deliverable(deliverable_id)
+        if d is None:
+            raise KeyError(deliverable_id)
+        # Ownership flows through the goal; ``_load_goal_for_caller``
+        # enforces admin / owner check and raises PermissionError on
+        # cross-user reach.
+        await self._load_goal_for_caller(d.goal_id, conn)
+        return d
+
+    async def _ws_deliverables_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id_raw = params.get("goal_id")
+        state_raw = params.get("state")
+        state: DeliverableState | None = None
+        if state_raw:
+            try:
+                state = DeliverableState(str(state_raw).lower().strip())
+            except ValueError as exc:
+                raise ValueError(f"unknown state: {state_raw}") from exc
+        if goal_id_raw is None:
+            raise ValueError("goal_id is required")
+        await self._load_goal_for_caller(str(goal_id_raw), conn)
+        ds = await self.list_deliverables(
+            goal_id=str(goal_id_raw), state=state,
+        )
+        return {"deliverables": [_deliverable_to_dict(d) for d in ds]}
+
+    async def _ws_deliverables_create(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        goal_id = str(params.get("goal_id", "")).strip()
+        name = str(params.get("name", "")).strip()
+        kind = str(params.get("kind", "")).strip()
+        content_ref = str(params.get("content_ref", ""))
+        produced_by_agent_id = str(params.get("produced_by_agent_id", "")).strip()
+        if not goal_id or not name or not kind:
+            raise ValueError("goal_id, name, kind are required")
+        await self._load_goal_for_caller(goal_id, conn)
+        # If produced_by_agent_id is provided, confirm same-owner.
+        if produced_by_agent_id:
+            await self.load_agent_for_caller(
+                produced_by_agent_id,
+                caller_user_id=self._caller_user_id(conn),
+                admin=self._is_admin(conn),
+            )
+        d = await self.create_deliverable(
+            goal_id=goal_id,
+            name=name,
+            kind=kind,
+            produced_by_agent_id=produced_by_agent_id,
+            content_ref=content_ref,
+        )
+        return {"deliverable": _deliverable_to_dict(d)}
+
+    async def _ws_deliverables_finalize(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        deliverable_id = str(params.get("deliverable_id", "")).strip()
+        if not deliverable_id:
+            raise ValueError("deliverable_id is required")
+        await self._load_deliverable_for_caller(deliverable_id, conn)
+        d = await self.finalize_deliverable(deliverable_id)
+        return {"deliverable": _deliverable_to_dict(d)}
+
+    async def _ws_deliverables_supersede(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        deliverable_id = str(params.get("deliverable_id", "")).strip()
+        new_content_ref = str(params.get("new_content_ref", "")).strip()
+        finalize = bool(params.get("finalize", False))
+        if not deliverable_id or not new_content_ref:
+            raise ValueError("deliverable_id and new_content_ref required")
+        await self._load_deliverable_for_caller(deliverable_id, conn)
+        obs, new = await self.supersede_deliverable(
+            deliverable_id,
+            new_content_ref=new_content_ref,
+            finalize=finalize,
+        )
+        return {
+            "obsoleted": _deliverable_to_dict(obs),
+            "new": _deliverable_to_dict(new),
+        }
+
+    async def _ws_goal_dependencies_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        dep_id_raw = params.get("dependent_goal_id")
+        src_id_raw = params.get("source_goal_id")
+        sat_raw = params.get("satisfied")
+        if dep_id_raw is None and src_id_raw is None:
+            raise ValueError(
+                "dependent_goal_id or source_goal_id required"
+            )
+        if dep_id_raw is not None:
+            await self._load_goal_for_caller(str(dep_id_raw), conn)
+        if src_id_raw is not None:
+            await self._load_goal_for_caller(str(src_id_raw), conn)
+        satisfied: bool | None = None
+        if sat_raw is not None:
+            satisfied = bool(sat_raw)
+        deps = await self.list_goal_dependencies(
+            dependent_goal_id=str(dep_id_raw) if dep_id_raw else None,
+            source_goal_id=str(src_id_raw) if src_id_raw else None,
+            satisfied=satisfied,
+        )
+        return {"dependencies": [_dependency_to_dict(d) for d in deps]}
+
+    async def _ws_goal_dependencies_add(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        dep_id = str(params.get("dependent_goal_id", "")).strip()
+        src_id = str(params.get("source_goal_id", "")).strip()
+        name = str(params.get("required_deliverable_name", "")).strip()
+        if not dep_id or not src_id or not name:
+            raise ValueError(
+                "dependent_goal_id, source_goal_id, "
+                "required_deliverable_name required"
+            )
+        await self._load_goal_for_caller(dep_id, conn)
+        await self._load_goal_for_caller(src_id, conn)
+        dep = await self.add_goal_dependency(
+            dependent_goal_id=dep_id,
+            source_goal_id=src_id,
+            required_deliverable_name=name,
+        )
+        return {"dependency": _dependency_to_dict(dep)}
+
+    async def _ws_goal_dependencies_remove(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        dependency_id = str(params.get("dependency_id", "")).strip()
+        if not dependency_id:
+            raise ValueError("dependency_id is required")
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_DEPENDENCIES_COLLECTION, dependency_id)
+        if row is None:
+            raise KeyError(dependency_id)
+        # Ownership through the dependent goal.
+        await self._load_goal_for_caller(row["dependent_goal_id"], conn)
+        await self.remove_goal_dependency(dependency_id)
+        return {"removed": True}
 
     # ── Event publishing helper ─────────────────────────────────────
 

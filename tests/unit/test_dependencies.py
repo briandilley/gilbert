@@ -1,13 +1,17 @@
-"""Tests for ``GoalDependency`` lifecycle and propagation on
-``deliverable_finalize``.
+"""Tests for ``GoalDependency`` lifecycle, propagation on
+``deliverable_finalize``, and the ``goals.dependencies.*`` /
+``deliverables.*`` WS RPC handlers.
 
 Most tests use the shared ``started_agent_service`` fixture and the
-sqlite-backed storage from ``conftest.py``.
+sqlite-backed storage from ``conftest.py``. WS RPC tests build a minimal
+fake connection that supplies ``user_id`` / ``user_level``.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from gilbert.interfaces.agent import AssignmentRole
 from gilbert.interfaces.storage import Filter, FilterOp, Query
@@ -24,6 +28,15 @@ async def _list_signals(svc: Any, agent_id: str) -> list[str]:
         )
     )
     return [r.get("signal_kind", "") for r in rows]
+
+
+class _FakeConn:
+    """Minimal stand-in for the WS connection object expected by the
+    handlers — provides ``user_id`` / ``user_level`` attributes only."""
+
+    def __init__(self, *, user_id: str, user_level: int = 100) -> None:
+        self.user_id = user_id
+        self.user_level = user_level
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -250,3 +263,148 @@ async def test_goal_summary_reflects_dependency_blocked(
     assert payload["is_dependency_blocked"] is False
 
 
+# ── WS RPC handlers ──────────────────────────────────────────────────
+
+
+async def test_ws_deliverables_owner_only(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="alpha")
+    g = await svc.create_goal(
+        owner_user_id="usr_1", name="g",
+        assign_to=[("alpha", AssignmentRole.DRIVER)],
+        assigned_by="user:usr_1",
+    )
+
+    handlers = svc.get_ws_handlers()
+    list_h = handlers["deliverables.list"]
+    create_h = handlers["deliverables.create"]
+
+    # Owner can list.
+    out = await list_h(_FakeConn(user_id="usr_1"), {"goal_id": g.id})
+    assert "deliverables" in out
+
+    # Other user blocked.
+    with pytest.raises(PermissionError):
+        await list_h(_FakeConn(user_id="usr_2"), {"goal_id": g.id})
+    with pytest.raises(PermissionError):
+        await create_h(
+            _FakeConn(user_id="usr_2"),
+            {
+                "goal_id": g.id, "name": "spec", "kind": "spec",
+                "produced_by_agent_id": a.id,
+            },
+        )
+
+
+async def test_ws_deliverables_create_finalize_round_trip(
+    started_agent_service: Any,
+) -> None:
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="alpha")
+    g = await svc.create_goal(
+        owner_user_id="usr_1", name="g",
+        assign_to=[("alpha", AssignmentRole.DRIVER)],
+        assigned_by="user:usr_1",
+    )
+    handlers = svc.get_ws_handlers()
+    conn = _FakeConn(user_id="usr_1")
+
+    created = await handlers["deliverables.create"](
+        conn,
+        {
+            "goal_id": g.id, "name": "spec", "kind": "spec",
+            "produced_by_agent_id": a.id, "content_ref": "r1",
+        },
+    )
+    did = created["deliverable"]["_id"]
+    assert created["deliverable"]["state"] == "draft"
+
+    finalized = await handlers["deliverables.finalize"](
+        conn, {"deliverable_id": did},
+    )
+    assert finalized["deliverable"]["state"] == "ready"
+
+    listed = await handlers["deliverables.list"](
+        conn, {"goal_id": g.id, "state": "ready"},
+    )
+    assert any(d["_id"] == did for d in listed["deliverables"])
+
+    superseded = await handlers["deliverables.supersede"](
+        conn,
+        {
+            "deliverable_id": did, "new_content_ref": "r2",
+            "finalize": True,
+        },
+    )
+    assert superseded["new"]["state"] == "ready"
+    assert superseded["obsoleted"]["state"] == "obsolete"
+
+
+async def test_ws_dependencies_owner_only(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    _, _, g_src, g_dep = await _bootstrap_two_goals(svc)
+
+    handlers = svc.get_ws_handlers()
+    add_h = handlers["goals.dependencies.add"]
+    list_h = handlers["goals.dependencies.list"]
+
+    # Owner can add.
+    out = await add_h(
+        _FakeConn(user_id="usr_1"),
+        {
+            "dependent_goal_id": g_dep.id,
+            "source_goal_id": g_src.id,
+            "required_deliverable_name": "spec",
+        },
+    )
+    assert "dependency" in out
+
+    # Other user blocked.
+    with pytest.raises(PermissionError):
+        await add_h(
+            _FakeConn(user_id="usr_2"),
+            {
+                "dependent_goal_id": g_dep.id,
+                "source_goal_id": g_src.id,
+                "required_deliverable_name": "other",
+            },
+        )
+    with pytest.raises(PermissionError):
+        await list_h(
+            _FakeConn(user_id="usr_2"), {"dependent_goal_id": g_dep.id},
+        )
+
+
+async def test_ws_dependencies_add_list_remove(
+    started_agent_service: Any,
+) -> None:
+    svc = started_agent_service
+    _, _, g_src, g_dep = await _bootstrap_two_goals(svc)
+
+    handlers = svc.get_ws_handlers()
+    conn = _FakeConn(user_id="usr_1")
+
+    added = await handlers["goals.dependencies.add"](
+        conn,
+        {
+            "dependent_goal_id": g_dep.id,
+            "source_goal_id": g_src.id,
+            "required_deliverable_name": "spec",
+        },
+    )
+    dep_id = added["dependency"]["_id"]
+
+    listed = await handlers["goals.dependencies.list"](
+        conn, {"dependent_goal_id": g_dep.id},
+    )
+    assert any(d["_id"] == dep_id for d in listed["dependencies"])
+
+    removed = await handlers["goals.dependencies.remove"](
+        conn, {"dependency_id": dep_id},
+    )
+    assert removed["removed"] is True
+
+    listed = await handlers["goals.dependencies.list"](
+        conn, {"dependent_goal_id": g_dep.id},
+    )
+    assert listed["dependencies"] == []

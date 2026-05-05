@@ -126,6 +126,10 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # Handlers enforce per-goal ownership (caller must own the goal,
     # i.e., goal.owner_user_id == caller.user_id) or be admin.
     "goals.": 100,
+    # Deliverable RPCs (Phase 5): user-level. Handlers enforce per-goal
+    # ownership through ``_load_goal_for_caller``. ``goals.dependencies.*``
+    # is covered by the broader ``goals.`` prefix above.
+    "deliverables.": 100,
     # MCP server (Gilbert-as-MCP): managing client registrations is
     # admin-only because creating a client grants an external
     # process permission to impersonate a Gilbert user's identity.
