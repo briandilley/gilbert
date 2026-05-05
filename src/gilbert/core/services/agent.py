@@ -31,8 +31,11 @@ from gilbert.interfaces.agent import (
     AgentStatus,
     AssignmentRole,
     Commitment,
+    Deliverable,
+    DeliverableState,
     Goal,
     GoalAssignment,
+    GoalDependency,
     GoalStatus,
     InboxSignal,
     MemoryState,
@@ -91,6 +94,8 @@ _AGENT_INBOX_SIGNALS_COLLECTION = "agent_inbox_signals"
 _AGENT_RUNS_COLLECTION = "agent_runs"
 _GOALS_COLLECTION = "goals"
 _GOAL_ASSIGNMENTS_COLLECTION = "goal_assignments"
+_DELIVERABLES_COLLECTION = "goal_deliverables"
+_DEPENDENCIES_COLLECTION = "goal_dependencies"
 
 # AI conversation rows live here. The same constant is declared on
 # AIService (``core/services/ai.py`` _COLLECTION). We re-declare instead
@@ -876,6 +881,60 @@ def _goal_assignment_from_dict(row: dict[str, Any]) -> GoalAssignment:
             if row.get("removed_at") else None
         ),
         handoff_note=row.get("handoff_note", ""),
+    )
+
+
+def _deliverable_to_dict(d: Deliverable) -> dict[str, Any]:
+    return {
+        "_id": d.id,
+        "goal_id": d.goal_id,
+        "name": d.name,
+        "kind": d.kind,
+        "state": d.state.value,
+        "produced_by_agent_id": d.produced_by_agent_id,
+        "content_ref": d.content_ref,
+        "created_at": d.created_at.isoformat(),
+        "finalized_at": d.finalized_at.isoformat() if d.finalized_at else None,
+    }
+
+
+def _deliverable_from_dict(row: dict[str, Any]) -> Deliverable:
+    return Deliverable(
+        id=row["_id"],
+        goal_id=row["goal_id"],
+        name=row.get("name", ""),
+        kind=row.get("kind", ""),
+        state=DeliverableState(row.get("state", "draft")),
+        produced_by_agent_id=row.get("produced_by_agent_id", ""),
+        content_ref=row.get("content_ref", ""),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        finalized_at=(
+            datetime.fromisoformat(row["finalized_at"])
+            if row.get("finalized_at") else None
+        ),
+    )
+
+
+def _dependency_to_dict(d: GoalDependency) -> dict[str, Any]:
+    return {
+        "_id": d.id,
+        "dependent_goal_id": d.dependent_goal_id,
+        "source_goal_id": d.source_goal_id,
+        "required_deliverable_name": d.required_deliverable_name,
+        "satisfied_at": d.satisfied_at.isoformat() if d.satisfied_at else None,
+    }
+
+
+def _dependency_from_dict(row: dict[str, Any]) -> GoalDependency:
+    return GoalDependency(
+        id=row["_id"],
+        dependent_goal_id=row["dependent_goal_id"],
+        source_goal_id=row["source_goal_id"],
+        required_deliverable_name=row.get("required_deliverable_name", ""),
+        satisfied_at=(
+            datetime.fromisoformat(row["satisfied_at"])
+            if row.get("satisfied_at") else None
+        ),
     )
 
 
@@ -2473,6 +2532,409 @@ class AgentService(Service):
             _goal_assignment_from_dict(to_assignment_row),
         )
 
+    # ── Deliverables + Dependencies (Phase 5) ────────────────────────
+
+    async def create_deliverable(
+        self,
+        *,
+        goal_id: str,
+        name: str,
+        kind: str,
+        produced_by_agent_id: str,
+        content_ref: str = "",
+        state: DeliverableState | None = None,
+    ) -> Deliverable:
+        """Persist a new deliverable.
+
+        Defaults to ``DeliverableState.DRAFT``. ``state=READY`` is only
+        used by the ``supersede_deliverable(finalize=True)`` path; in
+        that case the propagation hook is invoked here.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        eff_state = state if state is not None else DeliverableState.DRAFT
+        d = Deliverable(
+            id=f"dlv_{uuid.uuid4().hex[:12]}",
+            goal_id=goal_id,
+            name=name,
+            kind=kind,
+            state=eff_state,
+            produced_by_agent_id=produced_by_agent_id,
+            content_ref=content_ref,
+            created_at=_now(),
+            finalized_at=_now() if eff_state is DeliverableState.READY else None,
+        )
+        await self._storage.put(
+            _DELIVERABLES_COLLECTION, d.id, _deliverable_to_dict(d),
+        )
+        await self._publish(
+            "goal.deliverable.created",
+            {"deliverable_id": d.id, "goal_id": d.goal_id, "name": d.name},
+        )
+        if eff_state is DeliverableState.READY:
+            await self._on_deliverable_finalized(d)
+        return d
+
+    async def get_deliverable(
+        self, deliverable_id: str,
+    ) -> Deliverable | None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_DELIVERABLES_COLLECTION, deliverable_id)
+        if row is None:
+            return None
+        return _deliverable_from_dict(row)
+
+    async def list_deliverables(
+        self,
+        *,
+        goal_id: str | None = None,
+        state: DeliverableState | None = None,
+    ) -> list[Deliverable]:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        filters = []
+        if goal_id is not None:
+            filters.append(Filter(field="goal_id", op=FilterOp.EQ, value=goal_id))
+        if state is not None:
+            filters.append(Filter(field="state", op=FilterOp.EQ, value=state.value))
+        rows = await self._storage.query(
+            Query(collection=_DELIVERABLES_COLLECTION, filters=filters)
+        )
+        return [_deliverable_from_dict(r) for r in rows]
+
+    async def find_deliverable_by_content_ref(
+        self, content_ref: str,
+    ) -> Deliverable | None:
+        """Locate a deliverable that points at the given ``content_ref``.
+
+        Used by the cross-goal workspace resolver — given a workspace
+        file_id, find the deliverable that produced it. Returns the
+        most recently created match (if any).
+        """
+        if self._storage is None or not content_ref:
+            return None
+        rows = await self._storage.query(
+            Query(
+                collection=_DELIVERABLES_COLLECTION,
+                filters=[
+                    Filter(field="content_ref", op=FilterOp.EQ, value=content_ref),
+                ],
+            )
+        )
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        return _deliverable_from_dict(rows[0])
+
+    async def finalize_deliverable(
+        self, deliverable_id: str,
+    ) -> Deliverable:
+        """Flip a DRAFT deliverable to READY.
+
+        Refuses OBSOLETE; supersedes any prior READY deliverable on the
+        same goal sharing the same ``name`` (single-READY invariant).
+        Sequence: mark prior READY rows OBSOLETE first, then flip the
+        target to READY last, so a partial-failure mid-way leaves the
+        store coherent (target still DRAFT, prior already OBSOLETE).
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_DELIVERABLES_COLLECTION, deliverable_id)
+        if row is None:
+            raise KeyError(deliverable_id)
+        d = _deliverable_from_dict(row)
+        if d.state is DeliverableState.OBSOLETE:
+            raise ValueError(
+                f"deliverable {deliverable_id} is OBSOLETE; cannot finalize"
+            )
+        if d.state is DeliverableState.READY:
+            return d  # idempotent
+
+        # Single-READY invariant — supersede prior READY rows on the
+        # same (goal, name) BEFORE flipping the target. Excludes the
+        # current target so we don't OBSOLETE the row we're about to
+        # mark READY.
+        prior = await self._storage.query(
+            Query(
+                collection=_DELIVERABLES_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=d.goal_id),
+                    Filter(field="name", op=FilterOp.EQ, value=d.name),
+                    Filter(field="state", op=FilterOp.EQ,
+                           value=DeliverableState.READY.value),
+                ],
+            )
+        )
+        for prior_row in prior:
+            if prior_row["_id"] == deliverable_id:
+                continue
+            prior_row["state"] = DeliverableState.OBSOLETE.value
+            await self._storage.put(
+                _DELIVERABLES_COLLECTION, prior_row["_id"], prior_row,
+            )
+            await self._publish(
+                "goal.deliverable.obsoleted",
+                {"deliverable_id": prior_row["_id"], "goal_id": d.goal_id},
+            )
+
+        # Flip target LAST so a mid-failure leaves the store coherent.
+        row["state"] = DeliverableState.READY.value
+        row["finalized_at"] = _now().isoformat()
+        await self._storage.put(_DELIVERABLES_COLLECTION, deliverable_id, row)
+        finalized = _deliverable_from_dict(row)
+        await self._on_deliverable_finalized(finalized)
+        return finalized
+
+    async def supersede_deliverable(
+        self,
+        deliverable_id: str,
+        *,
+        new_content_ref: str,
+        finalize: bool = False,
+    ) -> tuple[Deliverable, Deliverable]:
+        """Mark the existing deliverable OBSOLETE; create a new one
+        (DRAFT, or READY if ``finalize=True``) with the same name/kind/
+        goal as the predecessor.
+
+        Returns ``(obsoleted, new)``.
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_DELIVERABLES_COLLECTION, deliverable_id)
+        if row is None:
+            raise KeyError(deliverable_id)
+        existing = _deliverable_from_dict(row)
+        if existing.state is DeliverableState.OBSOLETE:
+            raise ValueError(
+                f"deliverable {deliverable_id} is already OBSOLETE"
+            )
+        # Mark OBSOLETE first.
+        row["state"] = DeliverableState.OBSOLETE.value
+        await self._storage.put(_DELIVERABLES_COLLECTION, deliverable_id, row)
+        await self._publish(
+            "goal.deliverable.obsoleted",
+            {"deliverable_id": deliverable_id, "goal_id": existing.goal_id},
+        )
+
+        new_state = (
+            DeliverableState.READY if finalize else DeliverableState.DRAFT
+        )
+        new_d = await self.create_deliverable(
+            goal_id=existing.goal_id,
+            name=existing.name,
+            kind=existing.kind,
+            produced_by_agent_id=existing.produced_by_agent_id,
+            content_ref=new_content_ref,
+            state=new_state,
+        )
+        obsoleted = _deliverable_from_dict(
+            await self._storage.get(_DELIVERABLES_COLLECTION, deliverable_id)
+            or row
+        )
+        return obsoleted, new_d
+
+    async def add_goal_dependency(
+        self,
+        *,
+        dependent_goal_id: str,
+        source_goal_id: str,
+        required_deliverable_name: str,
+    ) -> GoalDependency:
+        """Register a dependency edge.
+
+        Idempotent on (dependent, source, name): if a row exists, return
+        it. If a matching READY deliverable already exists on the source
+        goal, the new row is created with ``satisfied_at=now()`` and
+        the wake-up signal fires immediately (scoped to this dep).
+        """
+        if self._storage is None:
+            raise RuntimeError("not started")
+        existing = await self._storage.query(
+            Query(
+                collection=_DEPENDENCIES_COLLECTION,
+                filters=[
+                    Filter(
+                        field="dependent_goal_id",
+                        op=FilterOp.EQ, value=dependent_goal_id,
+                    ),
+                    Filter(
+                        field="source_goal_id",
+                        op=FilterOp.EQ, value=source_goal_id,
+                    ),
+                    Filter(
+                        field="required_deliverable_name",
+                        op=FilterOp.EQ, value=required_deliverable_name,
+                    ),
+                ],
+            )
+        )
+        if existing:
+            return _dependency_from_dict(existing[0])
+
+        # Look for a matching READY deliverable on the source goal —
+        # if one exists, this dependency is created pre-satisfied and
+        # we fire the wake-up signal immediately.
+        ready = await self._storage.query(
+            Query(
+                collection=_DELIVERABLES_COLLECTION,
+                filters=[
+                    Filter(field="goal_id", op=FilterOp.EQ, value=source_goal_id),
+                    Filter(field="name", op=FilterOp.EQ,
+                           value=required_deliverable_name),
+                    Filter(field="state", op=FilterOp.EQ,
+                           value=DeliverableState.READY.value),
+                ],
+            )
+        )
+        now = _now()
+        dep = GoalDependency(
+            id=f"dep_{uuid.uuid4().hex[:12]}",
+            dependent_goal_id=dependent_goal_id,
+            source_goal_id=source_goal_id,
+            required_deliverable_name=required_deliverable_name,
+            satisfied_at=now if ready else None,
+        )
+        await self._storage.put(
+            _DEPENDENCIES_COLLECTION, dep.id, _dependency_to_dict(dep),
+        )
+        await self._publish(
+            "goal.dependency.added",
+            {
+                "dependency_id": dep.id,
+                "dependent_goal_id": dependent_goal_id,
+                "source_goal_id": source_goal_id,
+                "required_deliverable_name": required_deliverable_name,
+            },
+        )
+        if ready:
+            # Scoped propagation: signal only the dependent assignees on
+            # this fresh dep; the deliverable itself isn't being
+            # finalized again.
+            d = _deliverable_from_dict(ready[0])
+            await self._signal_dependent_assignees(
+                deliverable=d, dep=dep,
+            )
+        return dep
+
+    async def remove_goal_dependency(self, dependency_id: str) -> None:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_DEPENDENCIES_COLLECTION, dependency_id)
+        if row is None:
+            raise KeyError(dependency_id)
+        await self._storage.delete(_DEPENDENCIES_COLLECTION, dependency_id)
+        await self._publish(
+            "goal.dependency.removed",
+            {"dependency_id": dependency_id},
+        )
+
+    async def list_goal_dependencies(
+        self,
+        *,
+        dependent_goal_id: str | None = None,
+        source_goal_id: str | None = None,
+        satisfied: bool | None = None,
+    ) -> list[GoalDependency]:
+        if self._storage is None:
+            raise RuntimeError("not started")
+        filters = []
+        if dependent_goal_id is not None:
+            filters.append(Filter(
+                field="dependent_goal_id",
+                op=FilterOp.EQ, value=dependent_goal_id,
+            ))
+        if source_goal_id is not None:
+            filters.append(Filter(
+                field="source_goal_id",
+                op=FilterOp.EQ, value=source_goal_id,
+            ))
+        rows = await self._storage.query(
+            Query(collection=_DEPENDENCIES_COLLECTION, filters=filters)
+        )
+        out: list[GoalDependency] = []
+        for r in rows:
+            row_satisfied = bool(r.get("satisfied_at"))
+            if satisfied is True and not row_satisfied:
+                continue
+            if satisfied is False and row_satisfied:
+                continue
+            out.append(_dependency_from_dict(r))
+        return out
+
+    async def _signal_dependent_assignees(
+        self,
+        *,
+        deliverable: Deliverable,
+        dep: GoalDependency,
+    ) -> None:
+        """Signal every non-REVIEWER active assignee on the dependent
+        goal that the deliverable is ready. Best-effort (signal failures
+        log but don't roll back)."""
+        assignments = await self.list_assignments(
+            goal_id=dep.dependent_goal_id, active_only=True,
+        )
+        for asgn in assignments:
+            if asgn.role is AssignmentRole.REVIEWER:
+                continue
+            try:
+                await self._signal_agent(
+                    agent_id=asgn.agent_id,
+                    signal_kind="deliverable_ready",
+                    body=(
+                        f"Dependency satisfied: '{deliverable.name}' "
+                        f"from goal {dep.source_goal_id}"
+                    ),
+                    sender_kind="system",
+                    sender_id="",
+                    sender_name="system",
+                    metadata={
+                        "deliverable_id": deliverable.id,
+                        "source_goal_id": deliverable.goal_id,
+                        "dependent_goal_id": dep.dependent_goal_id,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "failed to signal agent %s for deliverable %s",
+                    asgn.agent_id, deliverable.id,
+                )
+
+    async def _on_deliverable_finalized(self, d: Deliverable) -> None:
+        """Propagate a READY deliverable to its dependents.
+
+        Find every unsatisfied ``GoalDependency`` whose
+        ``source_goal_id == d.goal_id`` and
+        ``required_deliverable_name == d.name``; mark each
+        ``satisfied_at`` and signal the dependent goal's non-REVIEWER
+        assignees. Publish ``goal.deliverable.finalized``.
+        """
+        if self._storage is None:
+            return
+        deps = await self.list_goal_dependencies(
+            source_goal_id=d.goal_id, satisfied=False,
+        )
+        for dep in deps:
+            if dep.required_deliverable_name != d.name:
+                continue
+            row = await self._storage.get(_DEPENDENCIES_COLLECTION, dep.id)
+            if row is None:
+                continue
+            row["satisfied_at"] = _now().isoformat()
+            await self._storage.put(_DEPENDENCIES_COLLECTION, dep.id, row)
+            satisfied_dep = _dependency_from_dict(row)
+            await self._signal_dependent_assignees(
+                deliverable=d, dep=satisfied_dep,
+            )
+        await self._publish(
+            "goal.deliverable.finalized",
+            {
+                "deliverable_id": d.id,
+                "goal_id": d.goal_id,
+                "name": d.name,
+            },
+        )
+
     async def _recent_war_room_posts(
         self, goal_id: str, limit: int = 10,
     ) -> list[dict[str, Any]]:
@@ -3166,6 +3628,9 @@ class AgentService(Service):
             if ag is not None:
                 names[a.agent_id] = ag.name
         recent = await self._recent_war_room_posts(goal_id, limit=10)
+        unsat = await self.list_goal_dependencies(
+            dependent_goal_id=goal_id, satisfied=False,
+        )
         out = {
             "name": goal.name,
             "description": goal.description,
@@ -3180,7 +3645,7 @@ class AgentService(Service):
             ],
             "recent_posts": recent,
             "lifetime_cost_usd": goal.lifetime_cost_usd,
-            "is_dependency_blocked": False,
+            "is_dependency_blocked": len(unsat) > 0,
         }
         return json.dumps(out)
 
@@ -3714,6 +4179,9 @@ class AgentService(Service):
             if ag is not None:
                 names[a.agent_id] = ag.name
         recent = await self._recent_war_room_posts(goal_id, limit=10)
+        unsat = await self.list_goal_dependencies(
+            dependent_goal_id=goal_id, satisfied=False,
+        )
         return {
             "goal": _goal_to_dict(goal),
             "assignees": [
@@ -3725,7 +4193,7 @@ class AgentService(Service):
                 for a in asgns
             ],
             "recent_posts": recent,
-            "is_dependency_blocked": False,
+            "is_dependency_blocked": len(unsat) > 0,
         }
 
     async def _ws_goals_posts_list(
