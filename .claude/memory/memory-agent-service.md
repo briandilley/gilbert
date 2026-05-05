@@ -118,6 +118,17 @@ inherits the current contextvars by default in Python 3.12+.
 and exceeded, the agent is auto-flipped to DISABLED and a warning is
 logged.
 
+**Events published:** the service publishes on every state change via
+`_publish(event_type, data)` (no-op when the bus isn't bound).
+- `agent.created` — `{agent_id, owner_user_id}` after `create_agent`.
+- `agent.updated` — `{agent_id}` after `update_agent`.
+- `agent.deleted` — `{agent_id}` after `delete_agent`.
+- `agent.run.started` — `{agent_id, run_id, triggered_by}` after the
+  initial RUNNING row is persisted in `_run_agent_internal`.
+- `agent.run.completed` — `{agent_id, run_id, status, cost_usd}` right
+  before `_run_agent_internal` returns. `source="agent"` on every event.
+The SPA subscribes to these for real-time refresh of the agents UI.
+
 **Storage API:** the backend uses `Query(collection=..., filters=[...])`
 with `Filter(field=..., op=FilterOp.EQ, value=...)`. Don't use
 dict-shaped filters — they don't match the real API. For

@@ -36,7 +36,7 @@ from gilbert.interfaces.agent import (
 )
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.configuration import ConfigParam
-from gilbert.interfaces.events import EventBusProvider
+from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Filter, FilterOp, Query, StorageBackend, StorageProvider
@@ -764,6 +764,7 @@ class AgentService(Service):
         )
         await self._storage.put(_AGENTS_COLLECTION, a.id, _agent_to_dict(a))
         await self._arm_heartbeat(a)
+        await self._publish("agent.created", {"agent_id": a.id, "owner_user_id": a.owner_user_id})
         return a
 
     async def get_agent(self, agent_id: str) -> Agent | None:
@@ -818,6 +819,7 @@ class AgentService(Service):
             await self._arm_heartbeat(updated)
         else:
             await self._disarm_heartbeat(agent_id)
+        await self._publish("agent.updated", {"agent_id": updated.id})
         return updated
 
     async def delete_agent(self, agent_id: str) -> bool:
@@ -849,6 +851,7 @@ class AgentService(Service):
             )
             for r in related:
                 await self._storage.delete(coll, r["_id"])
+        await self._publish("agent.deleted", {"agent_id": agent_id})
         return True
 
     # ── Heartbeat scheduling (Task 10) ──────────────────────────────
@@ -1218,6 +1221,10 @@ class AgentService(Service):
             pending_actions=[],
         )
         await self._storage.put(_AGENT_RUNS_COLLECTION, run.id, _run_to_dict(run))  # type: ignore[union-attr]
+        await self._publish(
+            "agent.run.started",
+            {"agent_id": a.id, "run_id": run.id, "triggered_by": triggered_by},
+        )
 
         try:
             system_prompt = await self._build_system_prompt(a, triggered_by, trigger_context)
@@ -1262,6 +1269,15 @@ class AgentService(Service):
             run.ended_at = _now()
 
         await self._storage.put(_AGENT_RUNS_COLLECTION, run.id, _run_to_dict(run))  # type: ignore[union-attr]
+        await self._publish(
+            "agent.run.completed",
+            {
+                "agent_id": a.id,
+                "run_id": run.id,
+                "status": run.status.value,
+                "cost_usd": run.cost_usd,
+            },
+        )
         return run
 
     def _synthesize_trigger_message(self, triggered_by: str, ctx: dict[str, Any]) -> str:
@@ -1709,3 +1725,11 @@ class AgentService(Service):
 
     async def _ws_get_defaults(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {"defaults": dict(self._defaults)}
+
+    # ── Event publishing helper ─────────────────────────────────────
+
+    async def _publish(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish an event on the bus, no-op if the bus is not bound."""
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(Event(event_type=event_type, data=data, source="agent"))

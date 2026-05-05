@@ -347,6 +347,88 @@ async def test_execute_agent_memory_save(started_agent_service: Any) -> None:
     assert any("dark mode" in m.content for m in mems)
 
 
+async def test_create_agent_publishes_event(started_agent_service: Any) -> None:
+    """create_agent publishes ``agent.created`` with agent_id + owner_user_id."""
+    svc = started_agent_service
+    seen: list[Any] = []
+
+    async def _handler(event: Any) -> None:
+        seen.append(event)
+
+    svc._event_bus.subscribe("agent.created", _handler)
+    a = await svc.create_agent(owner_user_id="usr_1", name="event-create")
+    assert len(seen) == 1
+    assert seen[0].event_type == "agent.created"
+    assert seen[0].data["agent_id"] == a.id
+    assert seen[0].data["owner_user_id"] == "usr_1"
+    assert seen[0].source == "agent"
+
+
+async def test_update_agent_publishes_event(started_agent_service: Any) -> None:
+    """update_agent publishes ``agent.updated`` with agent_id."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="event-update")
+    seen: list[Any] = []
+
+    async def _handler(event: Any) -> None:
+        seen.append(event)
+
+    svc._event_bus.subscribe("agent.updated", _handler)
+    await svc.update_agent(a.id, {"role_label": "New Label"})
+    assert len(seen) == 1
+    assert seen[0].event_type == "agent.updated"
+    assert seen[0].data["agent_id"] == a.id
+
+
+async def test_delete_agent_publishes_event(started_agent_service: Any) -> None:
+    """delete_agent publishes ``agent.deleted`` with agent_id."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="event-delete")
+    seen: list[Any] = []
+
+    async def _handler(event: Any) -> None:
+        seen.append(event)
+
+    svc._event_bus.subscribe("agent.deleted", _handler)
+    deleted = await svc.delete_agent(a.id)
+    assert deleted is True
+    assert len(seen) == 1
+    assert seen[0].event_type == "agent.deleted"
+    assert seen[0].data["agent_id"] == a.id
+
+
+async def test_run_agent_now_publishes_started_and_completed(
+    started_agent_service: Any,
+) -> None:
+    """run_agent_now publishes both ``agent.run.started`` and ``agent.run.completed``."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="event-run")
+    started: list[Any] = []
+    completed: list[Any] = []
+
+    async def _on_started(event: Any) -> None:
+        started.append(event)
+
+    async def _on_completed(event: Any) -> None:
+        completed.append(event)
+
+    svc._event_bus.subscribe("agent.run.started", _on_started)
+    svc._event_bus.subscribe("agent.run.completed", _on_completed)
+
+    run = await svc.run_agent_now(a.id, user_message="hello")
+
+    assert len(started) == 1
+    assert started[0].data["agent_id"] == a.id
+    assert started[0].data["run_id"] == run.id
+    assert started[0].data["triggered_by"] == "manual"
+
+    assert len(completed) == 1
+    assert completed[0].data["agent_id"] == a.id
+    assert completed[0].data["run_id"] == run.id
+    assert completed[0].data["status"] == run.status.value
+    assert "cost_usd" in completed[0].data
+
+
 async def test_tool_injection_adds_agent_id(started_agent_service: Any) -> None:
     svc = started_agent_service
     captured: dict[str, Any] = {}
