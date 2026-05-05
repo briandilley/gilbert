@@ -24,7 +24,6 @@ from gilbert.interfaces.tools import (
     ToolDefinition,
 )
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
 
 

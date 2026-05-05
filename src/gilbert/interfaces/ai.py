@@ -448,6 +448,7 @@ class AIProvider(Protocol):
         ai_profile: str = "",
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
+        mid_round_interrupt: Any = None,
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
 
@@ -470,6 +471,15 @@ class AIProvider(Protocol):
         user typed while the run was already in flight, so the model
         sees them on the next round rather than waiting for the run to
         finish.
+
+        ``mid_round_interrupt`` is an optional sync callable
+        ``() -> bool`` checked between tool-call execution groups
+        within a single round. When it returns ``True``, the remaining
+        un-run tool calls in the current round receive stub
+        ``ToolResult`` rows and execution returns early. Used by the
+        AgentService to interrupt a busy run when an ``urgent`` peer
+        signal arrives. ``None`` means "never interrupt"; a callback
+        that always returns ``False`` is bit-identical.
         """
         ...
 

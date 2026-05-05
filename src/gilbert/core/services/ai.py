@@ -10,8 +10,9 @@ import contextvars
 import json as _json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 
 from gilbert.core.context import (
     get_current_conversation_id,
