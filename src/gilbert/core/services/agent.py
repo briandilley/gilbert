@@ -21,7 +21,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from gilbert.interfaces.agent import (
@@ -1520,7 +1520,6 @@ class AgentService(Service):
         if args.get("due_at"):
             due_at = datetime.fromisoformat(str(args["due_at"]))
         else:
-            from datetime import timedelta
             seconds = float(args.get("due_in_seconds", 1800))
             due_at = _now() + timedelta(seconds=seconds)
         c = await self.create_commitment(agent_id=agent_id, content=content, due_at=due_at)
@@ -1633,6 +1632,9 @@ class AgentService(Service):
             "agents.run_now": self._ws_run_now,
             "agents.get_defaults": self._ws_get_defaults,
             "agents.runs.list": self._ws_runs_list,
+            "agents.commitments.list": self._ws_commitments_list,
+            "agents.commitments.create": self._ws_commitments_create,
+            "agents.commitments.complete": self._ws_commitments_complete,
         }
 
     def _is_admin(self, conn: Any) -> bool:
@@ -1738,6 +1740,63 @@ class AgentService(Service):
         )
         runs = await self.list_runs(agent_id=agent_id, limit=limit)
         return {"runs": [_run_to_dict(r) for r in runs]}
+
+    async def _ws_commitments_list(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        include_completed = bool(params.get("include_completed", False))
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        cs = await self.list_commitments(
+            agent_id=agent_id, include_completed=include_completed,
+        )
+        return {"commitments": [_commitment_to_dict(c) for c in cs]}
+
+    async def _ws_commitments_create(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        agent_id = str(params.get("agent_id", ""))
+        content = str(params.get("content", "")).strip()
+        if not content:
+            raise ValueError("content is required")
+        await self._load_agent_for_caller(
+            agent_id, caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        # Resolve due_at: prefer explicit due_at; fall back to due_in_seconds.
+        due_at_raw = params.get("due_at")
+        due_in_seconds = params.get("due_in_seconds")
+        if due_at_raw:
+            due_at = datetime.fromisoformat(str(due_at_raw))
+        elif due_in_seconds is not None:
+            due_at = _now() + timedelta(seconds=int(due_in_seconds))
+        else:
+            raise ValueError("due_at or due_in_seconds is required")
+        c = await self.create_commitment(
+            agent_id=agent_id, content=content, due_at=due_at,
+        )
+        return {"commitment": _commitment_to_dict(c)}
+
+    async def _ws_commitments_complete(
+        self, conn: Any, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        commitment_id = str(params.get("commitment_id", ""))
+        note = str(params.get("note", ""))
+        if self._storage is None:
+            raise RuntimeError("not started")
+        row = await self._storage.get(_AGENT_COMMITMENTS_COLLECTION, commitment_id)
+        if row is None:
+            raise KeyError(commitment_id)
+        # Authorize via the owning agent.
+        await self._load_agent_for_caller(
+            row["agent_id"], caller_user_id=self._caller_user_id(conn),
+            admin=self._is_admin(conn),
+        )
+        c = await self.complete_commitment(commitment_id, note=note)
+        return {"commitment": _commitment_to_dict(c)}
 
     # ── Event publishing helper ─────────────────────────────────────
 
