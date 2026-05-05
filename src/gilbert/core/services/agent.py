@@ -86,6 +86,21 @@ _AGENT_INBOX_SIGNALS_COLLECTION = "agent_inbox_signals"
 _AGENT_RUNS_COLLECTION = "agent_runs"
 _AI_CALL_NAME = "agent.run"
 
+_CORE_AGENT_TOOLS: frozenset[str] = frozenset({
+    # Phase 1A — agent self-management
+    "complete_run",
+    "request_user_input",
+    "notify_user",
+    "commitment_create",
+    "commitment_complete",
+    "commitment_list",
+    "agent_memory_save",
+    "agent_memory_search",
+    "agent_memory_review_and_promote",
+    # Phase 2 will add agent_list, agent_send_message, agent_delegate.
+    # Phase 4 will add goal_post.
+})
+
 
 # ── Module-level helpers ─────────────────────────────────────────────
 
@@ -1113,6 +1128,20 @@ class AgentService(Service):
             etype = ctx.get("event_type", "?")
             return f"Event '{etype}' fired. See trigger context for the payload."
         return f"Trigger: {triggered_by}."
+
+    def _compute_allowed_tool_names(self, a: Agent, *, available: set[str]) -> set[str]:
+        """Compute the tool name set for an agent's run.
+
+        - tools_allowed=None → all available tools (legacy behavior).
+        - tools_allowed=[…] → core ∪ allowlist, intersected with available.
+
+        Tools removed from the available set (e.g., plugin uninstalled) are
+        silently dropped — they just don't appear in the run.
+        """
+        if a.tools_allowed is None:
+            return set(available)
+        keep = (set(_CORE_AGENT_TOOLS) | set(a.tools_allowed)) & set(available)
+        return keep
 
     async def _build_system_prompt(
         self,
