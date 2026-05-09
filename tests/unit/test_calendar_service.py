@@ -1,9 +1,10 @@
 """Unit tests for ``CalendarService`` against a fake backend.
 
-These tests construct a service, attach in-memory fakes for storage,
-event bus, scheduler, and access control, register one or more
+These tests construct a service, attach a real SQLite storage
+backend, fakes for event bus and scheduler, register one or more
 accounts directly, and exercise the public API. We never mock the
-service — only its backend and external collaborators.
+service — only its third-party calendar backend and external
+collaborators.
 
 Coverage spans the spec's edge-case list: timezone correctness,
 all-day events, recurring instances, cancellations, account deletion
@@ -13,6 +14,7 @@ conflicts, restart-no-republish, and aggregate-with-failure.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -30,12 +32,14 @@ from gilbert.interfaces.calendar import (
     CalendarBackendAuthError,
     CalendarBackendConflictError,
     CalendarBackendNotFoundError,
+    CalendarBackendRateLimitError,
     CalendarEvent,
     EventCreateRequest,
     EventStatus,
     FreeBusyBlock,
 )
-from gilbert.interfaces.storage import FilterOp
+from gilbert.storage.sqlite import SQLiteStorage
+from tests.unit.conftest import _FakeStorageProvider
 
 # ── Fake backend ──────────────────────────────────────────────────────
 
@@ -177,6 +181,7 @@ class FakeCalendarBackend(CalendarBackend):
             attendees=tuple(request.attendees),
             visibility=request.visibility,
             html_link=cur.html_link,
+            recurring_event_id=cur.recurring_event_id,
         )
         self.events[event_id] = new
         return new
@@ -196,88 +201,7 @@ class FakeCalendarBackend(CalendarBackend):
         self.events[evt.event_id] = evt
 
 
-# ── In-memory storage backend (lightweight, query subset) ────────────
-
-
-class FakeStorageBackend:
-    def __init__(self) -> None:
-        self._data: dict[str, dict[str, dict[str, Any]]] = {}
-
-    async def get(self, collection: str, key: str) -> dict[str, Any] | None:
-        record = self._data.get(collection, {}).get(key)
-        if record is None:
-            return None
-        return {**record, "_id": key}
-
-    async def put(self, collection: str, key: str, data: dict[str, Any]) -> None:
-        clean = {k: v for k, v in data.items() if k != "_id"}
-        self._data.setdefault(collection, {})[key] = clean
-
-    async def delete(self, collection: str, key: str) -> None:
-        self._data.get(collection, {}).pop(key, None)
-
-    async def exists(self, collection: str, key: str) -> bool:
-        return key in self._data.get(collection, {})
-
-    def _match(self, record: dict[str, Any], filters: list[Any]) -> bool:
-        for f in filters:
-            val = record.get(f.field)
-            if f.op == FilterOp.EQ and val != f.value:
-                return False
-            if f.op == FilterOp.NEQ and val == f.value:
-                return False
-            if f.op == FilterOp.IN and val not in f.value:
-                return False
-            if f.op == FilterOp.GT and (val is None or val <= f.value):
-                return False
-            if f.op == FilterOp.GTE and (val is None or val < f.value):
-                return False
-            if f.op == FilterOp.LT and (val is None or val >= f.value):
-                return False
-            if f.op == FilterOp.LTE and (val is None or val > f.value):
-                return False
-            if f.op == FilterOp.CONTAINS:
-                if val is None or str(f.value).lower() not in str(val).lower():
-                    return False
-        return True
-
-    async def count(self, query: Any) -> int:
-        coll = query.collection
-        out = 0
-        for key, data in self._data.get(coll, {}).items():
-            record = {**data, "_id": key}
-            if self._match(record, query.filters or []):
-                out += 1
-        return out
-
-    async def query(self, query: Any) -> list[dict[str, Any]]:
-        coll = query.collection
-        results: list[dict[str, Any]] = []
-        for key, data in self._data.get(coll, {}).items():
-            record = {**data, "_id": key}
-            if self._match(record, query.filters or []):
-                results.append(record)
-        if query.sort:
-            for s in reversed(query.sort):
-                results.sort(
-                    key=lambda r: r.get(s.field) or "",
-                    reverse=s.descending,
-                )
-        if query.limit:
-            results = results[: query.limit]
-        return results
-
-    async def ensure_index(self, _: Any) -> None:
-        pass
-
-
-class FakeStorageService:
-    def __init__(self) -> None:
-        self.backend = FakeStorageBackend()
-        self.raw_backend = self.backend
-
-    def create_namespaced(self, namespace: str) -> Any:
-        return self.backend
+# ── Collaborator fakes ───────────────────────────────────────────────
 
 
 class FakeEventBus:
@@ -328,6 +252,9 @@ class RecordingScheduler:
         cb = self.jobs[name]["callback"]
         await cb()
 
+    def schedule_for(self, name: str) -> Any:
+        return self.jobs[name]["schedule"]
+
 
 class FakeResolver:
     def __init__(self) -> None:
@@ -364,38 +291,25 @@ def _user_ctx(user_id: str = "alice", *, roles: set[str] | None = None) -> UserC
     )
 
 
-async def _service() -> tuple[CalendarService, RecordingScheduler, FakeEventBus]:
+async def _service(
+    sqlite_storage: SQLiteStorage,
+) -> tuple[CalendarService, RecordingScheduler, FakeEventBus]:
+    """Build and start a CalendarService backed by real SQLite.
+
+    Returns the service, scheduler (for firing poll/sweep callbacks
+    by name), and the test event bus (whose ``published`` list lets
+    tests assert on event types and payloads).
+    """
     svc = CalendarService()
-    storage = FakeStorageService()
     sched = RecordingScheduler()
     ev = FakeEventBusService()
+    storage_provider = _FakeStorageProvider(sqlite_storage)
     resolver = FakeResolver()
-    resolver.caps["entity_storage"] = _AsCap("entity_storage", storage)
+    resolver.caps["entity_storage"] = storage_provider
     resolver.caps["scheduler"] = sched
     resolver.caps["event_bus"] = ev
     await svc.start(resolver)  # type: ignore[arg-type]
     return svc, sched, ev.bus
-
-
-class _AsCap:
-    """Wraps a fake into something that satisfies a capability protocol
-    by forwarding attribute access. ``isinstance(obj, Protocol)`` looks
-    at the methods, so we only need to expose the right surface."""
-
-    def __init__(self, name: str, inner: Any) -> None:
-        self._name = name
-        self._inner = inner
-
-    @property
-    def backend(self) -> Any:
-        return self._inner.backend
-
-    @property
-    def raw_backend(self) -> Any:
-        return self._inner.raw_backend
-
-    def create_namespaced(self, namespace: str) -> Any:
-        return self._inner.create_namespaced(namespace)
 
 
 def _make_account(
@@ -437,15 +351,15 @@ async def _seed_account(
 
 
 @pytest.mark.asyncio
-async def test_start_registers_boot_and_sweep_jobs() -> None:
-    svc, sched, _ = await _service()
+async def test_start_registers_boot_and_sweep_jobs(sqlite_storage: SQLiteStorage) -> None:
+    svc, sched, _ = await _service(sqlite_storage)
     assert "calendar-boot" in sched.jobs
     assert "calendar-announcement-sweep" in sched.jobs
 
 
 @pytest.mark.asyncio
-async def test_create_account_starts_runtime_and_publishes_event() -> None:
-    svc, sched, bus = await _service()
+async def test_create_account_starts_runtime_and_publishes_event(sqlite_storage: SQLiteStorage) -> None:
+    svc, sched, bus = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     assert account.id in svc._runtimes
     assert sched.jobs[svc._runtimes[account.id].poll_job_name]
@@ -454,16 +368,16 @@ async def test_create_account_starts_runtime_and_publishes_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_account_validates_timezone() -> None:
-    svc, _, _ = await _service()
+async def test_create_account_validates_timezone(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     bad = _make_account(timezone="Not/A/Real/Zone")
     with pytest.raises(ValueError):
         await svc.create_account(bad, _user_ctx("alice"))
 
 
 @pytest.mark.asyncio
-async def test_create_account_validates_working_hours() -> None:
-    svc, _, _ = await _service()
+async def test_create_account_validates_working_hours(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     a = _make_account()
     a.working_hours_start_hour = 18
     a.working_hours_end_hour = 9
@@ -472,8 +386,8 @@ async def test_create_account_validates_working_hours() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_can_administer_other_users_account() -> None:
-    svc, _, _ = await _service()
+async def test_admin_can_administer_other_users_account(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     bob_admin = _user_ctx("bob", roles={"admin"})
     # Sharing should succeed for the admin even though they're not the owner.
@@ -482,16 +396,16 @@ async def test_admin_can_administer_other_users_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_owner_non_admin_cannot_admin() -> None:
-    svc, _, _ = await _service()
+async def test_non_owner_non_admin_cannot_admin(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     with pytest.raises(CalendarPermissionError):
         await svc.update_account(account.id, {"name": "X"}, _user_ctx("bob"))
 
 
 @pytest.mark.asyncio
-async def test_update_account_with_invalid_timezone_rejected() -> None:
-    svc, _, _ = await _service()
+async def test_update_account_with_invalid_timezone_rejected(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     with pytest.raises(ValueError):
         await svc.update_account(
@@ -502,8 +416,8 @@ async def test_update_account_with_invalid_timezone_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_account_cascades_events_and_announcements() -> None:
-    svc, _, _ = await _service()
+async def test_delete_account_cascades_events_and_announcements(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     # Insert events + announcements directly via storage.
     await svc._storage.put(
@@ -524,13 +438,15 @@ async def test_delete_account_cascades_events_and_announcements() -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_poll_after_restart_does_not_republish_existing() -> None:
+async def test_first_poll_after_restart_does_not_republish_existing(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 14 — restart with populated cache must NOT fire
     ``calendar.event.created`` for pre-existing events."""
-    svc, sched, bus = await _service()
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     # Pre-seed cache as if the previous process had already polled.
     for i in range(1, 6):
+        s_iso = (datetime.now(UTC) + timedelta(hours=i)).isoformat()
+        e_iso = (datetime.now(UTC) + timedelta(hours=i, minutes=30)).isoformat()
         await svc._storage.put(
             "calendar_events",
             f"{account.id}:evt_{i}",
@@ -539,8 +455,10 @@ async def test_first_poll_after_restart_does_not_republish_existing() -> None:
                 "event_id": f"evt_{i}",
                 "calendar_id": "primary",
                 "title": f"Existing {i}",
-                "start": (datetime.now(UTC) + timedelta(hours=i)).isoformat(),
-                "end": (datetime.now(UTC) + timedelta(hours=i, minutes=30)).isoformat(),
+                "start": s_iso,
+                "end": e_iso,
+                "start_utc_iso": s_iso,
+                "end_utc_iso": e_iso,
                 "all_day": False,
                 "etag": "x",
                 "status": "confirmed",
@@ -571,8 +489,8 @@ async def test_first_poll_after_restart_does_not_republish_existing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_publishes_created_for_new_events() -> None:
-    svc, sched, bus = await _service()
+async def test_poll_publishes_created_for_new_events(sqlite_storage: SQLiteStorage) -> None:
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     bus.published.clear()
     backend.add_event(
@@ -591,10 +509,10 @@ async def test_poll_publishes_created_for_new_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancellation_emits_deleted_exactly_once() -> None:
+async def test_cancellation_emits_deleted_exactly_once(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 6 — a cancelled event is filtered from the fresh set
     and surfaces once as ``calendar.event.deleted``."""
-    svc, sched, bus = await _service()
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     backend.add_event(
         CalendarEvent(
@@ -628,10 +546,10 @@ async def test_cancellation_emits_deleted_exactly_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mutation_publish_dedup_suppresses_poll_republication() -> None:
+async def test_mutation_publish_dedup_suppresses_poll_republication(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 15 — create_event publishes once; the next poll's
     diff DOES NOT re-publish."""
-    svc, sched, bus = await _service()
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     user = _user_ctx("alice")
     bus.published.clear()
@@ -653,10 +571,10 @@ async def test_mutation_publish_dedup_suppresses_poll_republication() -> None:
 
 
 @pytest.mark.asyncio
-async def test_idempotency_dedup_for_repeated_create() -> None:
+async def test_idempotency_dedup_for_repeated_create(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 17 — same args ⇒ same idempotency key ⇒ backend
     deduplicates and only one event is created."""
-    svc, _, _ = await _service()
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     user = _user_ctx("alice")
     req1 = EventCreateRequest(
@@ -678,9 +596,9 @@ async def test_idempotency_dedup_for_repeated_create() -> None:
 
 
 @pytest.mark.asyncio
-async def test_etag_conflict_on_update_propagates() -> None:
+async def test_etag_conflict_on_update_propagates(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 16 — a stale if_match_etag yields ``CalendarBackendConflictError``."""
-    svc, _, _ = await _service()
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     user = _user_ctx("alice")
     req = EventCreateRequest(
@@ -702,13 +620,15 @@ async def test_etag_conflict_on_update_propagates() -> None:
 
 @pytest.mark.asyncio
 async def test_aggregate_events_with_account_filter_returns_warnings(
-    monkeypatch: pytest.MonkeyPatch,
+    sqlite_storage: SQLiteStorage,
 ) -> None:
     """Edge case 13 — one account fails, others still produce events,
-    failure surfaces as a warning."""
-    svc, sched, _ = await _service()
+    failure surfaces as a warning. Drives the real ``_event_row_to_event``
+    decode by writing a malformed ``start`` so a future regression in the
+    decoder is caught too (instead of monkeypatching the SUT helper)."""
+    svc, sched, _ = await _service(sqlite_storage)
     a1, b1 = await _seed_account(svc, _make_account(id_="cal_1", name="One"))
-    a2, b2 = await _seed_account(svc, _make_account(id_="cal_2", name="Two"))
+    a2, _b2 = await _seed_account(svc, _make_account(id_="cal_2", name="Two"))
     user = _user_ctx("alice")
     b1.add_event(
         CalendarEvent(
@@ -721,9 +641,10 @@ async def test_aggregate_events_with_account_filter_returns_warnings(
         )
     )
     await sched.fire(svc._runtimes[a1.id].poll_job_name)
-    # Patch _event_row_to_event to raise specifically when called for
-    # a row from cal_2. cal_2 has nothing cached, so we instead inject
-    # a row that the patched conversion will trip over.
+    # Inject a row with a malformed ISO timestamp so the real
+    # ``_event_row_to_event`` decoder throws when it tries to parse
+    # ``start``. The aggregate must catch and surface as a warning.
+    now_iso = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     await svc._storage.put(
         "calendar_events",
         f"{a2.id}:e_fail",
@@ -732,8 +653,10 @@ async def test_aggregate_events_with_account_filter_returns_warnings(
             "event_id": "e_fail",
             "calendar_id": "primary",
             "title": "Two",
-            "start": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-            "end": (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+            "start": "this-is-not-a-datetime",
+            "end": "neither-is-this",
+            "start_utc_iso": now_iso,
+            "end_utc_iso": (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
             "all_day": False,
             "etag": "",
             "status": "confirmed",
@@ -746,19 +669,6 @@ async def test_aggregate_events_with_account_filter_returns_warnings(
             "recurring_event_id": None,
             "visibility": "default",
         },
-    )
-
-    real_convert = CalendarService._event_row_to_event
-
-    def raising_convert(row: dict[str, Any]) -> CalendarEvent:
-        if row.get("account_id") == a2.id:
-            raise RuntimeError("simulated decode failure")
-        return real_convert(row)
-
-    monkeypatch.setattr(
-        CalendarService,
-        "_event_row_to_event",
-        staticmethod(raising_convert),
     )
     agg = await svc.list_events(
         None,
@@ -773,13 +683,24 @@ async def test_aggregate_events_with_account_filter_returns_warnings(
 
 
 @pytest.mark.asyncio
-async def test_unhealthy_after_repeated_auth_failures() -> None:
-    svc, sched, bus = await _service()
+async def test_unhealthy_after_repeated_auth_failures(sqlite_storage: SQLiteStorage) -> None:
+    """Health flips to ``unhealthy`` ONLY after the threshold-th
+    consecutive failure (default 3) — pin the threshold so a regression
+    that flips early/late is caught."""
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
+
+    # Fire 1: still ok.
     backend.fail_list_events_with = CalendarBackendAuthError("nope")
     await sched.fire(svc._runtimes[account.id].poll_job_name)
+    assert (await svc._require_account(account.id)).health == "ok"
+
+    # Fire 2: still ok.
     backend.fail_list_events_with = CalendarBackendAuthError("nope")
     await sched.fire(svc._runtimes[account.id].poll_job_name)
+    assert (await svc._require_account(account.id)).health == "ok"
+
+    # Fire 3: now unhealthy + exactly one health_changed event so far.
     backend.fail_list_events_with = CalendarBackendAuthError("nope")
     await sched.fire(svc._runtimes[account.id].poll_job_name)
     fresh = await svc._require_account(account.id)
@@ -790,8 +711,8 @@ async def test_unhealthy_after_repeated_auth_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_recovers_to_ok_on_successful_poll() -> None:
-    svc, sched, bus = await _service()
+async def test_health_recovers_to_ok_on_successful_poll(sqlite_storage: SQLiteStorage) -> None:
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     # Force three failures to flip to unhealthy.
     for _ in range(3):
@@ -807,8 +728,8 @@ async def test_health_recovers_to_ok_on_successful_poll() -> None:
 
 
 @pytest.mark.asyncio
-async def test_find_free_time_validates_arguments() -> None:
-    svc, _, _ = await _service()
+async def test_find_free_time_validates_arguments(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     user = _user_ctx("alice")
     now = datetime.now(UTC)
@@ -829,33 +750,34 @@ async def test_find_free_time_validates_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_find_free_time_returns_full_window_when_calendar_empty() -> None:
-    svc, _, _ = await _service()
+async def test_find_free_time_returns_full_window_when_calendar_empty(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     user = _user_ctx("alice")
     # Pick a Wed during working hours so respect_working_hours=True
     # gives us slots inside 9-18 UTC.
     start = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)  # Wed 10:00 UTC
     end = start + timedelta(hours=4)
-    slots = await svc.find_free_time(account.id, start, end, 30, user)
-    assert len(slots) > 0
-    for s in slots:
+    result = await svc.find_free_time(account.id, start, end, 30, user)
+    assert len(result.slots) > 0
+    for s in result.slots:
         assert s.slot_duration_minutes >= 30
         assert s.start.hour >= 9
         assert s.end.hour <= 18
+    assert result.warnings == []
 
 
 @pytest.mark.asyncio
-async def test_get_account_returns_none_for_unauthorized_user() -> None:
-    svc, _, _ = await _service()
+async def test_get_account_returns_none_for_unauthorized_user(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     out = await svc.get_account(account.id, _user_ctx("carol"))
     assert out is None
 
 
 @pytest.mark.asyncio
-async def test_naive_start_in_create_event_localized_to_account_tz() -> None:
-    svc, _, _ = await _service()
+async def test_naive_start_in_create_event_localized_to_account_tz(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     a = _make_account(timezone="America/New_York")
     account, backend = await _seed_account(svc, a)
     user = _user_ctx("alice")
@@ -872,11 +794,13 @@ async def test_naive_start_in_create_event_localized_to_account_tz() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_tools_includes_eight_named_tools_when_enabled() -> None:
-    svc, _, _ = await _service()
+async def test_get_tools_includes_eight_named_tools_when_enabled(sqlite_storage: SQLiteStorage) -> None:
+    """All eight tools are present, every one is gated on the ``user``
+    role (not ``admin``), and the parameter counts match the spec."""
+    svc, _, _ = await _service(sqlite_storage)
     tools = svc.get_tools()
-    names = {t.name for t in tools}
-    assert names == {
+    by_name = {t.name: t for t in tools}
+    assert set(by_name) == {
         "list_calendar_accounts",
         "get_schedule",
         "next_event",
@@ -886,20 +810,41 @@ async def test_get_tools_includes_eight_named_tools_when_enabled() -> None:
         "update_event",
         "delete_event",
     }
+    # Every calendar tool requires an authenticated user — never admin.
+    for tool in tools:
+        assert tool.required_role == "user", tool.name
+    # Pin the parameter counts so a regression that drops/adds a
+    # parameter shows up here.
+    expected_param_counts = {
+        "list_calendar_accounts": 0,
+        "get_schedule": 4,
+        "next_event": 2,
+        "get_event": 2,
+        "find_free_time": 7,
+        "create_event": 11,
+        "update_event": 11,
+        "delete_event": 4,
+    }
+    for name, expected_count in expected_param_counts.items():
+        assert len(by_name[name].parameters) == expected_count, name
+    # Mutating tools opt out of parallel execution so two confirms can't race.
+    for name in ("create_event", "update_event", "delete_event"):
+        assert by_name[name].parallel_safe is False, name
 
 
 @pytest.mark.asyncio
-async def test_get_tools_returns_empty_when_disabled() -> None:
+async def test_get_tools_returns_empty_when_disabled(sqlite_storage: SQLiteStorage) -> None:
     svc = CalendarService()
     svc._enabled = False
     assert svc.get_tools() == []
 
 
 @pytest.mark.asyncio
-async def test_create_event_tool_returns_preview_when_unconfirmed() -> None:
+async def test_create_event_tool_returns_preview_when_unconfirmed(sqlite_storage: SQLiteStorage) -> None:
     """The mutating preview-confirm helper must not touch the backend
-    when ``confirm=False``."""
-    svc, _, _ = await _service()
+    when ``confirm=False``, AND the preview's content must show the
+    proposed title and start so the user can verify before confirming."""
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     initial = len(backend.events)
     out = await svc.execute_tool(
@@ -907,23 +852,31 @@ async def test_create_event_tool_returns_preview_when_unconfirmed() -> None:
         {
             "_user_id": "alice",
             "account_id": account.id,
-            "title": "Hello",
+            "title": "Team Sync",
             "start": "2026-06-01T10:00:00+00:00",
             "duration_minutes": 30,
             "confirm": False,
         },
     )
-    # ToolOutput, with one UI block, plus no backend write.
     from gilbert.interfaces.ui import ToolOutput
 
     assert isinstance(out, ToolOutput)
     assert out.ui_blocks
+    # The preview must reference the proposed event title + start so the
+    # user has something to confirm against.
+    block = out.ui_blocks[0]
+    summary_text = next(
+        (e.label for e in block.elements if e.type == "label"),
+        "",
+    )
+    assert "Team Sync" in summary_text
+    assert "2026-06-01T10:00:00" in summary_text
     assert len(backend.events) == initial
 
 
 @pytest.mark.asyncio
-async def test_create_event_tool_writes_when_confirmed() -> None:
-    svc, _, _ = await _service()
+async def test_create_event_tool_writes_when_confirmed(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     initial = len(backend.events)
     await svc.execute_tool(
@@ -941,8 +894,8 @@ async def test_create_event_tool_writes_when_confirmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_event_tool_returns_preview_when_unconfirmed() -> None:
-    svc, _, _ = await _service()
+async def test_update_event_tool_returns_preview_when_unconfirmed(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     user = _user_ctx("alice")
     evt = await svc.create_event(
@@ -973,8 +926,8 @@ async def test_update_event_tool_returns_preview_when_unconfirmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_event_tool_returns_preview_when_unconfirmed() -> None:
-    svc, _, _ = await _service()
+async def test_delete_event_tool_returns_preview_when_unconfirmed(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     user = _user_ctx("alice")
     evt = await svc.create_event(
@@ -1002,8 +955,8 @@ async def test_delete_event_tool_returns_preview_when_unconfirmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_announcement_published_once_for_imminent_event() -> None:
-    svc, sched, bus = await _service()
+async def test_announcement_published_once_for_imminent_event(sqlite_storage: SQLiteStorage) -> None:
+    svc, sched, bus = await _service(sqlite_storage)
     account, backend = await _seed_account(svc)
     bus.published.clear()
     soon = datetime.now(UTC) + timedelta(minutes=5)
@@ -1028,8 +981,8 @@ async def test_announcement_published_once_for_imminent_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_accessible_accounts_filters_by_access() -> None:
-    svc, _, _ = await _service()
+async def test_list_accessible_accounts_filters_by_access(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
     a1, _ = await _seed_account(svc, _make_account(id_="cal_a"))
     a2, _ = await _seed_account(
         svc,
@@ -1043,10 +996,627 @@ async def test_list_accessible_accounts_filters_by_access() -> None:
 
 
 @pytest.mark.asyncio
-async def test_share_user_publishes_shares_changed() -> None:
-    svc, _, bus = await _service()
+async def test_share_user_publishes_shares_changed(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, bus = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
     bus.published.clear()
     await svc.share_user(account.id, "bob", _user_ctx("alice"))
     types = [e.event_type for e in bus.published]
     assert "calendar.account.shares.changed" in types
+
+
+# ── New: blocker / important regression coverage ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_find_free_time_with_24_hour_working_window_does_not_crash(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """``working_hours_end_hour=24`` must not raise — the validator
+    accepts it as "end of day" and ``_collect_slots`` must compute the
+    boundary as next-midnight rather than ``datetime.replace(hour=24)``
+    which would ValueError."""
+    svc, _, _ = await _service(sqlite_storage)
+    a = _make_account()
+    a.working_hours_start_hour = 0
+    a.working_hours_end_hour = 24
+    account, _ = await _seed_account(svc, a)
+    user = _user_ctx("alice")
+    start = datetime(2026, 6, 3, 22, 0, tzinfo=UTC)
+    end = start + timedelta(hours=4)  # crosses midnight
+    result = await svc.find_free_time(account.id, start, end, 30, user)
+    # Returned slots must overlap the search window without crashing.
+    assert all(s.end <= end for s in result.slots)
+    assert all(s.start >= start for s in result.slots)
+
+
+@pytest.mark.asyncio
+async def test_list_events_handles_non_utc_account_timezone(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """ISO-string queries must order correctly when stored events carry
+    non-UTC offsets — the UTC-iso columns make this a non-issue, but
+    the test pins the behaviour."""
+    svc, sched, _ = await _service(sqlite_storage)
+    a = _make_account(timezone="America/Los_Angeles")
+    account, backend = await _seed_account(svc, a)
+    user = _user_ctx("alice")
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    # An event "tomorrow morning" Pacific time so the cache_back / look-
+    # ahead window covers it regardless of when the test is run.
+    today_pacific = datetime.now(pacific).date()
+    tomorrow = today_pacific + timedelta(days=1)
+    local_start = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 9, 0, tzinfo=pacific)
+    local_end = local_start + timedelta(hours=1)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_tz",
+            calendar_id="primary",
+            account_id=account.id,
+            title="Local",
+            start=local_start,
+            end=local_end,
+        )
+    )
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+
+    # Query with a UTC window that includes the event.
+    time_min = local_start.astimezone(UTC) - timedelta(hours=1)
+    time_max = local_end.astimezone(UTC) + timedelta(hours=1)
+    agg = await svc.list_events(account.id, time_min, time_max, user)
+    titles = [e.title for e in agg.events]
+    assert "Local" in titles, agg
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_delete_current_events_on_west_of_utc_calendar(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """The sweep filter must compare on UTC, not on the original-tz
+    ISO that's just stored for human display."""
+    svc, sched, _ = await _service(sqlite_storage)
+    a = _make_account(timezone="America/Los_Angeles")
+    account, backend = await _seed_account(svc, a)
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    # Event is in the future relative to "now", but its local-tz ISO
+    # string sorts BEFORE a UTC cutoff (a regression that compared on
+    # the ``start`` column would prematurely delete this row).
+    future_local = datetime.now(pacific) + timedelta(hours=2)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_future",
+            calendar_id="primary",
+            account_id=account.id,
+            title="Future",
+            start=future_local,
+            end=future_local + timedelta(minutes=30),
+        )
+    )
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    await svc._sweep_old_records()
+    row = await svc._storage.get(
+        "calendar_events", svc._event_row_id(account.id, "evt_future")
+    )
+    assert row is not None, "sweep deleted a still-current event"
+
+
+@pytest.mark.asyncio
+async def test_sweep_deletes_records_older_than_cache_window(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """Pre-seed a stale event row and a stale announcement row, fire
+    the sweep, and assert both are gone."""
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    # Stale event — older than cache_back_hours (default 2h).
+    stale_event_iso = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    await svc._storage.put(
+        "calendar_events",
+        f"{account.id}:stale",
+        {
+            "account_id": account.id,
+            "event_id": "stale",
+            "calendar_id": "primary",
+            "title": "Old",
+            "start": stale_event_iso,
+            "end": stale_event_iso,
+            "start_utc_iso": stale_event_iso,
+            "end_utc_iso": stale_event_iso,
+            "all_day": False,
+            "etag": "x",
+            "status": "confirmed",
+            "transparency": "opaque",
+            "attendees_json": "[]",
+            "organizer_email": "",
+            "location": "",
+            "description": "",
+            "html_link": "",
+            "recurring_event_id": None,
+            "visibility": "default",
+        },
+    )
+    # Stale announcement — older than 48h.
+    stale_announcement_iso = (datetime.now(UTC) - timedelta(hours=49)).isoformat()
+    await svc._storage.put(
+        "calendar_event_announcements",
+        f"{account.id}:stale",
+        {
+            "account_id": account.id,
+            "event_id": "stale",
+            "start_iso": stale_announcement_iso,
+            "announced_at": stale_announcement_iso,
+        },
+    )
+    await svc._sweep_old_records()
+    assert await svc._storage.get("calendar_events", f"{account.id}:stale") is None
+    assert (
+        await svc._storage.get("calendar_event_announcements", f"{account.id}:stale")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_429_defers_next_poll_via_retry_after(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """A backend rate-limit response with ``retry_after_sec`` must
+    push the next poll attempt out by at least that many seconds."""
+    svc, sched, _ = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    backend.fail_list_events_with = CalendarBackendRateLimitError(
+        "slow down", retry_after_sec=30.0
+    )
+    import time as _time
+
+    before = _time.monotonic()
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    runtime = svc._runtimes[account.id]
+    assert runtime.next_poll_allowed_at >= before + 29.0
+    # Subsequent fire skips without touching the backend.
+    backend.list_events_calls = 0
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    assert backend.list_events_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_increments_counter_without_flipping_health(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """A single ``TimeoutError`` (transient) bumps the counter but
+    health stays ``ok`` — the threshold is what triggers the flip."""
+    svc, sched, bus = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    backend.fail_list_events_with = TimeoutError("slow")
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    fresh = await svc._require_account(account.id)
+    assert fresh.health == "ok"
+    runtime = svc._runtimes[account.id]
+    assert runtime.consecutive_failures == 1
+    health_events = [
+        e for e in bus.published if e.event_type == "calendar.account.health_changed"
+    ]
+    assert health_events == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_schedules_jittered_first_poll(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """The poll job's first fire (``start_at``) is jittered to within
+    ``[now, now + min(poll_interval_sec, 120)]`` to prevent thundering-
+    herd behaviour on Gilbert restart."""
+    svc, sched, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    schedule = sched.schedule_for(svc._runtimes[account.id].poll_job_name)
+    assert schedule.start_at is not None
+    now = datetime.now()
+    delta = (schedule.start_at - now).total_seconds()
+    upper = float(min(account.poll_interval_sec, 120))
+    # Allow a tiny clock-skew window for the assertion (start_at was
+    # computed before ``now`` here).
+    assert -1.0 <= delta <= upper + 1.0, delta
+
+
+@pytest.mark.asyncio
+async def test_poll_skips_storage_writes_for_unchanged_events(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """After the first poll has populated the cache, a second poll
+    with no event mutations must NOT call storage.put for those
+    events again — the diff-summary check should short-circuit."""
+    svc, sched, _ = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_quiet",
+            calendar_id="primary",
+            account_id=account.id,
+            title="Quiet",
+            start=datetime.now(UTC) + timedelta(hours=2),
+            end=datetime.now(UTC) + timedelta(hours=3),
+        )
+    )
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+
+    # Wrap the storage backend's put to count only ``calendar_events``
+    # writes.
+    real_put = svc._storage.put
+    put_calls: list[str] = []
+
+    async def counting_put(collection: str, key: str, data: dict[str, Any]) -> None:
+        if collection == "calendar_events":
+            put_calls.append(key)
+        await real_put(collection, key, data)
+
+    svc._storage.put = counting_put  # type: ignore[method-assign]
+    try:
+        await sched.fire(svc._runtimes[account.id].poll_job_name)
+    finally:
+        svc._storage.put = real_put  # type: ignore[method-assign]
+
+    assert put_calls == [], put_calls
+
+
+@pytest.mark.asyncio
+async def test_update_event_requires_etag(sqlite_storage: SQLiteStorage) -> None:
+    """``update_event`` must reject an empty ``if_match_etag`` so the
+    caller can't accidentally do last-write-wins by passing nothing."""
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    user = _user_ctx("alice")
+    evt = await svc.create_event(
+        account.id,
+        EventCreateRequest(
+            title="X",
+            start=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+            end=datetime(2026, 6, 1, 10, 30, tzinfo=UTC),
+        ),
+        user,
+    )
+    with pytest.raises(ValueError, match="if_match_etag"):
+        await svc.update_event(
+            account.id,
+            evt.event_id,
+            EventCreateRequest(
+                title="Y",
+                start=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+                end=datetime(2026, 6, 1, 10, 30, tzinfo=UTC),
+            ),
+            user,
+            if_match_etag="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_event_logs_audit_for_recurring_instance(
+    sqlite_storage: SQLiteStorage,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Updating a recurring instance emits an INFO log line carrying
+    the series id, so ops can audit instance-vs-series mutations."""
+    svc, _, _ = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    user = _user_ctx("alice")
+    # Seed a recurring instance.
+    backend.events["evt_rec"] = CalendarEvent(
+        event_id="evt_rec",
+        calendar_id="primary",
+        account_id=account.id,
+        title="Weekly",
+        start=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 6, 1, 10, 30, tzinfo=UTC),
+        etag="etag_rec_v1",
+        recurring_event_id="series_001",
+    )
+    with caplog.at_level(logging.INFO, logger="gilbert.core.services.calendar"):
+        await svc.update_event(
+            account.id,
+            "evt_rec",
+            EventCreateRequest(
+                title="Weekly Renamed",
+                start=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+                end=datetime(2026, 6, 1, 10, 30, tzinfo=UTC),
+            ),
+            user,
+            if_match_etag="etag_rec_v1",
+        )
+    assert any(
+        "recurring instance" in rec.getMessage() and "series_001" in rec.getMessage()
+        for rec in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_ctx_raises_when_user_id_missing(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """Tools must NEVER silently elevate to ``UserContext.SYSTEM`` —
+    a missing ``_user_id`` is a programming error, raise loudly."""
+    svc, _, _ = await _service(sqlite_storage)
+    with pytest.raises(PermissionError, match="missing user context"):
+        await svc.execute_tool("list_calendar_accounts", {})
+
+
+@pytest.mark.asyncio
+async def test_account_payload_masks_sensitive_backend_config(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """Sensitive ConfigParam values must be returned as ``********``
+    by ``_account_payload`` so shared-users (and even admins) don't
+    receive credentials by default — admins can re-fetch via
+    ``calendar.accounts.reveal_backend_config``."""
+    from gilbert.interfaces.calendar import CalendarBackend
+    from gilbert.interfaces.configuration import ConfigParam
+    from gilbert.interfaces.tools import ToolParameterType
+
+    # Register a one-off backend with a sensitive param so this test
+    # doesn't depend on the std-plugin being importable.
+    class _SensitiveCalendarBackend(FakeCalendarBackend):
+        backend_name = "sensitive_calendar"
+
+        @classmethod
+        def backend_config_params(cls) -> list[ConfigParam]:
+            return [
+                ConfigParam(
+                    key="email_address",
+                    type=ToolParameterType.STRING,
+                    description="public",
+                ),
+                ConfigParam(
+                    key="service_account_json",
+                    type=ToolParameterType.STRING,
+                    description="secret",
+                    sensitive=True,
+                ),
+            ]
+
+    try:
+        svc, _, _ = await _service(sqlite_storage)
+        a = _make_account(backend_name="sensitive_calendar")
+        a.backend_config = {
+            "email_address": "alice@example.com",
+            "service_account_json": "{...secret...}",
+        }
+        account, _ = await _seed_account(svc, a)
+        user = _user_ctx("alice")
+        payload = svc._account_payload(account, user)
+        assert payload["backend_config"]["service_account_json"] == "********"
+        assert payload["backend_config"]["email_address"] == "alice@example.com"
+        # When ``reveal_backend_config=True``, the unmasked value is returned.
+        revealed = svc._account_payload(account, user, reveal_backend_config=True)
+        assert revealed["backend_config"]["service_account_json"] == "{...secret...}"
+    finally:
+        CalendarBackend._registry.pop("sensitive_calendar", None)
+
+
+def _tomorrow_at(hour: int, minute: int = 0) -> datetime:
+    """Tomorrow at HH:MM UTC — keeps test-local dates inside the
+    default 14-day cache lookahead regardless of when the test runs."""
+    base = (datetime.now(UTC) + timedelta(days=1)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    return base
+
+
+@pytest.mark.asyncio
+async def test_find_free_time_excludes_busy_intervals(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """A single busy event inside the search window must NOT appear
+    inside any returned free slot."""
+    svc, sched, _ = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    user = _user_ctx("alice")
+    busy_start = _tomorrow_at(10)
+    busy_end = _tomorrow_at(11)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_busy",
+            calendar_id="primary",
+            account_id=account.id,
+            title="Busy",
+            start=busy_start,
+            end=busy_end,
+        )
+    )
+    # Pump the cache.
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+
+    window_start = _tomorrow_at(9)
+    window_end = _tomorrow_at(13)
+    result = await svc.find_free_time(account.id, window_start, window_end, 30, user)
+    # No returned slot may overlap the busy interval.
+    assert result.slots, "expected at least one free slot"
+    for s in result.slots:
+        assert s.end <= busy_start or s.start >= busy_end, (s, busy_start, busy_end)
+
+
+@pytest.mark.asyncio
+async def test_find_free_time_unions_busy_intervals_across_accounts(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """When the user has multiple accessible accounts and ``account_id``
+    is None, busy blocks from each are unioned — a slot must avoid the
+    union, not just one calendar's blocks."""
+    svc, sched, _ = await _service(sqlite_storage)
+    a1, b1 = await _seed_account(svc, _make_account(id_="cal_x"))
+    a2, b2 = await _seed_account(svc, _make_account(id_="cal_y"))
+    user = _user_ctx("alice")
+    busy1_start = _tomorrow_at(10)
+    busy1_end = _tomorrow_at(10, 30)
+    busy2_start = _tomorrow_at(11)
+    busy2_end = _tomorrow_at(11, 30)
+    # cal_x has a busy block 10:00-10:30.
+    b1.add_event(
+        CalendarEvent(
+            event_id="b1",
+            calendar_id="primary",
+            account_id=a1.id,
+            title="b1",
+            start=busy1_start,
+            end=busy1_end,
+        )
+    )
+    # cal_y has a busy block 11:00-11:30.
+    b2.add_event(
+        CalendarEvent(
+            event_id="b2",
+            calendar_id="primary",
+            account_id=a2.id,
+            title="b2",
+            start=busy2_start,
+            end=busy2_end,
+        )
+    )
+    await sched.fire(svc._runtimes[a1.id].poll_job_name)
+    await sched.fire(svc._runtimes[a2.id].poll_job_name)
+
+    window_start = _tomorrow_at(9)
+    window_end = _tomorrow_at(13)
+    result = await svc.find_free_time(None, window_start, window_end, 30, user)
+    busy_intervals = [
+        (busy1_start, busy1_end),
+        (busy2_start, busy2_end),
+    ]
+    assert result.slots, "expected at least one free slot"
+    for s in result.slots:
+        for bs, be in busy_intervals:
+            assert s.end <= bs or s.start >= be, (s, bs, be)
+
+
+# ── WS RPC happy-path + auth-deny coverage ───────────────────────────
+
+
+class _FakeConn:
+    """Minimal stand-in for the WS connection passed to RPC handlers."""
+
+    def __init__(self, user_ctx: UserContext) -> None:
+        self.user_ctx = user_ctx
+
+
+@pytest.mark.asyncio
+async def test_ws_accounts_create_admin_path_creates_account(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    admin = _user_ctx("admin1", roles={"admin"})
+    conn = _FakeConn(admin)
+    frame = {
+        "id": 42,
+        "name": "Admin's calendar",
+        "email_address": "admin@example.com",
+        "backend_name": "fake_calendar",
+        "backend_config": {},
+        "timezone": "UTC",
+    }
+    out = await svc._ws_accounts_create(conn, frame)
+    assert out["type"] == "calendar.accounts.create.result"
+    assert out["account"]["name"] == "Admin's calendar"
+
+
+@pytest.mark.asyncio
+async def test_ws_events_create_denies_non_shared_user(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """A user with no access to the account must get a 403 from
+    ``calendar.events.create``."""
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    bob = _user_ctx("bob")  # not owner / admin / shared
+    conn = _FakeConn(bob)
+    frame = {
+        "id": 1,
+        "account_id": account.id,
+        "event": {
+            "title": "X",
+            "start": "2026-06-01T10:00:00+00:00",
+            "duration_minutes": 30,
+        },
+    }
+    out = await svc._ws_events_create(conn, frame)
+    assert out["type"] == "gilbert.error"
+    assert out["code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_ws_events_create_happy_path(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    conn = _FakeConn(_user_ctx("alice"))
+    frame = {
+        "id": 1,
+        "account_id": account.id,
+        "event": {
+            "title": "Hello",
+            "start": "2026-06-01T10:00:00+00:00",
+            "duration_minutes": 30,
+        },
+    }
+    out = await svc._ws_events_create(conn, frame)
+    assert out["type"] == "calendar.events.create.result"
+    assert out["event"]["title"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_ws_find_free_time_happy_path(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    conn = _FakeConn(_user_ctx("alice"))
+    frame = {
+        "id": 1,
+        "account_id": account.id,
+        "time_min": "2026-06-03T09:00:00+00:00",
+        "time_max": "2026-06-03T13:00:00+00:00",
+        "duration_minutes": 30,
+    }
+    out = await svc._ws_find_free_time(conn, frame)
+    assert out["type"] == "calendar.find_free_time.result"
+    assert isinstance(out["slots"], list)
+    assert "warnings" in out
+
+
+@pytest.mark.asyncio
+async def test_ws_find_free_time_denies_non_shared_user(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    bob = _user_ctx("bob")
+    conn = _FakeConn(bob)
+    frame = {
+        "id": 1,
+        "account_id": account.id,
+        "time_min": "2026-06-03T09:00:00+00:00",
+        "time_max": "2026-06-03T13:00:00+00:00",
+        "duration_minutes": 30,
+    }
+    out = await svc._ws_find_free_time(conn, frame)
+    assert out["type"] == "gilbert.error"
+    assert out["code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_ws_reveal_backend_config_admin_only(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    """Only admins (or the owner) of an account can reveal the
+    plaintext backend_config."""
+    svc, _, _ = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    # Owner can reveal.
+    out = await svc._ws_accounts_reveal_backend_config(
+        _FakeConn(_user_ctx("alice")),
+        {"id": 1, "account_id": account.id},
+    )
+    assert out["type"] == "calendar.accounts.reveal_backend_config.result"
+    # Non-owner non-admin denied.
+    out_denied = await svc._ws_accounts_reveal_backend_config(
+        _FakeConn(_user_ctx("bob")),
+        {"id": 1, "account_id": account.id},
+    )
+    assert out_denied["type"] == "gilbert.error"
+    assert out_denied["code"] == 403
