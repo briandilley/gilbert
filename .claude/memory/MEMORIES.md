@@ -48,5 +48,6 @@
 - [run_loop primitive](memory-agent-loop.md) — pure async loop; budgets, tool dispatch, error handling
 - [AgentService](memory-agent-service.md) — durable Agent identity with persona/heartbeat/memory/commitments/tool gating; replaces AutonomousAgentService
 - [NotificationService](memory-notification-service.md) — notifications + WS dispatch via per-event filter
+- [PushNotificationService](memory-push-notification-service.md) — bus-driven fan-out to per-user external push routes (ntfy/Pushover/Discord/Telegram), bounded queue + worker pool
 - [Plugin UI Extensions](memory-plugin-ui-extensions.md) — Plugin.ui_panels() + <PluginPanelSlot> + per-plugin frontend/ dir
 - [Plugin runtime_dependencies](memory-runtime-dependencies.md) — Plugin.runtime_dependencies() + 'gilbert doctor' for non-pip OS deps
