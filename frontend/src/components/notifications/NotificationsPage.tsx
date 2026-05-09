@@ -74,15 +74,24 @@ export function NotificationsPage() {
     <div className="container mx-auto py-6 max-w-3xl">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-semibold">Notifications</h1>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleMarkAllRead}
-          disabled={unread === 0}
-        >
-          <CheckIcon className="size-4 mr-1" />
-          Mark all read ({unread})
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate("/account/notifications")}
+          >
+            Delivery routes
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleMarkAllRead}
+            disabled={unread === 0}
+          >
+            <CheckIcon className="size-4 mr-1" />
+            Mark all read ({unread})
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
