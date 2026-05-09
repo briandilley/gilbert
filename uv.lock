@@ -25,6 +25,7 @@ members = [
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
+    "gilbert-plugin-open-meteo",
     "gilbert-plugin-openai",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
@@ -942,6 +943,7 @@ dependencies = [
     { name = "gilbert-plugin-mistral" },
     { name = "gilbert-plugin-ngrok" },
     { name = "gilbert-plugin-ollama" },
+    { name = "gilbert-plugin-open-meteo" },
     { name = "gilbert-plugin-openai" },
     { name = "gilbert-plugin-openai-compatible" },
     { name = "gilbert-plugin-openrouter" },
@@ -1009,6 +1011,7 @@ requires-dist = [
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
     { name = "gilbert-plugin-ollama", virtual = "std-plugins/ollama" },
+    { name = "gilbert-plugin-open-meteo", virtual = "std-plugins/open-meteo" },
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
     { name = "gilbert-plugin-openai-compatible", virtual = "std-plugins/openai-compatible" },
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
@@ -1177,6 +1180,11 @@ requires-dist = [{ name = "pyngrok", specifier = ">=8.0.0" }]
 name = "gilbert-plugin-ollama"
 version = "1.0.0"
 source = { virtual = "std-plugins/ollama" }
+
+[[package]]
+name = "gilbert-plugin-open-meteo"
+version = "1.0.0"
+source = { virtual = "std-plugins/open-meteo" }
 
 [[package]]
 name = "gilbert-plugin-openai"
