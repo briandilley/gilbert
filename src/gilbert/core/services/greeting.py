@@ -244,7 +244,7 @@ class GreetingService(Service):
                 ),
                 default=_DEFAULT_WEATHER_HINT_TEMPLATE,
                 multiline=True,
-                ai_prompt=False,
+                ai_prompt=True,
             ),
         ]
 

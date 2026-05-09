@@ -41,7 +41,7 @@ Single-flight using `asyncio.Future` per in-flight key (NOT a per-key Lock dict 
 **v1 limitation:** poll uses only the service-default location; users with a per-user `home_location` different from the admin home will not get alerts for their location until the multi-poll PR lands. Documented in the per-user `set_home_location` confirmation message.
 
 ### Alert dedup persistence
-`_known_alert_ids: dict[(location_key, scope_id), set[str]]` (scope_id="system" today, leaves room for per-user fan-out without a structural change). Persisted to `gilbert.weather.alert_dedup` on `stop()` and on each poll's tail. **First poll after restart treats currently-active alerts as already-seen** — preventing the "spam every active alert on every restart" bug. Rows older than 7 days are GC'd at startup.
+`_known_alert_ids: dict[(location_key, scope_id), set[str]]` (scope_id="system" today, leaves room for per-user fan-out without a structural change). Persisted to `gilbert.weather.alert_dedup` on `stop()` and on each poll's tail. **First sweep after `start()` (cold boot, post-crash, or fresh install) treats every currently-active alert as already-seen and persists the dedup row WITHOUT publishing any `weather.alert.issued` events.** A `_first_sweep_done` flag guards this — it's reset to False in `start()` and flipped to True at the end of the first `_poll_alerts()` call. Subsequent polls publish only alert ids not in the persisted set. This protects against the spam vector where Gilbert was down during an active alert window: the just-restarted service must not re-blast every subscriber. Rows older than 7 days are GC'd at startup.
 
 ### Geocoding cross-backend fallback
 `geocode()` lives on the backend ABC because it's a *backend capability* that may be borrowed across plugins. Default impl raises `NotImplementedError`. Resolution at `start()`:
@@ -50,7 +50,7 @@ Single-flight using `asyncio.Future` per in-flight key (NOT a per-key Lock dict 
 3. If none, `geocode_location` returns `geocoding_unavailable` with a clear "install the open-meteo plugin" message.
 
 ### Daily digest event
-When `digest_enabled=True` and the scheduler is available, fires `weather.digest` daily at `digest_hour:digest_minute` (server local timezone — the scheduler is naive-local, no tz-aware DAILY primitive yet). Idempotent re-registration; restart skips the missed fire and waits for tomorrow. Drops the redundant "today" daily slice when also emitting hourly. Hard-capped at 50 hourly + 7 daily slices regardless of config to bound payload size.
+When `digest_enabled=True` and the scheduler is available, fires `weather.digest` daily at `digest_hour:digest_minute` (server local timezone — the scheduler is naive-local, no tz-aware DAILY primitive yet). Restart skips the missed fire and waits for tomorrow. **Idempotent within a calendar day**: a `last_digest` row in `service_state` (date in the home-location timezone) is checked at the top of `_publish_digest` and updated after a successful publish, so a config-reload or scheduler re-register cannot double-fire on the same day. Drops the redundant "today" daily slice when also emitting hourly. Hard-capped at 50 hourly + 7 daily slices regardless of config to bound payload size.
 
 ### Configuration parameters (`config_namespace = "weather"`)
 - `enabled` (BOOL, default false — service is useless without `home_location`).
@@ -64,7 +64,7 @@ When `digest_enabled=True` and the scheduler is available, fires `weather.digest
 `home_location` is NOT a `ConfigParam` — it lives only in entity storage at `gilbert.weather.service_state._id="home_location"`, set via the `home_location.set` two-phase Settings ConfigAction.
 
 ### Greeting integration
-`GreetingService.start()` does `resolver.get_capability("weather")` and stores it as `WeatherProvider | None`. New `include_weather` (BOOL, default true) and `weather_hint_template` (STRING, multiline, `ai_prompt=False`) ConfigParams. `_build_weather_blurb(user)` interpolates the template with deterministic values; the blurb gets injected into the AI greeting prompt as context. Catches `LocationNotConfiguredError` (silent skip) and `WeatherUnavailableError` (logged debug) by exact type — no bare `except Exception`.
+`GreetingService.start()` does `resolver.get_capability("weather")` and stores it as `WeatherProvider | None`. New `include_weather` (BOOL, default true) and `weather_hint_template` (STRING, multiline, `ai_prompt=True`) ConfigParams. `_build_weather_blurb(user)` interpolates the template with deterministic values; the blurb gets injected into the AI greeting prompt as `Context: …`, so `ai_prompt=True` per the AI-Prompts-Are-Always-Configurable rule. Catches `LocationNotConfiguredError` (silent skip) and `WeatherUnavailableError` (logged debug) by exact type — no bare `except Exception`.
 
 ### Slot-in for NWS / OpenWeather
 Both fit the interface unchanged:
@@ -75,7 +75,7 @@ Both fit the interface unchanged:
 - [Backend Pattern](memory-backend-pattern.md) — universal ABC + registry pattern this feature follows.
 - [Multi-backend Aggregator Pattern](memory-multi-backend-pattern.md) — service holds backends; the cache key already includes `backend_name` to support a future per-method multi-backend layout.
 - [Capability Protocols](memory-capability-protocols.md) — `WeatherProvider` belongs in `interfaces/`.
-- [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md) — applies to `weather_hint_template` on `GreetingService` (the deterministic blurb interpolated into the AI greeting prompt; templating not LLM-rewriting, so `ai_prompt=False`).
+- [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md) — `weather_hint_template` on `GreetingService` ships with `ai_prompt=True` because its rendered output is interpolated into the AI greeting prompt as context.
 - [Multi-User Isolation](memory-multi-user-isolation.md) — singleton-safe state, fresh `storage.get` per call, no per-user prefs cache on `self`.
 - [Scheduler Service](memory-scheduler-service.md) — `weather.digest` and `weather.alerts.poll` system jobs.
 - [Notification Service](memory-notification-service.md) — used by severe-alert delivery.
