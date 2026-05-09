@@ -5,6 +5,14 @@ export interface User {
   roles: string[];
   provider: string;
   has_password: boolean;
+  /**
+   * IANA timezone the user picked on the Account page (e.g.
+   * ``"America/Los_Angeles"``). ``null`` means "not configured" — the
+   * server falls back to its own zone for time-of-day features
+   * (push-notification quiet hours, daily summaries, …) and warns once
+   * per user.
+   */
+  tz: string | null;
 }
 
 export interface LoginMethod {

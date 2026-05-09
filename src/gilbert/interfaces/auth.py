@@ -5,8 +5,28 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gilbert.interfaces.configuration import ConfigParam
+
+
+def is_valid_tz(name: str) -> bool:
+    """Return ``True`` iff ``name`` is a recognised IANA timezone.
+
+    Used to validate user-profile timezone input on write paths
+    (account-profile RPC, service config, etc.). Empty / ``None`` is
+    NOT validated here — the caller is responsible for the "no value"
+    branch.
+    """
+    if not name:
+        return False
+    try:
+        ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return False
+    except Exception:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -16,6 +36,14 @@ class UserContext:
     Set at the request boundary (web middleware) or passed explicitly
     to service methods. The SYSTEM sentinel represents unauthenticated
     or system-level operations.
+
+    ``tz`` is the user's preferred IANA timezone (e.g.
+    ``"America/Los_Angeles"``). It is read by features that schedule or
+    render time-of-day values for the user — quiet-hours math in the
+    push-notification fan-out service, daily summaries, task due-soon
+    formatting, etc. ``None`` means "the user has not configured a
+    timezone"; consumers fall back to the server timezone with a
+    one-time WARN. Existing users get ``None`` until they pick one.
     """
 
     user_id: str
@@ -25,6 +53,7 @@ class UserContext:
     provider: str = "local"
     session_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    tz: str | None = None
 
     SYSTEM: ClassVar[UserContext]
     GUEST: ClassVar[UserContext]
