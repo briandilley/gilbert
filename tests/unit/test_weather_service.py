@@ -959,9 +959,134 @@ class TestPerUserPrefs:
 
 class TestAlertDelivery:
     @pytest.mark.asyncio
+    async def test_cold_boot_with_active_alerts_publishes_nothing(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """Spec: first sweep after start treats every active alert as
+        already-seen, even when no persisted dedup row exists.
+
+        This is the spam-vector guard: Gilbert was down for 3h during a
+        tornado warning; on restart, the first poll must NOT republish
+        the still-active warning as ``weather.alert.issued``.
+        """
+        backend = FakeWeatherBackend()
+        backend.alerts_capability = True
+        backend.alerts_to_return = [
+            WeatherAlert(
+                alert_id="a1",
+                title="Tornado Warning",
+                description="Take cover",
+                severity=AlertSeverity.EXTREME,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            ),
+            WeatherAlert(
+                alert_id="a2",
+                title="Severe Thunderstorm",
+                description="wind",
+                severity=AlertSeverity.SEVERE,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            ),
+        ]
+        svc, handles = await _build_service(
+            sqlite_storage=sqlite_storage, backend=backend,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            # No pre-seeding: cold boot path. The persisted dedup row
+            # is empty (or absent) and active alerts existed before
+            # start.
+            event_bus: InMemoryEventBus = handles["event_bus"].bus
+            seen_events: list[Event] = []
+            event_bus.subscribe(
+                "weather.alert.issued", lambda e: _record(seen_events, e),
+            )
+
+            assert svc._first_sweep_done is False
+            await svc._poll_alerts()
+            await asyncio.sleep(0)
+            # No events fire on the first sweep, even though a1/a2 are
+            # genuinely-new from the dedup-row's perspective.
+            assert seen_events == []
+            assert svc._first_sweep_done is True
+            # Both alerts are now in the seen set.
+            loc_key = (
+                f"{round(_TEST_LOC.latitude, 4)},{round(_TEST_LOC.longitude, 4)}"
+            )
+            assert svc._known_alert_ids[(loc_key, "system")] == {"a1", "a2"}
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_second_poll_after_first_sweep_publishes_new_alerts(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """After the first sweep marks active alerts as seen, the next
+        poll must publish only genuinely-new alert ids.
+        """
+        backend = FakeWeatherBackend()
+        backend.alerts_capability = True
+        backend.alerts_to_return = [
+            WeatherAlert(
+                alert_id="a1",
+                title="Existing",
+                description="x",
+                severity=AlertSeverity.MODERATE,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            ),
+        ]
+        svc, handles = await _build_service(
+            sqlite_storage=sqlite_storage, backend=backend,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            event_bus: InMemoryEventBus = handles["event_bus"].bus
+            seen_events: list[Event] = []
+            event_bus.subscribe(
+                "weather.alert.issued", lambda e: _record(seen_events, e),
+            )
+
+            # First sweep: a1 active → suppressed.
+            await svc._poll_alerts()
+            await asyncio.sleep(0)
+            assert seen_events == []
+
+            # Second poll: a2 newly active (a1 still active).
+            backend.alerts_to_return = [
+                WeatherAlert(
+                    alert_id="a1",
+                    title="Existing",
+                    description="x",
+                    severity=AlertSeverity.MODERATE,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                ),
+                WeatherAlert(
+                    alert_id="a2",
+                    title="New Warning",
+                    description="new",
+                    severity=AlertSeverity.SEVERE,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                ),
+            ]
+            await svc._poll_alerts()
+            await asyncio.sleep(0)
+            assert len(seen_events) == 1
+            assert seen_events[0].data["alert_id"] == "a2"
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
     async def test_first_poll_after_restart_does_not_publish_existing_alerts(
         self, sqlite_storage: SQLiteStorage,
     ) -> None:
+        """Warm-path: even when persisted dedup has the alert, the first
+        sweep still suppresses (and overwrites the seen set with the
+        currently-active set).
+        """
         backend = FakeWeatherBackend()
         backend.alerts_capability = True
         backend.alerts_to_return = [
@@ -1005,6 +1130,9 @@ class TestAlertDelivery:
         )
         try:
             await svc._save_home_location(_TEST_LOC)
+            # Mark first sweep as already done so this test exercises
+            # the warm-path publish branch.
+            svc._first_sweep_done = True
             event_bus: InMemoryEventBus = handles["event_bus"].bus
             seen: list[Event] = []
             event_bus.subscribe("weather.alert.issued", lambda e: _record(seen, e))
@@ -1037,6 +1165,9 @@ class TestAlertDelivery:
         )
         try:
             await svc._save_home_location(_TEST_LOC)
+            # Mark first sweep as already done so the severe-alert
+            # publish branch (and cache invalidation) actually runs.
+            svc._first_sweep_done = True
             await svc.get_current()  # populate cache
             assert svc._cache.size() == 1
 
@@ -1134,13 +1265,24 @@ class TestAlertDelivery:
     async def test_alert_dedup_persists_across_stop(
         self, sqlite_storage: SQLiteStorage,
     ) -> None:
+        """Dedup state is the source of truth across restart.
+
+        Asserts (a) keys are written to storage, (b) keys persist
+        across a simulated restart and survive into the new instance's
+        in-memory ``_known_alert_ids``, (c) duplicate alerts on a
+        post-first-sweep poll do not re-publish.
+        """
         backend = FakeWeatherBackend()
         backend.alerts_capability = True
         svc, _ = await _build_service(
             sqlite_storage=sqlite_storage, backend=backend,
         )
+        loc_key = (
+            f"{round(_TEST_LOC.latitude, 4)},{round(_TEST_LOC.longitude, 4)}"
+        )
         try:
             await svc._save_home_location(_TEST_LOC)
+            # First sweep: persist x1 and y2 as already-seen.
             backend.alerts_to_return = [
                 WeatherAlert(
                     alert_id="x1",
@@ -1150,13 +1292,76 @@ class TestAlertDelivery:
                     issued_at=datetime.now(UTC),
                     expires_at=None,
                 ),
+                WeatherAlert(
+                    alert_id="y2",
+                    title="t",
+                    description="d",
+                    severity=AlertSeverity.MINOR,
+                    issued_at=datetime.now(UTC),
+                    expires_at=None,
+                ),
             ]
             await svc._poll_alerts()
         finally:
             await svc.stop()
-        # Inspect persisted dedup row
+
+        # (a) Row was written with the actual seen set.
         rows = await sqlite_storage.list_collections()
-        assert any(c.endswith("alert_dedup") for c in rows)
+        dedup_collections = [c for c in rows if c.endswith("alert_dedup")]
+        assert dedup_collections, "alert_dedup collection should exist"
+        row = await sqlite_storage.get(
+            dedup_collections[0], f"system:{loc_key}",
+        )
+        assert row is not None
+        assert set(row["seen_alert_ids"]) == {"x1", "y2"}
+        assert row["location_key"] == loc_key
+        assert row["scope_id"] == "system"
+
+        # (b) Restart: a fresh service loads the persisted dedup state.
+        backend2 = FakeWeatherBackend()
+        backend2.alerts_capability = True
+        backend2.alerts_to_return = [
+            WeatherAlert(
+                alert_id="x1",  # still active
+                title="t",
+                description="d",
+                severity=AlertSeverity.MODERATE,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            ),
+            WeatherAlert(
+                alert_id="y2",  # still active
+                title="t",
+                description="d",
+                severity=AlertSeverity.MINOR,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
+            ),
+        ]
+        svc2, handles2 = await _build_service(
+            sqlite_storage=sqlite_storage, backend=backend2,
+        )
+        try:
+            # Persisted state was loaded into memory.
+            assert svc2._known_alert_ids[(loc_key, "system")] == {"x1", "y2"}
+
+            event_bus: InMemoryEventBus = handles2["event_bus"].bus
+            seen_events: list[Event] = []
+            event_bus.subscribe(
+                "weather.alert.issued", lambda e: _record(seen_events, e),
+            )
+
+            # First sweep after restart: still suppresses (no events).
+            await svc2._poll_alerts()
+            await asyncio.sleep(0)
+            assert seen_events == []
+
+            # (c) Second poll with the same alerts → no re-publish.
+            await svc2._poll_alerts()
+            await asyncio.sleep(0)
+            assert seen_events == []
+        finally:
+            await svc2.stop()
 
 
 def _record(target: list[Event], event: Event) -> Any:
@@ -1237,4 +1442,92 @@ class TestWeatherProviderProtocol:
             assert cw.location.name == "London"
         finally:
             await svc.stop()
+
+
+# ── Daily digest ──────────────────────────────────────────────────────
+
+
+class TestDailyDigest:
+    @pytest.mark.asyncio
+    async def test_publish_digest_fires_event_with_expected_shape(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """The digest fires once when invoked and its payload contains
+        the expected ``current`` / ``hourly`` / ``daily`` / ``location``
+        / ``units`` / ``source`` keys.
+        """
+        backend = FakeWeatherBackend()
+        svc, handles = await _build_service(
+            sqlite_storage=sqlite_storage, backend=backend,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            event_bus: InMemoryEventBus = handles["event_bus"].bus
+            seen: list[Event] = []
+            event_bus.subscribe("weather.digest", lambda e: _record(seen, e))
+
+            await svc._publish_digest()
+            await asyncio.sleep(0)
+
+            assert len(seen) == 1
+            payload = seen[0].data
+            assert "current" in payload
+            assert "hourly" in payload
+            assert "daily" in payload
+            assert "location" in payload
+            assert payload["units"] == "metric"
+            assert payload["source"] == backend.backend_name
+            # Sanity-check substructure
+            assert isinstance(payload["hourly"], list)
+            assert isinstance(payload["daily"], list)
+            assert payload["current"]["temperature"] == 18.4
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_publish_digest_does_not_double_fire_same_day(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """Idempotency contract: invoking ``_publish_digest`` twice in
+        the same calendar day fires the ``weather.digest`` event
+        exactly once. Protects against config-reload / scheduler
+        re-register firing the job twice on the same day.
+        """
+        backend = FakeWeatherBackend()
+        svc, handles = await _build_service(
+            sqlite_storage=sqlite_storage, backend=backend,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            event_bus: InMemoryEventBus = handles["event_bus"].bus
+            seen: list[Event] = []
+            event_bus.subscribe("weather.digest", lambda e: _record(seen, e))
+
+            await svc._publish_digest()
+            await asyncio.sleep(0)
+            await svc._publish_digest()
+            await asyncio.sleep(0)
+
+            assert len(seen) == 1
+        finally:
+            await svc.stop()
+
+
+# ── ConfigParam declarations ─────────────────────────────────────────
+
+
+class TestGreetingWeatherHintTemplateConfig:
+    def test_weather_hint_template_is_ai_prompt(self) -> None:
+        """The greeting service's ``weather_hint_template`` is fed into
+        the AI greeting prompt, so per the "AI Prompts Are Always
+        Configurable" rule it must declare ``ai_prompt=True`` to expose
+        the Author-with-AI affordance to operators.
+        """
+        from gilbert.core.services.greeting import GreetingService
+
+        params = GreetingService().config_params()
+        by_key = {p.key: p for p in params}
+        assert "weather_hint_template" in by_key
+        assert by_key["weather_hint_template"].ai_prompt is True
+        assert by_key["weather_hint_template"].multiline is True
 

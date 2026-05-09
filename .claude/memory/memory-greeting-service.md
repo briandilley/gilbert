@@ -16,7 +16,7 @@ Personalized arrival greetings driven by `presence.arrived` events. Generates un
 
 ### Weather integration (added in feature 02)
 - `start()` does `self._weather = resolver.get_capability("weather")` and gates on `isinstance(svc, WeatherProvider)` — never an `isinstance` against the concrete class.
-- New `include_weather` (BOOL, default true) and `weather_hint_template` (STRING, multiline, `ai_prompt=False`) ConfigParams. The template is a Python `str.format` template, NOT an AI prompt, so `ai_prompt=False`. (The AI-prompts-are-always-configurable rule applies because the rendered string is interpolated into Gilbert's main greeting prompt as context — making *that* configurable is the point of the ConfigParam.)
+- New `include_weather` (BOOL, default true) and `weather_hint_template` (STRING, multiline, `ai_prompt=True`) ConfigParams. The template is a Python `str.format` template whose rendered output is interpolated into Gilbert's main greeting prompt as `Context: …`, so per the [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md) rule it ships with `ai_prompt=True` to expose the Author-with-AI affordance to operators.
 - `_build_weather_blurb(user)` calls `WeatherProvider.get_current(user=user_ctx)`, catches `LocationNotConfiguredError` (silent skip) and `WeatherUnavailableError` (logged debug). Bare `except Exception` would hide programming bugs — typed catches surface them.
 - Unit suffixes (`°C` vs `°F`, `km/h` vs `mph`) come from `current.units`. Location name comes from `current.location.name` (no "the shop" hardcoding). The blurb is injected into the AI greeting prompt under a `Context: …` line so the model sees it but isn't forced to mention it.
 - The template's available placeholders: `{location_name}`, `{temperature}`, `{temp_suffix}`, `{condition_phrase}`, `{wind_speed}`, `{speed_suffix}`, `{feels_like_clause}`. The default template includes anti-fabrication guidance ("Quote only the values shown — never invent additional weather details.").
@@ -30,7 +30,7 @@ Single tool `greet` (slash command `/greet <name>`) — calls `_generate_greetin
 ## Related
 - [Weather Service](memory-weather-service.md) — provides the `WeatherProvider` capability that feeds the weather blurb.
 - [Capability Protocols](memory-capability-protocols.md) — `WeatherProvider` is the protocol used to access weather without coupling to the concrete service class.
-- [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md) — the greeting `style` ConfigParam is `ai_prompt=True`; `weather_hint_template` is `ai_prompt=False` because it's a Python format template, not a prompt-rewrite target.
+- [AI Prompts Are Always Configurable](memory-ai-prompts-configurable.md) — both `style` and `weather_hint_template` ship with `ai_prompt=True` since their values flow into the greeting AI prompt.
 - [Presence Service](memory-presence-service.md) — publishes `presence.arrived`.
 - `src/gilbert/core/services/greeting.py`
 
