@@ -421,6 +421,13 @@ class WeatherService(Service, ToolProvider):
         # Keyed by (location_key, scope_id). scope_id="system" today.
         self._known_alert_ids: dict[tuple[str, str], set[str]] = {}
         self._alert_dedup_loaded: bool = False
+        # First-sweep-after-restart suppression: on the very first
+        # _poll_alerts() call after start(), every currently-active
+        # alert is treated as already-seen and persisted without firing
+        # a `weather.alert.issued` event. Prevents notification spam
+        # when Gilbert was down during an active alert window
+        # (cold-boot, post-crash, or fresh install).
+        self._first_sweep_done: bool = False
         self._alert_unsubscribe: Any = None
 
         # Severity → notification urgency map
@@ -820,6 +827,10 @@ class WeatherService(Service, ToolProvider):
         # Load any persisted alert dedup rows
         await self._load_alert_dedup()
         self._alert_dedup_loaded = True
+        # Reset first-sweep flag so the next _poll_alerts() suppresses
+        # publishing for any currently-active alerts (whether persisted
+        # dedup state matches them or not).
+        self._first_sweep_done = False
 
         # Register scheduler jobs
         if self._scheduler is not None:
@@ -1886,6 +1897,19 @@ class WeatherService(Service, ToolProvider):
         dedup_key = (loc_key, scope_id)
         seen = self._known_alert_ids.setdefault(dedup_key, set())
 
+        # First-sweep-after-restart guard: treat every currently-active
+        # alert as already-seen and persist without publishing. Protects
+        # against re-firing alerts on cold boot or after a crash where
+        # persisted dedup state does not include alerts that became
+        # active during downtime. Subsequent polls publish only keys
+        # not in the persisted set.
+        if not self._first_sweep_done:
+            seen.clear()
+            seen.update(a.alert_id for a in current_alerts)
+            self._first_sweep_done = True
+            await self._persist_alert_dedup_one(dedup_key, seen)
+            return
+
         new_alerts = [a for a in current_alerts if a.alert_id not in seen]
         for alert in new_alerts:
             seen.add(alert.alert_id)
@@ -1996,12 +2020,24 @@ class WeatherService(Service, ToolProvider):
     # ── Daily digest ─────────────────────────────────────────────────
 
     async def _publish_digest(self) -> None:
-        """Fire the daily weather digest event (fan-out broadcast)."""
+        """Fire the daily weather digest event (fan-out broadcast).
+
+        Idempotency: the digest fires at most once per calendar day
+        (in the home location's timezone). A ``last_digest_date`` row
+        in ``service_state`` is the source of truth and survives
+        restart, so a config-reload or scheduler re-register cannot
+        double-fire on the same day.
+        """
         if self._backend is None or self._event_bus is None:
             return
         location = await self._load_home_location()
         if location is None:
             return
+
+        today_iso = _today_iso(location.timezone)
+        if await self._digest_already_fired_today(today_iso):
+            return
+
         units = self._default_units
         try:
             current = await self._cached_current(location, units)
@@ -2011,7 +2047,7 @@ class WeatherService(Service, ToolProvider):
             daily = await self._cached_daily(
                 location, self._digest_horizon_days, units,
             )
-            if daily and daily[0].date == _today_iso(location.timezone):
+            if daily and daily[0].date == today_iso:
                 daily = daily[1:]   # drop redundant "today" slice
         except WeatherUnavailableError:
             logger.warning("Weather digest skipped — backend unavailable")
@@ -2032,6 +2068,34 @@ class WeatherService(Service, ToolProvider):
                 source="weather",
             )
         )
+        await self._mark_digest_fired(today_iso)
+
+    async def _digest_already_fired_today(self, today_iso: str) -> bool:
+        if self._storage is None:
+            return False
+        try:
+            row = await self._storage.get(
+                _SERVICE_STATE_COLLECTION, "last_digest",
+            )
+        except Exception:
+            return False
+        if not row:
+            return False
+        return str(row.get("date", "")) == today_iso
+
+    async def _mark_digest_fired(self, today_iso: str) -> None:
+        if self._storage is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._storage.put(
+                _SERVICE_STATE_COLLECTION,
+                "last_digest",
+                {
+                    "_id": "last_digest",
+                    "date": today_iso,
+                    "fired_at": datetime.now(UTC).isoformat(),
+                },
+            )
 
 
 __all__ = [
