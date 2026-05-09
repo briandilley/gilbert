@@ -10,6 +10,7 @@ import { EntitiesPage } from "@/components/entities/EntitiesPage";
 import { CollectionDetail } from "@/components/entities/CollectionDetail";
 import { EntityDetail } from "@/components/entities/EntityDetail";
 import { InboxPage } from "@/components/inbox/InboxPage";
+import { CalendarPage } from "@/components/calendar/CalendarPage";
 import { RolesPage } from "@/components/roles/RolesPage";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { SystemPage } from "@/components/system/SystemPage";
@@ -46,6 +47,7 @@ export default function App() {
             element={<EntityDetail />}
           />
           <Route path="/inbox" element={<InboxPage />} />
+          <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/security" element={<Navigate to="/security/users" replace />} />
           <Route path="/security/*" element={<RolesPage />} />
           <Route path="/scheduler" element={<SchedulerPage />} />

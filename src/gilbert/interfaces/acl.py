@@ -35,6 +35,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # The WS layer applies a per-event mailbox-access filter on top of
     # this, so a user only sees events for mailboxes they can access.
     "inbox.": 100,
+    # Calendar events are user-level — any user can have a shared
+    # calendar account. Like inbox, the WS layer applies a per-event
+    # account-access filter on top of this prefix-level gate.
+    "calendar.": 100,
     # Notifications are user-level events; the WS layer's
     # can_see_notification_event filter narrows delivery to the
     # specific recipient by matching event.data["user_id"].
@@ -94,6 +98,11 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # Inbox RPCs are user-level; handlers enforce per-mailbox access
     # via can_access_mailbox / can_admin_mailbox on top of the level.
     "inbox.": 100,
+    # Calendar RPCs are user-level; handlers enforce per-account
+    # access via can_access_account / can_admin_account on top of the
+    # prefix-level gate (any authenticated user may issue calendar.*
+    # frames; per-account authorization is per-handler).
+    "calendar.": 100,
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,

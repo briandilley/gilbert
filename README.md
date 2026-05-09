@@ -103,6 +103,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and uses Spotify's Web API for browse/search. The Music service exposes search, queue, station ("play more like this"), and loop/repeat tools — capabilities are gated per-backend so swappable backends only surface what they actually support.
 - **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, and any AI-generated spoken output.
 - **Email inbox** — multi-mailbox, multi-user. Every mailbox is owned by a user and can be shared with individual users or roles for full read/send access. Messages land in a per-mailbox persisted store; outbound drafts queue through a shared outbox with crash-resilient delayed sends. The `google` plugin's Gmail backend is the reference implementation — add more by implementing `EmailBackend`. Incoming mail can also be handed off to an AI chat loop via the Inbox AI Chat service.
+- **Calendar** — multi-account, multi-user. Every calendar account is owned by a user and can be shared with individual users or roles. The Calendar service runs one backend instance per `poll_enabled` account, caches events for fast `get_schedule` / `next_event` / `find_free_time`, and emits `calendar.event.upcoming` notifications. Eight AI tools (`list_calendar_accounts`, `get_schedule`, `next_event`, `get_event`, `find_free_time`, `create_event`, `update_event`, `delete_event`) handle every common use case; the three mutating tools default to a preview/confirm `UIBlock` flow so the AI can never silently fire real invite emails. The `google` plugin's Google Calendar backend is the reference implementation.
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
 - **OCR** — the `tesseract` plugin extracts text from images locally (no network, no API key) for document indexing and vision workflows.
@@ -142,6 +143,7 @@ MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
 PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
 DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend
 EmailBackend         →  google plugin → GmailBackend
+CalendarBackend      →  google plugin → GoogleCalendarBackend
 DocumentBackend      →  core (LocalDocuments) + google plugin (GDriveDocuments)
 AuthBackend          →  core (LocalAuth) + google plugin (GoogleAuthBackend)
 UserProviderBackend  →  google plugin → GoogleDirectoryBackend
@@ -243,7 +245,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
 | **elevenlabs** | High-quality TTS for announcements and greetings |
-| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents |
+| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
 | **openai** | OpenAI GPT chat backend (configure alongside or instead of anthropic) |
