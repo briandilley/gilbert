@@ -25,10 +25,24 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.weather import (
+    LocationNotConfiguredError,
+    WeatherProvider,
+    WeatherUnavailableError,
+    WeatherUnits,
+)
 
 logger = logging.getLogger(__name__)
 
 _GREETING_COLLECTION = "greeting_state"
+
+_DEFAULT_WEATHER_HINT_TEMPLATE = (
+    "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
+    "{condition_phrase}, wind {wind_speed:.0f}{speed_suffix}"
+    "{feels_like_clause}. Mention it casually if it fits the moment, "
+    "otherwise ignore. Quote only the values shown — never invent additional "
+    "weather details."
+)
 
 
 class GreetingService(Service):
@@ -57,6 +71,9 @@ class GreetingService(Service):
         self._speakers: list[str] = []
         self._timezone: str = "UTC"
         self._ai_profile: str = "light"
+        self._include_weather: bool = True
+        self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
+        self._weather: WeatherProvider | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -111,6 +128,21 @@ class GreetingService(Service):
                 self._style = section.get("style", "")
                 self._speakers = section.get("speakers", [])
                 self._timezone = section.get("timezone", "UTC")
+                self._include_weather = bool(
+                    section.get("include_weather", self._include_weather)
+                )
+                self._weather_hint_template = section.get(
+                    "weather_hint_template",
+                    self._weather_hint_template,
+                ) or _DEFAULT_WEATHER_HINT_TEMPLATE
+
+        # Optional weather provider — if missing or wrong protocol,
+        # we silently degrade to the no-weather greeting. Capability
+        # protocol from ``interfaces/weather.py``; never isinstance-
+        # check against the concrete service class.
+        weather_svc = resolver.get_capability("weather")
+        if isinstance(weather_svc, WeatherProvider):
+            self._weather = weather_svc
 
         # Schedule a one-shot check for people already present at startup.
         # This handles the case where Gilbert restarts while people are
@@ -191,6 +223,29 @@ class GreetingService(Service):
                 default="light",
                 choices_from="ai_profiles",
             ),
+            ConfigParam(
+                key="include_weather",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Enrich greetings with a one-line weather hint when "
+                    "the WeatherService is available."
+                ),
+                default=True,
+            ),
+            ConfigParam(
+                key="weather_hint_template",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Python str.format template for the weather hint "
+                    "blurb interpolated into the greeting prompt. "
+                    "Available placeholders: {location_name}, "
+                    "{temperature}, {temp_suffix}, {condition_phrase}, "
+                    "{wind_speed}, {speed_suffix}, {feels_like_clause}."
+                ),
+                default=_DEFAULT_WEATHER_HINT_TEMPLATE,
+                multiline=True,
+                ai_prompt=False,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -200,6 +255,13 @@ class GreetingService(Service):
         self._ai_profile = config.get("ai_profile", self._ai_profile)
         self._speakers = config.get("speakers", self._speakers)
         self._timezone = config.get("timezone", self._timezone)
+        self._include_weather = bool(
+            config.get("include_weather", self._include_weather)
+        )
+        self._weather_hint_template = config.get(
+            "weather_hint_template",
+            self._weather_hint_template,
+        ) or _DEFAULT_WEATHER_HINT_TEMPLATE
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -395,6 +457,50 @@ class GreetingService(Service):
         except Exception:
             return datetime.now(UTC).strftime("%Y-%m-%d")
 
+    async def _build_weather_blurb(self, user: UserContext | None = None) -> str:
+        """Build a deterministic one-line weather blurb for the prompt.
+
+        Returns ``""`` when the WeatherService is missing, the user has
+        no configured location, or the backend is unavailable. Errors
+        propagate as ``LocationNotConfiguredError`` /
+        ``WeatherUnavailableError`` from ``WeatherProvider``; we catch
+        them by exact type so real bugs still surface.
+        """
+        if not self._include_weather or self._weather is None:
+            return ""
+        try:
+            current = await self._weather.get_current(user=user)
+        except LocationNotConfiguredError:
+            return ""
+        except WeatherUnavailableError:
+            logger.debug("Weather backend unavailable for greeting; skipping blurb")
+            return ""
+        temp_suffix = "°F" if current.units is WeatherUnits.IMPERIAL else "°C"
+        speed_suffix = "mph" if current.units is WeatherUnits.IMPERIAL else "km/h"
+        condition_phrase = current.condition.value.replace("_", " ")
+        feels_like_clause = ""
+        if (
+            current.feels_like is not None
+            and abs(current.feels_like - current.temperature) >= 3
+        ):
+            feels_like_clause = f", feels like {current.feels_like:.0f}{temp_suffix}"
+        location_name = current.location.name or "the configured location"
+        try:
+            return self._weather_hint_template.format(
+                location_name=location_name,
+                temperature=current.temperature,
+                temp_suffix=temp_suffix,
+                condition_phrase=condition_phrase,
+                wind_speed=current.wind_speed,
+                speed_suffix=speed_suffix,
+                feels_like_clause=feels_like_clause,
+            )
+        except (KeyError, IndexError, ValueError):
+            logger.warning(
+                "Greeting weather_hint_template format failed", exc_info=True,
+            )
+            return ""
+
     async def _generate_greeting(self, name: str, recent: list[str] | None = None) -> str:
         """Generate a personalized greeting via AI, with fallback."""
         if self._resolver is None:
@@ -416,13 +522,16 @@ class GreetingService(Service):
                 "structure, and word choice:\n" + "\n".join(f"- {g}" for g in recent[-7:])
             )
 
+        weather_blurb = await self._build_weather_blurb(user=None)
+        weather_section = f"\n\nContext: {weather_blurb}" if weather_blurb else ""
+
         prompt = (
             f"Generate a morning greeting for {name} who just arrived at the shop. "
             f"You're Gilbert, an AI assistant at a business. Be creative — vary your "
             f"tone across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). "
             f"Mention their name. 1-2 sentences max. "
             f"Write ONLY the greeting — no quotes, no preamble."
-            f"{style_instruction}{avoid_section}"
+            f"{style_instruction}{weather_section}{avoid_section}"
         )
 
         # tools_override=[] forces a zero-tool call regardless of the

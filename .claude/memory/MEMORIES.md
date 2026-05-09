@@ -31,6 +31,8 @@
 - [Skills System](memory-skills-system.md) — Agent Skills standard support, per-conversation skill activation via SKILL.md files
 - [Skill Workspaces & Activation Gate](memory-skill-workspaces.md) — per-conv workspace dirs, AI-vs-slash gate, cleanup-on-delete, legacy fallback
 - [Web Search Service](memory-websearch-service.md) — web search AI tool with Tavily backend
+- [Weather Service](memory-weather-service.md) — multi-backend weather AI tools (current, forecast, alerts) with Open-Meteo default
+- [Greeting Service](memory-greeting-service.md) — presence-driven personalized arrival greetings, with optional WeatherProvider enrichment
 - [Slash Commands](memory-slash-commands.md) — direct tool invocation from chat via /command syntax, bypassing the AI
 - [Config Actions](memory-config-actions.md) — action buttons on service settings pages (test_connection, link flows), with two-phase followup support
 - [MCP (Model Context Protocol)](memory-mcp.md) — Gilbert as MCP client (external servers → AI pipeline) AND MCP server (`/api/mcp` bearer-token endpoint) with per-user RBAC

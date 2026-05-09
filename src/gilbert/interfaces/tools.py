@@ -63,6 +63,15 @@ class ToolDefinition:
     # unsafe-by-default means adding a new tool is never a hidden concurrency
     # hazard. Pure reads (search/fetch/get_*) are the natural first opt-ins.
     parallel_safe: bool = False
+    # Whether the tool is exposed to the AI's tool-discovery surface.
+    # Default ``True`` matches the long-standing behaviour. Set ``False``
+    # for tools that should be slash-only — e.g. configuration mutations
+    # like ``set_home_location`` / ``set_units`` that the model would too
+    # eagerly invoke from casual phrasing. ``AIService._discover_tools``
+    # filters out ``ai_visible=False`` entries before sending the tool
+    # list to the model; the slash-command path ignores the flag (slash
+    # invocations are always intentional).
+    ai_visible: bool = True
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert parameters to JSON Schema format (used by most AI providers)."""
