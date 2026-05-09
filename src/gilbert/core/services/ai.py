@@ -3144,6 +3144,12 @@ class AIService(Service):
             if not isinstance(svc, ToolProvider):
                 continue
             for tool_def in svc.get_tools(user_ctx):
+                # Skip slash-only tools — they're registered with
+                # ``ai_visible=False`` so the model never sees them in
+                # its tool list. Slash dispatch lives elsewhere and
+                # picks them up regardless.
+                if not tool_def.ai_visible:
+                    continue
                 if tool_def.name in tools_by_name:
                     logger.warning(
                         "Duplicate tool name %r from %s (already registered by %s)",

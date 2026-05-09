@@ -106,6 +106,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Calendar** — multi-account, multi-user. Every calendar account is owned by a user and can be shared with individual users or roles. The Calendar service runs one backend instance per `poll_enabled` account, caches events for fast `get_schedule` / `next_event` / `find_free_time`, and emits `calendar.event.upcoming` notifications. Eight AI tools (`list_calendar_accounts`, `get_schedule`, `next_event`, `get_event`, `find_free_time`, `create_event`, `update_event`, `delete_event`) handle every common use case; the three mutating tools default to a preview/confirm `UIBlock` flow so the AI can never silently fire real invite emails. The `google` plugin's Google Calendar backend is the reference implementation.
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
+- **Weather** — the Weather service exposes `current_weather`, `forecast`, `weather_alerts`, and `geocode_location` AI tools (plus slash-only `/weather set_home` and `/weather set_units`). The default `open-meteo` plugin needs no API key and covers global current + hourly + daily forecasts. The interface accommodates NWS (US severe-weather alerts) and OpenWeatherMap as future plugins without breaking changes.
 - **OCR** — the `tesseract` plugin extracts text from images locally (no network, no API key) for document indexing and vision workflows.
 - **Public tunnel** — the `ngrok` plugin provides a public HTTPS URL so OAuth callbacks (Google login, Slack Socket Mode) work behind NAT.
 - **Slack bridge** — the `slack` plugin connects a Socket Mode bot so users can chat with Gilbert from Slack DMs and mentions, with the same tool access as the web UI.
@@ -148,6 +149,7 @@ DocumentBackend      →  core (LocalDocuments) + google plugin (GDriveDocuments
 AuthBackend          →  core (LocalAuth) + google plugin (GoogleAuthBackend)
 UserProviderBackend  →  google plugin → GoogleDirectoryBackend
 WebSearchBackend     →  tavily plugin → TavilySearch
+WeatherBackend       →  open-meteo plugin → OpenMeteoWeather
 OCRBackend           →  tesseract plugin → TesseractOCR
 TunnelBackend        →  ngrok plugin → NgrokTunnel
 MCPBackend           →  core (stdio, http, sse, browser — consume external MCP servers)
@@ -248,6 +250,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
+| **open-meteo** | Weather backend (no API key) — current, hourly, and daily forecasts |
 | **openai** | OpenAI GPT chat backend (configure alongside or instead of anthropic) |
 | **openai-compatible** | Vendor-neutral Chat Completions backend for vLLM, LM Studio, corporate proxies, and other endpoints without a dedicated plugin |
 | **slack** | Socket Mode bot bridging Slack DMs/mentions to the AI service |
