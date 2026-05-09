@@ -39,3 +39,13 @@ export async function changePassword(
 export async function revokeAllSessions(): Promise<void> {
   await apiFetch<void>("/auth/sessions/revoke-all", { method: "POST" });
 }
+
+export async function updateProfileTz(tz: string | null): Promise<{
+  user_id: string;
+  tz: string | null;
+}> {
+  return apiFetch<{ user_id: string; tz: string | null }>("/auth/profile", {
+    method: "POST",
+    body: JSON.stringify({ tz }),
+  });
+}

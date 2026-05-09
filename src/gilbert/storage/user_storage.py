@@ -49,6 +49,11 @@ class StorageUserBackend(UserBackend):
             "roles": list(data.get("roles", [])),
             "provider_links": list(data.get("provider_links", [])),
             "metadata": data.get("metadata", {}),
+            # IANA timezone (e.g. "America/Los_Angeles"); ``None`` until
+            # the user picks one. Read by features that need to render
+            # time-of-day in the user's zone (push fan-out quiet hours,
+            # daily summaries, etc.).
+            "tz": data.get("tz"),
             "created_at": now,
             "last_login": None,
         }
