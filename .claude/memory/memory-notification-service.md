@@ -38,3 +38,4 @@ and lets the UI decide.
 - ``src/gilbert/web/ws_protocol.py:can_see_notification_event``
 - ``docs/superpowers/specs/2026-05-03-autonomous-agent-design.md``
 - ``docs/superpowers/plans/2026-05-03-autonomous-agent-phase-3-notification-backend.md``
+- [PushNotificationService](memory-push-notification-service.md) — additive side-channel that subscribes to ``notification.received`` and fans out to external push providers; this service is unchanged.
