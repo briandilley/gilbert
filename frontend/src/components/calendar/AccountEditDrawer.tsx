@@ -77,7 +77,20 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
     setWhEnd(account.working_hours_end_hour);
     setPollEnabled(account.poll_enabled);
     setPollInterval(account.poll_interval_sec);
-  }, [account]);
+
+    // Sensitive ConfigParam values come back from the WS layer as
+    // ``********``. Admins can see the live values via a separate
+    // call (which logs an audit line server-side). Without this,
+    // saving the form would clobber the real secret with the mask.
+    if (account.can_admin) {
+      api
+        .revealCalendarBackendConfig(account.id)
+        .then((cfg) => setBackendConfig(cfg))
+        .catch(() => {
+          /* Non-admins or transient failures: keep the masked values. */
+        });
+    }
+  }, [account, api]);
 
   const selectedBackend = useMemo(
     () => backendsQuery.data?.find((b) => b.name === backendName),

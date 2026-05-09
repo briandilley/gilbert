@@ -19,15 +19,25 @@ Three entity collections, all owned by `CalendarService`:
 | Collection | Key fields |
 |---|---|
 | `calendar_accounts` | `id`, `name`, `email_address`, `backend_name`, `backend_config`, `calendar_id`, `timezone`, `working_hours_start_hour`, `working_hours_end_hour`, `owner_user_id`, `shared_with_users`, `shared_with_roles`, `poll_enabled`, `poll_interval_sec`, `upcoming_event_lookahead_minutes`, `health` (`ok`/`unhealthy`), `last_error`, `last_error_at`, `created_at` |
-| `calendar_events` | `_id = "{account_id}:{event_id}"`, `account_id`, `event_id`, `calendar_id`, `title`, `start`, `end`, `all_day`, `etag`, `status`, `transparency`, `attendees_json`, `organizer_email`, `location`, `description`, `html_link`, `recurring_event_id`, `visibility` |
+| `calendar_events` | `_id = "{account_id}:{event_id}"`, `account_id`, `event_id`, `calendar_id`, `title`, `start`, `end`, `start_utc_iso`, `end_utc_iso`, `all_day`, `etag`, `status`, `transparency`, `attendees_json`, `organizer_email`, `location`, `description`, `html_link`, `recurring_event_id`, `visibility` |
 | `calendar_event_announcements` | `_id = "{account_id}:{event_id}"`, `account_id`, `event_id`, `start_iso`, `announced_at` — dedup for `calendar.event.upcoming` so a process restart never re-fires |
 
 Indexes: `calendar_accounts(owner_user_id)`,
-`calendar_events(account_id, start)`, `calendar_events(start)` (for
-aggregate queries), `calendar_event_announcements(account_id, start_iso)`.
-The fetch and trim windows for `calendar_events` are deliberately
-**identical** (`now − cache_back_hours .. now + default_event_lookahead_days`)
-so the cache never holds rows the next poll wouldn't return.
+`calendar_events(account_id, start_utc_iso)`,
+`calendar_events(start_utc_iso)`, `calendar_events(end_utc_iso)`,
+`calendar_event_announcements(account_id, start_iso)`. The fetch and
+trim windows for `calendar_events` are deliberately **identical**
+(`now − cache_back_hours .. now + default_event_lookahead_days`) so the
+cache never holds rows the next poll wouldn't return.
+
+**`start` / `end` vs `start_utc_iso` / `end_utc_iso`** — `start` and
+`end` are the original-tz ISO strings (e.g. `"2026-05-09T22:00:00-08:00"`)
+kept for human-readable round-trip via `_event_row_to_event`. **All
+filter / sort queries use `start_utc_iso` / `end_utc_iso`** because
+string-comparing mixed-offset ISOs is not order-preserving (a PST event
+later than a UTC event lex-sorts as earlier). Pre-Cal-revise rows
+without UTC columns will not match the new queries — they'll get
+overwritten on the next poll cycle that touches them.
 
 ### Authorization
 
@@ -104,11 +114,36 @@ older than `cache_back_hours` — entity storage has no TTL primitive.
   `idempotency_key = sha256(account_id|title|start|end|sorted_attendees)[:32]`
   when caller omits one. Backends forward (Google: `requestId`)
   so a retry returns the original event instead of duplicating.
-- `update_event` — reads current event for `etag`, passes as
-  `if_match_etag`. On `CalendarBackendConflictError` (Google 412),
-  raises through to caller for refresh+retry.
+- `update_event` — **requires** non-empty `if_match_etag`; passing an
+  empty string raises `ValueError`. Without that hard requirement, a
+  service-side fresh `get_event` would always match the server etag,
+  defeating the whole point of OCC and silently masking writes that
+  lost the race. The AI tool's preview/confirm flow stashes the etag
+  on the hidden `pending_arguments` field of the preview UIBlock as
+  `_etag` (and the merged update overlay as `_merged`); the confirm
+  leg pulls them back out and threads them straight into
+  `update_event` instead of re-reading. On `CalendarBackendConflictError`
+  (Google 412), the service raises through to the caller for
+  refresh+retry. The recurring-instance audit log fires on the result
+  side (we know `evt.recurring_event_id` from the backend response).
 - `delete_event` — sends `sendUpdates="all"` only when
   `send_cancellations=True`.
+
+### Backend backoff signals
+
+`_on_poll_failure` consumes the typed taxonomy:
+
+- `CalendarBackendRateLimitError(retry_after_sec=…)` — sets
+  `runtime.next_poll_allowed_at = monotonic + retry_after_sec`. The
+  poll callback skips its API call until that point, so a 429 from
+  Google (carrying `Retry-After`) actually defers the next attempt
+  instead of hammering at the configured cadence.
+- `CalendarBackendTransientError` / `TimeoutError` — exponential
+  backoff (`2 ** consecutive_failures` seconds) capped at the
+  account's `poll_interval_sec`.
+
+A successful poll resets `consecutive_failures` and clears
+`next_poll_allowed_at`.
 
 Naive datetimes coming from tool args are localized to
 `ZoneInfo(account.timezone)` at the tool→service boundary. Account
@@ -162,11 +197,22 @@ adds the per-account narrowing on top — same mechanism inbox uses.
 
 ### WS RPCs
 
-- `calendar.accounts.{list,get,create,update,delete,test_connection,probe_calendars,share_user,unshare_user,share_role,unshare_role}`
+- `calendar.accounts.{list,get,create,update,delete,test_connection,probe_calendars,reveal_backend_config,share_user,unshare_user,share_role,unshare_role}`
 - `calendar.events.{list,get,create,update,delete}`
 - `calendar.freebusy.get`
 - `calendar.find_free_time`
 - `calendar.backends.list`
+
+`calendar.events.update` requires a non-empty `if_match_etag` frame
+field (returns 400 otherwise). The SPA reads it from the cached event
+before submitting the form.
+
+`calendar.find_free_time` returns both `slots` and `warnings`. The
+service's `find_free_time` returns `FreeTimeResult(slots, warnings)`
+so cross-attendee free/busy probe failures (the most common partial-
+failure mode — colleague's calendar isn't shared with the requester)
+surface to the caller without aborting. The AI tool stringifies
+warnings into its return JSON; the WS handler passes them through.
 
 `probe_calendars` is the spec's two-phase create flow: SPA creates the
 account with `poll_enabled=False`, then calls
@@ -202,15 +248,24 @@ return await confirm_or_execute(
 Do NOT retrofit existing inbox / music tools to use this helper — that
 is a separate UX pass per `OPEN_QUESTIONS.md`'s decision lock.
 
-### Plaintext-at-rest gap
+### Plaintext-at-rest gap + masking
 
-Service-account JSON in `backend_config` is `sensitive=True`, which
-masks it in WS responses, but `sensitive` is **not** encryption — the
-JSON sits in plaintext SQLite. This is a project-wide gap inherited
-by every backend that stores secrets (Gmail, Drive, Slack, Withings
-when shipped). Tracked in `OPEN_QUESTIONS.md` as a deferred v2 item;
-the std-plugins README documents the gap and recommends file-permission
-hardening.
+Service-account JSON in `backend_config` is `sensitive=True`. The
+default `_account_payload` walks `backend_cls.backend_config_params()`
+and **masks** any sensitive ConfigParam value as `"********"` before
+returning it over WS — shared users and even admins get the masked
+payload by default. Admins (or the owner) can re-fetch the unmasked
+value via `calendar.accounts.reveal_backend_config(account_id)`,
+which checks `can_admin_account` and emits an INFO audit log line
+on every reveal. The SPA's `AccountEditDrawer` calls this RPC on
+edit-open when the user has admin access so the form repopulates
+with the live secrets instead of overwriting them with the mask.
+
+Masking is **not** encryption — the JSON still sits in plaintext
+SQLite. This is a project-wide gap inherited by every backend that
+stores secrets (Gmail, Drive, Slack, Withings when shipped). Tracked
+in `OPEN_QUESTIONS.md` as a deferred v2 item; the std-plugins README
+documents the gap and recommends file-permission hardening.
 
 ### Multi-user state — what's on `self`
 

@@ -280,6 +280,21 @@ class AggregatedEvents:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FreeTimeResult:
+    """Return envelope for ``find_free_time``.
+
+    Carries ``warnings`` so cross-attendee free/busy probe failures
+    (the most common partial-failure mode — colleague's calendar
+    isn't shared with the requester) surface to callers without
+    aborting the whole search. The AI tool stringifies the warnings
+    into its return so the model can mention them to the user.
+    """
+
+    slots: list[FreeSlot]
+    warnings: list[str] = field(default_factory=list)
+
+
 # ── Authorization helpers ─────────────────────────────────────────────
 #
 # ``is_admin`` is derived from ``user_ctx`` inside the helpers so callers
@@ -582,7 +597,7 @@ class CalendarProvider(Protocol):
         respect_working_hours: bool = True,
         max_results: int = 5,
         attendee_emails: list[str] | None = None,
-    ) -> list[FreeSlot]: ...
+    ) -> FreeTimeResult: ...
 
     async def create_event(
         self,
@@ -632,6 +647,7 @@ __all__ = [
     "EventCreateRequest",
     "CalendarAccount",
     "AggregatedEvents",
+    "FreeTimeResult",
     "CalendarBackend",
     "CalendarBackendError",
     "CalendarBackendAuthError",

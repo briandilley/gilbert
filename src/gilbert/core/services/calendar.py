@@ -34,7 +34,7 @@ from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
 )
-from gilbert.core.services._ui_blocks import confirm_or_execute
+from gilbert.core.services._ui_blocks import build_preview_output, confirm_or_execute
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.calendar import (
     AggregatedEvents,
@@ -51,6 +51,7 @@ from gilbert.interfaces.calendar import (
     EventVisibility,
     FreeBusyBlock,
     FreeSlot,
+    FreeTimeResult,
     can_access_account,
     can_admin_account,
     determine_access,
@@ -106,6 +107,11 @@ class _AccountRuntime:
     recent_mutate_publishes: dict[str, float] = field(default_factory=dict)
     consecutive_failures: int = 0
     seeded_from_cache: bool = False
+    #: ``time.monotonic()`` value before which the poll loop must
+    #: skip its API call. Set by ``_on_poll_failure`` to honour
+    #: ``Retry-After`` on rate-limit responses and to apply
+    #: exponential backoff on transient failures.
+    next_poll_allowed_at: float = 0.0
 
 
 class CalendarService(Service):
@@ -121,8 +127,6 @@ class CalendarService(Service):
         self._storage: Any = None
         self._event_bus: Any = None
         self._scheduler: Any = None
-        self._access_control: Any = None
-        self._resolver: ServiceResolver | None = None
 
         self._runtimes: dict[str, _AccountRuntime] = {}
         self._cached_accounts: list[CalendarAccount] = []
@@ -155,7 +159,7 @@ class CalendarService(Service):
             name="calendar",
             capabilities=frozenset({"calendar", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage", "scheduler"}),
-            optional=frozenset({"event_bus", "configuration", "access_control"}),
+            optional=frozenset({"event_bus", "configuration"}),
             events=frozenset(
                 {
                     "calendar.event.upcoming",
@@ -191,13 +195,19 @@ class CalendarService(Service):
         await self._storage.ensure_index(
             IndexDefinition(
                 collection=_EVENTS_COLLECTION,
-                fields=["account_id", "start"],
+                fields=["account_id", "start_utc_iso"],
             )
         )
         await self._storage.ensure_index(
             IndexDefinition(
                 collection=_EVENTS_COLLECTION,
-                fields=["start"],
+                fields=["start_utc_iso"],
+            )
+        )
+        await self._storage.ensure_index(
+            IndexDefinition(
+                collection=_EVENTS_COLLECTION,
+                fields=["end_utc_iso"],
             )
         )
         await self._storage.ensure_index(
@@ -210,9 +220,6 @@ class CalendarService(Service):
         event_bus_svc = resolver.get_capability("event_bus")
         if isinstance(event_bus_svc, EventBusProvider):
             self._event_bus = event_bus_svc.bus
-
-        self._access_control = resolver.get_capability("access_control")
-        self._resolver = resolver
 
         config_svc = resolver.get_capability("configuration")
         section: dict[str, Any] = {}
@@ -916,6 +923,15 @@ class CalendarService(Service):
     async def _poll_runtime(self, runtime: _AccountRuntime) -> None:
         account = runtime.account
         backend = runtime.backend
+        # Honor a deferred next-poll deadline set by a prior rate-limit
+        # or transient failure — skip without touching the backend so we
+        # don't hammer the provider during its cooldown window.
+        if time.monotonic() < runtime.next_poll_allowed_at:
+            logger.debug(
+                "Calendar poll (%s): deferred (cooldown active)",
+                account.id,
+            )
+            return
         now = datetime.now(UTC)
         time_min = now - timedelta(hours=self._cache_back_hours)
         time_max = now + timedelta(days=self._default_lookahead_days)
@@ -965,7 +981,20 @@ class CalendarService(Service):
         except CalendarBackendNotFoundError as exc:
             await self._on_poll_failure(runtime, exc, fatal=True)
             return
-        except (TimeoutError, CalendarBackendError, Exception) as exc:
+        except (TimeoutError, CalendarBackendError) as exc:
+            await self._on_poll_failure(runtime, exc, fatal=False)
+            return
+        except Exception as exc:
+            # An unexpected exception class slipped through the typed
+            # taxonomy — record it, increment the counter, but don't
+            # crash the poll callback (the scheduler would log it as a
+            # job failure but we want to keep the runtime alive and
+            # surface ``unhealthy`` after the configured threshold).
+            logger.exception(
+                "Calendar poll (%s): unexpected exception class %s",
+                runtime.account.id,
+                type(exc).__name__,
+            )
             await self._on_poll_failure(runtime, exc, fatal=False)
             return
 
@@ -990,7 +1019,15 @@ class CalendarService(Service):
         new_snapshots: dict[str, dict[str, Any]] = {}
 
         for evt in fresh:
-            new_snapshots[evt.event_id] = self._event_summary_for_diff(evt)
+            snapshot = self._event_summary_for_diff(evt)
+            new_snapshots[evt.event_id] = snapshot
+            # Only write to storage when the diff-relevant fields actually
+            # changed. Skipping unchanged rows turns a 100-event / 5-min
+            # poll from a 100-write-per-cycle storm into a no-op cycle on
+            # quiet calendars.
+            previous = previous_snapshots.get(evt.event_id)
+            if previous == snapshot:
+                continue
             row_id = self._event_row_id(account.id, evt.event_id)
             await self._storage.put(
                 _EVENTS_COLLECTION,
@@ -1028,6 +1065,7 @@ class CalendarService(Service):
         runtime.last_seen_event_ids = fresh_ids
         runtime.last_seen_event_snapshots = new_snapshots
         runtime.consecutive_failures = 0
+        runtime.next_poll_allowed_at = 0.0
 
         # Health recovery — flip back to ok if it was unhealthy.
         if account.health != "ok":
@@ -1060,6 +1098,34 @@ class CalendarService(Service):
             exc,
             runtime.consecutive_failures,
         )
+
+        # Defer the next poll attempt to honor backend signals:
+        #   - Rate-limit with ``Retry-After`` → sleep at least that long.
+        #   - Transient (5xx, timeout) → exponential backoff capped at
+        #     the account's poll interval, so a flaky provider can't
+        #     keep us hammering at the normal cadence.
+        cooldown_sec = 0.0
+        from gilbert.interfaces.calendar import (
+            CalendarBackendRateLimitError,
+            CalendarBackendTransientError,
+        )
+
+        if isinstance(exc, CalendarBackendRateLimitError) and exc.retry_after_sec:
+            cooldown_sec = float(exc.retry_after_sec)
+        elif isinstance(exc, (CalendarBackendTransientError, TimeoutError)):
+            # 2, 4, 8, 16, … seconds of backoff capped at the configured
+            # poll interval (so we never push the next attempt past the
+            # cycle that would have run anyway).
+            backoff = 2.0 ** runtime.consecutive_failures
+            cooldown_sec = min(backoff, float(account.poll_interval_sec))
+        if cooldown_sec > 0.0:
+            runtime.next_poll_allowed_at = time.monotonic() + cooldown_sec
+            logger.info(
+                "Calendar poll (%s): deferring next attempt by %.1fs",
+                account.id,
+                cooldown_sec,
+            )
+
         if (
             runtime.consecutive_failures >= self._unhealthy_failure_threshold
             and account.health != "unhealthy"
@@ -1093,6 +1159,13 @@ class CalendarService(Service):
         account: CalendarAccount,
         evt: CalendarEvent,
     ) -> dict[str, Any]:
+        # ``start`` / ``end`` keep the event's original timezone offset so
+        # the SPA can render the original wall-clock time. Filter / sort
+        # queries always use ``start_utc_iso`` / ``end_utc_iso`` because
+        # string-comparing mixed-offset ISO timestamps is not order-
+        # preserving (e.g. "2026-05-09T22:00-08:00" sorts before
+        # "2026-05-10T05:00+00:00" even though the first instant is
+        # later).
         return {
             "account_id": account.id,
             "event_id": evt.event_id,
@@ -1100,6 +1173,8 @@ class CalendarService(Service):
             "title": evt.title,
             "start": evt.start.isoformat(),
             "end": evt.end.isoformat(),
+            "start_utc_iso": evt.start.astimezone(UTC).isoformat(),
+            "end_utc_iso": evt.end.astimezone(UTC).isoformat(),
             "all_day": evt.all_day,
             "etag": evt.etag,
             "status": evt.status.value,
@@ -1227,7 +1302,7 @@ class CalendarService(Service):
                 Query(
                     collection=_EVENTS_COLLECTION,
                     filters=[
-                        Filter(field="start", op=FilterOp.LT, value=event_cutoff),
+                        Filter(field="start_utc_iso", op=FilterOp.LT, value=event_cutoff),
                     ],
                 )
             )
@@ -1326,17 +1401,17 @@ class CalendarService(Service):
                                 value=a.id,
                             ),
                             Filter(
-                                field="start",
+                                field="start_utc_iso",
                                 op=FilterOp.GTE,
                                 value=time_min_iso,
                             ),
                             Filter(
-                                field="start",
+                                field="start_utc_iso",
                                 op=FilterOp.LTE,
                                 value=time_max_iso,
                             ),
                         ],
-                        sort=[SortField(field="start", descending=False)],
+                        sort=[SortField(field="start_utc_iso", descending=False)],
                     )
                 )
                 evs = [self._event_row_to_event(r) for r in rows]
@@ -1427,7 +1502,7 @@ class CalendarService(Service):
         respect_working_hours: bool = True,
         max_results: int = 5,
         attendee_emails: list[str] | None = None,
-    ) -> list[FreeSlot]:
+    ) -> FreeTimeResult:
         if not (5 <= duration_minutes <= 480):
             raise ValueError(f"duration_minutes must be between 5 and 480 (got {duration_minutes})")
         if time_min >= time_max:
@@ -1438,6 +1513,8 @@ class CalendarService(Service):
         if time_min.tzinfo is None or time_max.tzinfo is None:
             raise ValueError("time_min and time_max must be timezone-aware")
 
+        warnings: list[str] = []
+
         if account_id is not None:
             account = await self._require_account(account_id)
             self._require_access(account, user_ctx)
@@ -1445,7 +1522,7 @@ class CalendarService(Service):
         else:
             accounts = await self.list_accessible_accounts(user_ctx)
         if not accounts:
-            return []
+            return FreeTimeResult(slots=[], warnings=warnings)
 
         # Working hours intersection (most-restrictive wins).
         wh_start_h = max(a.working_hours_start_hour for a in accounts)
@@ -1467,17 +1544,17 @@ class CalendarService(Service):
                     filters=[
                         Filter(field="account_id", op=FilterOp.EQ, value=a.id),
                         Filter(
-                            field="start",
+                            field="start_utc_iso",
                             op=FilterOp.LTE,
                             value=time_max.astimezone(UTC).isoformat(),
                         ),
                         Filter(
-                            field="end",
+                            field="end_utc_iso",
                             op=FilterOp.GTE,
                             value=time_min.astimezone(UTC).isoformat(),
                         ),
                     ],
-                    sort=[SortField(field="start", descending=False)],
+                    sort=[SortField(field="start_utc_iso", descending=False)],
                 )
             )
             local_busy: list[tuple[datetime, datetime]] = []
@@ -1499,13 +1576,18 @@ class CalendarService(Service):
         for a in accounts:
             try:
                 busy.extend(await _busy_for_account(a))
-            except Exception:
+            except Exception as exc:
                 logger.exception("find_free_time: storage query failed for %s", a.id)
+                warnings.append(f"calendar {a.name!r} busy lookup failed: {exc}")
 
-        # Cross-attendee free/busy via backend (best-effort; warnings
-        # are silently swallowed at this layer — the tool surface adds
-        # them to its return).
+        # Cross-attendee free/busy via backend. We try one account at a
+        # time and stop on the first that succeeds (the same email list
+        # produces the same answer from any backend with delegation).
+        # Per-attempt failures surface as warnings on the result so the
+        # AI tool / SPA can tell the user "we couldn't see <foo>'s
+        # calendar".
         if attendee_emails:
+            attendee_blocks_collected = False
             for a in accounts:
                 runtime = self._runtimes.get(a.id)
                 if runtime is None:
@@ -1517,13 +1599,22 @@ class CalendarService(Service):
                     )
                     for b in got:
                         busy.append((max(b.start, time_min), min(b.end, time_max)))
+                    attendee_blocks_collected = True
                     break  # one account is enough to reach the same emails
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "find_free_time cross-attendee free_busy failed for %s",
                         a.id,
                     )
+                    warnings.append(
+                        f"attendee free/busy probe via {a.name!r} failed: {exc}"
+                    )
                     continue
+            if not attendee_blocks_collected:
+                warnings.append(
+                    "could not retrieve free/busy data for one or more attendees — "
+                    "their calendars may not be shared with this account"
+                )
 
         # Merge busy intervals.
         busy.sort(key=lambda iv: iv[0])
@@ -1565,7 +1656,7 @@ class CalendarService(Service):
                 wh_end_h,
                 max_results,
             )
-        return slots[:max_results]
+        return FreeTimeResult(slots=slots[:max_results], warnings=warnings)
 
     @staticmethod
     def _collect_slots(
@@ -1591,6 +1682,21 @@ class CalendarService(Service):
             add = grain - remainder
             return (dt + timedelta(seconds=add)).replace(microsecond=0).replace(second=0)
 
+        def _day_end_of(local: datetime) -> datetime:
+            """End-of-working-day boundary for ``local``'s date.
+
+            ``wh_end_h == 24`` is allowed by the validator and means
+            "end of day" — Python's ``datetime.replace(hour=24)`` raises,
+            so we compute the next-midnight boundary manually for the 24
+            case to keep the math correct.
+            """
+            if wh_end_h == 24:
+                base = (local + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                return base
+            return local.replace(hour=wh_end_h, minute=0, second=0, microsecond=0)
+
         cursor = _round_up_to_granularity(start)
         while cursor + duration <= end and len(out) < max_results:
             slot_end = cursor + duration
@@ -1599,7 +1705,7 @@ class CalendarService(Service):
                 local_start = slot_start.astimezone(tz)
                 local_end = slot_end.astimezone(tz)
                 day_start = local_start.replace(hour=wh_start_h, minute=0, second=0, microsecond=0)
-                day_end = local_start.replace(hour=wh_end_h, minute=0, second=0, microsecond=0)
+                day_end = _day_end_of(local_start)
                 if local_start < day_start:
                     cursor = day_start.astimezone(slot_start.tzinfo or UTC)
                     cursor = _round_up_to_granularity(cursor)
@@ -1673,25 +1779,28 @@ class CalendarService(Service):
         *,
         if_match_etag: str = "",
     ) -> CalendarEvent:
+        """Update an event with optimistic concurrency.
+
+        ``if_match_etag`` is REQUIRED — without it, a service-side fresh
+        ``get_event`` would always match the server etag, defeating the
+        whole point of OCC and silently masking writes that lost the
+        race. Callers (the WS layer, the AI tool's preview/confirm
+        flow, internal code) must read the event first and pass
+        ``current.etag``.
+        """
         account = await self._require_account(account_id)
         self._require_access(account, user_ctx)
         runtime = self._runtimes.get(account_id)
         if runtime is None:
             raise RuntimeError(f"Calendar account {account_id} runtime is not active")
+        if not if_match_etag:
+            raise ValueError(
+                "if_match_etag is required for update_event — read the event "
+                "first via get_event and pass its etag so optimistic "
+                "concurrency can detect concurrent edits"
+            )
         request.start = self._localize_naive(request.start, account.timezone)
         request.end = self._localize_naive(request.end, account.timezone)
-        if not if_match_etag:
-            current = await runtime.backend.get_event(account.calendar_id, event_id)
-            if current is None:
-                raise CalendarBackendNotFoundError(f"Event {event_id} not found")
-            if current.recurring_event_id is not None:
-                logger.info(
-                    "calendar.update_event on recurring instance (account=%s event=%s series=%s)",
-                    account.id,
-                    event_id,
-                    current.recurring_event_id,
-                )
-            if_match_etag = current.etag
         try:
             evt = await runtime.backend.update_event(
                 account.calendar_id,
@@ -1701,6 +1810,13 @@ class CalendarService(Service):
             )
         except CalendarBackendConflictError:
             raise
+        if evt.recurring_event_id is not None:
+            logger.info(
+                "calendar.update_event on recurring instance (account=%s event=%s series=%s)",
+                account.id,
+                event_id,
+                evt.recurring_event_id,
+            )
         self._record_mutate_publish(account_id, evt.event_id)
         await self._publish_event_change("calendar.event.updated", account, evt)
         return evt
@@ -2179,10 +2295,20 @@ class CalendarService(Service):
         self,
         arguments: dict[str, Any],
     ) -> UserContext:
-        """Construct a ``UserContext`` from injected ``_user_*`` args."""
+        """Construct a ``UserContext`` from injected ``_user_*`` args.
+
+        Calendar tools touch personal data (PII attendees, free/busy
+        windows). The AI service injects ``_user_id`` automatically; if
+        it's missing the call hasn't been authenticated and we MUST NOT
+        silently elevate to ``UserContext.SYSTEM`` — that would let any
+        unauthenticated tool invocation see / mutate every user's
+        calendar. Raise instead so the failure is loud and visible.
+        """
         user_id = str(arguments.get("_user_id") or "")
         if not user_id:
-            return UserContext.SYSTEM
+            raise PermissionError(
+                "missing user context — calendar tools require an authenticated _user_id"
+            )
         roles_raw = arguments.get("_user_roles") or []
         roles: frozenset[str]
         if isinstance(roles_raw, (list, tuple, set, frozenset)):
@@ -2501,7 +2627,7 @@ class CalendarService(Service):
             [str(a) for a in attendees_raw] if isinstance(attendees_raw, list) else None
         )
         try:
-            slots = await self.find_free_time(
+            result = await self.find_free_time(
                 account.id if account else None,
                 time_min,
                 time_max,
@@ -2514,15 +2640,18 @@ class CalendarService(Service):
         except ValueError as exc:
             return str(exc)
         return json.dumps(
-            [
-                {
-                    "start": s.start.isoformat(),
-                    "end": s.end.isoformat(),
-                    "slot_duration_minutes": s.slot_duration_minutes,
-                    "requested_duration_minutes": s.requested_duration_minutes,
-                }
-                for s in slots
-            ],
+            {
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "end": s.end.isoformat(),
+                        "slot_duration_minutes": s.slot_duration_minutes,
+                        "requested_duration_minutes": s.requested_duration_minutes,
+                    }
+                    for s in result.slots
+                ],
+                "warnings": list(result.warnings),
+            },
             indent=2,
         )
 
@@ -2672,7 +2801,61 @@ class CalendarService(Service):
         runtime = self._runtimes.get(account_id)
         if runtime is None:
             return f"Calendar account {account_id} runtime is not active. Enable it and retry."
-        # Read current event for delta preview.
+        confirm = bool(arguments.get("confirm", False))
+        # The etag round-trips through the preview/confirm form via the
+        # hidden ``pending_arguments`` field on the UIBlock — see
+        # ``memory-calendar-service.md``. On the confirm leg we trust the
+        # stashed etag instead of re-reading the event, so the OCC check
+        # actually compares the etag the user *saw* in the preview
+        # against the live etag at write time. Re-reading would defeat
+        # the whole point.
+        stashed_etag = str(arguments.get("_etag") or "")
+
+        if confirm and not stashed_etag:
+            return (
+                "Cannot confirm update without preview state. Re-call "
+                "update_event with confirm=false to generate a preview "
+                "first."
+            )
+
+        if confirm and stashed_etag:
+            # Confirm leg: use the etag the user saw at preview time.
+            request, build_err = self._build_create_request(
+                self._merged_update_args_from_confirm(arguments),
+                account,
+            )
+            if build_err is not None:
+                return build_err
+            try:
+                evt = await self.update_event(
+                    account_id,
+                    event_id,
+                    request,
+                    user_ctx,
+                    if_match_etag=stashed_etag,
+                )
+            except CalendarBackendConflictError:
+                return (
+                    "The event changed since you fetched it. Call "
+                    "get_event to re-read and try update_event again."
+                )
+            except CalendarPermissionError as exc:
+                return str(exc)
+            except CalendarBackendError as exc:
+                return f"Calendar backend error: {exc}"
+            return json.dumps(
+                {
+                    "event_id": evt.event_id,
+                    "account_id": evt.account_id,
+                    "title": evt.title,
+                    "start": evt.start.isoformat(),
+                    "end": evt.end.isoformat(),
+                    "html_link": evt.html_link,
+                },
+                indent=2,
+            )
+
+        # Preview leg — read current to build the delta + capture etag.
         try:
             current = await runtime.backend.get_event(account.calendar_id, event_id)
         except CalendarBackendNotFoundError:
@@ -2704,7 +2887,6 @@ class CalendarService(Service):
         request, build_err = self._build_create_request(merged_args, account)
         if build_err is not None:
             return build_err
-        confirm = bool(arguments.get("confirm", False))
         delta_lines: list[str] = [f"**update {current.title}**"]
         if "title" in arguments:
             delta_lines.append(f"title: {current.title!r} → {request.title!r}")
@@ -2712,6 +2894,10 @@ class CalendarService(Service):
             delta_lines.append(f"start: {current.start.isoformat()} → {request.start.isoformat()}")
         if "end" in arguments or "duration_minutes" in arguments:
             delta_lines.append(f"end:   {current.end.isoformat()} → {request.end.isoformat()}")
+        if "description" in arguments:
+            delta_lines.append(
+                f"description: {current.description!r} → {request.description!r}"
+            )
         if "location" in arguments:
             delta_lines.append(f"location: {current.location!r} → {request.location!r}")
         if "attendees" in arguments:
@@ -2723,45 +2909,33 @@ class CalendarService(Service):
             delta_lines.append("(recurring instance — only this occurrence will change)")
         summary = f"Updating event '{current.title}' (id={event_id}) — confirm?"
 
-        async def _do_update() -> str | ToolOutput:
-            try:
-                evt = await self.update_event(
-                    account_id,
-                    event_id,
-                    request,
-                    user_ctx,
-                    if_match_etag=current.etag,
-                )
-            except CalendarBackendConflictError:
-                return (
-                    "The event changed since you fetched it. Call "
-                    "get_event to re-read and try update_event again."
-                )
-            except CalendarPermissionError as exc:
-                return str(exc)
-            except CalendarBackendError as exc:
-                return f"Calendar backend error: {exc}"
-            return json.dumps(
-                {
-                    "event_id": evt.event_id,
-                    "account_id": evt.account_id,
-                    "title": evt.title,
-                    "start": evt.start.isoformat(),
-                    "end": evt.end.isoformat(),
-                    "html_link": evt.html_link,
-                },
-                indent=2,
-            )
+        # Stash the etag and the merged-arg overlay onto the preview
+        # arguments so the confirm leg can apply them without re-reading.
+        preview_args = dict(arguments)
+        preview_args["_etag"] = current.etag
+        preview_args["_merged"] = merged_args
 
-        return await confirm_or_execute(
-            confirm=confirm,
+        return build_preview_output(
             tool_name="update_event",
             title="Update calendar event",
             summary=summary,
             summary_lines=delta_lines,
-            arguments=arguments,
-            execute=_do_update,
+            arguments=preview_args,
         )
+
+    @staticmethod
+    def _merged_update_args_from_confirm(arguments: dict[str, Any]) -> dict[str, Any]:
+        """Reconstruct the merged update args for the confirm leg.
+
+        The preview leg stashes the merged dict under ``_merged`` so we
+        don't need to re-read the event at confirm time. We also accept
+        a confirm leg that lacks ``_merged`` (older flow) by falling
+        back to the raw arguments.
+        """
+        merged = arguments.get("_merged")
+        if isinstance(merged, dict):
+            return dict(merged)
+        return dict(arguments)
 
     async def _tool_delete_event(self, arguments: dict[str, Any]) -> str | ToolOutput:
         user_ctx = self._resolve_user_ctx_from_args(arguments)
@@ -2839,6 +3013,7 @@ class CalendarService(Service):
             "calendar.accounts.unshare_role": self._ws_accounts_unshare_role,
             "calendar.accounts.test_connection": self._ws_accounts_test,
             "calendar.accounts.probe_calendars": self._ws_accounts_probe,
+            "calendar.accounts.reveal_backend_config": self._ws_accounts_reveal_backend_config,
             "calendar.events.list": self._ws_events_list,
             "calendar.events.get": self._ws_events_get,
             "calendar.events.create": self._ws_events_create,
@@ -2858,18 +3033,53 @@ class CalendarService(Service):
             "code": code,
         }
 
-    @staticmethod
+    _BACKEND_CONFIG_MASK = "********"
+
+    @classmethod
+    def _mask_backend_config(
+        cls,
+        backend_name: str,
+        backend_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace sensitive ConfigParam values with ``********``.
+
+        Walks the backend's declared ``backend_config_params()`` and
+        masks any key whose ConfigParam has ``sensitive=True``. Used
+        anywhere the backend_config is returned to clients (default
+        path is masked; ``accounts.reveal_backend_config`` returns the
+        unmasked value to admins only, with an audit log line).
+        """
+        backends = CalendarBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            return dict(backend_config)
+        sensitive_keys = {p.key for p in backend_cls.backend_config_params() if p.sensitive}
+        result = dict(backend_config)
+        for key in sensitive_keys:
+            if key in result and result[key]:
+                result[key] = cls._BACKEND_CONFIG_MASK
+        return result
+
+    @classmethod
     def _account_payload(
+        cls,
         account: CalendarAccount,
         user_ctx: UserContext,
+        *,
+        reveal_backend_config: bool = False,
     ) -> dict[str, Any]:
         access = determine_access(user_ctx, account)
+        backend_config = (
+            dict(account.backend_config)
+            if reveal_backend_config
+            else cls._mask_backend_config(account.backend_name, account.backend_config)
+        )
         return {
             "id": account.id,
             "name": account.name,
             "email_address": account.email_address,
             "backend_name": account.backend_name,
-            "backend_config": account.backend_config,
+            "backend_config": backend_config,
             "calendar_id": account.calendar_id,
             "timezone": account.timezone,
             "working_hours_start_hour": account.working_hours_start_hour,
@@ -3010,6 +3220,38 @@ class CalendarService(Service):
             "type": "calendar.accounts.probe_calendars.result",
             "ref": frame.get("id"),
             "calendars": calendars,
+        }
+
+    async def _ws_accounts_reveal_backend_config(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the unmasked ``backend_config`` to admins only.
+
+        Default `_account_payload` masks ConfigParam values declared
+        ``sensitive=True``. The SPA's account-edit drawer calls this RPC
+        on edit-open when the user has admin access so the form can
+        repopulate (and not overwrite) the live secret values. Logs an
+        audit line every time the secret is revealed.
+        """
+        account_id = str(frame.get("account_id") or "")
+        try:
+            account = await self._require_account(account_id)
+        except CalendarAccountNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        if not can_admin_account(conn.user_ctx, account):
+            return self._err(frame, "Forbidden — admin access required", 403)
+        logger.info(
+            "calendar.accounts.reveal_backend_config: account=%s requester=%s",
+            account.id,
+            conn.user_ctx.user_id,
+        )
+        return {
+            "type": "calendar.accounts.reveal_backend_config.result",
+            "ref": frame.get("id"),
+            "account_id": account.id,
+            "backend_config": dict(account.backend_config),
         }
 
     async def _ws_accounts_share_user(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
@@ -3154,6 +3396,12 @@ class CalendarService(Service):
         if build_err is not None:
             return self._err(frame, build_err, 400)
         if_match_etag = str(frame.get("if_match_etag") or "")
+        if not if_match_etag:
+            return self._err(
+                frame,
+                "if_match_etag is required — read the event first and pass its etag",
+                400,
+            )
         try:
             evt = await self.update_event(
                 account_id,
@@ -3164,6 +3412,8 @@ class CalendarService(Service):
             )
         except CalendarBackendConflictError:
             return self._err(frame, "etag mismatch — refresh and retry", 409)
+        except ValueError as exc:
+            return self._err(frame, str(exc), 400)
         except CalendarBackendError as exc:
             return self._err(frame, str(exc), 500)
         return {
@@ -3240,7 +3490,7 @@ class CalendarService(Service):
         if attendees is not None and not isinstance(attendees, list):
             return self._err(frame, "attendee_emails must be a list", 400)
         try:
-            slots = await self.find_free_time(
+            result = await self.find_free_time(
                 frame.get("account_id"),
                 time_min,
                 time_max,
@@ -3268,8 +3518,9 @@ class CalendarService(Service):
                     "slot_duration_minutes": s.slot_duration_minutes,
                     "requested_duration_minutes": s.requested_duration_minutes,
                 }
-                for s in slots
+                for s in result.slots
             ],
+            "warnings": list(result.warnings),
         }
 
     async def _ws_backends_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
@@ -3315,5 +3566,13 @@ class _AggregateFailure:
     error: str
 
 
-# Verify protocol satisfaction.
-_ = CalendarProvider
+def _calendar_service_satisfies_provider(svc: CalendarService) -> CalendarProvider:
+    """Static structural-conformance hint.
+
+    Mypy / type-checkers verify that a ``CalendarService`` instance
+    satisfies the ``CalendarProvider`` protocol — if a method is
+    renamed, removed, or its signature drifts, this returns a typing
+    error at the file level rather than at every call site. Pure
+    type-checker construct; never invoked at runtime.
+    """
+    return svc
