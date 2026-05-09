@@ -259,6 +259,48 @@ async def me(
         "roles": sorted(user.roles),
         "provider": user.provider,
         "has_password": has_password,
+        "tz": user.tz,
+    }
+
+
+@router.post("/profile")
+async def update_profile(
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> dict[str, Any]:
+    """Update the calling user's mutable profile fields.
+
+    Currently only ``tz`` (IANA timezone string, or ``null`` to clear)
+    is editable. The value is validated against the standard
+    ``zoneinfo`` database before being persisted.
+    """
+    from gilbert.interfaces.auth import is_valid_tz
+    from gilbert.interfaces.users import UserManagementProvider
+
+    gilbert: Gilbert = request.app.state.gilbert
+    user_svc = gilbert.service_manager.get_by_capability("users")
+    if not isinstance(user_svc, UserManagementProvider):
+        raise HTTPException(status_code=503, detail="User service unavailable")
+
+    body = await request.json()
+    update: dict[str, Any] = {}
+    if "tz" in body:
+        raw = body["tz"]
+        if raw in (None, ""):
+            update["tz"] = None
+        elif isinstance(raw, str) and is_valid_tz(raw):
+            update["tz"] = raw
+        else:
+            raise HTTPException(status_code=400, detail="Invalid IANA timezone")
+
+    if not update:
+        raise HTTPException(status_code=400, detail="No supported fields supplied")
+
+    await user_svc.backend.update_user(user.user_id, update)
+    refreshed = await user_svc.backend.get_user(user.user_id)
+    return {
+        "user_id": user.user_id,
+        "tz": (refreshed or {}).get("tz"),
     }
 
 
