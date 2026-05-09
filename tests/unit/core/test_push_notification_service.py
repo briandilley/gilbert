@@ -36,7 +36,6 @@ from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.notifications import (
     Notification,
-    NotificationProvider,
     NotificationUrgency,
 )
 from gilbert.interfaces.push_notifications import (
