@@ -248,6 +248,16 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                "key": "calendar",
+                "label": "Calendar",
+                "description": "Calendar accounts, events, and free/busy",
+                "url": "/calendar",
+                "icon": "calendar",
+                "required_role": "user",
+                "requires_capability": "calendar",
+                "items": [],
+            },
+            {
                 "key": "knowledge",
                 "label": "Knowledge",
                 "description": "Browse, search, and manage indexed documents",
