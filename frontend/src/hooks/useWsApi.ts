@@ -463,6 +463,11 @@ export function useWsApi() {
         { type: "calendar.accounts.probe_calendars", account_id: accountId },
       ).then((r) => r.calendars),
 
+    revealCalendarBackendConfig: (accountId: string) =>
+      rpc<{ backend_config: Record<string, unknown> }>(
+        { type: "calendar.accounts.reveal_backend_config", account_id: accountId },
+      ).then((r) => r.backend_config),
+
     shareCalendarUser: (accountId: string, userId: string) =>
       rpc<{ account: CalendarAccount }>({
         type: "calendar.accounts.share_user", account_id: accountId, user_id: userId,
