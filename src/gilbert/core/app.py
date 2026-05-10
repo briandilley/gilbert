@@ -274,6 +274,17 @@ class Gilbert:
 
         self.service_manager.register(InboxAIChatService())
 
+        # Feeds — RSS / news service. Brings the built-in
+        # ``RssAtomFeedBackend`` along via a side-effect import inside
+        # ``FeedsService.start()``. Briefing fan-out is a separate
+        # service so the FeedsService stays focused on the feed
+        # lifecycle + briefing builder.
+        from gilbert.core.services.feed_briefing import FeedBriefingService
+        from gilbert.core.services.feeds import FeedsService
+
+        self.service_manager.register(FeedsService())
+        self.service_manager.register(FeedBriefingService())
+
         # Web search service
         from gilbert.core.services.websearch import WebSearchService
 

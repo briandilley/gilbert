@@ -16,6 +16,7 @@ from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
+from gilbert.interfaces.feeds import FeedsProvider
 from gilbert.interfaces.presence import PresenceProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import SpeakerProvider
@@ -74,6 +75,13 @@ class GreetingService(Service):
         self._include_weather: bool = True
         self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
         self._weather: WeatherProvider | None = None
+        # Feeds integration — splice the daily news briefing into the
+        # greeting when ``include_briefing=True`` and the user hasn't
+        # already been briefed today. Resolved at use time so feeds
+        # service start-order doesn't matter.
+        self._include_briefing: bool = False
+        self._briefing_max_seconds: int = 60
+        self._feeds: FeedsProvider | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -81,7 +89,16 @@ class GreetingService(Service):
             capabilities=frozenset({"greeting", "ai_tools"}),
             requires=frozenset({"event_bus", "entity_storage"}),
             optional=frozenset(
-                {"ai", "speaker_control", "text_to_speech", "presence", "configuration"}
+                {
+                    "ai",
+                    "speaker_control",
+                    "text_to_speech",
+                    "presence",
+                    "configuration",
+                    # Optional briefing splice — when present, the
+                    # greeting can include the day's top news.
+                    "feeds",
+                }
             ),
             ai_calls=frozenset({"greeting"}),
             events=frozenset({"greeting.announced"}),
@@ -135,6 +152,13 @@ class GreetingService(Service):
                     "weather_hint_template",
                     self._weather_hint_template,
                 ) or _DEFAULT_WEATHER_HINT_TEMPLATE
+                self._include_briefing = bool(
+                    section.get("include_briefing", self._include_briefing)
+                )
+                self._briefing_max_seconds = int(
+                    section.get("briefing_max_seconds", self._briefing_max_seconds)
+                    or self._briefing_max_seconds
+                )
 
         # Optional weather provider — if missing or wrong protocol,
         # we silently degrade to the no-weather greeting. Capability
@@ -143,6 +167,14 @@ class GreetingService(Service):
         weather_svc = resolver.get_capability("weather")
         if isinstance(weather_svc, WeatherProvider):
             self._weather = weather_svc
+
+        # Optional feeds provider — when present and
+        # ``include_briefing=True``, splice the news briefing into the
+        # greeting (degrades silently when absent). Resolution at use
+        # time so the briefing service doesn't have to start before us.
+        feeds_svc = resolver.get_capability("feeds")
+        if isinstance(feeds_svc, FeedsProvider):
+            self._feeds = feeds_svc
 
         # Schedule a one-shot check for people already present at startup.
         # This handles the case where Gilbert restarts while people are
@@ -246,6 +278,25 @@ class GreetingService(Service):
                 multiline=True,
                 ai_prompt=True,
             ),
+            ConfigParam(
+                key="include_briefing",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "When the FeedsProvider capability is available and "
+                    "the user hasn't been briefed today, splice the "
+                    "news briefing into the arrival greeting."
+                ),
+                default=False,
+            ),
+            ConfigParam(
+                key="briefing_max_seconds",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Soft cap on the briefing length passed as a hint "
+                    "into the briefing AI call (~2.5 words/sec)."
+                ),
+                default=60,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -262,6 +313,13 @@ class GreetingService(Service):
             "weather_hint_template",
             self._weather_hint_template,
         ) or _DEFAULT_WEATHER_HINT_TEMPLATE
+        self._include_briefing = bool(
+            config.get("include_briefing", self._include_briefing)
+        )
+        self._briefing_max_seconds = int(
+            config.get("briefing_max_seconds", self._briefing_max_seconds)
+            or self._briefing_max_seconds
+        )
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -369,19 +427,74 @@ class GreetingService(Service):
             recent = await self._get_recent_greetings(user_id)
             greeting = await self._generate_greeting(display_name, recent)
 
-            logger.info("Greeting %s: %s", user_id, greeting)
+            briefing_appendix = await self._maybe_briefing_text(user_id)
+            announcement = (
+                f"{greeting} {briefing_appendix}".strip()
+                if briefing_appendix
+                else greeting
+            )
+
+            logger.info("Greeting %s: %s", user_id, announcement)
 
             await self._mark_greeted(user_id, greeting)
-            await self._announce(greeting)
+            await self._announce(announcement)
 
             if self._event_bus:
                 await self._event_bus.publish(
                     Event(
                         event_type="greeting.announced",
-                        data={"user_id": user_id, "greeting": greeting},
+                        data={
+                            "user_id": user_id,
+                            "greeting": greeting,
+                            "briefing_included": bool(briefing_appendix),
+                        },
                         source="greeting",
                     )
                 )
+
+    async def _maybe_briefing_text(self, user_id: str) -> str:
+        """Build the briefing text to splice in, or "" if not applicable.
+
+        Degrades gracefully — feeds capability missing, briefing
+        already fired today, or AI failure all yield "" and the
+        greeting goes out without it. Per spec §13.1 / §16: the
+        ``last_briefed_on`` short-circuit keeps the daily fan-out
+        from re-running once the greeting flow has already fired
+        for this user today.
+        """
+        if not self._include_briefing or self._feeds is None:
+            return ""
+        # Today-already-briefed short-circuit. Storage may be unset
+        # in pathological tests — skip silently.
+        if self._storage_backend is None:
+            return ""
+        state = await self._storage_backend.get(
+            "feed_briefing_state", user_id
+        )
+        today = self._today_str()
+        if state and state.get("last_briefed_on") == today:
+            return ""
+        user_ctx = UserContext(
+            user_id=user_id,
+            email="",
+            display_name=user_id,
+            roles=frozenset({"user"}),
+        )
+        try:
+            result = await self._feeds.build_briefing(
+                user_ctx,
+                top_n=3,
+                max_spoken_seconds=self._briefing_max_seconds,
+                mark_briefed=True,
+            )
+        except Exception:
+            logger.warning(
+                "greeting: build_briefing failed for %s",
+                user_id,
+                exc_info=True,
+            )
+            return ""
+        return result.spoken or ""
 
     def _in_greeting_window(self) -> bool:
         """Check if current time is within the greeting window."""

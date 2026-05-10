@@ -39,6 +39,12 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # calendar account. Like inbox, the WS layer applies a per-event
     # account-access filter on top of this prefix-level gate.
     "calendar.": 100,
+    # Feeds events are user-level — any user can have a shared feed
+    # subscription. The WS layer applies a per-event feed-access
+    # filter on top of this prefix-level gate, and
+    # ``feed.briefing.ready`` is restricted to the recipient
+    # ``user_id`` only (analogous to notification fan-out).
+    "feed.": 100,
     # Notifications are user-level events; the WS layer's
     # can_see_notification_event filter narrows delivery to the
     # specific recipient by matching event.data["user_id"].
@@ -103,6 +109,11 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # prefix-level gate (any authenticated user may issue calendar.*
     # frames; per-account authorization is per-handler).
     "calendar.": 100,
+    # Feeds RPCs are user-level; handlers enforce per-feed access
+    # via can_access_feed / can_admin_feed on top of the prefix-level
+    # gate (any authenticated user may issue feeds.* frames; per-feed
+    # authorization is per-handler).
+    "feeds.": 100,
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,
