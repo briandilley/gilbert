@@ -100,6 +100,7 @@ _INGEST_DAILY_COLLECTION = "feed_ingest_daily"
 
 _RESCORE_TICK_INTERVAL_SEC = 30 * 60  # 30 minutes
 _RETENTION_TICK_INTERVAL_SEC = 24 * 60 * 60  # 1 day
+_LAZY_SCORE_TICK_INTERVAL_SEC = 24 * 60 * 60  # 1 day — daily backlog drain
 
 _DEFAULT_SCORING_PROMPT = (
     "You are a news triage assistant. Score each item for importance to "
@@ -189,6 +190,18 @@ def _ms(t0: float) -> int:
 def _safe_uid(item_uid: str) -> str:
     """Filesystem-safe form of an arbitrary item_uid for the cache path."""
     return hashlib.sha1(item_uid.encode("utf-8")).hexdigest()
+
+
+def _doc_id_for(source_id: str, feed_id: str, item_uid: str) -> str:
+    """Stable ``KnowledgeProvider`` document_id for a feed item.
+
+    MUST match the path used when indexing the article via
+    ``KnowledgeProvider.index_document`` so cascade deletion (unsubscribe
+    + retention) actually finds the document. The indexed path is
+    ``"<feed_id>/<safe_uid>.html"`` — keep the ``.html`` suffix in lockstep
+    or knowledge entries leak forever.
+    """
+    return f"{source_id}:{feed_id}/{_safe_uid(item_uid)}.html"
 
 
 def _sanitize_user_text(value: str) -> str:
@@ -287,7 +300,17 @@ class FeedsService(Service):
         self._score_workers: list[asyncio.Task[None]] = []
         self._ingest_workers: list[asyncio.Task[None]] = []
         self._score_drops_total: int = 0
+        self._lazy_score_total: int = 0
         self._ingest_total: dict[str, int] = {}
+
+        # Service-wide first-sync cap (§6.4e). Tracked as a remaining
+        # budget rather than a counter so a config-reload that bumps
+        # ``initial_score_cap`` upward immediately enlarges the budget.
+        # Recomputed on ``start()`` and on every ``initial_score_cap``
+        # config change. Items beyond the cap are persisted with
+        # ``score=-1.0`` and ``lazy_score=True``; the rescore tick (and
+        # a dedicated lazy-score tick) drains them later.
+        self._initial_score_remaining: int = 50
 
         # Synthetic ``feed_articles`` backend — owned privately, never
         # registered with KnowledgeService. Lazy-imported in ``start``
@@ -298,6 +321,10 @@ class FeedsService(Service):
         # per-feed backend, so we can fan out body fetches across many
         # feeds with one connection pool).
         self._http_client: httpx.AsyncClient | None = None
+
+        # robots.txt cache — instance-level so a service restart drops
+        # it cleanly and tests don't share state across runs.
+        self._robots_cache: dict[str, tuple[float, Any]] = {}
 
     @property
     def cached_feeds(self) -> list[Feed]:
@@ -549,9 +576,14 @@ class FeedsService(Service):
         self._score_on_ingest = bool(
             config.get("score_on_ingest", self._score_on_ingest)
         )
-        self._initial_score_cap = int(
+        new_cap = int(
             config.get("initial_score_cap", self._initial_score_cap) or 50
         )
+        # Bump the live budget if the cap rose; never silently shrink
+        # below what's already consumed.
+        if new_cap > self._initial_score_cap:
+            self._initial_score_remaining += new_cap - self._initial_score_cap
+        self._initial_score_cap = new_cap
         self._max_concurrent_polls = max(
             1, int(config.get("max_concurrent_polls", self._max_concurrent_polls) or 8)
         )
@@ -665,6 +697,8 @@ class FeedsService(Service):
                 section = config_svc.get_section_safe(self.config_namespace)
 
         await self.on_config_changed(section)
+        # Fresh start = fresh first-sync budget.
+        self._initial_score_remaining = max(0, self._initial_score_cap)
 
         if not self._enabled:
             logger.info("Feeds service disabled via configuration")
@@ -727,10 +761,19 @@ class FeedsService(Service):
             system=True,
         )
 
+        # Lazy-score backlog drain — daily.
+        self._scheduler.add_job(
+            name="feeds-lazy-score-tick",
+            schedule=Schedule.every(_LAZY_SCORE_TICK_INTERVAL_SEC),
+            callback=self._lazy_score_tick,
+            system=True,
+        )
+
         logger.info(
-            "Feeds service started (boot deferred, rescore tick %ds, retention tick %ds)",
+            "Feeds service started (boot deferred, rescore tick %ds, retention tick %ds, lazy-score tick %ds)",
             _RESCORE_TICK_INTERVAL_SEC,
             _RETENTION_TICK_INTERVAL_SEC,
+            _LAZY_SCORE_TICK_INTERVAL_SEC,
         )
 
     async def stop(self) -> None:
@@ -740,6 +783,7 @@ class FeedsService(Service):
                 "feeds-boot",
                 "feeds-rescore-tick",
                 "feeds-retention-tick",
+                "feeds-lazy-score-tick",
             ):
                 with contextlib.suppress(Exception):
                     self._scheduler.remove_job(name)
@@ -851,10 +895,16 @@ class FeedsService(Service):
 
         from gilbert.interfaces.scheduler import Schedule
 
-        # Cold-start jitter — capped at min(poll_interval, 120s).
-        jitter = random.uniform(
-            0, min(float(feed.poll_interval_sec), 120.0)
+        # Cold-start jitter — bounded by both the configured
+        # max_first_poll_jitter_sec and the feed's own poll interval
+        # (no point waiting longer than the next scheduled fire).
+        jitter_window = float(
+            min(
+                max(0, self._max_first_poll_jitter_sec),
+                feed.poll_interval_sec,
+            )
         )
+        jitter = random.uniform(0, jitter_window) if jitter_window > 0 else 0.0
         first_fire = datetime.now() + timedelta(seconds=jitter)
         poll_job_name = f"feeds-poll-{feed.id}"
         callback = self._make_poll_callback(feed.id)
@@ -1005,7 +1055,11 @@ class FeedsService(Service):
             if row.get("ingested_to_knowledge") and self._knowledge is not None:
                 with contextlib.suppress(Exception):
                     await self._knowledge.remove_document(
-                        f"{self._feed_doc_backend.source_id}:{feed.id}/{_safe_uid(row.get('item_uid', ''))}"
+                        _doc_id_for(
+                            self._feed_doc_backend.source_id,
+                            feed.id,
+                            str(row.get("item_uid", "")),
+                        )
                     )
             await self._storage.delete(_FEED_ITEMS_COLLECTION, row_id)
 
@@ -1155,12 +1209,17 @@ class FeedsService(Service):
 
         feed_by_id = {f.id: f for f in accessible}
         if category:
-            rows = [
-                r
-                for r in rows
-                if feed_by_id.get(str(r.get("feed_id", ""))).category == category  # type: ignore[union-attr]
-                if feed_by_id.get(str(r.get("feed_id", ""))) is not None
-            ]
+            # Guard ``is not None`` BEFORE dereferencing ``.category`` —
+            # list-comp ``if`` clauses run left-to-right, so reversing
+            # the order would AttributeError on stale rows referencing a
+            # feed_id we can no longer access. Inline tuple-unpack keeps
+            # the lookup single-shot.
+            filtered: list[dict[str, Any]] = []
+            for r in rows:
+                feed = feed_by_id.get(str(r.get("feed_id", "")))
+                if feed is not None and feed.category == category:
+                    filtered.append(r)
+            rows = filtered
 
         items = [StoredFeedItem.from_dict(r) for r in rows]
         if query:
@@ -1253,6 +1312,9 @@ class FeedsService(Service):
         async with lock:
             if self._poll_semaphore is None:
                 return
+            # Capture FIRST-SYNC status BEFORE _mark_polled_ok bumps
+            # last_polled_at — used to apply the §6.4e cap.
+            is_first_sync = not feed.last_polled_at
             t0 = time.perf_counter()
             try:
                 async with self._poll_semaphore:
@@ -1284,9 +1346,23 @@ class FeedsService(Service):
             for item in new_items:
                 await self._publish_item_received(feed, item)
                 if self._score_on_ingest:
-                    await self._enqueue_score(feed, item)
+                    if is_first_sync and self._initial_score_remaining <= 0:
+                        # Cap exhausted — flag for lazy scoring.
+                        await self._mark_lazy_score(feed, item)
+                    else:
+                        if is_first_sync:
+                            self._initial_score_remaining -= 1
+                        await self._enqueue_score(feed, item)
                 if feed.ingest_to_knowledge:
                     await self._enqueue_ingest(feed, item)
+
+            if is_first_sync:
+                logger.info(
+                    "Feeds first-sync for %s: %d new items, score budget remaining=%d",
+                    feed.id,
+                    len(new_items),
+                    self._initial_score_remaining,
+                )
 
             # Edited items are not re-emitted, re-scored, or re-ingested.
             _ = edited_items
@@ -1471,6 +1547,28 @@ class FeedsService(Service):
                 getattr(item, "item_uid", "?"),
                 self._score_drops_total,
             )
+            # Drop into the lazy-score backlog so the rescore tick still
+            # picks the item up — beats silently losing it.
+            await self._mark_lazy_score(feed, item)
+
+    async def _mark_lazy_score(
+        self, feed: Feed, item: FeedItem | StoredFeedItem
+    ) -> None:
+        """Persist an item with ``lazy_score=True`` + ``score=-1.0``.
+
+        Used by (a) the §6.4e first-sync cap and (b) the score-queue-full
+        drop path, so neither failure mode loses the item — both surface
+        through the rescore tick / lazy-score tick later.
+        """
+        stored_id = f"{feed.id}__{item.item_uid}"
+        existing = await self._storage.get(_FEED_ITEMS_COLLECTION, stored_id)
+        if existing is None:
+            return
+        existing["lazy_score"] = True
+        # Keep score=-1.0 explicitly so the rescore-tick filter picks it up.
+        existing["score"] = -1.0
+        await self._storage.put(_FEED_ITEMS_COLLECTION, stored_id, existing)
+        self._lazy_score_total += 1
 
     async def _enqueue_ingest(self, feed: Feed, item: FeedItem | StoredFeedItem) -> None:
         if self._ingest_queue is None:
@@ -1585,7 +1683,10 @@ class FeedsService(Service):
 
         Per spec §6.4c: capped at ``max_concurrent_scoring * 10`` per
         tick so a backlog can drain over multiple ticks without ever
-        starving the live poll path.
+        starving the live poll path. ``lazy_score=True`` items
+        (initial-sync cap or score-queue-full drops) live indefinitely
+        until ``_lazy_score_tick`` catches them — the 24h horizon here
+        is just the recency-decay budget for fresh scoring failures.
         """
         cutoff = (_now_utc() - timedelta(hours=24)).isoformat()
         rows = await self._storage.query(
@@ -1603,6 +1704,57 @@ class FeedsService(Service):
             feed = await self.get_feed(stored.feed_id)
             if feed is None:
                 continue
+            await self._enqueue_score(
+                feed,
+                FeedItem(
+                    item_uid=stored.item_uid,
+                    title=stored.title,
+                    link=stored.link,
+                    summary=stored.summary,
+                ),
+            )
+
+    async def _lazy_score_tick(self) -> None:
+        """Drain a small batch of ``lazy_score=True`` items per tick.
+
+        First-sync overflow (§6.4e) and score-queue-full drops both flag
+        items here. Run at a slow cadence (daily) and bound the per-tick
+        batch at ``max_concurrent_scoring * 10`` so a 1000-item backlog
+        drains over weeks rather than blowing the AI budget at once.
+
+        Items beyond the 24h rescore-tick window would otherwise be
+        stranded — this tick is the safety net.
+        """
+        rows = await self._storage.query(
+            Query(
+                collection=_FEED_ITEMS_COLLECTION,
+                filters=[
+                    Filter(field="lazy_score", op=FilterOp.EQ, value=True),
+                ],
+                sort=[SortField(field="received_at", descending=False)],
+                limit=max(1, self._max_concurrent_scoring) * 10,
+            )
+        )
+        if not rows:
+            return
+        logger.info(
+            "feeds: lazy-score tick draining %d item(s) (total flagged=%d)",
+            len(rows),
+            self._lazy_score_total,
+        )
+        for row in rows:
+            stored = StoredFeedItem.from_dict(row)
+            feed = await self.get_feed(stored.feed_id)
+            if feed is None:
+                continue
+            # Clear the flag eagerly so a re-tick before scoring completes
+            # doesn't double-enqueue. _score_item will overwrite the row
+            # with the real score (or leave -1.0 on parse failure, which
+            # the rescore tick then catches inside the 24h window).
+            existing = await self._storage.get(_FEED_ITEMS_COLLECTION, stored.id)
+            if existing is not None:
+                existing["lazy_score"] = False
+                await self._storage.put(_FEED_ITEMS_COLLECTION, stored.id, existing)
             await self._enqueue_score(
                 feed,
                 FeedItem(
@@ -1668,17 +1820,16 @@ class FeedsService(Service):
             return
 
         # Cache the bytes (observability).
-        cache_path = (
-            self._feed_doc_backend.base_dir
-            / feed.id
-            / f"{_safe_uid(item.item_uid)}.html"
-        )
+        # Path layout MUST stay aligned with `_doc_id_for` — cascade
+        # delete keys off the same composition.
+        rel_path = f"{feed.id}/{_safe_uid(item.item_uid)}.html"
+        cache_path = self._feed_doc_backend.base_dir / rel_path
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(body)
 
         meta = DocumentMeta(
             source_id=self._feed_doc_backend.source_id,
-            path=f"{feed.id}/{_safe_uid(item.item_uid)}.html",
+            path=rel_path,
             name=item.title or item.item_uid,
             document_type=DocumentType.TEXT,
             size_bytes=len(body),
@@ -1739,14 +1890,12 @@ class FeedsService(Service):
                 return False
         return True
 
-    _ROBOTS_CACHE: dict[str, tuple[float, Any]] = {}
-
     async def _robots_allows(self, scheme: str, netloc: str, path: str) -> bool:
         from urllib.robotparser import RobotFileParser
 
         key = f"{scheme}://{netloc}"
         now = time.monotonic()
-        cached = self._ROBOTS_CACHE.get(key)
+        cached = self._robots_cache.get(key)
         rp: Any
         if cached is not None and now - cached[0] < 3600:
             rp = cached[1]
@@ -1765,7 +1914,7 @@ class FeedsService(Service):
                     rp.parse([])
             except Exception:
                 rp.parse([])
-            self._ROBOTS_CACHE[key] = (now, rp)
+            self._robots_cache[key] = (now, rp)
         try:
             return bool(rp.can_fetch("GilbertFeeds", f"{scheme}://{netloc}{path}"))
         except Exception:
@@ -1851,9 +2000,11 @@ class FeedsService(Service):
             ):
                 with contextlib.suppress(Exception):
                     await self._knowledge.remove_document(
-                        f"{self._feed_doc_backend.source_id}:"
-                        f"{row.get('feed_id', '')}/"
-                        f"{_safe_uid(row.get('item_uid', ''))}"
+                        _doc_id_for(
+                            self._feed_doc_backend.source_id,
+                            str(row.get("feed_id", "")),
+                            str(row.get("item_uid", "")),
+                        )
                     )
             await self._storage.delete(_FEED_ITEMS_COLLECTION, row_id)
             removed += 1

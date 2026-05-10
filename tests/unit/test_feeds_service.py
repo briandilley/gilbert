@@ -1210,3 +1210,291 @@ class TestSafeUidHelper:
         assert "?" not in uid
         assert len(uid) == 40  # sha1 hex digest length
 
+
+class TestDocIdHelper:
+    """Regression for the B1 cascade-mismatch bug.
+
+    ``_ingest_item`` indexes documents at ``feed_articles:<feed_id>/<safe_uid>.html``;
+    unsubscribe / retention previously dropped the ``.html`` and silently
+    leaked knowledge entries. The helper guarantees both sides build the
+    identical id.
+    """
+
+    def test_doc_id_for_includes_html_suffix(self) -> None:
+        from gilbert.core.services.feeds import _doc_id_for
+
+        doc_id = _doc_id_for("feed_articles", "feed_abc", "uid-xyz")
+        assert doc_id.endswith(".html")
+        assert doc_id.startswith("feed_articles:feed_abc/")
+
+    async def test_unsubscribe_remove_document_id_matches_index_path(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, knowledge, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        item = StoredFeedItem(
+            id=f"{feed.id}__some-uid",
+            feed_id=feed.id,
+            item_uid="some-uid",
+            title="t",
+            link="l",
+            ingested_to_knowledge=True,
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+        await svc.unsubscribe(feed.id, _user("alice"))
+        # MUST end in .html — otherwise ChromaDB never finds the chunks.
+        assert knowledge.removed
+        assert all(d.endswith(".html") for d in knowledge.removed), knowledge.removed
+        from gilbert.core.services.feeds import _doc_id_for
+
+        expected = _doc_id_for(
+            svc._feed_doc_backend.source_id, feed.id, "some-uid"
+        )
+        assert expected in knowledge.removed
+
+    async def test_retention_remove_document_id_matches_index_path(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, knowledge, _ = feeds_svc
+        svc._retention_days = 1
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        old = StoredFeedItem(
+            id=f"{feed.id}__retained",
+            feed_id=feed.id,
+            item_uid="retained",
+            title="old",
+            link="l",
+            received_at=(datetime.now(UTC) - timedelta(days=30)).isoformat(),
+            ingested_to_knowledge=True,
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, old.id, old.to_dict())
+        await svc._retention_tick()
+        from gilbert.core.services.feeds import _doc_id_for
+
+        expected = _doc_id_for(
+            svc._feed_doc_backend.source_id, feed.id, "retained"
+        )
+        assert expected in knowledge.removed
+
+
+class TestSearchItemsCategoryGuard:
+    """Regression for the B2 list-comp ordering bug.
+
+    The category filter previously dereferenced ``feed_by_id.get(...)``
+    BEFORE the ``is not None`` check, so a stored item referencing a
+    feed the user can no longer access raised ``AttributeError`` and
+    crashed the search.
+    """
+
+    async def test_search_with_category_skips_orphan_rows(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        # Alice owns one feed. Stash an orphan row pointing at a feed
+        # she can't access (different owner_user_id, no shares).
+        feed = await svc.subscribe(
+            "https://example.com/alice.xml",
+            _user("alice"),
+            name="alice-feed",
+            category="tech",
+            backend_name="fake_feed",
+        )
+        # Real item on Alice's feed.
+        good = StoredFeedItem(
+            id=f"{feed.id}__u1",
+            feed_id=feed.id,
+            item_uid="u1",
+            title="real",
+            link="l",
+            received_at=datetime.now(UTC).isoformat(),
+        )
+        # Orphan: references a feed_id Alice doesn't own / share into.
+        orphan = StoredFeedItem(
+            id="orphan_id__o1",
+            feed_id="orphan_id",
+            item_uid="o1",
+            title="ghost",
+            link="l",
+            received_at=datetime.now(UTC).isoformat(),
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, good.id, good.to_dict())
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, orphan.id, orphan.to_dict())
+        # Filtering by category MUST NOT raise on the orphan row.
+        items = await svc.search_items(
+            category="tech", user_ctx=_user("alice")
+        )
+        assert any(i.id == good.id for i in items)
+        assert all(i.id != orphan.id for i in items)
+
+
+class TestInitialScoreCap:
+    """Regression for the B4 ``initial_score_cap`` dead-config bug."""
+
+    async def test_first_sync_caps_scoring_calls_at_initial_score_cap(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        svc._initial_score_cap = 3
+        svc._initial_score_remaining = 3
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        backend = svc._runtimes[feed.id].backend
+        backend.next_items = [_make_item(f"u{i}") for i in range(10)]
+        await svc._poll_runtime(svc._runtimes[feed.id])
+        # Only 3 should have been enqueued; the rest land lazy_score=True.
+        from gilbert.interfaces.storage import Query
+
+        rows = await svc._storage.query(Query(collection=_FEED_ITEMS_COLLECTION))
+        lazy = [r for r in rows if r.get("lazy_score")]
+        assert len(lazy) == 7, f"expected 7 lazy items, got {len(lazy)}"
+        assert svc._initial_score_remaining == 0
+
+    async def test_lazy_score_tick_drains_lazy_backlog(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        svc._initial_score_cap = 2
+        svc._initial_score_remaining = 2
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        backend = svc._runtimes[feed.id].backend
+        backend.next_items = [_make_item(f"u{i}") for i in range(8)]
+        await svc._poll_runtime(svc._runtimes[feed.id])
+        # 6 items lazy-scored. Drain the queue first.
+        if svc._score_queue is not None:
+            await svc._score_queue.join()
+        # Run the lazy-score tick — it should clear the lazy flag and
+        # enqueue them.
+        await svc._lazy_score_tick()
+        if svc._score_queue is not None:
+            await svc._score_queue.join()
+        from gilbert.interfaces.storage import Query
+
+        rows = await svc._storage.query(Query(collection=_FEED_ITEMS_COLLECTION))
+        # All items should now have either a real score or an attempted one
+        # (lazy_score=False after the tick).
+        still_lazy = [r for r in rows if r.get("lazy_score")]
+        assert still_lazy == [], f"lazy backlog not drained: {still_lazy}"
+
+    async def test_score_queue_full_drop_marks_lazy_for_recovery(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        # Persist an item, then fill the queue to the brim and try to
+        # enqueue another — drop path should flag lazy_score on the row.
+        item = StoredFeedItem(
+            id=f"{feed.id}__overflow",
+            feed_id=feed.id,
+            item_uid="overflow",
+            title="t",
+            link="l",
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+        # Replace the queue with a 1-slot queue and pre-fill it.
+        import asyncio as _asyncio
+
+        svc._score_queue = _asyncio.Queue(maxsize=1)
+        svc._score_queue.put_nowait((feed, FeedItem(item_uid="filler", title="f", link="f")))
+        await svc._enqueue_score(
+            feed, FeedItem(item_uid="overflow", title="t", link="l")
+        )
+        row = await sqlite_storage.get(_FEED_ITEMS_COLLECTION, item.id)
+        assert row["lazy_score"] is True
+        assert row["score"] == -1.0
+
+
+class TestWsCanSeeFeedEvent:
+    """Regression for B3 — feed.briefing.ready event MUST be filtered to
+    the recipient ``user_id`` only (admin sees all)."""
+
+    def _conn(self, user_id: str, level: int = 100) -> Any:
+        from gilbert.web.ws_protocol import WsConnection, WsConnectionManager
+        from unittest.mock import MagicMock
+
+        user = UserContext(
+            user_id=user_id,
+            email=f"{user_id}@example.com",
+            display_name=user_id,
+            roles=frozenset({"user"}),
+        )
+        manager = MagicMock(spec=WsConnectionManager)
+        return WsConnection(user, level, manager)
+
+    def test_briefing_ready_blocked_for_other_user(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        conn = self._conn("alice")
+        event = Event(
+            event_type="feed.briefing.ready",
+            data={"user_id": "bob", "briefing_id": "b1"},
+        )
+        assert conn.can_see_feed_event(event) is False
+
+    def test_briefing_ready_visible_to_recipient(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        conn = self._conn("alice")
+        event = Event(
+            event_type="feed.briefing.ready",
+            data={"user_id": "alice", "briefing_id": "b1"},
+        )
+        assert conn.can_see_feed_event(event) is True
+
+    def test_briefing_ready_visible_to_admin(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        admin_conn = self._conn("admin", level=0)
+        event = Event(
+            event_type="feed.briefing.ready",
+            data={"user_id": "alice", "briefing_id": "b1"},
+        )
+        assert admin_conn.can_see_feed_event(event) is True
+
+    def test_throttled_event_filtered_by_user(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        conn = self._conn("alice")
+        event = Event(
+            event_type="feed.ingest.throttled",
+            data={"user_id": "bob", "feed_id": "f"},
+        )
+        assert conn.can_see_feed_event(event) is False
+
+    def test_subscription_event_passes_through(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        conn = self._conn("alice")
+        # Per-feed events are not user-targeted; the per-feed ACL check
+        # happens at the SPA layer.
+        event = Event(
+            event_type="feed.subscription.created",
+            data={"feed_id": "f", "owner_user_id": "bob"},
+        )
+        assert conn.can_see_feed_event(event) is True
+
+    def test_non_feed_event_passes_through(self) -> None:
+        from gilbert.interfaces.events import Event
+
+        conn = self._conn("alice")
+        event = Event(event_type="presence.arrived", data={"user_id": "bob"})
+        assert conn.can_see_feed_event(event) is True
+
