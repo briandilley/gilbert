@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <subtitle>For testing only.</subtitle>
+  <link href="https://example.com/" />
+  <link rel="self" href="https://example.com/feed.atom" />
+  <updated>2026-05-01T12:00:00Z</updated>
+  <id>urn:uuid:atom-basic-fixture</id>
+  <entry>
+    <title>First Story</title>
+    <link href="https://example.com/first" />
+    <id>tag:example.com,2026:first</id>
+    <updated>2026-05-01T12:00:00Z</updated>
+    <published>2026-05-01T11:00:00Z</published>
+    <summary>The first story summary.</summary>
+    <author><name>Jane</name></author>
+  </entry>
+  <entry>
+    <title>Second Story</title>
+    <link href="https://example.com/second" />
+    <id>tag:example.com,2026:second</id>
+    <updated>2026-05-01T10:00:00Z</updated>
+    <published>2026-05-01T10:00:00Z</published>
+    <summary>The second story summary.</summary>
+    <author><name>Mike</name></author>
+  </entry>
+</feed>
+

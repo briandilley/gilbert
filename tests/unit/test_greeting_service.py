@@ -290,3 +290,139 @@ class TestGreetingService:
         await greeting_service._greet_already_present()
 
         mock_presence.who_is_here.assert_not_called()
+
+
+# ── FeedsProvider integration ────────────────────────────────────────
+
+
+class _FakeFeedsForGreeting:
+    """Bare-minimum FeedsProvider stub for greeting splice tests."""
+
+    def __init__(self, spoken: str = "news today") -> None:
+        self.calls: list[Any] = []
+        self.spoken = spoken
+        self.fail = False
+
+    async def subscribe(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def unsubscribe(self, *args: Any, **kwargs: Any) -> None:
+        raise NotImplementedError
+
+    async def list_accessible_feeds(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def get_feed(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+    async def search_items(self, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def get_top_items(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def mark_read(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def build_briefing(self, user_ctx: Any, **kwargs: Any) -> Any:
+        from datetime import UTC, datetime
+
+        from gilbert.interfaces.feeds import BriefingResult
+
+        self.calls.append({"user_id": user_ctx.user_id, **kwargs})
+        if self.fail:
+            raise RuntimeError("forced failure")
+        return BriefingResult(
+            spoken=self.spoken,
+            headlines=[],
+            item_ids=["x"],
+            since=datetime.now(UTC),
+            briefing_id=f"brief_{user_ctx.user_id}",
+        )
+
+
+class TestGreetingBriefingSplice:
+    """Per spec §16 — when ``include_briefing=True`` and the user
+    hasn't been briefed today, the greeting splices in the briefing
+    text before announcing."""
+
+    @pytest.mark.asyncio
+    async def test_greeting_includes_briefing_when_flag_on(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        from gilbert.interfaces.feeds import FeedsProvider
+
+        feeds = _FakeFeedsForGreeting(spoken="THE BRIEFING")
+        assert isinstance(feeds, FeedsProvider)
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == "THE BRIEFING"
+        assert feeds.calls and feeds.calls[0]["user_id"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_flag_off(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        feeds = _FakeFeedsForGreeting()
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = False
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+        assert feeds.calls == []
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_feeds_capability_absent(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        # No feeds capability registered.
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_already_briefed_today(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        from datetime import UTC, datetime
+
+        feeds = _FakeFeedsForGreeting()
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        # Pre-seed today's briefing on the storage backend used by greeting.
+        storage = resolver.caps["entity_storage"].backend
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        await storage.put(
+            "feed_briefing_state",
+            "alice",
+            {"_id": "alice", "last_briefed_on": today},
+        )
+        # _maybe_briefing_text uses self._today_str() which uses
+        # self._timezone — make sure it matches.
+        greeting_service._timezone = "UTC"
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+        assert feeds.calls == []  # never called build_briefing
+
+    @pytest.mark.asyncio
+    async def test_greeting_briefing_failure_degrades_silently(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        feeds = _FakeFeedsForGreeting()
+        feeds.fail = True
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+
+    def test_greeting_does_not_import_briefing_provider(self) -> None:
+        # Regression guard for Round-2 architect spec change. Verify
+        # the symbol does not exist.
+        from gilbert.interfaces import feeds as feeds_mod
+
+        assert not hasattr(feeds_mod, "BriefingProvider")
