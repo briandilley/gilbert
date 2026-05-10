@@ -26,6 +26,16 @@ dependencies = [
     "markdown>=3.5",
     "pyjwt[crypto]>=2.12.1",
     "aiohttp>=3.13.5",
+    # feedparser parses RSS 2.0 / Atom 1.0 — both open standards, no
+    # vendor-specific behavior. ~150 KB on disk, BSD-licensed,
+    # stdlib-only transitive deps. Justified in
+    # ``docs/specs/04-rss-feeds.md`` §3 (Note on integrations/
+    # precedent) — the test for "may live in core integrations/" is
+    # vendor-free + small + provider-neutral; feedparser clears all
+    # three. The only feed backend that stays in core; provider-
+    # specific backends (Reddit, HackerNews, YouTube, podcasts) belong
+    # in ``std-plugins/``.
+    "feedparser>=6.0.10",
     # Std-plugin workspace members — each is a uv workspace member with
     # its own ``pyproject.toml`` declaring its third-party Python deps.
     # Listing them here (with ``{ workspace = true }`` sources below)
