@@ -564,6 +564,66 @@ class HealthProvider(Protocol):
     ) -> GreetingBrief: ...
 
 
+# ── HealthLinkProvider Protocol ──────────────────────────────────────
+
+
+@runtime_checkable
+class HealthLinkProvider(Protocol):
+    """Capability protocol for "does this user have any health_links?"
+
+    The web nav resolves this via ``isinstance`` so the question
+    "should the /health entry render in the nav?" is a service-owned
+    query, not raw storage access from the route layer. The service
+    ACL-gates the underlying read; consumers never reach into private
+    attributes.
+    """
+
+    async def user_has_active_links(self, user_id: str) -> bool: ...
+
+
+# ── Human-friendly metric labels ─────────────────────────────────────
+
+
+METRIC_TYPE_HUMAN_NAMES: dict[MetricType, str] = {
+    MetricType.SLEEP_DURATION: "sleep",
+    MetricType.SLEEP_EFFICIENCY: "sleep efficiency",
+    MetricType.SLEEP_DEEP: "deep sleep",
+    MetricType.SLEEP_REM: "REM sleep",
+    MetricType.SLEEP_AWAKE: "wake time",
+    MetricType.STEPS: "steps",
+    MetricType.DISTANCE: "distance",
+    MetricType.ACTIVE_MINUTES: "active minutes",
+    MetricType.CALORIES_BURNED: "calories",
+    MetricType.HEART_RATE_RESTING: "resting heart rate",
+    MetricType.HEART_RATE_AVG: "heart rate",
+    MetricType.HRV: "HRV",
+    MetricType.SPO2: "blood oxygen",
+    MetricType.WEIGHT: "weight",
+    MetricType.BODY_FAT: "body fat",
+    MetricType.LEAN_MASS: "lean mass",
+    MetricType.BMI: "BMI",
+    MetricType.BLOOD_PRESSURE_SYS: "blood pressure (systolic)",
+    MetricType.BLOOD_PRESSURE_DIA: "blood pressure (diastolic)",
+    MetricType.BODY_TEMPERATURE: "body temperature",
+    MetricType.RESPIRATORY_RATE: "respiratory rate",
+    MetricType.VO2_MAX: "VO₂ max",
+}
+
+
+def metric_types_human_summary(metric_types: list[MetricType]) -> str:
+    """Render a comma-joined human-friendly summary for notifications.
+
+    Used by the cross-user-read notification body per spec §6.1.1.
+    Returns ``"all metrics"`` when the list is empty (the service
+    semantics: empty == "every metric type the target has").
+    """
+    if not metric_types:
+        return "all metrics"
+    return ", ".join(
+        METRIC_TYPE_HUMAN_NAMES.get(t, t.value) for t in metric_types
+    )
+
+
 # ── Authorization helpers ────────────────────────────────────────────
 #
 # Pure helpers: no service deps, no concrete-class imports. The caller
@@ -753,6 +813,9 @@ __all__ = [
     "LinkCompleteResult",
     "HealthBackend",
     "HealthProvider",
+    "HealthLinkProvider",
+    "METRIC_TYPE_HUMAN_NAMES",
+    "metric_types_human_summary",
     "StorageAwareHealthBackend",
     "HealthBackendError",
     "HealthBackendAuthError",

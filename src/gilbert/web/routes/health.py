@@ -63,6 +63,9 @@ class _HealthRouteSurface(Protocol):
     @property
     def public_base_url(self) -> str: ...
 
+    @property
+    def webhook_max_body_bytes(self) -> int: ...
+
     async def ingest_webhook(
         self,
         token: str,
@@ -176,10 +179,15 @@ def _health_service(request: Request) -> _HealthRouteSurface:
 
 
 def _client_ip(request: Request) -> str:
-    """Extract the client IP, honoring X-Forwarded-For when present."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
+    """Extract the client IP for the per-IP webhook rate-limit bucket.
+
+    INTENTIONALLY ignores ``X-Forwarded-For``: Gilbert has no
+    ``web.trusted_proxies`` allowlist, so any value in that header is
+    attacker-controlled. Honoring it would let a single client spoof
+    a fresh IP per request and bypass the 30/min cap on the 404
+    enumeration-defense path. Until a trusted-proxy allowlist exists
+    in core (open follow-up), only ``request.client.host`` is used.
+    """
     if request.client is not None:
         return request.client.host
     return ""
@@ -198,9 +206,26 @@ async def health_webhook(token: str, request: Request) -> Response:
     - 404 ``{"received": 0}`` for unknown / disabled tokens (collapsed)
     - 413 if the body exceeds ``webhook_max_body_bytes``
     - 429 with ``Retry-After`` for rate-limited requests
+
+    Body-cap enforcement is BEFORE ``await request.body()``: a POST
+    advertising ``Content-Length: 5_000_000_000`` would otherwise
+    make Starlette buffer 5 GB into the worker's memory before the
+    1 MB cap is checked (memory-DoS vector).
     """
     svc = _health_service(request)
+    cap = svc.webhook_max_body_bytes
+    content_length_raw = request.headers.get("content-length") or ""
+    try:
+        content_length = int(content_length_raw) if content_length_raw else 0
+    except ValueError:
+        content_length = 0
+    if content_length > cap:
+        return JSONResponse(content={"received": 0}, status_code=413)
     body = await request.body()
+    if len(body) > cap:
+        # Defensive — covers chunked transfer encoding / missing
+        # content-length where the pre-check above couldn't fire.
+        return JSONResponse(content={"received": 0}, status_code=413)
     headers = {k.lower(): v for k, v in request.headers.items()}
     remote_addr = _client_ip(request)
     result = await svc.ingest_webhook(
@@ -242,6 +267,23 @@ async def list_my_links(
     svc = _health_service(request)
     items = await svc.list_user_links(user.user_id)
     return {"items": items}
+
+
+@api_router.get("/me/config")
+async def my_health_config(
+    request: Request,
+    user: UserContext = Depends(require_authenticated),  # noqa: B008
+) -> dict[str, Any]:
+    """Public-facing snapshot of the operator-set ``gilbert.public_base_url``.
+
+    Returned as a boolean ``has_public_base_url`` so plugin SPA panels
+    can disable their Connect button when the operator hasn't yet set
+    the base URL (Withings OAuth, future Garmin/Oura/Fitbit). Never
+    returns the URL itself — the panel doesn't need it; the server
+    builds the callback URL on its own.
+    """
+    svc = _health_service(request)
+    return {"has_public_base_url": bool(svc.public_base_url)}
 
 
 @api_router.post("/me/connect/{backend}")

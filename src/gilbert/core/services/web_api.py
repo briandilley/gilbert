@@ -482,33 +482,19 @@ class WebApiService(Service):
             nonlocal user_has_health_data
             if user_has_health_data is not None:
                 return user_has_health_data
-            health_svc = sm.get_by_capability("health")
             user_has_health_data = False
-            if health_svc is not None and getattr(health_svc, "_storage", None):
-                from gilbert.interfaces.storage import (
-                    Filter as _Filter,
-                )
-                from gilbert.interfaces.storage import (
-                    FilterOp as _FilterOp,
-                )
-                from gilbert.interfaces.storage import (
-                    Query as _Query,
-                )
-
+            health_svc = sm.get_by_capability("health")
+            # Resolve via the public ``HealthLinkProvider`` protocol so
+            # the question "does this user have any health_links?" is
+            # service-owned, not raw storage access from the route. The
+            # service ACL-gates the underlying read; the protocol keeps
+            # the layer rules clean and the implementation swappable.
+            from gilbert.interfaces.health import HealthLinkProvider
+            if health_svc is not None and isinstance(health_svc, HealthLinkProvider):
                 try:
-                    count = await health_svc._storage.count(
-                        _Query(
-                            collection="health_links",
-                            filters=[
-                                _Filter(
-                                    field="user_id",
-                                    op=_FilterOp.EQ,
-                                    value=conn.user_ctx.user_id,
-                                )
-                            ],
-                        )
+                    user_has_health_data = await health_svc.user_has_active_links(
+                        conn.user_ctx.user_id
                     )
-                    user_has_health_data = count > 0
                 except Exception:
                     user_has_health_data = False
             return user_has_health_data

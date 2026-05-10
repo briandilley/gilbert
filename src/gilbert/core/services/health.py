@@ -29,7 +29,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gilbert.core.context import set_current_user
+from gilbert.core.context import get_current_user, set_current_user
 from gilbert.core.services._ui_blocks import confirm_or_execute
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
@@ -58,8 +58,10 @@ from gilbert.interfaces.health import (
     LinkStartResult,
     MetricType,
     MetricUnit,
+    StorageAwareHealthBackend,
     can_mutate_metrics,
     can_read_metrics,
+    metric_types_human_summary,
 )
 from gilbert.interfaces.notifications import (
     NotificationProvider,
@@ -176,6 +178,18 @@ _OAUTH_STATE_TTL_SECONDS = 600
 _AUTH_FAILURE_THRESHOLD = 5
 
 _BUCKET_LRU_CAP = 10_000
+
+# Hard ceiling on the row count an aggregate query loads into memory.
+# A caller asking for a 10-year window with dense data (e.g. minute-
+# resolution heart rate) could otherwise pull millions of rows into
+# memory before the Python aggregator runs. We cap at 50k and emit a
+# WARN when the result hits the cap so callers know the aggregate is
+# truncated rather than partial-window-correct.
+_MAX_AGGREGATE_ROWS = 50_000
+
+# Soft cap on the in-memory ``_summary_cache``. Eviction is LRU
+# (oldest entry dropped) once we exceed the cap.
+_SUMMARY_CACHE_MAX = 1000
 
 
 # ── Bucket helpers ───────────────────────────────────────────────────
@@ -330,7 +344,15 @@ class HealthService(Service):
         # for OAuth callback URLs).
         self._public_base_url: str = ""
 
-        self._summary_cache: dict[str, DailySummary] = {}
+        # LRU-bounded cache of latest daily summaries.
+        self._summary_cache: OrderedDict[str, DailySummary] = OrderedDict()
+
+        # Per-state asyncio.Lock so two concurrent OAuth callbacks for
+        # the same state cannot both observe ``consumed_at == None``
+        # and both succeed (race repro: an attacker / browser-prefetch
+        # firing the callback URL twice). Setdefault under the lock
+        # ensures only the first arriver creates the lock object.
+        self._oauth_state_locks: dict[str, asyncio.Lock] = {}
 
     # ── Service metadata ─────────────────────────────────────────────
 
@@ -346,6 +368,7 @@ class HealthService(Service):
                     "access_control",
                     "ai_chat",
                     "notifications",
+                    "users",
                 }
             ),
             events=frozenset(
@@ -373,6 +396,13 @@ class HealthService(Service):
         string means "admin hasn't set gilbert.public_base_url yet" —
         OAuth flows refuse to begin in that case."""
         return self._public_base_url
+
+    @property
+    def webhook_max_body_bytes(self) -> int:
+        """Body-size cap exposed to the route layer for the
+        Content-Length pre-check (defends against memory-DoS via a
+        very large advertised body)."""
+        return self._webhook_max_body_bytes
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -562,8 +592,6 @@ class HealthService(Service):
         ``initialize`` so OAuth flows can read / write the link row
         and build callback URLs from a single trusted source.
         """
-        from gilbert.interfaces.health import StorageAwareHealthBackend
-
         for name, cls in HealthBackend.registered_backends().items():
             try:
                 backend = cls()
@@ -630,12 +658,14 @@ class HealthService(Service):
     async def _emit_security_warnings(self) -> None:
         """Emit startup WARNs for known-risky configurations.
 
-        - OAuth backend present + non-127.0.0.1 bind + no TLS-fronting.
-        - debug_log_values=true with >1 user.
-        - .gilbert/gilbert.db permissions looser than 0600 (POSIX).
+        Per spec §6.4 / §6.7 / §7.5 step 7:
+        - OAuth backend present + non-127.0.0.1 bind: Withings refresh
+          tokens travel over plain HTTP and rest unencrypted on disk.
+        - ``debug_log_values=true`` AND user count > 1: in a multi-user
+          deployment, DEBUG-logging metric values bleeds one user's
+          data into the operator's general log file.
+        - ``.gilbert/gilbert.db`` permissions looser than 0600 (POSIX).
         """
-        if self._access_control is None:
-            return  # OK to skip — we still want the basic startup path
         # File permissions check — best-effort.
         try:
             from gilbert.config import DATA_DIR
@@ -652,6 +682,59 @@ class HealthService(Service):
                     )
         except Exception:
             logger.debug("Could not inspect DB file permissions", exc_info=True)
+
+        # OAuth + non-localhost bind warning. The bind address lives
+        # in the ``gilbert`` config section under ``web.bind_address``;
+        # if no OAuth-capable backend is registered (no Withings, no
+        # future Garmin/Oura/Fitbit) the warning is irrelevant.
+        has_oauth_backend = any(
+            b.supports_pull for b in self._backends.values()
+        )
+        if has_oauth_backend and self._resolver is not None:
+            config_svc = self._resolver.get_capability("configuration")
+            bind_address = ""
+            if isinstance(config_svc, ConfigurationReader):
+                try:
+                    gilbert_section = config_svc.get_section_safe("gilbert")
+                except Exception:
+                    gilbert_section = {}
+                web_section = gilbert_section.get("web") or {}
+                if isinstance(web_section, dict):
+                    bind_address = str(web_section.get("bind_address") or "")
+            # Localhost bindings are safe; everything else trips the
+            # warning (operator may have a TLS-fronting tunnel in
+            # front, but the WARN is the v1 friction we owe them).
+            if bind_address and bind_address not in (
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            ):
+                logger.warning(
+                    "Health: OAuth backend(s) present and web.bind_address "
+                    "is %r (not 127.0.0.1) — Withings refresh tokens travel "
+                    "over plain HTTP and rest unencrypted on disk in v1. "
+                    "Front Gilbert with a TLS-terminating tunnel before "
+                    "exposing OAuth flows to the network.",
+                    bind_address,
+                )
+
+        # debug_log_values + multi-user warning.
+        if self._debug_log_values and self._storage is not None:
+            try:
+                user_count = await self._storage.count(
+                    Query(collection="users")
+                )
+            except Exception:
+                user_count = 0
+            if user_count > 1:
+                logger.warning(
+                    "Health: debug_log_values=true on a multi-user instance "
+                    "(%d users). DEBUG-level log lines now include metric "
+                    "values — one user's readings will appear in the shared "
+                    "log file. Disable for any deployment beyond a single "
+                    "trusted operator.",
+                    user_count,
+                )
 
     # ── Configurable ─────────────────────────────────────────────────
 
@@ -676,7 +759,12 @@ class HealthService(Service):
                 type=ToolParameterType.INTEGER,
                 description=(
                     "Local hour to fire the per-user daily summary "
-                    "(0–23). DST handled by zoneinfo."
+                    "(0–23). DST handled by zoneinfo. Note: the "
+                    "scheduler ticks every UTC top-of-hour, so users "
+                    "in fractional-offset timezones (IST = UTC+5:30, "
+                    "Newfoundland = -3:30, Nepal = +5:45, ...) get "
+                    "their summary at the next half-hour past this "
+                    "value rather than on the exact minute."
                 ),
                 default=_DEFAULT_DAILY_SUMMARY_HOUR,
             ),
@@ -944,6 +1032,30 @@ class HealthService(Service):
             )
         )
 
+        # Refresh ``gilbert.public_base_url`` so an operator who set it
+        # AFTER the service started doesn't have to restart Gilbert for
+        # OAuth flows + webhook URL building to start working. Push the
+        # new value into every storage-aware backend (Withings) AND
+        # cache it locally for ``rotate_webhook_token``.
+        if self._resolver is not None:
+            config_svc = self._resolver.get_capability("configuration")
+            if isinstance(config_svc, ConfigurationReader):
+                try:
+                    gb = config_svc.get_section_safe("gilbert")
+                except Exception:
+                    gb = {}
+                self._public_base_url = str(gb.get("public_base_url") or "")
+                for backend in self._backends.values():
+                    if isinstance(backend, StorageAwareHealthBackend):
+                        try:
+                            backend.set_public_base_url(self._public_base_url)
+                        except Exception:
+                            logger.debug(
+                                "set_public_base_url failed on backend %s",
+                                getattr(backend, "backend_name", "?"),
+                                exc_info=True,
+                            )
+
     # ── Authorization helpers ────────────────────────────────────────
 
     def _is_health_admin(self, user_ctx: UserContext) -> bool:
@@ -1061,6 +1173,14 @@ class HealthService(Service):
         Primary dedup: ``(user_id, backend, source_event_id)`` when
         ``source_event_id`` is non-empty. Fallback (when empty):
         ``(user_id, backend, metric_type, recorded_at)``.
+
+        Both sides of the recorded_at comparison are normalized to UTC
+        before being serialized to ISO 8601 — Python's ``isoformat``
+        is not canonical (``+00:00`` vs ``Z``, microsecond presence,
+        etc.), so a round-trip via ``astimezone(UTC).isoformat()``
+        yields a stable shape the EQ filter actually matches. Without
+        this, two distinct readings at the same wall-clock second
+        from different sources would both survive instead of dedup'ing.
         """
         assert self._storage is not None
         if metric.source_event_id:
@@ -1080,7 +1200,15 @@ class HealthService(Service):
                 )
             )
         else:
-            rows = await self._storage.query(
+            recorded_canonical = _canonical_iso(metric.recorded_at)
+            # Fall back to a small candidate set keyed only on
+            # ``(user_id, backend, metric_type)`` and filter in Python
+            # — defends against either side being persisted with a
+            # non-canonical ISO string from older code paths or other
+            # backends. Bounded: a single (user, backend, type) tuple
+            # rarely has more than a handful of rows at the same
+            # second. ``limit=20`` keeps memory bounded.
+            candidates = await self._storage.query(
                 Query(
                     collection=_METRICS_COLLECTION,
                     filters=[
@@ -1091,15 +1219,22 @@ class HealthService(Service):
                             op=FilterOp.EQ,
                             value=metric.metric_type.value,
                         ),
-                        Filter(
-                            field="recorded_at",
-                            op=FilterOp.EQ,
-                            value=metric.recorded_at.isoformat(),
-                        ),
                     ],
-                    limit=1,
+                    limit=20,
                 )
             )
+            rows = []
+            for c in candidates:
+                stored_raw = str(c.get("recorded_at") or "")
+                try:
+                    stored_canonical = _canonical_iso(
+                        datetime.fromisoformat(stored_raw)
+                    )
+                except ValueError:
+                    continue
+                if stored_canonical == recorded_canonical:
+                    rows = [c]
+                    break
         if not rows:
             return None
         return str(rows[0].get("id") or rows[0].get("_id") or "")
@@ -1249,8 +1384,6 @@ class HealthService(Service):
         """Return metrics for ``user_id`` in [since, until). Owner-only
         path — caller must be the user (or SYSTEM, or hold
         ``health-admin``)."""
-        from gilbert.core.context import get_current_user
-
         user_ctx = get_current_user()
         self._require_read(user_ctx, user_id)
         if self._storage is None:
@@ -1284,8 +1417,6 @@ class HealthService(Service):
         user_id: str,
         metric_type: MetricType,
     ) -> HealthMetric | None:
-        from gilbert.core.context import get_current_user
-
         user_ctx = get_current_user()
         self._require_read(user_ctx, user_id)
         if self._storage is None:
@@ -1322,11 +1453,48 @@ class HealthService(Service):
         until: datetime,
         aggregator: AggregatorKind | None = None,
     ) -> list[HealthAggregate]:
-        from gilbert.core.context import get_current_user
-
         user_ctx = get_current_user()
         self._require_read(user_ctx, user_id)
+        # Hard cap to defend against unbounded windows pulling millions
+        # of rows into memory (e.g. a 10-year ``health_trend`` request
+        # against minute-resolution heart rate). When we hit the cap
+        # the aggregate is partial — emit a WARN so callers know.
+        if self._storage is not None:
+            total = await self._storage.count(
+                Query(
+                    collection=_METRICS_COLLECTION,
+                    filters=[
+                        Filter(field="user_id", op=FilterOp.EQ, value=user_id),
+                        Filter(
+                            field="metric_type",
+                            op=FilterOp.EQ,
+                            value=metric_type.value,
+                        ),
+                        Filter(
+                            field="recorded_at",
+                            op=FilterOp.GTE,
+                            value=since.isoformat(),
+                        ),
+                        Filter(
+                            field="recorded_at",
+                            op=FilterOp.LT,
+                            value=until.isoformat(),
+                        ),
+                    ],
+                )
+            )
+            if total > _MAX_AGGREGATE_ROWS:
+                logger.warning(
+                    "Health: aggregate(%s, %s) hit %d-row cap (%d total) "
+                    "— window truncated to most-recent rows",
+                    user_id,
+                    metric_type.value,
+                    _MAX_AGGREGATE_ROWS,
+                    total,
+                )
         rows = await self.read_metrics(user_id, [metric_type], since, until)
+        if len(rows) > _MAX_AGGREGATE_ROWS:
+            rows = rows[-_MAX_AGGREGATE_ROWS:]
         if not rows:
             return []
         agg_kind = aggregator or DEFAULT_AGGREGATOR.get(metric_type, AggregatorKind.AVG)
@@ -1359,14 +1527,13 @@ class HealthService(Service):
         user_id: str,
         on_or_before: datetime | None = None,
     ) -> DailySummary | None:
-        from gilbert.core.context import get_current_user
-
         user_ctx = get_current_user()
         self._require_read(user_ctx, user_id)
         if self._storage is None:
             return None
         cached = self._summary_cache.get(user_id)
         if cached is not None and on_or_before is None:
+            self._summary_cache.move_to_end(user_id)
             return cached
         filters = [Filter(field="user_id", op=FilterOp.EQ, value=user_id)]
         if on_or_before is not None:
@@ -1390,10 +1557,17 @@ class HealthService(Service):
         try:
             summary = DailySummary.from_dict(rows[0])
             if on_or_before is None:
-                self._summary_cache[user_id] = summary
+                self._cache_summary(user_id, summary)
             return summary
         except Exception:
             return None
+
+    def _cache_summary(self, user_id: str, summary: DailySummary) -> None:
+        """Insert into ``_summary_cache`` with LRU eviction."""
+        self._summary_cache[user_id] = summary
+        self._summary_cache.move_to_end(user_id)
+        while len(self._summary_cache) > _SUMMARY_CACHE_MAX:
+            self._summary_cache.popitem(last=False)
 
     async def health_brief_for_greeting(
         self,
@@ -1459,15 +1633,11 @@ class HealthService(Service):
                 f"User {actor_ctx.user_id!r} lacks role {HEALTH_ADMIN_ROLE!r} "
                 f"for cross-user read"
             )
-        # Read as SYSTEM (target window) so the read-side check passes.
-        ctx = contextvars.copy_context()
-        await asyncio.create_task(
-            self._set_system_then_noop(),
-            context=ctx,
-        )
-
-        # Direct query — bypass the read filter since we already
-        # gate-checked the role above.
+        # Direct query — bypass the read filter since the role gate
+        # above already authorized the cross-user access. Running this
+        # in the admin's outer context (rather than spawning a SYSTEM-
+        # context subtask) keeps the audit row's ``actor_user_id``
+        # correct AND avoids a misleading no-op create_task call.
         if self._storage is None:
             return []
         filters = [
@@ -1507,7 +1677,10 @@ class HealthService(Service):
         try:
             if self._notifications is not None:
                 period_human = _format_period_human(since, until)
-                types_summary = ", ".join(t.value for t in metric_types) or "all metrics"
+                # Human-friendly metric names per spec §6.1.1 — the
+                # notification body MUST read "sleep, weight" not
+                # "sleep_duration, weight".
+                types_summary = metric_types_human_summary(metric_types)
                 await self._notifications.notify_user(
                     user_id=target_user_id,
                     message=(
@@ -1517,7 +1690,10 @@ class HealthService(Service):
                     ),
                     urgency=NotificationUrgency.NORMAL,
                     source="health",
-                    source_ref={"actor_user_id": actor_ctx.user_id},
+                    source_ref={
+                        "actor_user_id": actor_ctx.user_id,
+                        "action_url": "/account/health/audit-log",
+                    },
                 )
             else:
                 logger.warning(
@@ -1534,12 +1710,6 @@ class HealthService(Service):
 
         return metrics
 
-    async def _set_system_then_noop(self) -> None:
-        """Set context user to SYSTEM inside the copied context so the
-        admin_read_metrics call's read filter passes. The context is
-        local to the spawned task — no leakage."""
-        set_current_user(UserContext.SYSTEM)
-
     async def _record_audit(
         self,
         *,
@@ -1550,6 +1720,7 @@ class HealthService(Service):
         period_start: datetime | None = None,
         period_end: datetime | None = None,
         request_id: str = "",
+        backends: list[str] | None = None,
     ) -> None:
         if self._storage is None:
             return
@@ -1563,17 +1734,19 @@ class HealthService(Service):
             "target_user_id": target_user_id,
             "accessed_at": accessed_at,
             "metric_types": list(metric_types or []),
+            "backends": list(backends or []),
             "period_start": period_start.isoformat() if period_start else "",
             "period_end": period_end.isoformat() if period_end else "",
             "request_id": request_id,
         }
         await self._storage.put(_AUDIT_COLLECTION, row_id, row)
         audit_logger.info(
-            "%s actor=%s target=%s types=%s period=%s..%s",
+            "%s actor=%s target=%s types=%s backends=%s period=%s..%s",
             kind,
             actor_user_id,
             target_user_id,
             ",".join(metric_types or []) or "*",
+            ",".join(backends or []) or "-",
             period_start.isoformat() if period_start else "-",
             period_end.isoformat() if period_end else "-",
         )
@@ -1585,6 +1758,7 @@ class HealthService(Service):
                 "kind": kind,
                 "accessed_at": accessed_at,
                 "metric_types": list(metric_types or []),
+                "backends": list(backends or []),
                 "period_start": period_start.isoformat() if period_start else "",
                 "period_end": period_end.isoformat() if period_end else "",
             },
@@ -1707,11 +1881,17 @@ class HealthService(Service):
 
         # 3. Audit row (survives the cascade).
         if actor_kind == "self_delete_all":
+            # Per spec §4.5: ``metric_types`` is ``list[MetricType]``
+            # and MUST be empty for ``self_delete_all`` (no specific
+            # types were "read"). Backends are recorded under a
+            # separate ``backends`` field — overloading metric_types
+            # with backend names corrupts downstream analytics.
             await self._record_audit(
                 kind="self_delete_all",
                 actor_user_id=user_id,
                 target_user_id=user_id,
-                metric_types=preview.get("backends") or [],
+                metric_types=[],
+                backends=sorted(preview.get("backends") or []),
             )
 
         # 4. Cascade-delete event.
@@ -1862,29 +2042,40 @@ class HealthService(Service):
         a different backend, ``{"status": "already"}`` if the row was
         already consumed, ``{"status": "missing"}`` if it doesn't
         exist.
+
+        Atomicity: an in-memory ``asyncio.Lock`` keyed on the state
+        token serializes the read-then-write so two concurrent
+        callbacks for the same state cannot both observe ``consumed_at
+        == None`` and both succeed. The TTL check is INSIDE the locked
+        section so a state expiring mid-consume returns "expired"
+        deterministically. The lock dict only grows; entries persist
+        for process lifetime which is fine for per-state objects (each
+        state is one-shot — we never come back to the same lock).
         """
         if self._storage is None:
             return {"status": "missing"}
-        row = await self._storage.get(_OAUTH_STATE_COLLECTION, state)
-        if row is None:
-            return {"status": "missing"}
-        expires_at_raw = row.get("expires_at") or ""
-        try:
-            expires_at = datetime.fromisoformat(str(expires_at_raw))
-        except ValueError:
-            return {"status": "missing"}
-        if datetime.now(UTC) > expires_at:
-            await self._storage.delete(_OAUTH_STATE_COLLECTION, state)
-            return {"status": "expired"}
-        if str(row.get("user_id") or "") != caller_user_id:
-            return {"status": "user_mismatch"}
-        if str(row.get("backend_name") or "") != backend_name:
-            return {"status": "backend_mismatch"}
-        if row.get("consumed_at"):
-            return {"status": "already"}
-        row["consumed_at"] = datetime.now(UTC).isoformat()
-        await self._storage.put(_OAUTH_STATE_COLLECTION, state, row)
-        return {"status": "ok", "user_id": str(row.get("user_id") or "")}
+        lock = self._oauth_state_locks.setdefault(state, asyncio.Lock())
+        async with lock:
+            row = await self._storage.get(_OAUTH_STATE_COLLECTION, state)
+            if row is None:
+                return {"status": "missing"}
+            expires_at_raw = row.get("expires_at") or ""
+            try:
+                expires_at = datetime.fromisoformat(str(expires_at_raw))
+            except ValueError:
+                return {"status": "missing"}
+            if datetime.now(UTC) > expires_at:
+                await self._storage.delete(_OAUTH_STATE_COLLECTION, state)
+                return {"status": "expired"}
+            if str(row.get("user_id") or "") != caller_user_id:
+                return {"status": "user_mismatch"}
+            if str(row.get("backend_name") or "") != backend_name:
+                return {"status": "backend_mismatch"}
+            if row.get("consumed_at"):
+                return {"status": "already"}
+            row["consumed_at"] = datetime.now(UTC).isoformat()
+            await self._storage.put(_OAUTH_STATE_COLLECTION, state, row)
+            return {"status": "ok", "user_id": str(row.get("user_id") or "")}
 
     async def record_oauth_error(
         self,
@@ -1985,6 +2176,35 @@ class HealthService(Service):
         )
         return [_redact_link(r) for r in rows]
 
+    async def user_has_active_links(self, user_id: str) -> bool:
+        """Return ``True`` iff the user has at least one row in
+        ``health_links`` (regardless of ``enabled``).
+
+        Implements ``HealthLinkProvider`` so the web nav can answer
+        "should /health render?" without reaching into the service's
+        private storage attribute. Per spec §17.3 the conditional nav
+        gate doesn't care about ``enabled`` — a disabled link still
+        means the user has used the feature and the page is meaningful.
+        """
+        if self._storage is None:
+            return False
+        try:
+            count = await self._storage.count(
+                Query(
+                    collection=_LINKS_COLLECTION,
+                    filters=[
+                        Filter(field="user_id", op=FilterOp.EQ, value=user_id),
+                    ],
+                )
+            )
+        except Exception:
+            logger.debug(
+                "user_has_active_links: storage count failed",
+                exc_info=True,
+            )
+            return False
+        return count > 0
+
     async def disconnect_backend(self, user_id: str, backend_name: str) -> bool:
         """Remove a single ``health_links`` row + revoke upstream.
 
@@ -2051,23 +2271,31 @@ class HealthService(Service):
         *,
         concurrency: int,
         label: str,
+        tz_by_user: dict[str, str] | None = None,
     ) -> None:
         """Run ``work(user_id)`` for each user with bounded concurrency.
 
         Each task gets its own copy of contextvars (per
         ``memory-multi-user-isolation.md``) so the per-task
-        ``set_current_user`` doesn't leak to siblings.
+        ``set_current_user`` doesn't leak to siblings. ``tz_by_user``
+        propagates the resolved per-user timezone into the SYSTEM
+        identity so downstream code reads ``user_ctx.tz`` instead of
+        re-querying ``users_svc`` (which the spec pins as the
+        canonical path).
         """
         if not user_ids:
             return
         sem = asyncio.Semaphore(max(1, concurrency))
+        tz_map = tz_by_user or {}
 
         async def _one(uid: str) -> None:
             async with sem:
                 ctx = contextvars.copy_context()
 
                 async def _runner() -> None:
-                    set_current_user(_system_acting_for(uid))
+                    set_current_user(
+                        _system_acting_for(uid, tz=tz_map.get(uid))
+                    )
                     try:
                         await work(uid)
                     except Exception:
@@ -2077,15 +2305,47 @@ class HealthService(Service):
 
         await asyncio.gather(*[_one(uid) for uid in user_ids])
 
-    async def _users_due_at_current_hour(self) -> list[str]:
-        """Return user_ids whose ``daily_summary_local_hour`` matches
-        the current wall-clock hour in their TZ. Reads the user's TZ
-        from the user profile via the users service if available; falls
-        back to a per-user override on the link row, then to the global
-        default.
+    async def _resolve_user_tz(self, user_id: str) -> str:
+        """Best-effort resolve the user's IANA TZ string.
+
+        Reads from the optional ``users`` capability when present.
+        Returns ``""`` (= "fall back to UTC") if the user is unknown
+        or hasn't set a TZ. The caller decides how to render that.
+        """
+        if self._resolver is None:
+            return ""
+        users_svc = self._resolver.get_capability("users")
+        if users_svc is None:
+            return ""
+        try:
+            user = await users_svc.get_user(user_id)  # type: ignore[attr-defined]
+        except Exception:
+            return ""
+        if isinstance(user, dict):
+            return str(user.get("tz") or "")
+        # Future: typed User objects via UsersProvider — read .tz attr.
+        tz_attr = getattr(user, "tz", None)
+        return str(tz_attr or "")
+
+    async def _users_due_at_current_hour(self) -> tuple[list[str], dict[str, str]]:
+        """Return ``(user_ids, tz_by_user)`` whose
+        ``daily_summary_local_hour`` matches the current wall-clock
+        hour in their TZ.
+
+        The TZ map is returned alongside the user_ids so the scheduler
+        can populate ``UserContext.tz`` on the per-task SYSTEM identity
+        rather than each work fn re-querying the users service.
+
+        Note on resolution: the scheduler tick fires at every UTC top
+        of hour, so a user in a fractional-offset TZ (IST = UTC+5:30,
+        Newfoundland = -3:30, Nepal = +5:45, ...) gets their summary
+        at the half-hour past their configured ``daily_summary_local_hour``
+        rather than on the exact hour. Spec doesn't strictly require
+        minute-level precision; the alternative — a 30-min tick —
+        doubles scheduler overhead for every user globally.
         """
         if self._storage is None:
-            return []
+            return [], {}
         link_rows = await self._storage.query(
             Query(
                 collection=_LINKS_COLLECTION,
@@ -2094,22 +2354,14 @@ class HealthService(Service):
         )
         seen: set[str] = set()
         due: list[str] = []
-        users_svc = (
-            self._resolver.get_capability("users") if self._resolver is not None else None
-        )
+        tz_by_user: dict[str, str] = {}
         for raw in link_rows:
             user_id = str(raw.get("user_id") or "")
             if not user_id or user_id in seen:
                 continue
             seen.add(user_id)
-            tz_name = ""
-            if users_svc is not None:
-                try:
-                    user = await users_svc.get_user(user_id)  # type: ignore[attr-defined]
-                    if isinstance(user, dict):
-                        tz_name = str(user.get("tz") or "")
-                except Exception:
-                    tz_name = ""
+            tz_name = await self._resolve_user_tz(user_id)
+            tz_by_user[user_id] = tz_name
             try:
                 tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
             except ZoneInfoNotFoundError:
@@ -2121,13 +2373,13 @@ class HealthService(Service):
                 target_hour = override
             if local_now.hour == target_hour:
                 due.append(user_id)
-        return due
+        return due, tz_by_user
 
     async def _run_daily_summary_tick(self) -> None:
         if self._storage is None:
             return
         try:
-            user_ids = await self._users_due_at_current_hour()
+            user_ids, tz_by_user = await self._users_due_at_current_hour()
         except Exception:
             logger.exception("Health: daily-summary tick failed to load users")
             return
@@ -2136,6 +2388,7 @@ class HealthService(Service):
             self._compute_and_persist_summary,
             concurrency=self._daily_summary_concurrency,
             label="daily-summary",
+            tz_by_user=tz_by_user,
         )
 
     def _make_pull_sync_callback(
@@ -2171,8 +2424,17 @@ class HealthService(Service):
                 await self._update_last_sync(uid, backend_name, error="")
                 self._consecutive_auth_failures.pop((uid, backend_name), None)
             except HealthBackendRateLimitError as exc:
-                await self._update_last_sync(uid, backend_name, error=f"rate-limited; retry after {exc.retry_after_seconds}s")
-                await asyncio.sleep(exc.retry_after_seconds)
+                # Don't sleep inside the semaphore slot — pinning a
+                # slot for ``retry_after_seconds`` (Withings's typical
+                # 300s) starves other users on the next tick. Just
+                # record the error and let the next scheduled tick
+                # pick the user up; the bucket has typically refilled
+                # by then.
+                await self._update_last_sync(
+                    uid,
+                    backend_name,
+                    error=f"rate-limited; retry after {exc.retry_after_seconds}s",
+                )
             except HealthBackendAuthError as exc:
                 await self._update_last_sync(uid, backend_name, error=f"auth: {exc}")
                 key = (uid, backend_name)
@@ -2288,20 +2550,19 @@ class HealthService(Service):
         calls AI for the prose summary."""
         if self._storage is None:
             return
-        # Resolve user TZ.
-        tz = ZoneInfo("UTC")
-        users_svc = (
-            self._resolver.get_capability("users") if self._resolver is not None else None
-        )
-        if users_svc is not None:
-            try:
-                user = await users_svc.get_user(user_id)  # type: ignore[attr-defined]
-                if isinstance(user, dict):
-                    name = str(user.get("tz") or "")
-                    if name:
-                        tz = ZoneInfo(name)
-            except Exception:
-                pass
+        # Resolve user TZ. Read from the per-task ``UserContext.tz``
+        # populated by ``_run_per_user`` when invoked from the
+        # scheduler. Fall back to ``users_svc.get_user`` when the
+        # context-injected value is missing — covers ad-hoc callers
+        # (e.g. tests) that didn't go through the scheduler path.
+        ctx_user = get_current_user()
+        tz_name = ctx_user.tz or ""
+        if not tz_name:
+            tz_name = await self._resolve_user_tz(user_id)
+        try:
+            tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+        except ZoneInfoNotFoundError:
+            tz = ZoneInfo("UTC")
 
         local_now = datetime.now(tz)
         local_today_0 = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2345,7 +2606,7 @@ class HealthService(Service):
             generated_at=datetime.now(UTC),
         )
         await self._storage.put(_SUMMARIES_COLLECTION, row_id, summary.to_dict())
-        self._summary_cache[user_id] = summary
+        self._cache_summary(user_id, summary)
         await self._publish_event(
             "health.daily.summary",
             {
@@ -2809,18 +3070,35 @@ class HealthService(Service):
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _system_acting_for(user_id: str) -> UserContext:
+def _system_acting_for(user_id: str, *, tz: str | None = None) -> UserContext:
     """Return a SYSTEM-acting-for-target identity for scheduler work.
 
     The actor remains ``UserContext.SYSTEM`` (so the audit log
     correctly shows scheduler activity as ``actor="system"``);
     ``metadata["target_user_id"]`` carries the target so service code
-    paths that need it can pull it via metadata.
+    paths that need it can pull it via metadata. ``tz`` propagates the
+    target user's timezone so scheduler code paths read it from the
+    typed ``UserContext`` rather than poking at ``users_svc`` again.
     """
     return replace(
         UserContext.SYSTEM,
         metadata={"target_user_id": user_id},
+        tz=tz,
     )
+
+
+def _canonical_iso(when: datetime) -> str:
+    """Return a stable UTC ISO-8601 string for ``when``.
+
+    Python's ``datetime.isoformat`` is not canonical: ``+00:00`` vs
+    ``Z`` suffix, optional microseconds, naive vs aware all round-trip
+    differently. This helper coerces to aware-UTC then formats so two
+    semantically identical timestamps from different sources compare
+    equal.
+    """
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(UTC).isoformat()
 
 
 def _redact_link(row: dict[str, Any]) -> dict[str, Any]:
