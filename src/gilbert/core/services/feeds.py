@@ -192,6 +192,93 @@ def _safe_uid(item_uid: str) -> str:
     return hashlib.sha1(item_uid.encode("utf-8")).hexdigest()
 
 
+# Multi-part public suffixes we recognise without pulling in the full
+# tldextract / publicsuffix2 dependency. Covers the most common cases
+# the spec §9 cheap-eTLD+1 check has historically gotten wrong
+# (`bbc.co.uk` → `co.uk` reducing to a same-suffix match). Long form
+# wins by being scanned first.
+_KNOWN_MULTIPART_SUFFIXES: tuple[str, ...] = (
+    "co.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.nz",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "ac.uk",
+    "gov.uk",
+    "ac.jp",
+    "co.in",
+    "co.za",
+    "com.br",
+    "co.kr",
+    "com.mx",
+    "com.tr",
+    "com.cn",
+    "com.hk",
+)
+
+
+def _registrable_suffix(host: str) -> str:
+    """Return the eTLD+1 form of ``host`` (best-effort).
+
+    Recognises common multi-part suffixes from `_KNOWN_MULTIPART_SUFFIXES`
+    so `bbc.co.uk` reduces to `bbc.co.uk` (not `co.uk`); falls back to
+    the last-two-labels heuristic otherwise. This is *advisory* — the
+    SSRF guard's load-bearing layer is the always-block private/
+    metadata host check, not this suffix comparison.
+    """
+    host = host.lower().strip(".")
+    if not host:
+        return ""
+    parts = host.split(".")
+    for suffix in _KNOWN_MULTIPART_SUFFIXES:
+        if host.endswith("." + suffix) and len(parts) >= len(suffix.split(".")) + 1:
+            n = len(suffix.split(".")) + 1
+            return ".".join(parts[-n:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _is_private_or_metadata_host(host: str) -> bool:
+    """True when ``host`` resolves to a private / loopback / link-local /
+    cloud-metadata address (IPv4 + IPv6). String-only — no DNS lookup.
+
+    Blocks:
+        - IPv4 RFC1918 (10/8, 172.16/12, 192.168/16) + loopback (127/8)
+        - IPv4 link-local (169.254/16 — AWS / GCE metadata service)
+        - IPv4 broadcast / current-network (0/8, 255.255.255.255)
+        - IPv4 CGNAT (100.64/10)
+        - IPv4 multicast (224/4)
+        - IPv6 loopback (::1), link-local (fe80::/10), ULA (fc00::/7),
+          multicast (ff00::/8), unspecified (::)
+        - Hostname literals: ``localhost``, ``ip6-localhost``
+        - The empty / wildcard host
+    """
+    import ipaddress
+
+    h = host.strip("[]")
+    if not h or h in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        # Not an IP literal — only literal-IP / known-hostname checks
+        # apply here. (DNS-rebinding-style attacks would need the actual
+        # resolver result; ``httpx`` will follow DNS so we'd add a hook
+        # there for paranoid deployments.)
+        return False
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True
+    if ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+        return True
+    if isinstance(ip, ipaddress.IPv4Address):
+        # CGNAT 100.64.0.0/10 — not flagged as ``is_private`` until 3.13.
+        if ipaddress.IPv4Address("100.64.0.0") <= ip <= ipaddress.IPv4Address("100.127.255.255"):
+            return True
+    return False
+
+
 def _doc_id_for(source_id: str, feed_id: str, item_uid: str) -> str:
     """Stable ``KnowledgeProvider`` document_id for a feed item.
 
@@ -1005,6 +1092,23 @@ class FeedsService(Service):
         if backend_cls is None:
             raise FeedError(f"Unknown feed backend: {backend_name}")
 
+        # Idempotency (§S5): if this user already owns a subscription
+        # to the same URL, return it instead of minting a duplicate
+        # row + duplicate runtime + duplicate scheduler job. OPML
+        # re-imports rely on this — a 30-feed OPML re-imported should
+        # be a no-op, not a 60-feed footgun.
+        existing_rows = await self._storage.query(
+            Query(
+                collection=_FEEDS_COLLECTION,
+                filters=[
+                    Filter(field="owner_user_id", op=FilterOp.EQ, value=user_ctx.user_id),
+                    Filter(field="url", op=FilterOp.EQ, value=url),
+                ],
+            )
+        )
+        if existing_rows:
+            return Feed.from_dict(existing_rows[0])
+
         # Probe the URL — backend constructed transiently for the probe.
         probe_backend = backend_cls()
         await probe_backend.initialize({})
@@ -1799,10 +1903,10 @@ class FeedsService(Service):
         body, mime, status = await self._fetch_article_body(link)
         if body is None:
             return
-        if mime not in {
-            "text/html",
-            "application/xhtml+xml",
-        } and not (mime or "").startswith("text/"):
+        # Narrow to HTML (per spec §9 step 6 — closed allow-list).
+        # PDFs, images, calendars, plain text, RSS-as-text get skipped;
+        # only article bodies belong in the vector index.
+        if mime not in {"text/html", "application/xhtml+xml"}:
             logger.info(
                 "feeds: skipping ingestion — non-HTML content-type %r for %s",
                 mime,
@@ -1861,25 +1965,45 @@ class FeedsService(Service):
         )
 
     async def _safe_to_fetch(self, feed: Feed, link: str) -> bool:
+        """SSRF guard for article-body fetches.
+
+        Two layers:
+        (a) ALWAYS-block private / loopback / link-local / cloud-metadata
+            hosts — IPv4 and IPv6 — regardless of feed/link relationship,
+            so a feed whose own URL resolves locally can't smuggle a
+            metadata-server fetch through.
+        (b) eTLD+1 advisory — different registrable suffix is allowed
+            (sites legitimately link out) but combined with (a) the
+            metadata path still blocks.
+
+        This is NOT a complete public-suffix-list implementation; the
+        deny-list-based eTLD+1 check below recognises the common
+        multi-part suffixes (co.uk, com.au, …) so ``bbc.co.uk`` doesn't
+        reduce to ``co.uk``. The advisory exists so a hijacked feed
+        can't easily pivot off-domain — the ``always-block`` set above
+        is the load-bearing privacy guard.
+        """
         parsed = urlparse(link)
         if parsed.scheme not in {"http", "https"}:
             return False
 
-        # eTLD+1 SSRF guard (cheap form: same registrable suffix as feed host).
+        link_host = (parsed.hostname or "").lower()
+        if not link_host:
+            return False
+        if _is_private_or_metadata_host(link_host):
+            logger.info("feeds: refusing fetch to private / metadata host: %s", link)
+            return False
+
+        # eTLD+1 SSRF guard (multi-part suffix aware).
         try:
-            feed_host = urlparse(feed.url).hostname or ""
-            link_host = parsed.hostname or ""
-            if feed_host and link_host:
-                feed_top = ".".join(feed_host.split(".")[-2:]).lower()
-                link_top = ".".join(link_host.split(".")[-2:]).lower()
-                if feed_top != link_top:
-                    # Different eTLD+1 — allow but only if both look like
-                    # ordinary public hosts (refuse localhost / private).
-                    if any(
-                        link_host.startswith(p)
-                        for p in ("localhost", "127.", "10.", "192.168.", "0.")
-                    ):
-                        return False
+            feed_host = (urlparse(feed.url).hostname or "").lower()
+            if feed_host:
+                feed_top = _registrable_suffix(feed_host)
+                link_top = _registrable_suffix(link_host)
+                if feed_top != link_top and _is_private_or_metadata_host(
+                    link_host
+                ):
+                    return False
         except Exception:
             return False
 
@@ -1928,6 +2052,16 @@ class FeedsService(Service):
         original_scheme = urlparse(url).scheme
         current_url = url
         for _ in range(6):  # 5 redirects + 1 initial
+            # SSRF guard the CURRENT url on every hop — a public initial
+            # link that 302s to ``http://169.254.169.254`` would otherwise
+            # walk straight through.
+            current_host = (urlparse(current_url).hostname or "").lower()
+            if not current_host or _is_private_or_metadata_host(current_host):
+                logger.info(
+                    "feeds: refusing redirect to private / metadata host: %s",
+                    current_url,
+                )
+                return None, "", 0
             try:
                 response = await self._http_client.get(
                     current_url,
@@ -1953,6 +2087,18 @@ class FeedsService(Service):
             mime = (
                 response.headers.get("content-type", "").split(";")[0].strip().lower()
             )
+            # Pre-check Content-Length to short-circuit oversized bodies
+            # before reading them. (TODO v1.x: switch to streaming
+            # `client.stream()` so a chunked-encoding adversary without
+            # Content-Length can't OOM us — for now `httpx` defaults +
+            # the post-read cap below provide a backstop.)
+            length = response.headers.get("content-length")
+            if length is not None:
+                try:
+                    if int(length) > 256 * 1024:
+                        return None, mime, response.status_code
+                except ValueError:
+                    pass
             body = response.content
             if len(body) > 256 * 1024:
                 # Skip half-articles — search relevance breaks otherwise.

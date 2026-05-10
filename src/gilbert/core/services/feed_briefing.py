@@ -129,7 +129,13 @@ class FeedBriefingService(Service):
             ConfigParam(
                 key="timezone",
                 type=ToolParameterType.STRING,
-                description="Server-side IANA timezone for the daily fire.",
+                description=(
+                    "IANA timezone for the daily fire. v1 is single global "
+                    "tz: ``Schedule.daily_at(...)`` runs in server-local "
+                    "time regardless of this value. The knob is captured "
+                    "for v1.x when the scheduler ABC grows tz support — "
+                    "see spec §13.2."
+                ),
                 default="UTC",
             ),
             ConfigParam(

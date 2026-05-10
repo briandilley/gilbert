@@ -170,8 +170,15 @@ worker tasks (default 4) drain the queue. Each worker calls
 received_at > now - 24h` items and re-enqueues them, capped at
 `max_concurrent_scoring * 10` per tick.
 
-`initial_score_cap=50` (default) bounds first-sync AI fan-out — items
-beyond the cap stay at `score=-1.0` until lazy-scored on tool read.
+**`initial_score_cap=50` (default) is enforced.** On a feed's FIRST
+poll (`last_polled_at == ""`) the service consumes from a global
+`_initial_score_remaining` budget; items beyond the cap are persisted
+with `score=-1.0` AND `lazy_score=True` so they can be drained later.
+The score-queue-full drop path also flags `lazy_score=True` so
+nothing is permanently lost. A separate **`feeds-lazy-score-tick`
+(daily)** drains the lazy backlog at `max_concurrent_scoring * 10`
+per tick — the rescore tick's 24h window only catches recent
+failures; this one is the safety net.
 
 ### Knowledge ingestion
 
@@ -180,12 +187,19 @@ Per-item flow when `feed.ingest_to_knowledge=True`:
 1. Acquire `_ingest_semaphore`.
 2. Per-user-per-day cap (`ingest_max_items_per_day_per_user`,
    default 200). Above cap → emit `feed.ingest.throttled`, skip.
-3. SSRF / politeness checks: same eTLD+1 host (or refuse `localhost`/
-   private hosts), `robots.txt` honored when `respect_robots_txt`
-   (cached 1h).
-4. Fetch body — 10s timeout, 256 KB cap, max 5 redirects, reject
-   `https → http`.
-5. Content-Type guard (HTML / XHTML only).
+3. SSRF / politeness checks. Always-block list (covers IPv4 and IPv6):
+   loopback (`127/8`, `::1`), RFC1918 (`10/8`, `172.16/12`,
+   `192.168/16`), link-local (`169.254/16` AWS-metadata, `fe80::/10`),
+   ULA (`fc00::/7`), CGNAT (`100.64/10`), multicast (`224/4`,
+   `ff00::/8`), broadcast / unspecified / reserved. eTLD+1 advisory
+   uses a built-in multi-part suffix list so `bbc.co.uk` reduces
+   correctly. Re-checked on every redirect target inside
+   `_fetch_article_body`. `robots.txt` honored when
+   `respect_robots_txt` (cached 1h, instance-level).
+4. Fetch body — 10s timeout, 256 KB cap (Content-Length pre-checked),
+   max 5 redirects, reject `https → http`.
+5. Content-Type guard — strict allow-list `{text/html,
+   application/xhtml+xml}`. PDFs / plain text / calendars get skipped.
 6. Paywall heuristic — strip HTML to text, skip if < 1 KB or matches
    bundled paywall regex.
 7. Cache bytes to `.gilbert/feed-cache/<feed_id>/<safe_uid>.html`
@@ -284,6 +298,49 @@ per-feed-access filter applies on top, modeled on inbox.
 `import_opml` walks `<outline>` entries and calls `subscribe` per
 entry; returns `[(url, ""|error)]`. `export_opml` returns OPML 2.0
 text for every accessible feed.
+
+**Subscribe is idempotent on `(owner_user_id, url)`** — re-subscribing
+to a URL the user already owns returns the existing `Feed` row and
+re-importing the same OPML is a no-op (per S5 follow-up).
+
+### WebSocket RPC surface (spec §14)
+
+`get_ws_handlers()` exposes the full SPA-driven surface; per-handler
+authz uses `can_access_feed` / `can_admin_feed` so the permissive
+prefix ACL (`feeds.: 100`) stays safe.
+
+| Frame | Notes |
+|---|---|
+| `feeds.list` / `.get` | accessible feeds with `unread_count` |
+| `feeds.create` | probe + persist + start runtime; idempotent |
+| `feeds.update` / `.delete` | admin-only; delete cascades knowledge via `_doc_id_for` helper |
+| `feeds.test` | probe URL without persisting |
+| `feeds.share_user/role` / `.unshare_user/role` | admin-only |
+| `feeds.poll_now` | admin-only force-poll |
+| `feeds.items.list/get/mark/delete/reingest` | per-feed authz; delete cascades `KnowledgeProvider.remove_document` |
+| `feeds.briefing.preview` | dry-run (no event, no mark_briefed) |
+| `feeds.briefing.run` | publishes `feed.briefing.ready`; admin can target another user |
+| `feeds.briefing.get` | recipient-or-admin |
+| `feeds.import_opml` / `.export_opml` | admin-only |
+| `feeds.backends.list` | registered `FeedBackend` schemas |
+
+`feed.briefing.ready` and `feed.ingest.throttled` are user-targeted —
+the WS layer's `WsConnection.can_see_feed_event` filter restricts
+delivery to the recipient `user_id` (admins see all). Other
+`feed.*` events are feed-scoped and pass that filter; the SPA layer
+keeps a per-feed access cache for those.
+
+`FeedBriefingService` adds one admin-only handler:
+`feeds.briefing.daily.run` (wraps `run_now()` for operator-driven
+fan-out).
+
+### Web UI (spec §15)
+
+Mounted at `/feeds`. Components in `frontend/src/components/feeds/`:
+`FeedsPage`, `FeedSidebar`, `FeedItemList`, `FeedEditDrawer`,
+`BriefingCard`. Dashboard mounts `<BriefingCard />` next to
+`<UpcomingEventCard />`. Nav entry comes from
+`web_api._build_nav` (key=`feeds`, gated on `feeds` capability).
 
 ## Related
 - [Inbox Service](memory-inbox-service.md) — closest analog
