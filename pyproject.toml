@@ -75,6 +75,7 @@ dependencies = [
     "gilbert-plugin-telegram",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-withings",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
 ]
@@ -114,6 +115,7 @@ gilbert-plugin-tavily = { workspace = true }
 gilbert-plugin-telegram = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
+gilbert-plugin-withings = { workspace = true }
 gilbert-plugin-xai = { workspace = true }
 
 [project.optional-dependencies]

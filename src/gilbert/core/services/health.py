@@ -557,10 +557,21 @@ class HealthService(Service):
 
     async def _init_backends(self, section: dict[str, Any]) -> None:
         """Instantiate each registered ``HealthBackend`` and call
-        ``initialize()`` with its per-backend config subsection."""
+        ``initialize()`` with its per-backend config subsection.
+
+        Backends satisfying ``StorageAwareHealthBackend`` get the raw
+        storage backend AND the public base URL injected before
+        ``initialize`` so OAuth flows can read / write the link row
+        and build callback URLs from a single trusted source.
+        """
+        from gilbert.interfaces.health import StorageAwareHealthBackend
+
         for name, cls in HealthBackend.registered_backends().items():
             try:
                 backend = cls()
+                if isinstance(backend, StorageAwareHealthBackend):
+                    backend.set_storage(self._storage)
+                    backend.set_public_base_url(self._public_base_url)
                 sub = section.get(name) if isinstance(section.get(name), dict) else {}
                 await backend.initialize(dict(sub) if isinstance(sub, dict) else {})
                 self._backends[name] = backend

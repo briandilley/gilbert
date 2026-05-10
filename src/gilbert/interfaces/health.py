@@ -492,6 +492,29 @@ class HealthBackend(ABC):
         ...
 
 
+# ── StorageAwareHealthBackend Protocol ───────────────────────────────
+
+
+@runtime_checkable
+class StorageAwareHealthBackend(Protocol):
+    """Protocol for health backends that need raw storage access.
+
+    The OAuth pull backends (Withings, future Garmin / Oura / Fitbit)
+    need to read and write the per-user ``health_links`` row to track
+    cursor / tokens / expiry. The service calls ``set_storage(storage)``
+    immediately after instantiation; backends that don't satisfy this
+    protocol skip the call and don't get raw access.
+
+    Webhook-only backends (apple-health, hk-webhook) don't satisfy this
+    protocol — the service handles persistence on their behalf via
+    ``ingest_webhook``.
+    """
+
+    def set_storage(self, storage: object) -> None: ...
+
+    def set_public_base_url(self, url: str) -> None: ...
+
+
 # ── HealthProvider Protocol ──────────────────────────────────────────
 
 
@@ -730,6 +753,7 @@ __all__ = [
     "LinkCompleteResult",
     "HealthBackend",
     "HealthProvider",
+    "StorageAwareHealthBackend",
     "HealthBackendError",
     "HealthBackendAuthError",
     "HealthBackendRateLimitError",
