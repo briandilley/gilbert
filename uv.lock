@@ -23,6 +23,7 @@ members = [
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-jellyfin",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
@@ -972,6 +973,7 @@ dependencies = [
     { name = "gilbert-plugin-google" },
     { name = "gilbert-plugin-groq" },
     { name = "gilbert-plugin-guess-that-song" },
+    { name = "gilbert-plugin-jellyfin" },
     { name = "gilbert-plugin-lutron-radiora" },
     { name = "gilbert-plugin-mistral" },
     { name = "gilbert-plugin-ngrok" },
@@ -1047,6 +1049,7 @@ requires-dist = [
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
     { name = "gilbert-plugin-groq", virtual = "std-plugins/groq" },
     { name = "gilbert-plugin-guess-that-song", virtual = "std-plugins/guess-that-song" },
+    { name = "gilbert-plugin-jellyfin", virtual = "std-plugins/jellyfin" },
     { name = "gilbert-plugin-lutron-radiora", virtual = "std-plugins/lutron-radiora" },
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
@@ -1208,6 +1211,17 @@ source = { virtual = "std-plugins/groq" }
 name = "gilbert-plugin-guess-that-song"
 version = "1.0.0"
 source = { virtual = "std-plugins/guess-that-song" }
+
+[[package]]
+name = "gilbert-plugin-jellyfin"
+version = "1.0.0"
+source = { virtual = "std-plugins/jellyfin" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.27.0" }]
 
 [[package]]
 name = "gilbert-plugin-lutron-radiora"

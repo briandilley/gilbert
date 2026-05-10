@@ -884,7 +884,7 @@ class MediaLibraryService(Service):
 
     def config_actions(self) -> list[ConfigAction]:
         actions: list[ConfigAction] = []
-        # Service-level: test_backend (per spec §10.4).
+        # Service-level actions for the User Mappings + Health UI.
         actions.append(
             ConfigAction(
                 key="test_backend",
@@ -893,6 +893,73 @@ class MediaLibraryService(Service):
                     "Ping a backend (Plex /identity, Jellyfin /System/Info)."
                 ),
                 required_role="admin",
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="list_user_mappings",
+                label="List user mappings",
+                description="Read-only enumeration of current mappings.",
+                required_role="admin",
+                hidden=True,
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="list_backend_users",
+                label="List backend users",
+                description=(
+                    "Enumerate users on a backend "
+                    "(payload: {backend: '...'})."
+                ),
+                required_role="admin",
+                hidden=True,
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="set_user_mapping",
+                label="Link user",
+                description=(
+                    "Persist a Gilbert↔backend mapping (payload: "
+                    "{gilbert_user_id, backend, backend_user_id, "
+                    "backend_username})."
+                ),
+                required_role="admin",
+                hidden=True,
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="unlink_user_mapping",
+                label="Unlink user",
+                description=(
+                    "Remove an existing mapping (payload: "
+                    "{gilbert_user_id, backend})."
+                ),
+                required_role="admin",
+                hidden=True,
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="list_backend_health",
+                label="Backend health",
+                description="Per-backend health for the Settings banner.",
+                required_role="admin",
+                hidden=True,
+            )
+        )
+        actions.append(
+            ConfigAction(
+                key="list_gilbert_users",
+                label="List Gilbert users",
+                description=(
+                    "Read-only Gilbert user list for the User Mappings "
+                    "dropdown."
+                ),
+                required_role="admin",
+                hidden=True,
             )
         )
         # Per-backend actions are forwarded with a "<backend>." prefix
@@ -927,6 +994,105 @@ class MediaLibraryService(Service):
     async def invoke_config_action(
         self, key: str, payload: dict[str, Any]
     ) -> ConfigActionResult:
+        if key == "list_user_mappings":
+            mappings = await self.list_user_mappings()
+            return ConfigActionResult(
+                status="ok",
+                message=f"{len(mappings)} mapping(s).",
+                data={"mappings": mappings},
+            )
+        if key == "list_backend_users":
+            backend_name = str(payload.get("backend") or "").strip()
+            if not backend_name:
+                return ConfigActionResult(
+                    status="error",
+                    message="list_backend_users requires {backend}.",
+                )
+            try:
+                users = await self.list_backend_users(backend_name)
+            except MediaLibraryError as exc:
+                return ConfigActionResult(
+                    status="error", message=str(exc)
+                )
+            return ConfigActionResult(
+                status="ok",
+                message=f"{len(users)} user(s) on {backend_name}.",
+                data={"users": users, "backend": backend_name},
+            )
+        if key == "set_user_mapping":
+            gid = str(payload.get("gilbert_user_id") or "").strip()
+            backend_name = str(payload.get("backend") or "").strip()
+            buid = str(payload.get("backend_user_id") or "").strip()
+            buname = str(payload.get("backend_username") or "").strip()
+            if not gid or not backend_name or not buid:
+                return ConfigActionResult(
+                    status="error",
+                    message=(
+                        "set_user_mapping requires {gilbert_user_id, "
+                        "backend, backend_user_id}."
+                    ),
+                )
+            try:
+                await self.set_user_mapping(
+                    gid, backend_name, buid, backend_username=buname
+                )
+            except Exception as exc:
+                return ConfigActionResult(
+                    status="error", message=str(exc)
+                )
+            return ConfigActionResult(
+                status="ok", message="Mapping saved."
+            )
+        if key == "unlink_user_mapping":
+            gid = str(payload.get("gilbert_user_id") or "").strip()
+            backend_name = str(payload.get("backend") or "").strip()
+            if not gid or not backend_name:
+                return ConfigActionResult(
+                    status="error",
+                    message=(
+                        "unlink_user_mapping requires {gilbert_user_id, "
+                        "backend}."
+                    ),
+                )
+            removed = await self.unlink_user_mapping(gid, backend_name)
+            return ConfigActionResult(
+                status="ok",
+                message=("Unlinked." if removed else "No mapping to unlink."),
+            )
+        if key == "list_backend_health":
+            return ConfigActionResult(
+                status="ok",
+                message="Backend health snapshot.",
+                data={"health": await self.list_backend_health()},
+            )
+        if key == "list_gilbert_users":
+            gilbert_users: list[dict[str, str]] = []
+            if self._resolver is not None:
+                users_svc = self._resolver.get_capability("users")
+                if users_svc is not None:
+                    list_users = getattr(users_svc, "list_users", None)
+                    if list_users is not None:
+                        try:
+                            raw = await list_users()
+                        except Exception as exc:
+                            return ConfigActionResult(
+                                status="error", message=str(exc)
+                            )
+                        for u in raw or []:
+                            gilbert_users.append(
+                                {
+                                    "user_id": str(u.get("_id") or ""),
+                                    "display_name": str(
+                                        u.get("display_name") or ""
+                                    ),
+                                    "email": str(u.get("email") or ""),
+                                }
+                            )
+            return ConfigActionResult(
+                status="ok",
+                message=f"{len(gilbert_users)} Gilbert user(s).",
+                data={"users": gilbert_users},
+            )
         if key == "test_backend":
             backend_name = str(payload.get("backend") or "").strip()
             if not backend_name:

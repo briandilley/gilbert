@@ -55,3 +55,5 @@
 - [Feeds Service](memory-feeds-service.md) — RSS/Atom polling + scoring + briefing builder; built-in RssAtomFeedBackend + private feed_articles DocumentBackend
 - [Feed Briefing Service](memory-feed-briefing-service.md) — daily fan-out; presence-first, fallback fires presence_grace_minutes after briefing_hour
 - [Tasks Service](memory-tasks-service.md) — multi-list todo aggregator with local-first push reconciliation, soft-delete, due_soon, GC; LocalTaskBackend + GoogleTasksBackend (in google plugin)
+- [Media Library Service](memory-media-library-service.md) — multi-backend Plex/Jellyfin video library + casting, per-user mapping, capability-gated tools
+- [Plex / Jellyfin Backends](memory-media-library-backends.md) — backend-specific gotchas (Plex Home user tokens, Jellyfin admin-token fan-out, ticks vs seconds)

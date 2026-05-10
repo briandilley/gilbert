@@ -51,6 +51,7 @@ dependencies = [
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-frigate",
     "gilbert-plugin-gemini",
+    "gilbert-plugin-jellyfin",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
@@ -87,6 +88,7 @@ gilbert-plugin-discord-webhook = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
 gilbert-plugin-frigate = { workspace = true }
 gilbert-plugin-gemini = { workspace = true }
+gilbert-plugin-jellyfin = { workspace = true }
 gilbert-plugin-google = { workspace = true }
 gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }

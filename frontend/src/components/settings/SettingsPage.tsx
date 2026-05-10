@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigSection } from "./ConfigSection";
+import { MediaLibraryUserMappings } from "./MediaLibraryUserMappings";
 import { ServiceToggles } from "./ServiceToggles";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import type { ConfigCategory } from "@/types/config";
@@ -94,6 +95,16 @@ export function SettingsPage() {
           {current.sections.map((section) => (
             <ConfigSection key={section.namespace} section={section} />
           ))}
+          {/* Core MediaLibraryService User Mappings panel — lives in
+              core SPA because the service is core. Per spec §13:
+              one table per configured backend, plus a backend-health
+              banner driven by ``service.method.invoke``-style
+              ConfigActions on the service. Plugin-shipped panels for
+              backend-specific widgets land via PluginPanelSlot below. */}
+          {current.name === "Media" &&
+            current.sections.some((s) => s.namespace === "media_library") && (
+              <MediaLibraryUserMappings />
+            )}
           {/* Plugins can contribute admin-scoped panels to a category
               via a "settings.<category>" slot — e.g. a future plugin
               could mount its own management UI under its own
