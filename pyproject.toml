@@ -63,6 +63,7 @@ dependencies = [
     "gilbert-plugin-openai",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-plex",
     "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
@@ -98,6 +99,7 @@ gilbert-plugin-open-meteo = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
+gilbert-plugin-plex = { workspace = true }
 gilbert-plugin-pushover = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
 gilbert-plugin-slack = { workspace = true }
