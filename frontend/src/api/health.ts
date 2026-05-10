@@ -58,6 +58,9 @@ export interface AuditRow {
   target_user_id: string;
   accessed_at: string;
   metric_types: string[];
+  // Backends touched (populated for ``self_delete_all``; empty for
+  // cross-user reads). Spec §4.5 — separate field from metric_types.
+  backends?: string[];
   period_start: string;
   period_end: string;
 }

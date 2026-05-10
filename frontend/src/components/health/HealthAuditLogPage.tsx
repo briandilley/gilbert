@@ -80,7 +80,9 @@ export function HealthAuditLogPage(): JSX.Element {
                     <td className="py-1 text-xs">
                       {r.metric_types.length > 0
                         ? r.metric_types.join(", ")
-                        : "—"}
+                        : r.backends && r.backends.length > 0
+                          ? `backends: ${r.backends.join(", ")}`
+                          : "—"}
                     </td>
                     <td className="py-1 text-xs">
                       {r.period_start && r.period_end

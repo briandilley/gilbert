@@ -15,17 +15,20 @@ pull), `hk-webhook` (generic catch-all push).
 ### Architecture
 
 - `interfaces/health.py` — `HealthBackend` ABC + registry, `HealthProvider`
-  capability protocol, `StorageAwareHealthBackend` protocol (for OAuth
-  backends that need raw storage access), `HealthMetric` /
-  `HealthAggregate` / `DailySummary` / `GreetingBrief` /
-  `LinkStartResult` / `LinkCompleteResult` dataclasses, `MetricType` /
-  `MetricUnit` / `AggregatePeriod` / `AggregatorKind` enums, error
-  taxonomy (`HealthBackendAuthError`, `HealthBackendRateLimitError`,
+  capability protocol, `HealthLinkProvider` capability protocol (for
+  the web nav's "should /health render?" gate, no raw storage poking),
+  `StorageAwareHealthBackend` protocol (for OAuth backends that need
+  raw storage access), `HealthMetric` / `HealthAggregate` /
+  `DailySummary` / `GreetingBrief` / `LinkStartResult` /
+  `LinkCompleteResult` dataclasses, `MetricType` / `MetricUnit` /
+  `AggregatePeriod` / `AggregatorKind` enums, error taxonomy
+  (`HealthBackendAuthError`, `HealthBackendRateLimitError`,
   `HealthBackendTransientError`, `HealthBackendNotFoundError`), pure
   `can_read_metrics` / `can_mutate_metrics` auth helpers,
   `parse_metric_payload` shared parser with `extra`-whitelist caps,
-  `HEALTH_ADMIN_ROLE` constant. Imports nothing outside
-  `interfaces/` + stdlib.
+  `METRIC_TYPE_HUMAN_NAMES` mapping + `metric_types_human_summary`
+  helper for cross-user-read notifications, `HEALTH_ADMIN_ROLE`
+  constant. Imports nothing outside `interfaces/` + stdlib.
 - `core/services/health.py` — `HealthService` (singleton). Discovers
   backends via `HealthBackend.registered_backends()` + side-effect
   imports inside std-plugins.
@@ -65,6 +68,14 @@ pull), `hk-webhook` (generic catch-all push).
   `health_links`, `health_daily_summaries`, `health_audit`,
   `health_oauth_state` so the entities page never silently exposes
   private data.
+- **Log-redaction filter in `core/logging.py`** masks values for the
+  keys `code`, `state`, `Authorization`, `webhook_url`, `oauth_*`,
+  plus generic `token`/`secret`/`password`. Bearer tokens in
+  Authorization headers are masked before generic kv patterns run, so
+  `Authorization: Bearer <secret>` collapses cleanly to
+  `Authorization: Bearer [redacted]`. Installed once on the root
+  logger (singleton `RedactingFilter`) so every handler — console,
+  file, AI log — emits redacted records.
 
 ### Backends
 
@@ -93,12 +104,20 @@ pull), `hk-webhook` (generic catch-all push).
 - `health_daily_summaries(_id=user_id/YYYY-MM-DD, user_id, local_date,
   summary_text, metrics_snapshot, flags, generated_at)`.
 - `health_audit(_id, kind, actor_user_id, target_user_id, accessed_at,
-  metric_types, period_start, period_end, request_id)` —
+  metric_types, backends, period_start, period_end, request_id)` —
   `read=admin/write=admin` ACL so attackers gaining user-level access
   can't tamper with the audit trail through the entities page.
+  `metric_types` is `list[MetricType]` and is empty for
+  `self_delete_all` rows; `backends` carries the `list[str]` of
+  backend names involved in the delete (only populated for
+  `self_delete_all`).
 - `health_oauth_state(_id=state, user_id, backend_name, created_at,
   expires_at, consumed_at)` — server-side state binding, 10-minute
-  TTL, one-shot consume.
+  TTL, one-shot consume. `consume_oauth_state` is serialized per-state
+  via an in-memory `asyncio.Lock` so two concurrent callbacks for the
+  same state cannot both observe `consumed_at == None` and both
+  succeed (the lock holds across the read-then-write critical
+  section, including the TTL check).
 
 ### Events
 
@@ -129,16 +148,25 @@ actor + target + admin.
   dict serializes the dedup-then-write path so concurrent webhook
   deliveries for the same user-backend can't trample each other.
   Different users / different backends fan out.
+- Withings `_call` retries on 401 are also serialized per-user via
+  `WithingsBackend._refresh_locks[user_id]`. After acquiring the
+  lock, the backend re-reads the link row to absorb the case where
+  another caller already refreshed (avoids "second refresh fails
+  because the first invalidated the prior refresh token" cascading
+  to consecutive-auth-failure-driven auto-disable).
 - Per-user write cap (default 100k/day) enforced in `ingest_metrics`
   regardless of source — defends against a buggy Shortcut posting
   every minute.
 - Per-token + per-IP webhook buckets, LRU-capped at 10k entries.
 - Scheduler loops use `_run_per_user(user_ids, work, *, concurrency,
-  label)` — bounded `asyncio.Semaphore` + per-task
+  label, tz_by_user=...)` — bounded `asyncio.Semaphore` + per-task
   `contextvars.copy_context()` so the per-task `set_current_user`
   doesn't leak. Actor stays `UserContext.SYSTEM` with
   `metadata["target_user_id"]` carrying the target so audit logs
   distinguish "system did X for user Y" from "user Y did X."
+  `_system_acting_for(user_id, *, tz=None)` populates `tz` on the
+  SYSTEM context so `_compute_and_persist_summary` reads it via
+  `get_current_user().tz` instead of re-querying `users_svc`.
 
 ### Configurable prompts
 
