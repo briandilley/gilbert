@@ -211,6 +211,15 @@ ignore = [
     "SIM117",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Plugin directories use kebab-case names (apple-health, hk-webhook,
+# guess-that-song, ...) per the plugin manifest convention. The
+# package name CAN'T be lowercased without breaking the manifest +
+# uv-workspace member name; the per-file ignore lets the plugin
+# loader's sys.modules registration (which substitutes underscores
+# at import time) continue to work.
+"std-plugins/*/__init__.py" = ["N999"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

@@ -57,3 +57,4 @@
 - [Tasks Service](memory-tasks-service.md) — multi-list todo aggregator with local-first push reconciliation, soft-delete, due_soon, GC; LocalTaskBackend + GoogleTasksBackend (in google plugin)
 - [Media Library Service](memory-media-library-service.md) — multi-backend Plex/Jellyfin video library + casting, per-user mapping, capability-gated tools
 - [Plex / Jellyfin Backends](memory-media-library-backends.md) — backend-specific gotchas (Plex Home user tokens, Jellyfin admin-token fan-out, ticks vs seconds)
+- [Health Service](memory-health-service.md) — multi-backend personal health metrics with PHI-adjacent privacy posture, two-step right-to-delete, hash-at-rest webhook tokens, audit-logged cross-user reads

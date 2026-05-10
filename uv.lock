@@ -12,6 +12,7 @@ members = [
     "gilbert",
     "gilbert-plugin-american-standard",
     "gilbert-plugin-anthropic",
+    "gilbert-plugin-apple-health",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
@@ -23,6 +24,7 @@ members = [
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-hk-webhook",
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
@@ -42,6 +44,7 @@ members = [
     "gilbert-plugin-telegram",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-withings",
     "gilbert-plugin-xai",
 ]
 overrides = [{ name = "onnxruntime", specifier = "<1.21" }]
@@ -962,6 +965,7 @@ dependencies = [
     { name = "feedparser" },
     { name = "gilbert-plugin-american-standard" },
     { name = "gilbert-plugin-anthropic" },
+    { name = "gilbert-plugin-apple-health" },
     { name = "gilbert-plugin-arr" },
     { name = "gilbert-plugin-bedrock" },
     { name = "gilbert-plugin-browser" },
@@ -973,6 +977,7 @@ dependencies = [
     { name = "gilbert-plugin-google" },
     { name = "gilbert-plugin-groq" },
     { name = "gilbert-plugin-guess-that-song" },
+    { name = "gilbert-plugin-hk-webhook" },
     { name = "gilbert-plugin-jellyfin" },
     { name = "gilbert-plugin-lutron-radiora" },
     { name = "gilbert-plugin-mistral" },
@@ -992,6 +997,7 @@ dependencies = [
     { name = "gilbert-plugin-telegram" },
     { name = "gilbert-plugin-tesseract" },
     { name = "gilbert-plugin-unifi" },
+    { name = "gilbert-plugin-withings" },
     { name = "gilbert-plugin-xai" },
     { name = "httpx" },
     { name = "markdown" },
@@ -1038,6 +1044,7 @@ requires-dist = [
     { name = "feedparser", specifier = ">=6.0.10" },
     { name = "gilbert-plugin-american-standard", virtual = "std-plugins/american-standard" },
     { name = "gilbert-plugin-anthropic", virtual = "std-plugins/anthropic" },
+    { name = "gilbert-plugin-apple-health", virtual = "std-plugins/apple-health" },
     { name = "gilbert-plugin-arr", virtual = "std-plugins/arr" },
     { name = "gilbert-plugin-bedrock", virtual = "std-plugins/bedrock" },
     { name = "gilbert-plugin-browser", virtual = "std-plugins/browser" },
@@ -1049,6 +1056,7 @@ requires-dist = [
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
     { name = "gilbert-plugin-groq", virtual = "std-plugins/groq" },
     { name = "gilbert-plugin-guess-that-song", virtual = "std-plugins/guess-that-song" },
+    { name = "gilbert-plugin-hk-webhook", virtual = "std-plugins/hk-webhook" },
     { name = "gilbert-plugin-jellyfin", virtual = "std-plugins/jellyfin" },
     { name = "gilbert-plugin-lutron-radiora", virtual = "std-plugins/lutron-radiora" },
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
@@ -1068,6 +1076,7 @@ requires-dist = [
     { name = "gilbert-plugin-telegram", virtual = "std-plugins/telegram" },
     { name = "gilbert-plugin-tesseract", virtual = "std-plugins/tesseract" },
     { name = "gilbert-plugin-unifi", virtual = "std-plugins/unifi" },
+    { name = "gilbert-plugin-withings", virtual = "std-plugins/withings" },
     { name = "gilbert-plugin-xai", virtual = "std-plugins/xai" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "markdown", specifier = ">=3.5" },
@@ -1122,6 +1131,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "anthropic", specifier = ">=0.89.0" }]
+
+[[package]]
+name = "gilbert-plugin-apple-health"
+version = "1.0.0"
+source = { virtual = "std-plugins/apple-health" }
 
 [[package]]
 name = "gilbert-plugin-arr"
@@ -1211,6 +1225,11 @@ source = { virtual = "std-plugins/groq" }
 name = "gilbert-plugin-guess-that-song"
 version = "1.0.0"
 source = { virtual = "std-plugins/guess-that-song" }
+
+[[package]]
+name = "gilbert-plugin-hk-webhook"
+version = "1.0.0"
+source = { virtual = "std-plugins/hk-webhook" }
 
 [[package]]
 name = "gilbert-plugin-jellyfin"
@@ -1356,6 +1375,17 @@ requires-dist = [{ name = "pytesseract", specifier = ">=0.3.13" }]
 name = "gilbert-plugin-unifi"
 version = "1.0.0"
 source = { virtual = "std-plugins/unifi" }
+
+[[package]]
+name = "gilbert-plugin-withings"
+version = "1.0.0"
+source = { virtual = "std-plugins/withings" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.27" }]
 
 [[package]]
 name = "gilbert-plugin-xai"

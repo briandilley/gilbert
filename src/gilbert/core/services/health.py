@@ -41,21 +41,19 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.health import (
+    DEFAULT_AGGREGATOR,
     HEALTH_ADMIN_ROLE,
     AggregatePeriod,
     AggregatorKind,
     DailySummary,
-    DEFAULT_AGGREGATOR,
     GreetingBrief,
     HealthAggregate,
     HealthBackend,
     HealthBackendAuthError,
-    HealthBackendError,
     HealthBackendNotFoundError,
     HealthBackendRateLimitError,
     HealthBackendTransientError,
     HealthMetric,
-    HealthProvider,
     LinkCompleteResult,
     LinkStartResult,
     MetricType,
@@ -1742,6 +1740,251 @@ class HealthService(Service):
             "upstream_revoke_failures": revoke_failures,
         }
 
+    async def rotate_webhook_token(
+        self,
+        user_id: str,
+        backend_name: str,
+    ) -> dict[str, Any]:
+        """Rotate a per-user webhook token. Returns the raw token ONCE
+        + the derived ``webhook_url`` so the SPA can show "copy this
+        URL into your iOS Shortcut" — only the SHA-256 hash is
+        persisted. The previous token is revoked immediately.
+
+        Refuses for backends without ``supports_push``. Sends an
+        URGENT notification reminding the user to update any device
+        posting with the old token.
+        """
+        if self._storage is None:
+            return {"status": "error", "message": "storage unavailable"}
+        backend = self._backends.get(backend_name)
+        if backend is None:
+            return {"status": "error", "message": f"unknown backend: {backend_name}"}
+        if not backend.supports_push:
+            return {
+                "status": "error",
+                "message": (
+                    f"Token rotation does not apply to backend '{backend_name}'"
+                ),
+            }
+        raw_token = secrets.token_urlsafe(48)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        last4 = raw_token[-4:]
+        link_id = f"{user_id}/{backend_name}"
+        existing = await self._storage.get(_LINKS_COLLECTION, link_id) or {
+            "_id": link_id,
+            "user_id": user_id,
+            "backend_name": backend_name,
+            "enabled": True,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        existing["webhook_token_hash"] = token_hash
+        existing["webhook_token_last4"] = last4
+        existing["enabled"] = True
+        existing["updated_at"] = datetime.now(UTC).isoformat()
+        await self._storage.put(_LINKS_COLLECTION, link_id, existing)
+
+        base = self._public_base_url.rstrip("/")
+        webhook_url = f"{base}/webhook/health/{raw_token}" if base else ""
+
+        # URGENT notification — rotation creates a silent-dead-drop
+        # bug if the user has a device posting with the old token.
+        if self._notifications is not None:
+            try:
+                await self._notifications.notify_user(
+                    user_id=user_id,
+                    message=(
+                        f"Health webhook token rotated for {backend_name}. "
+                        "Update your device with the new URL."
+                    ),
+                    urgency=NotificationUrgency.URGENT,
+                    source="health",
+                )
+            except Exception:
+                logger.debug("Token-rotate notify failed", exc_info=True)
+        return {
+            "status": "ok",
+            "raw_token": raw_token,
+            "webhook_url": webhook_url,
+        }
+
+    async def begin_link(self, user_id: str, backend_name: str) -> LinkStartResult:
+        """Service-level begin_link wrapper.
+
+        Looks up the backend by name (or returns ``status="error"``)
+        and delegates to ``backend.begin_link(user_id)``.
+        """
+        backend = self._backends.get(backend_name)
+        if backend is None:
+            return LinkStartResult(
+                status="error",
+                message=f"unknown backend: {backend_name}",
+            )
+        return await backend.begin_link(user_id)
+
+    async def complete_link(
+        self,
+        user_id: str,
+        backend_name: str,
+        payload: dict[str, Any],
+    ) -> LinkCompleteResult:
+        """Service-level complete_link wrapper.
+
+        Delegates to the backend's ``complete_link`` and, on success,
+        publishes ``health.link.connected``.
+        """
+        backend = self._backends.get(backend_name)
+        if backend is None:
+            return LinkCompleteResult(
+                status="error",
+                message=f"unknown backend: {backend_name}",
+            )
+        result = await backend.complete_link(user_id, payload)
+        if result.status == "ok":
+            await self._publish_event(
+                "health.link.connected",
+                {"user_id": user_id, "backend": backend_name},
+            )
+        return result
+
+    async def consume_oauth_state(
+        self,
+        state: str,
+        backend_name: str,
+        caller_user_id: str,
+    ) -> dict[str, Any]:
+        """Validate + one-shot consume an OAuth state row.
+
+        Returns ``{"status": "ok", "user_id": ...}`` on success,
+        ``{"status": "expired"}`` on TTL expiry,
+        ``{"status": "user_mismatch"}`` if the caller's session doesn't
+        match the originating user (confused-deputy defense),
+        ``{"status": "backend_mismatch"}`` if the state was minted for
+        a different backend, ``{"status": "already"}`` if the row was
+        already consumed, ``{"status": "missing"}`` if it doesn't
+        exist.
+        """
+        if self._storage is None:
+            return {"status": "missing"}
+        row = await self._storage.get(_OAUTH_STATE_COLLECTION, state)
+        if row is None:
+            return {"status": "missing"}
+        expires_at_raw = row.get("expires_at") or ""
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_raw))
+        except ValueError:
+            return {"status": "missing"}
+        if datetime.now(UTC) > expires_at:
+            await self._storage.delete(_OAUTH_STATE_COLLECTION, state)
+            return {"status": "expired"}
+        if str(row.get("user_id") or "") != caller_user_id:
+            return {"status": "user_mismatch"}
+        if str(row.get("backend_name") or "") != backend_name:
+            return {"status": "backend_mismatch"}
+        if row.get("consumed_at"):
+            return {"status": "already"}
+        row["consumed_at"] = datetime.now(UTC).isoformat()
+        await self._storage.put(_OAUTH_STATE_COLLECTION, state, row)
+        return {"status": "ok", "user_id": str(row.get("user_id") or "")}
+
+    async def record_oauth_error(
+        self,
+        user_id: str,
+        backend_name: str,
+        error: str,
+    ) -> None:
+        """Record an OAuth-denied error on the link row."""
+        if self._storage is None:
+            return
+        link_id = f"{user_id}/{backend_name}"
+        existing = await self._storage.get(_LINKS_COLLECTION, link_id) or {
+            "_id": link_id,
+            "user_id": user_id,
+            "backend_name": backend_name,
+            "enabled": False,
+        }
+        existing["last_sync_error"] = f"oauth: {error}"
+        await self._storage.put(_LINKS_COLLECTION, link_id, existing)
+
+    async def list_admin_user_counts(self) -> list[dict[str, Any]]:
+        """Per-user aggregate (counts only, no values, no per-day
+        breakdown). Used by the admin overview /api/health/admin/users
+        route."""
+        if self._storage is None:
+            return []
+        rows = await self._storage.query(
+            Query(
+                collection=_LINKS_COLLECTION,
+                sort=[SortField(field="user_id", descending=False)],
+            )
+        )
+        by_user: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            uid = str(r.get("user_id") or "")
+            if not uid:
+                continue
+            info = by_user.setdefault(
+                uid,
+                {
+                    "user_id": uid,
+                    "has_data": False,
+                    "backends": [],
+                    "last_ingested_at": "",
+                },
+            )
+            info["backends"].append(str(r.get("backend_name") or ""))
+            for stamp_key in ("last_delivery_at", "last_sync_at"):
+                stamp = str(r.get(stamp_key) or "")
+                if stamp:
+                    info["has_data"] = True
+                    if stamp > info["last_ingested_at"]:
+                        info["last_ingested_at"] = stamp
+        return list(by_user.values())
+
+    async def list_admin_audit_log(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Read every ``health_audit`` row (admin / health-admin)."""
+        if self._storage is None:
+            return []
+        return await self._storage.query(
+            Query(
+                collection=_AUDIT_COLLECTION,
+                sort=[SortField(field="accessed_at", descending=True)],
+                limit=limit,
+            )
+        )
+
+    async def list_my_audit_log(
+        self,
+        user_id: str,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Per-user audit log: every row where ``target_user_id``
+        matches the calling user, sorted most recent first."""
+        if self._storage is None:
+            return []
+        return await self._storage.query(
+            Query(
+                collection=_AUDIT_COLLECTION,
+                filters=[
+                    Filter(field="target_user_id", op=FilterOp.EQ, value=user_id),
+                ],
+                sort=[SortField(field="accessed_at", descending=True)],
+                limit=limit,
+            )
+        )
+
+    async def list_user_links(self, user_id: str) -> list[dict[str, Any]]:
+        """Return every ``health_links`` row for the user, secrets
+        redacted."""
+        if self._storage is None:
+            return []
+        rows = await self._storage.query(
+            Query(
+                collection=_LINKS_COLLECTION,
+                filters=[Filter(field="user_id", op=FilterOp.EQ, value=user_id)],
+            )
+        )
+        return [_redact_link(r) for r in rows]
+
     async def disconnect_backend(self, user_id: str, backend_name: str) -> bool:
         """Remove a single ``health_links`` row + revoke upstream.
 
@@ -2086,7 +2329,7 @@ class HealthService(Service):
                     system_prompt=self._summary_prompt,
                     profile_name=self._ai_profile,
                 )
-                summary_text = (response.content or "").strip()
+                summary_text = (response.message.content or "").strip()
             except Exception:
                 logger.exception("Health: AI summary failed for %s", user_id)
                 summary_text = ""
@@ -2270,7 +2513,7 @@ class HealthService(Service):
                     system_prompt=self._summary_prompt,
                     profile_name=self._ai_profile,
                 )
-                ai_text = (response.content or "").strip()
+                ai_text = (response.message.content or "").strip()
             except Exception:
                 logger.debug("health_now: AI call failed", exc_info=True)
         return json.dumps({"snapshot": snapshot, "summary": ai_text})
@@ -2333,7 +2576,7 @@ class HealthService(Service):
             return json.dumps(
                 {
                     "snapshot": snapshot,
-                    "summary_text": (response.content or "").strip(),
+                    "summary_text": (response.message.content or "").strip(),
                 }
             )
         except Exception:
@@ -2375,7 +2618,7 @@ class HealthService(Service):
                     system_prompt=self._trend_prompt,
                     profile_name=self._ai_profile,
                 )
-                ai_text = (response.content or "").strip()
+                ai_text = (response.message.content or "").strip()
             except Exception:
                 logger.debug("health_trend: AI failed", exc_info=True)
         return json.dumps(

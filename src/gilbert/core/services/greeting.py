@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
-from gilbert.interfaces.health import GreetingBrief, HealthProvider
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.feeds import FeedsProvider
+from gilbert.interfaces.health import GreetingBrief, HealthProvider
 from gilbert.interfaces.presence import PresenceProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import SpeakerProvider

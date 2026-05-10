@@ -16,32 +16,27 @@ import pytest
 from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.health import (
-    HealthService,
+    _ACL_COLLECTION,
+    _AUDIT_COLLECTION,
     _LINKS_COLLECTION,
     _METRICS_COLLECTION,
     _ROLES_COLLECTION,
-    _ACL_COLLECTION,
     _SUMMARIES_COLLECTION,
-    _AUDIT_COLLECTION,
+    HealthService,
 )
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.health import (
     HEALTH_ADMIN_ROLE,
-    HealthMetric,
     MetricType,
-    MetricUnit,
 )
 from gilbert.interfaces.notifications import (
     Notification,
-    NotificationProvider,
     NotificationUrgency,
 )
 from gilbert.interfaces.storage import Filter, FilterOp, Query
 from gilbert.storage.sqlite import SQLiteStorage
-
 from tests.unit._fakes.health import FakeHealthBackend, make_metric
-
 
 # ── Resolver / fakes ────────────────────────────────────────────────
 

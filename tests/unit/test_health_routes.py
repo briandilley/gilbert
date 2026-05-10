@@ -21,14 +21,12 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from gilbert.core.events import InMemoryEventBus
-from gilbert.core.services.health import HealthService, _LINKS_COLLECTION
+from gilbert.core.services.health import _LINKS_COLLECTION, HealthService
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.health import HEALTH_ADMIN_ROLE
 from gilbert.web.auth import require_authenticated
 from gilbert.web.routes.health import api_router, webhook_router
-
 from tests.unit._fakes.health import FakeHealthBackend, make_metric
-
 
 # ── Fakes ────────────────────────────────────────────────────────────
 
@@ -280,7 +278,7 @@ def test_me_links_lists_caller_only(
         assert "webhook_token_hash" not in item
 
 
-def test_delete_all_requires_literal_DELETE(
+def test_delete_all_requires_literal_DELETE(  # noqa: N802
     app_and_svc: tuple[FastAPI, HealthService, str],
 ) -> None:
     app, _svc, _ = app_and_svc
@@ -292,7 +290,7 @@ def test_delete_all_requires_literal_DELETE(
     assert bad.status_code == 400
 
 
-def test_delete_all_with_DELETE_succeeds(
+def test_delete_all_with_DELETE_succeeds(  # noqa: N802
     app_and_svc: tuple[FastAPI, HealthService, str],
 ) -> None:
     app, svc, _ = app_and_svc

@@ -487,12 +487,16 @@ class WebApiService(Service):
             if health_svc is not None and getattr(health_svc, "_storage", None):
                 from gilbert.interfaces.storage import (
                     Filter as _Filter,
+                )
+                from gilbert.interfaces.storage import (
                     FilterOp as _FilterOp,
+                )
+                from gilbert.interfaces.storage import (
                     Query as _Query,
                 )
 
                 try:
-                    count = await health_svc._storage.count(  # type: ignore[attr-defined]
+                    count = await health_svc._storage.count(
                         _Query(
                             collection="health_links",
                             filters=[

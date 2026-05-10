@@ -16,7 +16,6 @@ Key invariants per spec §10.1 / §11 / §16.6:
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -26,9 +25,9 @@ import pytest
 from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.health import (
-    HealthService,
     _DEFAULT_SUMMARY_PROMPT,
     _SUMMARIES_COLLECTION,
+    HealthService,
     _structured_prose,
 )
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole
@@ -40,9 +39,6 @@ from gilbert.interfaces.health import (
 )
 from gilbert.interfaces.storage import Filter, FilterOp, Query
 from gilbert.storage.sqlite import SQLiteStorage
-
-from tests.unit._fakes.health import FakeHealthBackend
-
 
 # ── Fakes ────────────────────────────────────────────────────────────
 
@@ -112,8 +108,8 @@ class _RecordingAI:
             }
         )
         return AIResponse(
-            content=self.response_text,
-            usage={"input_tokens": 10, "output_tokens": 8, "cost_usd": 0.0},
+            message=Message(role=MessageRole.ASSISTANT, content=self.response_text),
+            model="test-model",
         )
 
 

@@ -14,8 +14,8 @@ import pytest
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.health import (
     DEFAULT_AGGREGATOR,
-    EXTRA_MAX_KEYS,
     EXTRA_MAX_KEY_LEN,
+    EXTRA_MAX_KEYS,
     EXTRA_MAX_TOTAL_BYTES,
     EXTRA_MAX_VALUE_LEN,
     HEALTH_ADMIN_ROLE,
@@ -35,7 +35,6 @@ from gilbert.interfaces.health import (
     can_read_metrics,
     parse_metric_payload,
 )
-
 
 # ── DEFAULT_AGGREGATOR completeness ──────────────────────────────────
 
@@ -261,7 +260,7 @@ class _FakeOneBackend(HealthBackend):
         return {MetricType.STEPS}
 
 
-def test_subclass_registers_in_HealthBackend_registry() -> None:
+def test_subclass_registers_in_HealthBackend_registry() -> None:  # noqa: N802
     """``__init_subclass__`` registers on ``HealthBackend._registry``
     (NOT ``cls._registry``) so subclasses don't shadow the parent."""
     assert "_fake_one" in HealthBackend.registered_backends()

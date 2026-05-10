@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from gilbert.core.services.greeting import GreetingService
 from gilbert.interfaces.health import (
     GreetingBrief,
