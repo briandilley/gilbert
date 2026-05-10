@@ -45,6 +45,12 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # ``feed.briefing.ready`` is restricted to the recipient
     # ``user_id`` only (analogous to notification fan-out).
     "feed.": 100,
+    # Tasks events are user-level — any user can have a shared task
+    # list. The WS layer's per-event list-access filter applies on
+    # top of this prefix-level gate. ``task.`` covers per-task events
+    # and ``tasks.`` covers list-level / aggregate events.
+    "tasks.": 100,
+    "task.": 100,
     # Notifications are user-level events; the WS layer's
     # can_see_notification_event filter narrows delivery to the
     # specific recipient by matching event.data["user_id"].
@@ -114,6 +120,11 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # gate (any authenticated user may issue feeds.* frames; per-feed
     # authorization is per-handler).
     "feeds.": 100,
+    # Tasks RPCs are user-level; handlers enforce per-list access via
+    # can_access_list / can_admin_list on top of the prefix-level gate
+    # (any authenticated user may issue tasks.* frames; per-list
+    # authorization is per-handler).
+    "tasks.": 100,
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,
