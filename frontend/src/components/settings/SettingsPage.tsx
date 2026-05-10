@@ -99,11 +99,19 @@ export function SettingsPage() {
               core SPA because the service is core. Per spec §13:
               one table per configured backend, plus a backend-health
               banner driven by ``service.method.invoke``-style
-              ConfigActions on the service. Plugin-shipped panels for
-              backend-specific widgets land via PluginPanelSlot below. */}
+              ConfigActions on the service. */}
           {current.name === "Media" &&
             current.sections.some((s) => s.namespace === "media_library") && (
               <MediaLibraryUserMappings />
+            )}
+          {/* Spec §13.3 extension point: plugins (Plex / Jellyfin)
+              can ship backend-specific widgets — e.g. a future Plex
+              "Choose Server" wizard — that mount under
+              ``settings.media_library`` without core SPA edits. The
+              slot is additive on top of the core panel above. */}
+          {current.name === "Media" &&
+            current.sections.some((s) => s.namespace === "media_library") && (
+              <PluginPanelSlot slot="settings.media_library" />
             )}
           {/* Plugins can contribute admin-scoped panels to a category
               via a "settings.<category>" slot — e.g. a future plugin

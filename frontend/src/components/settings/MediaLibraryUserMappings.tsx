@@ -11,10 +11,11 @@
  * ``test_backend``.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useEventBus } from "@/hooks/useEventBus";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -23,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { CheckIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
+import { RefreshCwIcon, Trash2Icon } from "lucide-react";
 
 interface GilbertUser {
   user_id: string;
@@ -77,7 +78,9 @@ export function MediaLibraryUserMappings() {
   const mappings: UserMapping[] =
     (mappingsData?.result?.data?.mappings as UserMapping[]) ?? [];
 
-  // Backend health
+  // Backend health — subscribed to ``media.backend.health_changed``
+  // for live updates, with a 30s poll fallback in case the bus drops.
+  // Spec §13.2.
   const { data: healthData } = useQuery({
     queryKey: ["media_library", "health"],
     queryFn: () => api.invokeConfigAction(NAMESPACE, "list_backend_health"),
@@ -93,6 +96,16 @@ export function MediaLibraryUserMappings() {
   const refreshAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["media_library"] });
   }, [queryClient]);
+
+  const refreshHealth = useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: ["media_library", "health"],
+    });
+  }, [queryClient]);
+
+  // Push: bus event triggers an immediate health refetch so the
+  // banner flips green/red without waiting for the 30s poll cycle.
+  useEventBus("media.backend.health_changed", refreshHealth);
 
   if (backends.length === 0) {
     return (
@@ -197,10 +210,10 @@ function BackendMappingsTable({
     (backendUsersData?.result?.data?.users as BackendUser[]) ?? [];
 
   // pending edits keyed by gilbert user id (the in-memory dropdown
-  // selection before the user clicks Save).
+  // selection before the user clicks "Save all").
   const [pending, setPending] = useState<Record<string, string>>({});
   // local UI state for messages.
-  const [savingFor, setSavingFor] = useState<string | null>(null);
+  const [saving, setSaving] = useState<boolean>(false);
   const [errorFor, setErrorFor] = useState<string | null>(null);
 
   useEffect(() => {
@@ -215,35 +228,66 @@ function BackendMappingsTable({
     setPending((prev) => ({ ...prev, [gid]: backendUserId }));
   };
 
-  const onSave = async (gid: string) => {
-    const buid = pending[gid];
-    if (!buid) return;
-    setSavingFor(gid);
+  const dirtyEntries = useMemo(
+    () =>
+      Object.entries(pending).filter(([gid, buid]) => {
+        const current = mappingFor(gid);
+        return buid && buid !== current?.backend_user_id;
+      }),
+    [pending, mappings],
+  );
+
+  const onSaveAll = async () => {
+    if (dirtyEntries.length === 0) return;
+    setSaving(true);
     setErrorFor(null);
     try {
-      const buser = backendUsers.find((u) => u.id === buid);
-      const response = await api.invokeConfigAction(
-        NAMESPACE,
-        "set_user_mapping",
-        {
-          gilbert_user_id: gid,
-          backend,
-          backend_user_id: buid,
-          backend_username: buser?.username || "",
-        },
+      // Spec §13.1: batch all dirty rows in one click. Issue all RPCs
+      // in parallel and surface the first failure (the rest stay
+      // dirty so the user can retry without losing their selections).
+      const results = await Promise.all(
+        dirtyEntries.map(async ([gid, buid]) => {
+          const buser = backendUsers.find((u) => u.id === buid);
+          const response = await api.invokeConfigAction(
+            NAMESPACE,
+            "set_user_mapping",
+            {
+              gilbert_user_id: gid,
+              backend,
+              backend_user_id: buid,
+              backend_username: buser?.username || "",
+            },
+          );
+          return { gid, buid, response };
+        }),
       );
-      if (response.result.status !== "ok") {
-        setErrorFor(response.result.message || "Save failed");
-      } else {
-        setPending((prev) => {
-          const next = { ...prev };
-          delete next[gid];
-          return next;
-        });
-        onChanged();
+      const failures = results.filter(
+        (r) => r.response.result.status !== "ok",
+      );
+      const succeededGids = new Set(
+        results
+          .filter((r) => r.response.result.status === "ok")
+          .map((r) => r.gid),
+      );
+      // Drop the saved rows from the pending map; keep any failures.
+      setPending((prev) => {
+        const next: Record<string, string> = {};
+        for (const [gid, buid] of Object.entries(prev)) {
+          if (!succeededGids.has(gid)) next[gid] = buid;
+        }
+        return next;
+      });
+      if (failures.length > 0) {
+        const first = failures[0].response.result.message || "Save failed";
+        setErrorFor(
+          failures.length === 1
+            ? first
+            : `${first} (+${failures.length - 1} more)`,
+        );
       }
+      onChanged();
     } finally {
-      setSavingFor(null);
+      setSaving(false);
     }
   };
 
@@ -313,7 +357,11 @@ function BackendMappingsTable({
                     value={selected}
                     onValueChange={(v: string | null) => onSelect(gu.user_id, v ?? "")}
                   >
-                    <SelectTrigger className="w-64">
+                    <SelectTrigger
+                      className={
+                        dirty ? "w-64 ring-2 ring-amber-400" : "w-64"
+                      }
+                    >
                       <SelectValue placeholder={`Choose ${backend}…`} />
                     </SelectTrigger>
                     <SelectContent>
@@ -330,16 +378,6 @@ function BackendMappingsTable({
                 </td>
                 <td className="py-2 pr-2">
                   <div className="flex gap-1">
-                    {dirty && (
-                      <Button
-                        size="sm"
-                        onClick={() => onSave(gu.user_id)}
-                        disabled={savingFor === gu.user_id}
-                      >
-                        <CheckIcon className="size-3 mr-1" />
-                        Save
-                      </Button>
-                    )}
                     {mapping && !dirty && (
                       <>
                         <Button
@@ -365,6 +403,23 @@ function BackendMappingsTable({
           })}
         </tbody>
       </table>
+      {/* Spec §13.1: one Save-all button at the bottom commits every
+          pending edit in a single batch. Disabled when no edits are
+          dirty so the click is unambiguous. */}
+      <div className="mt-3 flex items-center justify-end gap-3">
+        {dirtyEntries.length > 0 && (
+          <span className="text-xs text-muted-foreground">
+            {dirtyEntries.length} pending
+          </span>
+        )}
+        <Button
+          size="sm"
+          onClick={onSaveAll}
+          disabled={saving || dirtyEntries.length === 0}
+        >
+          {saving ? "Saving…" : "Save all"}
+        </Button>
+      </div>
     </div>
   );
 }

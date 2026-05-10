@@ -91,6 +91,7 @@ from gilbert.interfaces.tools import (
     ToolParameterType,
 )
 from gilbert.interfaces.ui import ToolOutput, UIBlock, UIElement, UIOption
+from gilbert.interfaces.users import UserManagementProvider
 
 if TYPE_CHECKING:
     pass
@@ -98,6 +99,85 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+# ── Log redaction ──────────────────────────────────────────────────
+#
+# Plex (`?X-Plex-Token=`) and Jellyfin (`?api_key=`) carry secrets in
+# query strings. ``httpx.HTTPStatusError.__str__`` includes the URL,
+# which means a 401 with ``logger.warning(..., exc_info=True)`` would
+# write the live token to the file logger and the AI-API call log.
+# Spec §16 mandates a redactor; acceptance #9 verifies via grep against
+# the captured log output.
+
+_PLEX_TOKEN_RE = re.compile(r"X-Plex-Token=[^&\s\"'<>]+", re.IGNORECASE)
+_API_KEY_RE = re.compile(r"\?api_key=[^&\s\"'<>]+", re.IGNORECASE)
+_API_KEY_BARE_RE = re.compile(r"&api_key=[^&\s\"'<>]+", re.IGNORECASE)
+
+
+def _redact_sensitive(text: str) -> str:
+    """Strip backend tokens from ``text``.
+
+    Replaces ``X-Plex-Token=<secret>`` and ``[?&]api_key=<secret>`` with
+    ``=<REDACTED>`` placeholders. Safe to call on arbitrary log text —
+    non-matching strings pass through unchanged.
+    """
+    if not text:
+        return text
+    out = _PLEX_TOKEN_RE.sub("X-Plex-Token=<REDACTED>", text)
+    out = _API_KEY_RE.sub("?api_key=<REDACTED>", out)
+    out = _API_KEY_BARE_RE.sub("&api_key=<REDACTED>", out)
+    return out
+
+
+class MediaLogRedactor(logging.Filter):
+    """Redact backend tokens from log records before they're emitted.
+
+    Installed at service ``start()`` on the relevant module loggers
+    (core service + plugin loggers). Mutates ``record.msg`` and
+    ``record.args`` in-place; returns True so the record continues
+    through the handler chain.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, str):
+                record.msg = _redact_sensitive(record.msg)
+            if record.args:
+                if isinstance(record.args, tuple):
+                    record.args = tuple(
+                        _redact_sensitive(a) if isinstance(a, str) else a
+                        for a in record.args
+                    )
+                elif isinstance(record.args, dict):
+                    record.args = {
+                        k: (
+                            _redact_sensitive(v) if isinstance(v, str) else v
+                        )
+                        for k, v in record.args.items()
+                    }
+        except Exception:
+            # Never break logging because of a redaction bug — fall
+            # through with the record as-is.
+            pass
+        return True
+
+
+# Module-level filter so multiple ``addFilter`` calls don't pile up
+# duplicates; logging.Filter de-dupes by identity.
+_MEDIA_LOG_REDACTOR = MediaLogRedactor()
+
+
+def _install_log_redactor(*logger_names: str) -> None:
+    """Attach the singleton redactor to each named logger.
+
+    Idempotent — subsequent calls are no-ops because Python logging
+    de-dupes filters by identity.
+    """
+    for name in logger_names:
+        target = logging.getLogger(name)
+        if _MEDIA_LOG_REDACTOR not in target.filters:
+            target.addFilter(_MEDIA_LOG_REDACTOR)
 
 _USER_MAP_COLLECTION = "media_library_user_map"
 _CLIENTS_CACHE_COLLECTION = "media_library_clients_cache"
@@ -440,7 +520,13 @@ class MediaLibraryService(Service):
             capabilities=frozenset({"media_library", "ai_tools"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
-                {"configuration", "event_bus", "ai_chat", "scheduler"}
+                {
+                    "configuration",
+                    "event_bus",
+                    "ai_chat",
+                    "scheduler",
+                    "users",
+                }
             ),
             events=frozenset(
                 {
@@ -456,6 +542,15 @@ class MediaLibraryService(Service):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+
+        # Spec §16: strip backend tokens from log records on the core
+        # service + per-plugin loggers. Idempotent — re-starts don't
+        # pile up duplicate filters.
+        _install_log_redactor(
+            __name__,
+            "gilbert_plugin_plex.plex_backend",
+            "gilbert_plugin_jellyfin.jellyfin_backend",
+        )
 
         storage_svc = resolver.require_capability("entity_storage")
         if isinstance(storage_svc, StorageProvider):
@@ -1134,25 +1229,23 @@ class MediaLibraryService(Service):
             gilbert_users: list[dict[str, str]] = []
             if self._resolver is not None:
                 users_svc = self._resolver.get_capability("users")
-                if users_svc is not None:
-                    list_users = getattr(users_svc, "list_users", None)
-                    if list_users is not None:
-                        try:
-                            raw = await list_users()
-                        except Exception as exc:
-                            return ConfigActionResult(
-                                status="error", message=str(exc)
-                            )
-                        for u in raw or []:
-                            gilbert_users.append(
-                                {
-                                    "user_id": str(u.get("_id") or ""),
-                                    "display_name": str(
-                                        u.get("display_name") or ""
-                                    ),
-                                    "email": str(u.get("email") or ""),
-                                }
-                            )
+                if isinstance(users_svc, UserManagementProvider):
+                    try:
+                        raw = await users_svc.list_users()
+                    except Exception as exc:
+                        return ConfigActionResult(
+                            status="error", message=str(exc)
+                        )
+                    for u in raw or []:
+                        gilbert_users.append(
+                            {
+                                "user_id": str(u.get("_id") or ""),
+                                "display_name": str(
+                                    u.get("display_name") or ""
+                                ),
+                                "email": str(u.get("email") or ""),
+                            }
+                        )
             return ConfigActionResult(
                 status="ok",
                 message=f"{len(gilbert_users)} Gilbert user(s).",
@@ -1287,21 +1380,35 @@ class MediaLibraryService(Service):
             previous_status != status
             and self._event_bus is not None
         ):
-            asyncio.create_task(
-                self._event_bus.publish(
-                    Event(
-                        event_type="media.backend.health_changed",
-                        data={
-                            "backend": backend_name,
-                            "status": status,
-                            "previous_status": previous_status,
-                            "error": error,
-                        },
-                        source="media_library",
-                    )
-                ),
-                name=f"media-health-changed-{backend_name}",
-            )
+            # Spawn the publish in a copied context so a ContextVar.set
+            # in the surrounding fan-out branch doesn't leak into the
+            # publish coroutine, and hold a strong reference so CPython
+            # doesn't garbage-collect the task mid-flight (which surfaces
+            # as a "task was destroyed but is pending" warning).
+            try:
+                task = asyncio.create_task(
+                    self._event_bus.publish(
+                        Event(
+                            event_type="media.backend.health_changed",
+                            data={
+                                "backend": backend_name,
+                                "status": status,
+                                "previous_status": previous_status,
+                                "error": error,
+                            },
+                            source="media_library",
+                        )
+                    ),
+                    name=f"media-health-changed-{backend_name}",
+                    context=contextvars.copy_context(),
+                )
+            except RuntimeError:
+                # No running loop (e.g., called from a non-async path).
+                # Fall back to scheduling on next event loop iteration
+                # only when a loop exists; otherwise drop silently.
+                return
+            self._pending_event_tasks.add(task)
+            task.add_done_callback(self._pending_event_tasks.discard)
 
     async def list_backend_health(self) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
@@ -2217,8 +2324,17 @@ class MediaLibraryService(Service):
         gilbert_user_id: str = "",
         initiator: str = "user",
         idempotency_key: str = "",
-    ) -> str:
-        """Resolve to ``play_item`` outcome (``"played" | "deduped"``)."""
+    ) -> tuple[str, bool]:
+        """Run a play, honoring the per-client idempotency window.
+
+        Returns ``(outcome, deduped)``:
+        - ``outcome`` is the play result (``"played"`` after a fresh
+          backend dispatch; for an idempotency-cache hit this is the
+          *cached* prior outcome, per spec §6.10).
+        - ``deduped`` is True when the call short-circuited via the
+          idempotency cache, False on a fresh dispatch. Callers use
+          this to phrase 'playing now' vs 'already playing'.
+        """
         backend = self._backends.get(client.backend_name)
         if backend is None:
             raise MediaLibraryUnavailableError(
@@ -2230,7 +2346,12 @@ class MediaLibraryService(Service):
         async with lock:
             cached = self._check_idempotency(lock_key, idempotency_key)
             if cached is not None:
-                return "deduped"
+                # Spec §6.10: return the cached outcome (e.g., "played"),
+                # NOT a literal "deduped". The deduped flag travels in
+                # the second tuple element so callers can phrase 'we
+                # already started this' without losing the original
+                # outcome.
+                return cached, True
             backend_user_id = ""
             if gilbert_user_id:
                 backend_user_id = await self.resolve_backend_user(
@@ -2306,19 +2427,31 @@ class MediaLibraryService(Service):
                         source="media_library",
                     )
                 )
-            return "played"
+            return "played", False
 
     async def pause_client(self, client: MediaClient) -> None:
         backend = self._require_backend(client.backend_name)
-        await backend.pause(client.client_id)
+        await self._timed_client_call(
+            backend.pause(client.client_id),
+            backend_name=client.backend_name,
+            action="pause",
+        )
 
     async def resume_client(self, client: MediaClient) -> None:
         backend = self._require_backend(client.backend_name)
-        await backend.resume(client.client_id)
+        await self._timed_client_call(
+            backend.resume(client.client_id),
+            backend_name=client.backend_name,
+            action="resume",
+        )
 
     async def stop_client(self, client: MediaClient) -> None:
         backend = self._require_backend(client.backend_name)
-        await backend.stop(client.client_id)
+        await self._timed_client_call(
+            backend.stop(client.client_id),
+            backend_name=client.backend_name,
+            action="stop",
+        )
 
     async def seek_client(
         self, client: MediaClient, position_seconds: float
@@ -2328,7 +2461,34 @@ class MediaLibraryService(Service):
             raise MediaLibraryUnavailableError(
                 f"{client.backend_name} does not support seek"
             )
-        await backend.seek(client.client_id, position_seconds)
+        await self._timed_client_call(
+            backend.seek(client.client_id, position_seconds),
+            backend_name=client.backend_name,
+            action="seek",
+        )
+
+    async def _timed_client_call(
+        self,
+        coro: Awaitable[Any],
+        *,
+        backend_name: str,
+        action: str,
+    ) -> None:
+        """Wrap a pause/resume/stop/seek call in the per-call timeout.
+
+        Spec §6.8 lists 10s for ``play``; the lighter actions reuse
+        that bound so a hung client backend can't hang the AI turn.
+        """
+        timeout = self._backend_timeouts.get("play", 10.0)
+        try:
+            await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            self._set_health(
+                backend_name, "degraded", error=f"{action} timeout"
+            )
+            raise MediaLibraryUnavailableError(
+                f"{backend_name} {action} timed out"
+            ) from None
 
     def _require_backend(self, backend_name: str) -> MediaLibraryBackend:
         backend = self._backends.get(backend_name)
@@ -2842,55 +3002,105 @@ class MediaLibraryService(Service):
                 )
             )
 
-        # playback_control is registered whenever any backend is
-        # configured. The `seek` action is gated on supports_seek but
-        # the tool itself stays for pause / resume / stop.
+        # Spec §7.4 maps `playback_control` to FOUR slashes (one per
+        # action). Register the canonical tool plus three wrappers, each
+        # bound to its own slash_command. Each wrapper delegates to the
+        # same ``_tool_playback_control`` handler with ``action`` pre-
+        # filled in arguments. Precedent: MusicService's per-action
+        # slash registrations (``play`` vs ``play_queue`` etc.) all
+        # delegating to one underlying method.
         playback_actions = ["pause", "resume", "stop"]
         if self.supports_seek:
             playback_actions.append("seek")
+        common_params = [
+            ToolParameter(
+                name="action",
+                type=ToolParameterType.STRING,
+                description="pause | resume | stop | seek",
+                enum=playback_actions,
+                required=False,
+            ),
+            ToolParameter(
+                name="client",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Optional. Auto-picks the active session if "
+                    "exactly one is playing."
+                ),
+                required=False,
+            ),
+            ToolParameter(
+                name="position",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Position for action=seek. Accepts '5m', "
+                    "'1h22m', '1:22:00' (H:MM:SS), '1:22' "
+                    "(M:SS), '3700' (raw seconds)."
+                ),
+                required=False,
+            ),
+        ]
         tools.append(
             ToolDefinition(
                 name="playback_control",
                 slash_group="media",
                 slash_command="pause",
-                slash_help=(
-                    "Pause / resume / stop / seek active session."
-                ),
+                slash_help="Pause the active session.",
                 description=(
                     "Pause, resume, stop, or seek the active session on "
                     "a media client. Use action=seek with the position "
-                    "parameter to jump to a specific point."
+                    "parameter to jump to a specific point. The "
+                    "/media pause slash pre-fills action=pause."
                 ),
-                parameters=[
-                    ToolParameter(
-                        name="action",
-                        type=ToolParameterType.STRING,
-                        description="pause | resume | stop | seek",
-                        enum=playback_actions,
-                    ),
-                    ToolParameter(
-                        name="client",
-                        type=ToolParameterType.STRING,
-                        description=(
-                            "Optional. Auto-picks the active session if "
-                            "exactly one is playing."
-                        ),
-                        required=False,
-                    ),
-                    ToolParameter(
-                        name="position",
-                        type=ToolParameterType.STRING,
-                        description=(
-                            "Position for action=seek. Accepts '5m', "
-                            "'1h22m', '1:22:00' (H:MM:SS), '1:22' "
-                            "(M:SS), '3700' (raw seconds)."
-                        ),
-                        required=False,
-                    ),
-                ],
+                parameters=common_params,
                 required_role="user",
             )
         )
+        tools.append(
+            ToolDefinition(
+                name="playback_resume",
+                slash_group="media",
+                slash_command="resume",
+                slash_help="Resume the paused session.",
+                description=(
+                    "Resume the paused session on a media client "
+                    "(wraps playback_control with action=resume)."
+                ),
+                parameters=common_params,
+                required_role="user",
+            )
+        )
+        tools.append(
+            ToolDefinition(
+                name="playback_stop",
+                slash_group="media",
+                slash_command="stop",
+                slash_help="Stop the active session.",
+                description=(
+                    "Stop the active session on a media client "
+                    "(wraps playback_control with action=stop)."
+                ),
+                parameters=common_params,
+                required_role="user",
+            )
+        )
+        if self.supports_seek:
+            tools.append(
+                ToolDefinition(
+                    name="playback_seek",
+                    slash_group="media",
+                    slash_command="seek",
+                    slash_help=(
+                        "Seek the active session to a position."
+                    ),
+                    description=(
+                        "Seek the active session to ``position`` "
+                        "(wraps playback_control with action=seek)."
+                    ),
+                    parameters=common_params,
+                    required_role="user",
+                )
+            )
 
         if self.supports_recommend_next:
             tools.append(
@@ -3018,6 +3228,22 @@ class MediaLibraryService(Service):
             return await self._tool_now_playing(arguments)
         if name == "playback_control":
             return await self._tool_playback_control(arguments)
+        if name == "playback_pause":
+            return await self._tool_playback_control(
+                {**arguments, "action": "pause"}
+            )
+        if name == "playback_resume":
+            return await self._tool_playback_control(
+                {**arguments, "action": "resume"}
+            )
+        if name == "playback_stop":
+            return await self._tool_playback_control(
+                {**arguments, "action": "stop"}
+            )
+        if name == "playback_seek":
+            return await self._tool_playback_control(
+                {**arguments, "action": "seek"}
+            )
         if name == "recommend_next":
             return await self._tool_recommend_next(arguments)
         if name == "media_library_link_user":
@@ -3291,7 +3517,7 @@ class MediaLibraryService(Service):
         idempotency_key = f"{client.client_id}:{item.id}"
         offset = item.view_offset_seconds if item.view_offset_seconds > 0 else 0.0
         try:
-            outcome = await self.play_item(
+            _outcome, deduped = await self.play_item(
                 item,
                 client,
                 offset_seconds=offset,
@@ -3307,9 +3533,8 @@ class MediaLibraryService(Service):
         return ToolOutput(
             text=json.dumps(
                 {
-                    "status": "playing"
-                    if outcome != "deduped"
-                    else "deduped",
+                    "status": "playing",
+                    "deduped": deduped,
                     "title": item.title,
                     "client": client.name,
                     "backend": client.backend_name,
@@ -3705,12 +3930,9 @@ class MediaLibraryService(Service):
         if self._resolver is None:
             return (None, "users service unavailable")
         users_svc = self._resolver.get_capability("users")
-        if users_svc is None:
+        if not isinstance(users_svc, UserManagementProvider):
             return (None, "users service unavailable")
-        list_users = getattr(users_svc, "list_users", None)
-        if list_users is None:
-            return (None, "users service unavailable")
-        users = await list_users()
+        users = await users_svc.list_users()
         for u in users:
             if u.get("_id") == gilbert_user:
                 return (gilbert_user, str(u.get("display_name") or u.get("email") or gilbert_user))
