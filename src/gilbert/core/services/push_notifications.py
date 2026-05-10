@@ -624,17 +624,25 @@ class PushNotificationService(Service, ToolProvider):
                 job = await self._queue.get()
             except asyncio.CancelledError:
                 return
+            # Spawn the fan-out as its own Task with the captured
+            # context (Context.run only contains sync code, so we
+            # can't use it for the async fan-out body; the spec
+            # explicitly calls this out).
+            task = asyncio.Task(
+                self._fan_out(job),
+                context=job.context.copy(),
+            )
             try:
-                # Spawn the fan-out as its own Task with the captured
-                # context (Context.run only contains sync code, so we
-                # can't use it for the async fan-out body; the spec
-                # explicitly calls this out).
-                task = asyncio.Task(
-                    self._fan_out(job),
-                    context=job.context.copy(),
-                )
                 await task
             except asyncio.CancelledError:
+                # The worker was cancelled (e.g. during ``stop()``).
+                # Cancel the inner fan-out task so its in-flight HTTP
+                # work doesn't outlive shutdown, then exit the loop.
+                # ``gather`` swallows the resulting CancelledError so
+                # we cleanly observe the task ending.
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self._queue.task_done()
                 return
             except Exception:
                 logger.exception(
@@ -642,7 +650,12 @@ class PushNotificationService(Service, ToolProvider):
                     job.data.get("id", "?"),
                 )
             finally:
-                self._queue.task_done()
+                # On the cancellation path above we already called
+                # ``task_done`` before returning; on every other path
+                # the task ran to completion (success or normal
+                # exception) and we mark it here.
+                if not task.cancelled():
+                    self._queue.task_done()
 
     async def _fan_out(self, job: _FanOutJob) -> None:
         if self._storage is None:
@@ -1140,11 +1153,17 @@ class PushNotificationService(Service, ToolProvider):
                 sort=[SortField(field="created_at")],
             )
         )
+        # Mask sensitive destination fields whenever the caller isn't the
+        # row's owner — admins reading another user's routes only see
+        # ``"********"`` placeholders for tokens / webhook URLs / user_keys.
+        mask = target_user != caller
         return {
             "type": "push.routes.list.result",
             "ref": frame.get("id"),
             "ok": True,
-            "routes": [self._serialize_route(r) for r in rows],
+            "routes": [
+                self._serialize_route(r, mask_sensitive=mask) for r in rows
+            ],
         }
 
     async def _ws_routes_create(
@@ -1594,13 +1613,44 @@ class PushNotificationService(Service, ToolProvider):
         return (time.monotonic() - last) >= self._test_debounce_s
 
     @staticmethod
-    def _serialize_route(row: dict[str, Any]) -> dict[str, Any]:
+    def _serialize_route(
+        row: dict[str, Any], *, mask_sensitive: bool = False
+    ) -> dict[str, Any]:
+        """Serialize a route row for the WS RPC layer.
+
+        When ``mask_sensitive`` is True, every key in ``destination_data``
+        whose corresponding ``ConfigParam`` was declared with
+        ``sensitive=True`` (per the backend's ``destination_params()``)
+        is replaced with ``"********"``. This is the path admins take
+        when listing **another** user's routes — the route owner gets
+        unmasked values so they can edit them.
+        """
         out = dict(row)
-        # Don't echo destination secrets in raw form — UI displays them
-        # masked. The route owner needs to re-enter sensitive fields to
-        # change them, mirroring how Settings handles ``sensitive=True``
-        # ConfigParams. We keep the keys but blank them server-side so
-        # the SPA only has to render placeholders.
+        if not mask_sensitive:
+            return out
+        backend_name = str(row.get("backend_name") or "")
+        backend_cls = PushNotificationBackend.registered_backends().get(
+            backend_name
+        )
+        if backend_cls is None:
+            # Unknown backend → mask the whole destination_data dict so
+            # we never accidentally echo a secret because the plugin
+            # disappeared between writes.
+            if isinstance(row.get("destination_data"), dict):
+                out["destination_data"] = {
+                    k: "********" for k in row["destination_data"]
+                }
+            return out
+        sensitive_keys = {
+            p.key for p in backend_cls.destination_params() if p.sensitive
+        }
+        original = row.get("destination_data") or {}
+        if not isinstance(original, dict):
+            return out
+        out["destination_data"] = {
+            k: ("********" if k in sensitive_keys else v)
+            for k, v in original.items()
+        }
         return out
 
     @staticmethod
