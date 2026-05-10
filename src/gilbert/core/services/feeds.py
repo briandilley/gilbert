@@ -2984,6 +2984,540 @@ class FeedsService(Service):
                 return it
         return None
 
+    # ── WebSocket RPC handlers ───────────────────────────────────────
+    #
+    # Spec §14. ACL prefix is permissive (``feeds.: 100``); each handler
+    # enforces its own per-feed access via ``can_access_feed`` /
+    # ``can_admin_feed``. Pattern mirrors ``inbox.get_ws_handlers`` and
+    # ``calendar.get_ws_handlers`` — `conn.user_ctx` carries the
+    # authenticated user; mutations go through the same public methods
+    # as the AI tools so the side-effect surface (events, scheduler,
+    # cascade) stays identical.
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            # Feeds
+            "feeds.list": self._ws_feeds_list,
+            "feeds.get": self._ws_feeds_get,
+            "feeds.create": self._ws_feeds_create,
+            "feeds.update": self._ws_feeds_update,
+            "feeds.delete": self._ws_feeds_delete,
+            "feeds.test": self._ws_feeds_test,
+            "feeds.share_user": self._ws_feeds_share_user,
+            "feeds.unshare_user": self._ws_feeds_unshare_user,
+            "feeds.share_role": self._ws_feeds_share_role,
+            "feeds.unshare_role": self._ws_feeds_unshare_role,
+            "feeds.poll_now": self._ws_feeds_poll_now,
+            # Items
+            "feeds.items.list": self._ws_items_list,
+            "feeds.items.get": self._ws_items_get,
+            "feeds.items.mark": self._ws_items_mark,
+            "feeds.items.delete": self._ws_items_delete,
+            "feeds.items.reingest": self._ws_items_reingest,
+            # Briefing
+            "feeds.briefing.preview": self._ws_briefing_preview,
+            "feeds.briefing.run": self._ws_briefing_run,
+            "feeds.briefing.get": self._ws_briefing_get,
+            # OPML / backends
+            "feeds.import_opml": self._ws_import_opml,
+            "feeds.export_opml": self._ws_export_opml,
+            "feeds.backends.list": self._ws_backends_list,
+        }
+
+    @staticmethod
+    def _err(frame: dict[str, Any], msg: str, code: int) -> dict[str, Any]:
+        return {"type": "gilbert.error", "ref": frame.get("id"), "error": msg, "code": code}
+
+    @staticmethod
+    def _ok(frame: dict[str, Any], frame_type: str, **payload: Any) -> dict[str, Any]:
+        return {"type": frame_type, "ref": frame.get("id"), **payload}
+
+    def _feed_payload(self, feed: Feed, user_ctx: UserContext) -> dict[str, Any]:
+        is_admin = self._is_admin(user_ctx)
+        access = determine_feed_access(user_ctx, feed, is_admin=is_admin)
+        return {
+            "id": feed.id,
+            "name": feed.name,
+            "url": feed.url,
+            "backend_name": feed.backend_name,
+            "backend_config": dict(feed.backend_config),
+            "owner_user_id": feed.owner_user_id,
+            "shared_with_users": list(feed.shared_with_users),
+            "shared_with_roles": list(feed.shared_with_roles),
+            "category": feed.category,
+            "importance_weight": feed.importance_weight,
+            "ingest_to_knowledge": feed.ingest_to_knowledge,
+            "briefing_eligible": feed.briefing_eligible,
+            "poll_enabled": feed.poll_enabled,
+            "poll_interval_sec": feed.poll_interval_sec,
+            "suggested_poll_interval_sec": feed.suggested_poll_interval_sec,
+            "effective_poll_interval_sec": feed.effective_poll_interval_sec(),
+            "last_polled_at": feed.last_polled_at,
+            "last_poll_status_code": feed.last_poll_status_code,
+            "last_poll_items_total": feed.last_poll_items_total,
+            "last_poll_items_new": feed.last_poll_items_new,
+            "last_poll_duration_ms": feed.last_poll_duration_ms,
+            "consecutive_failures": feed.consecutive_failures,
+            "last_error": feed.last_error,
+            "created_at": feed.created_at,
+            "access": access.value if access is not None else None,
+            "can_admin": can_admin_feed(user_ctx, feed, is_admin=is_admin),
+        }
+
+    def _item_payload(self, item: StoredFeedItem) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "feed_id": item.feed_id,
+            "item_uid": item.item_uid,
+            "title": item.title,
+            "link": item.link,
+            "summary": item.summary,
+            "ai_summary": item.ai_summary,
+            "author": item.author,
+            "score": item.score,
+            "score_reason": item.score_reason,
+            "lazy_score": getattr(item, "lazy_score", False),
+            "read": item.read,
+            "briefed_at": item.briefed_at,
+            "ingested_to_knowledge": item.ingested_to_knowledge,
+            "published_at": item.published_at,
+            "received_at": item.received_at,
+            "enclosure_url": item.enclosure_url,
+            "enclosure_mime": item.enclosure_mime,
+        }
+
+    async def _unread_count(self, feed_id: str) -> int:
+        """Count of unread items on a feed (used for list payload)."""
+        rows = await self._storage.query(
+            Query(
+                collection=_FEED_ITEMS_COLLECTION,
+                filters=[
+                    Filter(field="feed_id", op=FilterOp.EQ, value=feed_id),
+                    Filter(field="read", op=FilterOp.EQ, value=False),
+                ],
+            )
+        )
+        return len(rows)
+
+    # ---- Feeds ----
+
+    async def _ws_feeds_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        user_ctx = conn.user_ctx
+        feeds = await self.list_accessible_feeds(user_ctx)
+        out: list[dict[str, Any]] = []
+        for f in feeds:
+            payload = self._feed_payload(f, user_ctx)
+            payload["unread_count"] = await self._unread_count(f.id)
+            out.append(payload)
+        return self._ok(frame, "feeds.list.result", feeds=out)
+
+    async def _ws_feeds_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        feed_id = str(frame.get("feed_id") or "")
+        try:
+            feed = await self._require_feed(feed_id)
+        except FeedNotFoundError:
+            return self._err(frame, "Feed not found", 404)
+        try:
+            self._require_access(feed, conn.user_ctx)
+        except FeedsPermissionError:
+            return self._err(frame, "Forbidden", 403)
+        payload = self._feed_payload(feed, conn.user_ctx)
+        payload["unread_count"] = await self._unread_count(feed.id)
+        return self._ok(frame, "feeds.get.result", feed=payload)
+
+    async def _ws_feeds_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        url = str(frame.get("url") or "")
+        if not url:
+            return self._err(frame, "url is required", 400)
+        backend_name = str(frame.get("backend_name") or "rss_atom")
+        name = str(frame.get("name") or "")
+        category = str(frame.get("category") or "")
+        poll_interval = int(frame.get("poll_interval_sec") or 0)
+        try:
+            feed = await self.subscribe(
+                url=url,
+                user_ctx=conn.user_ctx,
+                name=name,
+                category=category,
+                backend_name=backend_name,
+                poll_interval_sec=poll_interval,
+            )
+        except FeedError as exc:
+            return self._err(frame, str(exc), 400)
+        return self._ok(
+            frame,
+            "feeds.create.result",
+            feed=self._feed_payload(feed, conn.user_ctx),
+        )
+
+    async def _ws_feeds_update(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        feed_id = str(frame.get("feed_id") or "")
+        updates = frame.get("updates") or {}
+        if not isinstance(updates, dict):
+            return self._err(frame, "updates must be an object", 400)
+        try:
+            feed = await self.update_feed(feed_id, updates, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        return self._ok(
+            frame,
+            "feeds.update.result",
+            feed=self._feed_payload(feed, conn.user_ctx),
+        )
+
+    async def _ws_feeds_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        feed_id = str(frame.get("feed_id") or "")
+        try:
+            await self.unsubscribe(feed_id, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        return self._ok(frame, "feeds.delete.result", status="ok")
+
+    async def _ws_feeds_test(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        url = str(frame.get("url") or "")
+        backend_name = str(frame.get("backend_name") or "rss_atom")
+        if not url:
+            return self._err(frame, "url is required", 400)
+        backends = FeedBackend.registered_backends()
+        backend_cls = backends.get(backend_name)
+        if backend_cls is None:
+            return self._err(frame, f"Unknown backend: {backend_name}", 400)
+        backend = backend_cls()
+        try:
+            await backend.initialize({})
+            try:
+                meta = await backend.probe(url)
+            finally:
+                await backend.close()
+        except FeedError as exc:
+            return self._err(frame, str(exc), 400)
+        return self._ok(
+            frame,
+            "feeds.test.result",
+            title=meta.title,
+            description=meta.description,
+            link=meta.link,
+        )
+
+    async def _ws_feeds_share_helper(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+        *,
+        share: bool,
+        share_role: bool,
+    ) -> dict[str, Any]:
+        feed_id = str(frame.get("feed_id") or "")
+        target = str(frame.get("role") or frame.get("user_id") or "")
+        result_verb = (
+            ("share_role" if share_role else "share_user")
+            if share
+            else ("unshare_role" if share_role else "unshare_user")
+        )
+        try:
+            method = (
+                self.share_role
+                if (share and share_role)
+                else self.unshare_role
+                if (not share and share_role)
+                else self.share_user
+                if (share and not share_role)
+                else self.unshare_user
+            )
+            feed = await method(feed_id, target, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        return self._ok(
+            frame,
+            f"feeds.{result_verb}.result",
+            feed=self._feed_payload(feed, conn.user_ctx),
+        )
+
+    async def _ws_feeds_share_user(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return await self._ws_feeds_share_helper(conn, frame, share=True, share_role=False)
+
+    async def _ws_feeds_unshare_user(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return await self._ws_feeds_share_helper(conn, frame, share=False, share_role=False)
+
+    async def _ws_feeds_share_role(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return await self._ws_feeds_share_helper(conn, frame, share=True, share_role=True)
+
+    async def _ws_feeds_unshare_role(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return await self._ws_feeds_share_helper(conn, frame, share=False, share_role=True)
+
+    async def _ws_feeds_poll_now(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        feed_id = str(frame.get("feed_id") or "")
+        try:
+            feed = await self._require_feed(feed_id)
+        except FeedNotFoundError:
+            return self._err(frame, "Feed not found", 404)
+        try:
+            self._require_admin(feed, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        runtime = self._runtimes.get(feed.id)
+        if runtime is None:
+            return self._err(frame, "Feed runtime not started", 409)
+        prev_total = feed.last_poll_items_total
+        prev_new = feed.last_poll_items_new
+        try:
+            await self._poll_runtime(runtime)
+        except Exception as exc:  # noqa: BLE001
+            return self._err(frame, f"Poll failed: {exc}", 500)
+        refreshed = await self.get_feed(feed.id)
+        if refreshed is None:
+            return self._err(frame, "Feed disappeared during poll", 500)
+        return self._ok(
+            frame,
+            "feeds.poll_now.result",
+            items_seen=refreshed.last_poll_items_total,
+            items_new=refreshed.last_poll_items_new,
+            error=refreshed.last_error,
+            previous_items_total=prev_total,
+            previous_items_new=prev_new,
+        )
+
+    # ---- Items ----
+
+    async def _ws_items_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        user_ctx = conn.user_ctx
+        feed_id_raw = frame.get("feed_id")
+        feed_id = str(feed_id_raw) if feed_id_raw else None
+        items = await self.search_items(
+            feed_id=feed_id,
+            query=str(frame.get("query") or ""),
+            unread_only=bool(frame.get("unread_only") or False),
+            min_score=float(frame.get("min_score") or 0.0),
+            category=str(frame.get("category") or ""),
+            limit=int(frame.get("limit") or 50),
+            page=int(frame.get("page") or 1),
+            user_ctx=user_ctx,
+        )
+        return self._ok(
+            frame,
+            "feeds.items.list.result",
+            items=[self._item_payload(i) for i in items],
+            total=len(items),
+        )
+
+    async def _ws_items_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(frame.get("item_id") or "")
+        item = await self.get_item(item_id)
+        if item is None:
+            return self._err(frame, "Item not found", 404)
+        try:
+            feed = await self._require_feed(item.feed_id)
+            self._require_access(feed, conn.user_ctx)
+        except FeedsPermissionError:
+            return self._err(frame, "Forbidden", 403)
+        except FeedNotFoundError:
+            return self._err(frame, "Owning feed not found", 404)
+        return self._ok(frame, "feeds.items.get.result", item=self._item_payload(item))
+
+    async def _ws_items_mark(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(frame.get("item_id") or "")
+        read = bool(frame.get("read", True))
+        try:
+            await self.mark_read(item_id, conn.user_ctx, read=read)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        return self._ok(frame, "feeds.items.mark.result", status="ok", read=read)
+
+    async def _ws_items_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(frame.get("item_id") or "")
+        item = await self.get_item(item_id)
+        if item is None:
+            return self._err(frame, "Item not found", 404)
+        try:
+            feed = await self._require_feed(item.feed_id)
+            self._require_admin(feed, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        # Cascade knowledge entry if previously ingested.
+        if item.ingested_to_knowledge and self._knowledge is not None:
+            with contextlib.suppress(Exception):
+                await self._knowledge.remove_document(
+                    _doc_id_for(
+                        self._feed_doc_backend.source_id,
+                        feed.id,
+                        item.item_uid,
+                    )
+                )
+        await self._storage.delete(_FEED_ITEMS_COLLECTION, item.id)
+        return self._ok(frame, "feeds.items.delete.result", status="ok")
+
+    async def _ws_items_reingest(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(frame.get("item_id") or "")
+        item = await self.get_item(item_id)
+        if item is None:
+            return self._err(frame, "Item not found", 404)
+        try:
+            feed = await self._require_feed(item.feed_id)
+            self._require_admin(feed, conn.user_ctx)
+        except FeedsPermissionError as exc:
+            return self._err(frame, str(exc), 403)
+        except FeedNotFoundError as exc:
+            return self._err(frame, str(exc), 404)
+        try:
+            await self._ingest_item(feed, item)
+        except Exception as exc:  # noqa: BLE001
+            return self._err(frame, f"Ingest failed: {exc}", 500)
+        return self._ok(frame, "feeds.items.reingest.result", status="ok")
+
+    # ---- Briefing ----
+
+    async def _ws_briefing_preview(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        # Dry-run — does NOT mark briefed and does NOT publish events.
+        result = await self.build_briefing(
+            conn.user_ctx,
+            top_n=int(frame.get("top_n", 5) or 5),
+            category=str(frame.get("category") or ""),
+            mark_briefed=False,
+        )
+        return self._ok(
+            frame,
+            "feeds.briefing.preview.result",
+            spoken=result.spoken,
+            headlines=[h.to_dict() for h in result.headlines],
+            item_ids=result.item_ids,
+            since=result.since.isoformat(),
+            briefing_id=result.briefing_id,
+        )
+
+    async def _ws_briefing_run(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        # Caller may target another user only as admin; otherwise self.
+        target_user_id = str(frame.get("user_id") or "") or conn.user_ctx.user_id
+        if target_user_id != conn.user_ctx.user_id and not self._is_admin(conn.user_ctx):
+            return self._err(frame, "Only admins may run briefings for other users", 403)
+        force = bool(frame.get("force") or False)
+        # Idempotency: skip-when-already-briefed unless force.
+        if not force:
+            state = await self.get_briefing_state(target_user_id)
+            today = _now_utc().strftime("%Y-%m-%d")
+            if state.get("last_briefed_on") == today and state.get("last_briefing_id"):
+                cached = await self.get_briefing(str(state.get("last_briefing_id", "")))
+                if cached:
+                    return self._ok(
+                        frame,
+                        "feeds.briefing.run.result",
+                        briefing_id=str(state.get("last_briefing_id")),
+                        spoken=str(cached.get("spoken", "")),
+                        headlines=cached.get("headlines") or [],
+                        item_ids=cached.get("item_ids") or [],
+                        cached=True,
+                    )
+        # Build a UserContext for the target — admin path can target another.
+        if target_user_id == conn.user_ctx.user_id:
+            user_ctx = conn.user_ctx
+        else:
+            user_ctx = UserContext(
+                user_id=target_user_id,
+                email="",
+                display_name=target_user_id,
+                roles=frozenset({"user"}),
+            )
+        result = await self.build_briefing(
+            user_ctx,
+            top_n=int(frame.get("top_n", 5) or 5),
+            category=str(frame.get("category") or ""),
+            mark_briefed=True,
+        )
+        await self._publish_event(
+            "feed.briefing.ready",
+            {
+                "user_id": target_user_id,
+                "briefing_id": result.briefing_id,
+                "item_count": len(result.item_ids),
+                "since": result.since.isoformat(),
+            },
+        )
+        return self._ok(
+            frame,
+            "feeds.briefing.run.result",
+            briefing_id=result.briefing_id,
+            spoken=result.spoken,
+            headlines=[h.to_dict() for h in result.headlines],
+            item_ids=result.item_ids,
+            cached=False,
+        )
+
+    async def _ws_briefing_get(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        briefing_id = str(frame.get("briefing_id") or "")
+        if not briefing_id:
+            return self._err(frame, "briefing_id is required", 400)
+        cached = await self.get_briefing(briefing_id)
+        if cached is None:
+            return self._err(frame, "Briefing not found", 404)
+        # Per-user gate: only the recipient or an admin may read.
+        if (
+            cached.get("user_id") != conn.user_ctx.user_id
+            and not self._is_admin(conn.user_ctx)
+        ):
+            return self._err(frame, "Forbidden", 403)
+        return self._ok(
+            frame,
+            "feeds.briefing.get.result",
+            briefing_id=briefing_id,
+            spoken=str(cached.get("spoken", "")),
+            headlines=cached.get("headlines") or [],
+            item_ids=cached.get("item_ids") or [],
+            since=str(cached.get("since", "")),
+        )
+
+    # ---- OPML / backends ----
+
+    async def _ws_import_opml(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        # Admin-only — OPML import is a bulk subscribe and the spec
+        # restricts it to operators (§14).
+        if not self._is_admin(conn.user_ctx):
+            return self._err(frame, "Admin role required", 403)
+        opml_text = str(frame.get("opml") or "")
+        if not opml_text:
+            return self._err(frame, "opml body is required", 400)
+        results = await self.import_opml(opml_text, conn.user_ctx)
+        return self._ok(
+            frame,
+            "feeds.import_opml.result",
+            results=[{"url": url, "error": err} for url, err in results],
+        )
+
+    async def _ws_export_opml(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn.user_ctx):
+            return self._err(frame, "Admin role required", 403)
+        opml = await self.export_opml(conn.user_ctx)
+        return self._ok(frame, "feeds.export_opml.result", opml=opml)
+
+    async def _ws_backends_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        backends: list[dict[str, Any]] = []
+        for name, cls in FeedBackend.registered_backends().items():
+            params = []
+            for p in cls.backend_config_params():
+                params.append(
+                    {
+                        "key": p.key,
+                        "type": p.type.value if hasattr(p.type, "value") else str(p.type),
+                        "description": p.description,
+                        "default": p.default,
+                        "restart_required": p.restart_required,
+                        "sensitive": p.sensitive,
+                        "choices": list(p.choices) if p.choices else None,
+                        "multiline": p.multiline,
+                        "backend_param": True,
+                    }
+                )
+            backends.append({"name": name, "config_params": params})
+        return self._ok(frame, "feeds.backends.list.result", backends=backends)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
