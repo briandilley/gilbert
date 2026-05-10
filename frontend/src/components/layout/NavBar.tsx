@@ -42,6 +42,7 @@ import {
   TerminalIcon,
   BarChart3Icon,
   ChevronDownIcon,
+  RssIcon,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -77,12 +78,14 @@ const ICONS: Record<string, LucideIcon> = {
   "rotate-ccw": RotateCcwIcon,
   "terminal": TerminalIcon,
   "bar-chart": BarChart3Icon,
+  "rss": RssIcon,
 };
 
 /** Tailwind color for each top-level group's icon. */
 const GROUP_COLORS: Record<string, string> = {
   chat: "text-blue-500",
   inbox: "text-green-500",
+  feeds: "text-orange-500",
   knowledge: "text-amber-500",
   mcp: "text-pink-500",
   security: "text-purple-500",

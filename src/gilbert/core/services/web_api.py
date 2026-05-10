@@ -258,6 +258,16 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                "key": "feeds",
+                "label": "Feeds",
+                "description": "RSS / news feeds, scoring, and the daily briefing",
+                "url": "/feeds",
+                "icon": "rss",
+                "required_role": "user",
+                "requires_capability": "feeds",
+                "items": [],
+            },
+            {
                 "key": "knowledge",
                 "label": "Knowledge",
                 "description": "Browse, search, and manage indexed documents",
