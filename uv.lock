@@ -32,6 +32,7 @@ members = [
     "gilbert-plugin-openai",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-plex",
     "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
@@ -980,6 +981,7 @@ dependencies = [
     { name = "gilbert-plugin-openai" },
     { name = "gilbert-plugin-openai-compatible" },
     { name = "gilbert-plugin-openrouter" },
+    { name = "gilbert-plugin-plex" },
     { name = "gilbert-plugin-pushover" },
     { name = "gilbert-plugin-qwen" },
     { name = "gilbert-plugin-slack" },
@@ -1054,6 +1056,7 @@ requires-dist = [
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
     { name = "gilbert-plugin-openai-compatible", virtual = "std-plugins/openai-compatible" },
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
+    { name = "gilbert-plugin-plex", virtual = "std-plugins/plex" },
     { name = "gilbert-plugin-pushover", virtual = "std-plugins/pushover" },
     { name = "gilbert-plugin-qwen", virtual = "std-plugins/qwen" },
     { name = "gilbert-plugin-slack", virtual = "std-plugins/slack" },
@@ -1262,6 +1265,21 @@ source = { virtual = "std-plugins/openai-compatible" }
 name = "gilbert-plugin-openrouter"
 version = "1.0.0"
 source = { virtual = "std-plugins/openrouter" }
+
+[[package]]
+name = "gilbert-plugin-plex"
+version = "1.0.0"
+source = { virtual = "std-plugins/plex" }
+dependencies = [
+    { name = "httpx" },
+    { name = "plexapi" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "plexapi", specifier = ">=4.15.0" },
+]
 
 [[package]]
 name = "gilbert-plugin-pushover"
@@ -2643,6 +2661,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/72/a1/717ac5bc99f387c0f60def91271ea4262125c0815d764a5d1776a272275c/playwright-1.59.0-py3-none-win32.whl", hash = "sha256:6989c476be2b9cd3e24a18cc9dcf202e266fb3d91e3e5395cd668c54ea54b119", size = 37713698, upload-time = "2026-04-29T08:11:27.251Z" },
     { url = "https://files.pythonhosted.org/packages/0f/a5/4e630ee05d8b46b840f943268e86d6063703e8dadb2d3eb405c7b9b2e48c/playwright-1.59.0-py3-none-win_amd64.whl", hash = "sha256:d5a5cc064b82ca92996080025710844e417f44df8fda9001102c28f44174171c", size = 37713704, upload-time = "2026-04-29T08:11:30.41Z" },
     { url = "https://files.pythonhosted.org/packages/eb/0c/3ece41761ba13c8321009aefcaec7a016eb42799c42eef5e03ace7f2de5b/playwright-1.59.0-py3-none-win_arm64.whl", hash = "sha256:93581ad515728cadc8af39b288a5633ba6d36e7d72048e79d890ce01ea2156f9", size = 33956745, upload-time = "2026-04-29T08:11:34.738Z" },
+]
+
+[[package]]
+name = "plexapi"
+version = "4.18.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/37/5b3d926db8f5cfe20bb8d9652df0272ca23fa028f3b2798038ec41218ca1/plexapi-4.18.1.tar.gz", hash = "sha256:deba96e94b8b51fc0b042334ebbd48a14e407efd33f281a5d8e9897f9e5dba5f", size = 161393, upload-time = "2026-03-22T22:14:14.356Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/a8/9f1c54ce351d681aa0eb2221f7deccbdd5a95421507eb59e6f7ec83931d7/plexapi-4.18.1-py3-none-any.whl", hash = "sha256:d8330cee337bc55dc006c392a58b3259239d787a32cbe4064b50a9b07a6e0b35", size = 176427, upload-time = "2026-03-22T22:14:12.563Z" },
 ]
 
 [[package]]
