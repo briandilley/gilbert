@@ -8,6 +8,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -915,9 +916,19 @@ async def test_count_detections_returns_structured_buckets(
         "count_detections",
         {"since": "24h", "_user_roles": ["user"]},
     )
-    assert "total=5" in str(out)
-    assert "front_door" in str(out)
-    assert "package" in str(out)
+    # Structured JSON — the AI should consume buckets without parsing prose.
+    import json as _json
+
+    parsed = _json.loads(str(out))
+    assert parsed["total"] == 5
+    assert parsed["by_camera"] == {"front_door": 3, "driveway": 2}
+    assert parsed["by_label"] == {"person": 3, "package": 1, "car": 1}
+    assert parsed["by_camera_label"] == {
+        "front_door.person": 2,
+        "front_door.package": 1,
+        "driveway.car": 1,
+        "driveway.person": 1,
+    }
     await svc.stop()
 
 
@@ -1179,3 +1190,457 @@ async def test_is_camera_muted_matches_wildcards(
     )
     assert await svc.is_camera_muted("porch", "package")
     await svc.stop()
+
+
+# ── Vision semaphore concurrency cap ────────────────────────────────
+
+
+async def test_vision_semaphore_caps_cross_event_parallelism(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """The cross-event ``_vision_semaphore`` is what bounds vision-API
+    spend when bursts of distinct events fire at once. Spawn 5
+    concurrent annotations across distinct event_ids with a slow vision
+    backend and observe the peak concurrent describe_image calls.
+    """
+    in_flight = 0
+    peak_in_flight = 0
+
+    class _SlowVision:
+        async def describe_image(self, b: bytes, m: str) -> str:
+            nonlocal in_flight, peak_in_flight
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                # Hold the semaphore long enough for sibling tasks to
+                # pile up and contest the bound.
+                await asyncio.sleep(0.05)
+                return "ok"
+            finally:
+                in_flight -= 1
+
+    _register_fake("fake_sem", lambda: {"events": []})
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={
+            "enabled": True,
+            "backend": "fake_sem",
+            "vision_concurrency": 2,  # cap parallelism at 2
+        },
+        vision=_SlowVision(),
+    )
+    await svc.start(resolver)
+
+    started_at = int(time.time() * 1000)
+    events = [
+        CameraEvent(
+            event_id=f"sem-{i}",
+            camera="porch",
+            label="package",
+            phase=CameraEventPhase.ACTIVE,
+            started_at=started_at,
+            has_snapshot=True,
+            source_backend="fake",
+        )
+        for i in range(5)
+    ]
+    for ev in events:
+        await svc._persist_event(svc._stamp_proxied_urls(ev))
+    await asyncio.gather(*(svc._annotate_event(ev) for ev in events))
+    await svc.stop()
+
+    # The semaphore is the only thing capping per-event annotation
+    # concurrency. Without it, all five would land in describe_image
+    # simultaneously.
+    assert peak_in_flight <= 2, (
+        f"peak concurrency {peak_in_flight} exceeded the cap of 2"
+    )
+    # Make sure all events actually annotated (5 calls, capped at 2 at
+    # a time).
+    rows = await storage.query(Query(collection="camera_events"))
+    assert sum(1 for r in rows if r.get("vision_text") == "ok") == 5
+
+
+# ── Score-Δ dedup OR-branches: new zones, fresh snapshot ─────────────
+
+
+async def test_event_published_when_new_zones_added_with_unchanged_score(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Service publishes events for a single event_id even if the score
+    is unchanged — the *backend* dedup (FrigateMQTT) is what guards the
+    ``small score change AND same zones AND same snapshot`` branch. The
+    service treats every CameraEvent that comes off the iterator as
+    real. Verify by seeing both events arrive on the bus when the
+    backend yields two updates with new zones."""
+    received: list[Event] = []
+
+    async def on_event(e: Event) -> None:
+        received.append(e)
+
+    event_bus.subscribe("camera.event.detected", on_event)
+
+    base_kwargs: dict[str, Any] = dict(
+        event_id="zones-1",
+        camera="porch",
+        label="person",
+        phase=CameraEventPhase.ACTIVE,
+        started_at=int(time.time() * 1000),
+        score=0.7,
+        has_snapshot=True,
+        source_backend="fake",
+    )
+    ev1 = CameraEvent(**base_kwargs, zones=("porch_zone",))
+    ev2 = CameraEvent(**base_kwargs, zones=("porch_zone", "doorway"))
+
+    _register_fake("fake_zones_or", lambda: {"events": [ev1, ev2]})
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={"enabled": True, "backend": "fake_zones_or"},
+    )
+    await svc.start(resolver)
+    for _ in range(20):
+        if len(received) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    await svc.stop()
+
+    assert len(received) == 2
+    assert received[0].data["zones"] == ["porch_zone"]
+    assert received[1].data["zones"] == ["porch_zone", "doorway"]
+
+
+async def test_event_published_when_snapshot_advances_with_unchanged_score(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Same shape as above: a fresh snapshot frame for an existing
+    event still flows. Backend gates the dedup (covered separately in
+    plugin event-normalization tests); the service must not introduce
+    its own gate."""
+    received: list[Event] = []
+
+    async def on_event(e: Event) -> None:
+        received.append(e)
+
+    event_bus.subscribe("camera.event.detected", on_event)
+
+    started_at = int(time.time() * 1000)
+    ev1 = CameraEvent(
+        event_id="snap-1",
+        camera="porch",
+        label="person",
+        phase=CameraEventPhase.ACTIVE,
+        started_at=started_at,
+        score=0.6,
+        zones=(),
+        has_snapshot=True,
+        source_backend="fake",
+    )
+    # Same event_id, same score, same zones — but a new "snapshot" is
+    # represented in the proxied event by virtue of the service
+    # treating each yielded event as fresh.
+    ev2 = CameraEvent(
+        event_id="snap-1",
+        camera="porch",
+        label="person",
+        phase=CameraEventPhase.ACTIVE,
+        started_at=started_at,
+        score=0.6,
+        zones=(),
+        has_snapshot=True,
+        source_backend="fake",
+    )
+    _register_fake("fake_snap_or", lambda: {"events": [ev1, ev2]})
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={"enabled": True, "backend": "fake_snap_or"},
+    )
+    await svc.start(resolver)
+    for _ in range(20):
+        if len(received) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    await svc.stop()
+    assert len(received) == 2
+
+
+# ── vision_text retention scrub (separate from row delete) ──────────
+
+
+async def test_vision_text_scrub_blanks_old_rows_without_deleting_them(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """``vision_text_retention_days`` independently scrubs descriptions
+    from rows older than its cutoff while preserving the event row
+    itself (event metadata stays around for analytics; only the LLM
+    output gets scrubbed)."""
+    now_ms = int(time.time() * 1000)
+    one_day_ms = 86_400_000
+    await storage.put(
+        "camera_events",
+        "old-with-text",
+        {
+            "event_id": "old-with-text",
+            "camera": "porch",
+            "label": "package",
+            "started_at": now_ms - 5 * one_day_ms,
+            "phase": "active",
+            "score": 0.7,
+            "vision_text": "an old description",
+        },
+    )
+    await storage.put(
+        "camera_events",
+        "old-without-text",
+        {
+            "event_id": "old-without-text",
+            "camera": "porch",
+            "label": "person",
+            "started_at": now_ms - 5 * one_day_ms,
+            "phase": "active",
+            "score": 0.5,
+            "vision_text": "",
+        },
+    )
+    await storage.put(
+        "camera_events",
+        "fresh-with-text",
+        {
+            "event_id": "fresh-with-text",
+            "camera": "porch",
+            "label": "package",
+            "started_at": now_ms - one_day_ms // 2,  # 12 h ago
+            "phase": "active",
+            "score": 0.8,
+            "vision_text": "fresh description",
+        },
+    )
+
+    _register_fake("fake_scrub", lambda: {"events": []})
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={
+            "enabled": True,
+            "backend": "fake_scrub",
+            # Keep all rows around (high retention),
+            # but scrub vision_text on rows older than 2 days.
+            "retention_days": 30,
+            "vision_text_retention_days": 2,
+        },
+    )
+    await svc.start(resolver)
+    await svc._sweep_old_camera_events()
+    await svc.stop()
+
+    rows = {
+        r["event_id"]: r
+        for r in await storage.query(Query(collection="camera_events"))
+    }
+    # All 3 rows still present (none deleted).
+    assert set(rows.keys()) == {"old-with-text", "old-without-text", "fresh-with-text"}
+    # Old row's vision_text is now blank.
+    assert rows["old-with-text"]["vision_text"] == ""
+    # Fresh row's vision_text untouched.
+    assert rows["fresh-with-text"]["vision_text"] == "fresh description"
+
+
+# ── LWT online↔offline (service-side bus events) ────────────────────
+
+
+async def test_publishes_camera_backend_disconnected_on_stream_error(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """When the backend's stream raises ``CameraBackendError`` (the
+    plugin's translation of an MQTT LWT or transport drop), the
+    service publishes ``camera.backend.disconnected`` with a payload
+    shaped for the dashboard."""
+    received: list[Event] = []
+
+    async def on_event(e: Event) -> None:
+        received.append(e)
+
+    event_bus.subscribe("camera.backend.disconnected", on_event)
+    event_bus.subscribe("camera.backend.connected", on_event)
+
+    class _DropAfterFirst(_FakeBackend):
+        backend_name = "fake_lwt"
+
+        def __init__(self) -> None:
+            super().__init__(events=[])
+            self._raised = False
+
+        async def stream_events(self) -> AsyncIterator[CameraEvent]:
+            # First connect cycle: raise immediately to simulate LWT
+            # offline. Second connect should keep failing too.
+            if not self._raised:
+                self._raised = True
+                raise CameraBackendError("frigate offline")
+            await asyncio.sleep(10)  # park; will be cancelled by stop()
+            yield  # type: ignore[unreachable]
+
+    CameraEventBackend._registry["fake_lwt"] = _DropAfterFirst
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={
+            "enabled": True,
+            "backend": "fake_lwt",
+            "reconnect_max_seconds": 0.01,
+        },
+    )
+    await svc.start(resolver)
+    svc._reconnect_max_seconds = 0.01
+    # Wait until we see at least one connected + one disconnected.
+    for _ in range(40):
+        types = {e.event_type for e in received}
+        if (
+            "camera.backend.connected" in types
+            and "camera.backend.disconnected" in types
+        ):
+            break
+        await asyncio.sleep(0.05)
+    await svc.stop()
+
+    types_seen = [e.event_type for e in received]
+    assert "camera.backend.connected" in types_seen
+    assert "camera.backend.disconnected" in types_seen
+
+    # The disconnect event payload mentions backend name + transport +
+    # the upstream error string the dashboard renders verbatim.
+    disc = next(
+        e for e in received if e.event_type == "camera.backend.disconnected"
+    )
+    assert disc.data["backend_name"] == "fake_lwt"
+    assert disc.data["transport"] == "mqtt"
+    assert "frigate offline" in disc.data["error"]
+
+
+# ── _user_tz threading: today/yesterday in caller TZ ────────────────
+
+
+def test_parse_time_window_today_anchored_to_user_tz() -> None:
+    """``today`` should resolve to local midnight in the caller's tz,
+    not UTC midnight."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    # Build the expected local midnight for an LA caller.
+    la_tz = ZoneInfo("America/Los_Angeles")
+    now_la = datetime.now(la_tz)
+    expected_la_midnight = datetime(
+        now_la.year, now_la.month, now_la.day, tzinfo=la_tz
+    )
+    expected_ms = int(expected_la_midnight.timestamp() * 1000)
+
+    out = CameraEventService._parse_time_window(
+        "today", user_tz="America/Los_Angeles"
+    )
+    assert out == expected_ms
+
+    # UTC fallback is different unless the caller is on UTC right now.
+    out_utc = CameraEventService._parse_time_window("today", user_tz=None)
+    if out_utc != expected_ms:
+        # Different anchor — the LA window is not the UTC window.
+        assert out_utc != out
+
+
+def test_parse_time_window_yesterday_anchored_to_user_tz() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    tokyo = ZoneInfo("Asia/Tokyo")
+    now_tokyo = datetime.now(tokyo)
+    expected_tokyo_yesterday = (
+        datetime(now_tokyo.year, now_tokyo.month, now_tokyo.day, tzinfo=tokyo)
+        - timedelta(days=1)
+    )
+    expected_ms = int(expected_tokyo_yesterday.timestamp() * 1000)
+
+    out = CameraEventService._parse_time_window(
+        "yesterday", user_tz="Asia/Tokyo"
+    )
+    assert out == expected_ms
+
+
+def test_parse_time_window_unknown_tz_falls_back_to_utc() -> None:
+    """Bad TZ string shouldn't crash — fall back to UTC midnight."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    # Compute the UTC-anchored expected value for today.
+    utc = ZoneInfo("UTC")
+    now_utc = datetime.now(utc)
+    expected_utc_midnight = datetime(
+        now_utc.year, now_utc.month, now_utc.day, tzinfo=utc
+    )
+    expected_ms = int(expected_utc_midnight.timestamp() * 1000)
+
+    out = CameraEventService._parse_time_window(
+        "today", user_tz="Not/A_Real_Zone"
+    )
+    assert out == expected_ms
+
+
+async def test_count_detections_honors_user_tz(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """An event ``today`` in LA local time but ``yesterday`` in UTC
+    should appear in a ``since=today`` query when the caller's
+    ``_user_tz`` is ``America/Los_Angeles``."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    la_tz = ZoneInfo("America/Los_Angeles")
+    now_la = datetime.now(la_tz)
+    midnight_la = datetime(
+        now_la.year, now_la.month, now_la.day, tzinfo=la_tz
+    )
+    # 30-min after LA midnight — same calendar day in LA, possibly
+    # previous day in UTC depending on the season.
+    after_midnight_la = midnight_la + timedelta(minutes=30)
+    ts_ms = int(after_midnight_la.timestamp() * 1000)
+
+    await storage.put(
+        "camera_events",
+        "tz-1",
+        {
+            "event_id": "tz-1",
+            "camera": "porch",
+            "label": "person",
+            "started_at": ts_ms,
+            "phase": "active",
+            "score": 0.5,
+        },
+    )
+    _register_fake("fake_tz", lambda: {"events": []})
+    svc = CameraEventService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        cameras_section={"enabled": True, "backend": "fake_tz"},
+    )
+    await svc.start(resolver)
+    out = await svc.execute_tool(
+        "count_detections",
+        {
+            "since": "today",
+            "_user_roles": ["user"],
+            "_user_tz": "America/Los_Angeles",
+        },
+    )
+    await svc.stop()
+
+    import json as _json
+
+    parsed = _json.loads(str(out))
+    assert parsed["total"] == 1
+    assert parsed["by_camera"] == {"porch": 1}

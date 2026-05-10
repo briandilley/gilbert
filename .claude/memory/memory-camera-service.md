@@ -111,16 +111,27 @@ secondary cutoff while keeping the metadata.
   over face matches + vision prose + presence) was dropped because it
   produced confidently-wrong identifications.
 - `count_detections` (`/cameras count`) — structured counts
-  (`total`, `by_camera`, `by_label`, `by_camera_label`) the AI
-  composes prose from. Replaces the previously-spec'd opaque
+  (`total`, `by_camera`, `by_label`, `by_camera_label`) returned as
+  parseable JSON. Replaces the previously-spec'd opaque
   `recent_detections_summary`.
+
+### Time-window grammar in caller TZ
+`_parse_time_window` accepts `30m` / `4h` / `7d` / `today` /
+`yesterday` / ISO-8601. The AI dispatcher injects `_user_tz` (IANA
+name from `UserContext.tz`); the camera tools pass it through so
+`today` / `yesterday` anchor to **the caller's local midnight**, not
+UTC midnight. Unknown TZ strings fall back to UTC. The relative
+shorthands (`24h`) are TZ-independent (elapsed-time deltas).
 
 ### WebSocket RPCs
 `cameras.list`, `cameras.get`, `cameras.events.list`,
 `cameras.events.get`, `cameras.events.since`, `cameras.snapshots.get`,
-`cameras.zones.list`, `cameras.zones.update` (501 — Frigate is
-read-only from Gilbert), `cameras.mutes.list`, `cameras.mutes.set`,
-`cameras.mutes.clear`, `cameras.test_connection` (admin-only). Every
+`cameras.zones.list`, `cameras.mutes.list`, `cameras.mutes.set`,
+`cameras.mutes.clear`, `cameras.test_connection` (admin-only).
+Note: `cameras.zones.update` is intentionally **not** registered —
+Frigate is read-only from Gilbert's perspective, so a stub that always
+501s would just lie to clients. The SPA can branch on whether the
+frame type exists. Every
 handler that returns event rows / media URLs applies the per-camera
 role gate from the cached `_role_overrides` map.
 
@@ -174,13 +185,23 @@ role gate from the cached `_role_overrides` map.
   package warm/informative, glass_break brief/urgent).
 
 ### SPA
-- `/cameras` page (`frontend/src/components/cameras/CamerasPage.tsx`):
-  per-camera grid + recent-events feed + mute drawer.
-- `<RecentDetectionCard />` mounts in the dashboard's bottom slot.
-  Subscribes to `camera.event.detected` via the existing
-  `useEventBus` hook so new events appear without a poll.
-- Plugin-local API in `frontend/src/hooks/useCamerasApi.ts` wraps
-  the WS RPCs.
+- All camera UI lives **inside the frigate plugin**:
+  `std-plugins/frigate/frontend/`. Core SPA never imports from the
+  plugin — see `memory-plugin-ui-extensions.md` for the slot mechanism.
+- `CamerasPage.tsx` (per-camera grid + recent-events feed + mute
+  drawer) ships as `panel_id="frigate.cameras_page"` declared via
+  `Plugin.ui_routes()` for `path="/cameras"`. Core's `<PluginRoutes>`
+  injects the `<Route>` automatically.
+- `RecentEventsCard.tsx` mounts into the `dashboard.bottom` slot via
+  `panel_id="frigate.recent_events"` declared in `Plugin.ui_panels()`.
+  Core's `DashboardPage.tsx` renders only `<PluginPanelSlot
+  slot="dashboard.bottom" />` — no hardcoded import.
+- Plugin-local API hook (`std-plugins/frigate/frontend/api.ts`) wraps
+  every `cameras.*` WS RPC. It uses the core `useWebSocket` helper via
+  the `@/` alias — that's the canonical plugin-frontend pattern.
+- `panels.ts` is the side-effect file core's
+  `frontend/src/plugins/index.ts` `import.meta.glob` picks up; it
+  registers both panels in `lib/plugin-panels`.
 
 ### Multi-user isolation
 - Singleton; **every** `__init__` attribute is service-lifetime.
