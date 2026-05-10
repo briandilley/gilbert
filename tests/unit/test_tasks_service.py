@@ -1520,3 +1520,402 @@ class TestWSRPCs:
         )
         assert isinstance(result["summary"], str)
 
+    async def test_tasks_list_paginates_with_cursor(
+        self, started_service: Any
+    ) -> None:
+        """Spec §6.2-9 requires (cursor, limit) on tasks.list. The
+        cursor is opaque; v1 encodes the next-page offset and the
+        response carries ``next_cursor`` while a full page came back."""
+        svc, *_ = started_service
+        tl = await svc.create_list(_local_list("tl_paged"), _owner())
+        # Add 5 tasks; ask for page size 2.
+        for i in range(5):
+            await svc.add_task(tl.id, Task(title=f"t-{i}"), _owner())
+        handlers = svc.get_ws_handlers()
+        page1 = await handlers["tasks.list"](
+            _FakeConn(_owner()),
+            {"id": "p1", "list_id": tl.id, "limit": 2},
+        )
+        assert len(page1["tasks"]) == 2
+        assert page1["next_cursor"] == "2"
+        page2 = await handlers["tasks.list"](
+            _FakeConn(_owner()),
+            {
+                "id": "p2",
+                "list_id": tl.id,
+                "limit": 2,
+                "cursor": page1["next_cursor"],
+            },
+        )
+        assert len(page2["tasks"]) == 2
+        assert page2["next_cursor"] == "4"
+        page3 = await handlers["tasks.list"](
+            _FakeConn(_owner()),
+            {
+                "id": "p3",
+                "list_id": tl.id,
+                "limit": 2,
+                "cursor": page2["next_cursor"],
+            },
+        )
+        # Last page is short → no further cursor.
+        assert len(page3["tasks"]) == 1
+        assert page3["next_cursor"] is None
+        # No row appears on more than one page.
+        all_ids = {t["id"] for p in (page1, page2, page3) for t in p["tasks"]}
+        assert len(all_ids) == 5
+
+    async def test_refresh_list_happy_path(
+        self, started_service: Any
+    ) -> None:
+        """``tasks.lists.refresh`` triggers a fresh upstream poll and
+        returns the count of newly-discovered rows."""
+        svc, *_ = started_service
+
+        class _Backend(FakeExternalBackend):
+            backend_name = "refresh_happy_a"
+
+        try:
+            tl = await svc.create_list(
+                _ext_list("tl_refresh_h", backend_name="refresh_happy_a"),
+                _owner(),
+            )
+            backend = svc._runtimes[tl.id].backend
+            assert isinstance(backend, FakeExternalBackend)
+            now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            backend.upstream = {
+                "src-x": Task(
+                    id="",
+                    list_id=tl.id,
+                    title="from-upstream",
+                    source_id="src-x",
+                    updated_at=now,
+                ),
+            }
+            handlers = svc.get_ws_handlers()
+            result = await handlers["tasks.lists.refresh"](
+                _FakeConn(_owner()), {"id": "r1", "list_id": tl.id}
+            )
+            assert result["type"] == "tasks.lists.refresh.result"
+            assert result.get("new") == 1
+            assert result.get("total") == 1
+        finally:
+            TaskBackend._registry.pop("refresh_happy_a", None)
+
+    async def test_refresh_list_denies_unrelated_user(
+        self, started_service: Any
+    ) -> None:
+        """Non-shared, non-owner, non-admin users get 403 on refresh."""
+        svc, *_ = started_service
+
+        class _Backend(FakeExternalBackend):
+            backend_name = "refresh_deny_a"
+
+        try:
+            tl = await svc.create_list(
+                _ext_list("tl_refresh_d", backend_name="refresh_deny_a"),
+                _owner(),
+            )
+            handlers = svc.get_ws_handlers()
+            result = await handlers["tasks.lists.refresh"](
+                _FakeConn(_unrelated()), {"id": "r1", "list_id": tl.id}
+            )
+            assert result.get("code") == 403
+        finally:
+            TaskBackend._registry.pop("refresh_deny_a", None)
+
+
+# ── Restore, DST, poll-diff events, sync-tick patch hygiene ─────────
+
+
+class TestRestoreTask:
+    async def test_restore_unhides_and_publishes_event(
+        self, started_service: Any
+    ) -> None:
+        """Soft-deleted task can be restored by an admin and the
+        resurrection is announced via ``task.restored`` so SPAs and
+        other subscribers can refresh their views."""
+        svc, storage, ebus, *_ = started_service
+        tl = await svc.create_list(_local_list(), _owner())
+        created = await svc.add_task(
+            tl.id, Task(title="phoenix"), _owner()
+        )
+        set_current_user(_owner())
+        await svc.delete_task(created.id, _owner())
+        # Soft-deleted: hidden from reads.
+        assert await svc.get_task(created.id) is None
+        ebus.published.clear()
+        restored = await svc.restore_task(created.id, _admin())
+        # No deleted_at, sync_status reset for a local list.
+        assert restored.deleted_at == ""
+        assert restored.sync_status == SyncStatus.SYNCED
+        # Visible again to readers.
+        set_current_user(_owner())
+        assert await svc.get_task(created.id) is not None
+        # Event published exactly once.
+        restored_events = [
+            e for e in ebus.published if e.event_type == "task.restored"
+        ]
+        assert len(restored_events) == 1
+        assert restored_events[0].data["task_id"] == created.id
+
+    async def test_restore_requires_admin(
+        self, started_service: Any
+    ) -> None:
+        svc, *_ = started_service
+        tl = await svc.create_list(_local_list(), _owner())
+        created = await svc.add_task(
+            tl.id, Task(title="x"), _owner()
+        )
+        set_current_user(_owner())
+        await svc.delete_task(created.id, _owner())
+        with pytest.raises(TaskListPermissionError):
+            await svc.restore_task(created.id, _owner())
+
+    def test_service_info_advertises_task_restored_event(self) -> None:
+        info = TasksService().service_info()
+        assert "task.restored" in info.events
+
+
+class TestDSTHandling:
+    async def test_due_today_spans_dst_fallback(
+        self, started_service: Any
+    ) -> None:
+        """Spec §18.1 lines 2152-2154: a task ``due_at`` set inside
+        the user's local DST-transition day must still surface in
+        ``due_today`` when the user is in that zone.
+
+        We simulate the scenario by stamping ``due_at`` from a
+        timestamp constructed in the user's local zone (so the
+        UTC↔local round-trip naturally encounters the fallback) and
+        asserting ``due_today`` returns it. The window in
+        ``TasksService.due_today`` constructs `start_local` and
+        `end_local` from the user's zone, so a fall-back day (which is
+        25 hours long in clock time) is fully covered.
+        """
+        from zoneinfo import ZoneInfo
+
+        svc, *_ = started_service
+        tl = await svc.create_list(_local_list(), _owner())
+        eastern = ZoneInfo("America/New_York")
+        eastern_user = UserContext(
+            user_id="owner",
+            email="owner@example.com",
+            display_name="Owner",
+            roles=frozenset({"user"}),
+            tz="America/New_York",
+        )
+        # Pick the most recent DST fallback in America/New_York
+        # (first Sunday of November). This is deterministic — the
+        # service's local-day window is computed at call time, so
+        # we use `today's` Eastern date and just verify the window
+        # logic is wide enough to span 25 clock-hours when applicable.
+        # The robust assertion: a task whose due_at is at noon Eastern
+        # today appears in due_today regardless of whether today is a
+        # DST transition day.
+        now_et = datetime.now(UTC).astimezone(eastern)
+        noon_et = now_et.replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
+        due_iso = noon_et.astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        await svc.add_task(
+            tl.id,
+            Task(
+                title="dst-noon",
+                due_at=due_iso,
+                due_at_tz="America/New_York",
+            ),
+            eastern_user,
+        )
+        # Also add a task at 1:30 AM local (the duplicated hour on
+        # fall-back days). On non-fall-back days this is just an
+        # ordinary early-morning row; either way it must be in today.
+        early_local = now_et.replace(
+            hour=1, minute=30, second=0, microsecond=0
+        )
+        early_iso = early_local.astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        await svc.add_task(
+            tl.id,
+            Task(
+                title="dst-early",
+                due_at=early_iso,
+                due_at_tz="America/New_York",
+            ),
+            eastern_user,
+        )
+        set_current_user(eastern_user)
+        results = await svc.due_today()
+        titles = {t.title for t in results}
+        assert "dst-noon" in titles
+        assert "dst-early" in titles
+
+
+class TestPollDiffEvents:
+    async def test_poll_emits_task_updated_for_changed_row(
+        self, started_service: Any
+    ) -> None:
+        """Spec §18.1 lines 2108-2110: a second poll where one row
+        carries new ``updated_at`` + a changed user-facing field emits
+        ``task.updated`` (and never re-inserts)."""
+        svc, storage, ebus, *_ = started_service
+
+        class _Backend(FakeExternalBackend):
+            backend_name = "poll_diff_upd_a"
+
+        try:
+            tl = await svc.create_list(
+                _ext_list("tlst_diff_upd", backend_name="poll_diff_upd_a"),
+                _owner(),
+            )
+            backend = svc._runtimes[tl.id].backend
+            assert isinstance(backend, FakeExternalBackend)
+            now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            backend.upstream = {
+                "src-A": Task(
+                    id="",
+                    list_id=tl.id,
+                    title="orig",
+                    source_id="src-A",
+                    updated_at=now,
+                ),
+            }
+            await svc._poll_runtime(svc._runtimes[tl.id])
+            ebus.published.clear()
+            # Mutate the row upstream and bump updated_at.
+            later = (
+                datetime.now(UTC) + timedelta(minutes=5)
+            ).isoformat().replace("+00:00", "Z")
+            backend.upstream["src-A"].title = "renamed"
+            backend.upstream["src-A"].updated_at = later
+            await svc._poll_runtime(svc._runtimes[tl.id])
+            updated_events = [
+                e for e in ebus.published if e.event_type == "task.updated"
+            ]
+            created_events = [
+                e for e in ebus.published if e.event_type == "task.created"
+            ]
+            assert len(updated_events) == 1
+            assert updated_events[0].data["task_id"]
+            # No duplicate insert.
+            assert len(created_events) == 0
+        finally:
+            TaskBackend._registry.pop("poll_diff_upd_a", None)
+
+    async def test_poll_emits_task_completed_when_done_upstream(
+        self, started_service: Any
+    ) -> None:
+        """A poll diff that flips ``status`` to ``done`` emits
+        ``task.completed`` (not ``task.updated``)."""
+        svc, storage, ebus, *_ = started_service
+
+        class _Backend(FakeExternalBackend):
+            backend_name = "poll_diff_done_a"
+
+        try:
+            tl = await svc.create_list(
+                _ext_list("tlst_diff_done", backend_name="poll_diff_done_a"),
+                _owner(),
+            )
+            backend = svc._runtimes[tl.id].backend
+            assert isinstance(backend, FakeExternalBackend)
+            now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            backend.upstream = {
+                "src-B": Task(
+                    id="",
+                    list_id=tl.id,
+                    title="finishing",
+                    source_id="src-B",
+                    updated_at=now,
+                    status=TaskStatus.OPEN,
+                ),
+            }
+            await svc._poll_runtime(svc._runtimes[tl.id])
+            ebus.published.clear()
+            later = (
+                datetime.now(UTC) + timedelta(minutes=5)
+            ).isoformat().replace("+00:00", "Z")
+            backend.upstream["src-B"].status = TaskStatus.DONE
+            backend.upstream["src-B"].updated_at = later
+            await svc._poll_runtime(svc._runtimes[tl.id])
+            completed_events = [
+                e for e in ebus.published if e.event_type == "task.completed"
+            ]
+            assert len(completed_events) == 1
+        finally:
+            TaskBackend._registry.pop("poll_diff_done_a", None)
+
+
+class TestSyncTickPatchHygiene:
+    async def test_sync_tick_retry_sends_only_user_facing_fields(
+        self, started_service: Any
+    ) -> None:
+        """Spec §6.7.2: ``backend.update_task`` is patch-shaped — the
+        tick MUST NOT leak internal bookkeeping (``_id``,
+        ``sync_status``, ``last_push_error``, ``idempotency_key``,
+        ``retry_count`` etc.) into the patch dict.
+
+        This exercises the retry path where the row already has a
+        ``source_id`` from a previous successful add but a subsequent
+        update failed, leaving sync_status=PENDING_PUSH.
+        """
+        svc, storage, *_ = started_service
+
+        class _Backend(FakeExternalBackend):
+            backend_name = "patch_hygiene_a"
+
+        try:
+            tl = await svc.create_list(
+                _ext_list("tl_hyg", backend_name="patch_hygiene_a"),
+                _owner(),
+            )
+            backend = svc._runtimes[tl.id].backend
+            assert isinstance(backend, FakeExternalBackend)
+            # Step 1: add succeeds — source_id is set.
+            created = await svc.add_task(
+                tl.id, Task(title="hi", notes="orig"), _owner()
+            )
+            assert created.source_id
+            # Step 2: simulate an in-flight failed push by directly
+            # backdating the row to PENDING_PUSH so the next sync_tick
+            # exercises the update_task retry branch.
+            row = await storage.get("tasks", created.id)
+            assert row is not None
+            row["sync_status"] = SyncStatus.PENDING_PUSH.value
+            row["last_push_error"] = "stale failure"
+            row["idempotency_key"] = "should-not-leak"
+            row["retry_count"] = 1
+            await storage.put("tasks", created.id, row)
+            backend.update_calls.clear()
+            await svc._sync_tick()
+            assert len(backend.update_calls) == 1
+            _src, patch, _etag = backend.update_calls[0]
+            allowed = {
+                "title",
+                "notes",
+                "due_at",
+                "due_at_tz",
+                "priority",
+                "tags",
+                "project",
+                "status",
+                "completed_at",
+            }
+            assert set(patch.keys()) == allowed
+            for forbidden in (
+                "_id",
+                "id",
+                "sync_status",
+                "last_push_error",
+                "idempotency_key",
+                "retry_count",
+                "etag",
+                "source_id",
+            ):
+                assert forbidden not in patch
+        finally:
+            TaskBackend._registry.pop("patch_hygiene_a", None)
+

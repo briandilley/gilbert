@@ -731,6 +731,226 @@ async def test_chat_injects_user_identity_into_tool_args(
     assert captured_args["_invocation_source"] == "ai"
     # _conversation_id is also injected (the chat created one).
     assert captured_args["_conversation_id"]
+    # _tool_call_id is the tool_use_id from the AI response so tools
+    # can synthesize implicit idempotency keys (see tasks add_task).
+    assert captured_args["_tool_call_id"] == "tc_probe"
+
+
+async def test_chat_injects_tool_call_id_for_idempotency(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+    storage_backend: StorageBackend,
+) -> None:
+    """The injected ``_tool_call_id`` lets tools (e.g. tasks add_task)
+    synthesize an implicit idempotency key from
+    ``(_user_id, _conversation_id, _tool_call_id)`` so a multi-turn AI
+    retry of the same tool call doesn't double-create rows.
+
+    Regression test: prior to the ai.py injection fix, ``_tool_call_id``
+    was never injected and the all-three guard in tasks.py never fired.
+    """
+    captured_per_call: list[dict[str, Any]] = []
+
+    class CapturingProvider(StubToolProviderService):
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            captured_per_call.append(dict(arguments))
+            return "ok"
+
+    tool_def = ToolDefinition(name="probe", description="capture args")
+    provider = CapturingProvider(tools=[tool_def], results={"probe": "ok"})
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [provider] if cap == "ai_tools" else []
+
+    # Two parallel tool calls in one response so we can assert each gets
+    # its own distinct tool_call_id.
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="probing",
+                tool_calls=[
+                    ToolCall(
+                        tool_call_id="tc_alpha",
+                        tool_name="probe",
+                        arguments={},
+                    ),
+                    ToolCall(
+                        tool_call_id="tc_beta",
+                        tool_name="probe",
+                        arguments={},
+                    ),
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="done"),
+            model="stub",
+        )
+    )
+
+    await ai_service.start(resolver)
+    user = UserContext(
+        user_id="u1",
+        display_name="U",
+        email="u@x.com",
+        roles=frozenset({"user"}),
+    )
+    await ai_service.chat("hi", user_ctx=user)
+
+    assert len(captured_per_call) == 2
+    tool_call_ids = {args["_tool_call_id"] for args in captured_per_call}
+    assert tool_call_ids == {"tc_alpha", "tc_beta"}
+
+
+async def test_chat_injects_user_tz_into_tool_args(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+    storage_backend: StorageBackend,
+) -> None:
+    """The user's IANA tz is injected so tools that resolve "today" /
+    due windows in the caller's local time (e.g. tasks_due) don't fall
+    back to the host clock.
+
+    Regression test: prior to the ai.py injection fix, ``_user_tz`` was
+    never injected and a Pacific user asking what's due today on an
+    Eastern host would get the host's window, not theirs.
+    """
+    captured_args: dict[str, Any] = {}
+
+    class CapturingProvider(StubToolProviderService):
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            captured_args.update(arguments)
+            return "ok"
+
+    tool_def = ToolDefinition(name="probe", description="capture args")
+    provider = CapturingProvider(tools=[tool_def], results={"probe": "ok"})
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [provider] if cap == "ai_tools" else []
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="probing",
+                tool_calls=[
+                    ToolCall(
+                        tool_call_id="tc_tz",
+                        tool_name="probe",
+                        arguments={},
+                    ),
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="done"),
+            model="stub",
+        )
+    )
+
+    await ai_service.start(resolver)
+    user = UserContext(
+        user_id="usr_pacific",
+        display_name="Pacific User",
+        email="p@x.com",
+        roles=frozenset({"user"}),
+        tz="America/Los_Angeles",
+    )
+    await ai_service.chat("hi", user_ctx=user)
+
+    assert captured_args["_user_tz"] == "America/Los_Angeles"
+
+
+async def test_chat_omits_user_tz_when_user_has_none(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+    storage_service: StorageService,
+    storage_backend: StorageBackend,
+) -> None:
+    """If the user has no configured tz, ``_user_tz`` is not injected;
+    downstream tools fall back to the host clock as documented."""
+    captured_args: dict[str, Any] = {}
+
+    class CapturingProvider(StubToolProviderService):
+        async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+            captured_args.update(arguments)
+            return "ok"
+
+    tool_def = ToolDefinition(name="probe", description="capture args")
+    provider = CapturingProvider(tools=[tool_def], results={"probe": "ok"})
+
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = lambda cap: None
+    resolver.get_all = lambda cap: [provider] if cap == "ai_tools" else []
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(
+                role=MessageRole.ASSISTANT,
+                content="probing",
+                tool_calls=[
+                    ToolCall(
+                        tool_call_id="tc_notz",
+                        tool_name="probe",
+                        arguments={},
+                    ),
+                ],
+            ),
+            model="stub",
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="done"),
+            model="stub",
+        )
+    )
+
+    await ai_service.start(resolver)
+    user = UserContext(
+        user_id="usr_no_tz",
+        display_name="No TZ",
+        email="n@x.com",
+        roles=frozenset({"user"}),
+    )
+    await ai_service.chat("hi", user_ctx=user)
+
+    assert "_user_tz" not in captured_args
 
 
 async def test_system_prompt_includes_user_identity_block(
