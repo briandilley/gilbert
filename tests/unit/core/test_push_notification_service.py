@@ -268,12 +268,46 @@ class _RaisingBackend(_FakeBackendBase):
         raise RuntimeError("Bearer secret-token leaked")
 
 
-# Side-effect: importing this module registers all four backends above.
+class _SecretBackend(_FakeBackendBase):
+    """Backend with a ``sensitive=True`` destination field — used to
+    verify ``_serialize_route`` masks secrets when admins read other
+    users' routes."""
+
+    backend_name = "secret-backend"
+
+    @classmethod
+    def destination_params(cls) -> list[ConfigParam]:
+        return [
+            ConfigParam(
+                key="api_key",
+                type=ToolParameterType.STRING,
+                description="Secret api key",
+                default="",
+                sensitive=True,
+            ),
+            ConfigParam(
+                key="endpoint",
+                type=ToolParameterType.STRING,
+                description="Public endpoint",
+                default="",
+            ),
+        ]
+
+    async def send(
+        self,
+        destination: PushDestination,
+        message: PushMessage,
+    ) -> PushDeliveryResult:
+        return PushDeliveryResult(status=PushDeliveryStatus.DELIVERED)
+
+
+# Side-effect: importing this module registers all backends above.
 _TEST_BACKEND_NAMES = (
     "recording-backend",
     "blocking-backend",
     "retry-backend",
     "raising-backend",
+    "secret-backend",
 )
 
 
@@ -944,6 +978,68 @@ async def test_ws_routes_list_admin_can_read_other_user(
     assert len(result["routes"]) == 1
 
 
+async def test_ws_routes_list_masks_sensitive_fields_for_admin(
+    setup_service: tuple[
+        PushNotificationService, InMemoryEventBus, _FakeNotificationsProvider, _FakeUserBackend,
+    ],
+    sqlite_storage: StorageBackend,
+) -> None:
+    """An admin reading another user's routes MUST receive masked
+    sensitive ``destination_data`` fields — bot tokens, webhook URLs,
+    Pushover user_keys must come back as ``"********"``. Non-sensitive
+    fields stay plain so the SPA can render them as labels."""
+    svc, _bus, _notifications, _users = setup_service
+    secret_value = "supersecret-api-key"
+    await _create_route(
+        sqlite_storage,
+        route_id="r_alice_secret",
+        user_id="u_alice",
+        backend_name="secret-backend",
+        destination_data={"api_key": secret_value, "endpoint": "https://example"},
+    )
+    admin = _FakeConn("u_admin", admin=True)
+    result = await svc._ws_routes_list(
+        admin, {"id": "1", "user_id": "u_alice"}
+    )
+    assert result["ok"]
+    assert len(result["routes"]) == 1
+    dest = result["routes"][0]["destination_data"]
+    assert dest["api_key"] == "********"
+    # The value must NEVER appear in the wire payload anywhere.
+    import json
+
+    serialized = json.dumps(result)
+    assert secret_value not in serialized
+    # Non-sensitive fields are preserved.
+    assert dest["endpoint"] == "https://example"
+
+
+async def test_ws_routes_list_owner_sees_unmasked_secrets(
+    setup_service: tuple[
+        PushNotificationService, InMemoryEventBus, _FakeNotificationsProvider, _FakeUserBackend,
+    ],
+    sqlite_storage: StorageBackend,
+) -> None:
+    """The route owner reading their OWN routes still gets the
+    unmasked secret values back — the SPA needs them so the user can
+    edit the destination form without re-typing the whole secret."""
+    svc, _bus, _notifications, _users = setup_service
+    secret_value = "supersecret-api-key"
+    await _create_route(
+        sqlite_storage,
+        route_id="r_alice_self",
+        user_id="u_alice",
+        backend_name="secret-backend",
+        destination_data={"api_key": secret_value, "endpoint": "https://example"},
+    )
+    alice = _FakeConn("u_alice")
+    result = await svc._ws_routes_list(
+        alice, {"id": "1", "user_id": "u_alice"}
+    )
+    assert result["ok"]
+    assert result["routes"][0]["destination_data"]["api_key"] == secret_value
+
+
 async def test_ws_routes_test_debounces(
     setup_service: tuple[
         PushNotificationService, InMemoryEventBus, _FakeNotificationsProvider, _FakeUserBackend,
@@ -1047,6 +1143,70 @@ async def test_ai_tool_delete_returns_confirm_uiblock_then_deletes(
 
 
 # ── Subscribed-on-start sanity check ────────────────────────────────
+
+
+async def test_stop_cancels_inflight_fan_out_task(
+    sqlite_storage: StorageBackend,
+) -> None:
+    """When ``stop()`` is called while a worker is awaiting an in-flight
+    ``_fan_out`` task (e.g. the backend's HTTP request is still in
+    flight), the inner task MUST be cancelled — not abandoned. Leaks
+    here would let HTTP work outlive shutdown."""
+    bus = InMemoryEventBus()
+    svc = PushNotificationService()
+    svc._worker_count = 1
+    svc._test_debounce_s = 0.0
+    resolver = _FakeResolver(
+        {
+            "entity_storage": _FakeStorageProvider(sqlite_storage),
+            "event_bus": _FakeEventBusProvider(bus),
+        }
+    )
+    await svc.start(resolver)
+    blocking = svc._backends["blocking-backend"]
+    assert isinstance(blocking, _BlockingBackend)
+    await _create_route(
+        sqlite_storage,
+        route_id="r_block_stop",
+        user_id="u_b",
+        backend_name="blocking-backend",
+    )
+
+    # Capture every Task created during the publish so we can find the
+    # spawned _fan_out and per-route delivery sub-tasks afterwards.
+    pre_existing = {id(t) for t in asyncio.all_tasks()}
+    await _publish_notification(bus, user_id="u_b", notification_id="n_block")
+    # Wait until the backend has actually entered ``send`` — proves the
+    # inner _fan_out task is mid-flight when we call stop().
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1.0)
+    new_tasks = [
+        t for t in asyncio.all_tasks() if id(t) not in pre_existing
+    ]
+    # Identify the spawned tasks by name / coroutine — _fan_out and the
+    # per-route _deliver_with_retry task should both be in flight.
+    spawned = [
+        t
+        for t in new_tasks
+        if (
+            "_fan_out" in (t.get_coro().__qualname__ if t.get_coro() else "")
+            or "_deliver_with_retry"
+            in (t.get_coro().__qualname__ if t.get_coro() else "")
+        )
+    ]
+    assert spawned, "expected at least one spawned _fan_out / delivery task"
+
+    await svc.stop()
+
+    # Every spawned inner task must be cancelled (or completed) — none
+    # should still be pending after stop() returns.
+    for t in spawned:
+        assert t.done(), f"{t.get_name()} survived stop()"
+
+    # And the blocking backend's send must NOT have been allowed to
+    # complete normally — the task should be cancelled.
+    assert any(t.cancelled() for t in spawned), (
+        "expected at least one in-flight fan-out task to be cancelled"
+    )
 
 
 async def test_unsubscribes_on_stop(sqlite_storage: StorageBackend) -> None:

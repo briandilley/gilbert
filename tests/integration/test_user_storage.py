@@ -85,6 +85,57 @@ async def test_update_user(user_backend: StorageUserBackend) -> None:
     assert user["email"] == "test@example.com"  # Unchanged fields preserved
 
 
+async def test_legacy_user_row_without_tz_reads_back_as_none(
+    sqlite_storage: SQLiteStorage, user_backend: StorageUserBackend
+) -> None:
+    """Pre-existing user rows written before the ``tz`` precursor
+    landed don't carry the field. The read path MUST tolerate that
+    silently — ``get_user`` returns the row without raising, and the
+    derived ``UserContext`` carries ``tz=None``.
+
+    This is the no-migration claim from the feature spec: existing
+    deployments don't need a backfill before deploying the new code.
+    """
+    # Write a legacy-shaped row directly via the storage layer, with NO
+    # ``tz`` key. Mirrors what an earlier-version of Gilbert would have
+    # persisted.
+    legacy_row = {
+        "username": "legacy",
+        "email": "legacy@example.com",
+        "display_name": "Legacy User",
+        "password_hash": "",
+        "is_root": False,
+        "roles": ["user"],
+        "provider_links": [],
+        "metadata": {},
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "last_login": None,
+    }
+    assert "tz" not in legacy_row
+    await sqlite_storage.put("users", "legacy_u1", legacy_row)
+
+    fetched = await user_backend.get_user("legacy_u1")
+    assert fetched is not None
+    # ``get_user`` must not blow up on the missing key.
+    assert fetched.get("tz") is None
+
+    # Building the in-memory UserContext (mirroring what
+    # ``AuthService.validate_session`` does) must succeed and carry
+    # ``tz=None``.
+    from gilbert.interfaces.auth import UserContext
+
+    user_ctx = UserContext(
+        user_id=fetched["_id"],
+        email=fetched["email"],
+        display_name=fetched.get("display_name", ""),
+        roles=frozenset(fetched.get("roles", [])),
+        provider="local",
+        tz=fetched.get("tz") or None,
+    )
+    assert user_ctx.tz is None
+    assert user_ctx.user_id == "legacy_u1"
+
+
 async def test_update_user_not_found(user_backend: StorageUserBackend) -> None:
     with pytest.raises(KeyError):
         await user_backend.update_user("nonexistent", {"display_name": "X"})
