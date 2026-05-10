@@ -28,6 +28,11 @@ class TaskError(Exception):
     """Base error type raised by ``TaskBackend`` operations."""
 
 
+# Convenience alias — concrete backends typically catch the base class
+# under a "Backend"-prefixed name to mirror their other typed errors.
+TaskBackendError = TaskError
+
+
 class TaskBackendAuthError(TaskError):
     """Raised when a backend rejects credentials (e.g. HTTP 401/403)."""
 
@@ -665,6 +670,7 @@ __all__ = [
     "TaskBackend",
     "TaskBackendAuthError",
     "TaskBackendConflictError",
+    "TaskBackendError",
     "TaskBackendNotFoundError",
     "TaskBackendRateLimitError",
     "TaskBackendTransientError",

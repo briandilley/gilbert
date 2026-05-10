@@ -24,6 +24,7 @@ import {
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
 import { BriefingCard } from "@/components/feeds/BriefingCard";
+import { DueTodayCard } from "@/components/tasks/DueTodayCard";
 
 interface CardStyle {
   icon: LucideIcon;
@@ -71,6 +72,7 @@ export function DashboardPage() {
           system-status panels, etc. before the standard card grid. */}
       <div className="mb-4 sm:mb-6 space-y-3">
         <UpcomingEventCard />
+        <DueTodayCard />
         <BriefingCard />
         <PluginPanelSlot slot="dashboard.top" />
       </div>

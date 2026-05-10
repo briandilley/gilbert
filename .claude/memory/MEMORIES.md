@@ -53,3 +53,4 @@
 - [Plugin runtime_dependencies](memory-runtime-dependencies.md) — Plugin.runtime_dependencies() + 'gilbert doctor' for non-pip OS deps
 - [Feeds Service](memory-feeds-service.md) — RSS/Atom polling + scoring + briefing builder; built-in RssAtomFeedBackend + private feed_articles DocumentBackend
 - [Feed Briefing Service](memory-feed-briefing-service.md) — daily fan-out; presence-first, fallback fires presence_grace_minutes after briefing_hour
+- [Tasks Service](memory-tasks-service.md) — multi-list todo aggregator with local-first push reconciliation, soft-delete, due_soon, GC; LocalTaskBackend + GoogleTasksBackend (in google plugin)
