@@ -24,6 +24,7 @@ from gilbert.core.services import (
     EventBusService,
     InboxService,
     LightsService,
+    MediaLibraryService,
     MusicService,
     ShadesService,
     SpeakerService,
@@ -207,6 +208,11 @@ class Gilbert:
         self.service_manager.register(TTSService())
         self.service_manager.register(SpeakerService())
         self.service_manager.register(MusicService())
+        # Media library — multi-backend Plex/Jellyfin video library +
+        # casting. Concrete backends (PlexBackend, JellyfinBackend) are
+        # registered by their respective std-plugins via side-effect
+        # imports during plugin setup; the service iterates the registry.
+        self.service_manager.register(MediaLibraryService())
         self.service_manager.register(LightsService())
         self.service_manager.register(ShadesService())
         self.service_manager.register(ThermostatService())
