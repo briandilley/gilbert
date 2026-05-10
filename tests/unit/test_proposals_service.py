@@ -93,6 +93,25 @@ class FakeStorage(StorageBackend):
         )
         return len(results)
 
+    async def delete_query(self, query: Query) -> int:
+        rows = await self.query(
+            Query(
+                collection=query.collection,
+                filters=query.filters,
+                sort=[],
+                limit=query.limit,
+                offset=0,
+            ),
+        )
+        coll = self._data.get(query.collection, {})
+        removed = 0
+        for row in rows:
+            entity_id = row.get("_id")
+            if entity_id is not None and entity_id in coll:
+                del coll[entity_id]
+                removed += 1
+        return removed
+
     async def list_collections(self) -> list[str]:
         return list(self._data.keys())
 

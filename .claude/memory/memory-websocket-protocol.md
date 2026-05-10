@@ -43,7 +43,7 @@ Longest prefix match. System user bypasses. Overrides stored in `acl_event_visib
 
 ### Filtering Pipeline (per event, per connection)
 1. Pattern match against client's subscriptions (`fnmatch`)
-2. Role-level visibility check
+2. Role-level visibility check (uses `resolve_event_visibility(event_type, data)` from `interfaces/acl.py`, which honors a per-event `data["required_role"]` override before falling back to the prefix table — used by the camera service to admin-gate specific cameras whose detection events ride a prefix-everyone topic)
 3. Chat content filter (conversation membership + `visible_to`)
 
 ### Subscription Model

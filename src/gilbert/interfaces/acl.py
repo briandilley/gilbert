@@ -2,7 +2,24 @@
 
 Shared by both the core access-control service and the web layer so that
 neither depends on the other for these constants.
+
+Reserved keys on ``Event.data``
+--------------------------------
+
+``required_role`` — when an ``Event``'s ``data["required_role"]`` is one
+of the canonical role names (``"admin"`` / ``"user"`` / ``"everyone"``),
+``resolve_event_visibility`` returns the matching numeric level for that
+role and the per-event-type prefix table is bypassed. Services use this
+to override the *default* visibility for events whose audience is
+narrower than the prefix would suggest (e.g. an admin-gated camera
+publishing an event under ``camera.event.detected`` — which is
+prefix-everyone — but with ``data["required_role"]="admin"`` so the WS
+filter only delivers it to admin connections). Unknown / missing values
+fall back to the prefix-based resolution.
 """
+
+from collections.abc import Mapping
+from typing import Any
 
 # ── Built-in role levels ──────────────────────────────────────────────
 # Canonical mapping of role names → numeric privilege levels.
@@ -27,6 +44,13 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     "screen.": 200,
     "chat.": 200,
     "workspace.": 200,
+    # Camera events default to everyone; the camera service overrides on
+    # a per-camera basis by writing ``data["required_role"]`` per the
+    # ``resolve_event_visibility`` primitive below.
+    "camera.": 200,
+    # Backend-status events (connect/disconnect) are admin-only
+    # diagnostics, distinct from the per-camera detection stream above.
+    "camera.backend.": 0,
     # user (100)
     "presence.": 100,
     "timer.": 100,
@@ -125,6 +149,9 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # (any authenticated user may issue tasks.* frames; per-list
     # authorization is per-handler).
     "tasks.": 100,
+    # Camera RPCs are user-level; handlers enforce per-camera role
+    # filtering on top of the prefix-level gate.
+    "cameras.": 100,
     # Notifications are user-level; handlers enforce per-user ownership
     # so a user only ever sees / mutates their own notifications.
     "notification.": 100,
@@ -208,3 +235,25 @@ def resolve_default_event_level(event_type: str) -> int:
             best_match = prefix
             best_level = level
     return best_level
+
+
+def resolve_event_visibility(
+    event_type: str,
+    data: Mapping[str, Any] | None = None,
+) -> int:
+    """Resolve the minimum role level for an event, honoring per-event overrides.
+
+    When the event's ``data["required_role"]`` is one of the canonical
+    role names (``"admin"`` / ``"user"`` / ``"everyone"``), the matching
+    numeric level wins. Unknown / missing values fall back to the
+    longest-prefix lookup in :data:`DEFAULT_EVENT_VISIBILITY`.
+
+    See the module docstring for the contract on ``data["required_role"]``.
+    """
+    if data is not None:
+        required = data.get("required_role")
+        if isinstance(required, str):
+            level = BUILTIN_ROLE_LEVELS.get(required)
+            if level is not None:
+                return level
+    return resolve_default_event_level(event_type)

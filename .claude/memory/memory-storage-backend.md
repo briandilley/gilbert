@@ -7,6 +7,7 @@ Generic entity store abstracted behind `StorageBackend` ABC. SQLite implementati
 The storage interface (`src/gilbert/interfaces/storage.py`) exposes:
 - **Entity CRUD**: `put(collection, id, data)`, `get()`, `delete()`, `exists()`
 - **Querying**: `query(Query)` and `count(Query)` using `Filter` objects with operators (eq, neq, gt, gte, lt, lte, in, contains, exists)
+- **Batched delete**: `delete_query(Query) -> int` — single-statement removal of every row matching the filters. SQLite implementation is a parameterized `DELETE WHERE` (with a "select ids → delete IN (...)" fallback for SQLite builds without `UPDATE_DELETE_LIMIT`). Returns the row count. Used for retention sweeps (camera events, etc.) so a hot collection doesn't suffer per-row round-trips.
 - **Collection management**: `list_collections()`, `drop_collection()`
 - **Indexing**: `ensure_index(IndexDefinition)` — integrations declare how they query, and the backend creates appropriate indexes
 

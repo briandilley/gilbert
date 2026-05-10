@@ -159,6 +159,17 @@ class FakeStorage(StorageBackend):
     async def count(self, query: Query) -> int:
         return len(await self.query(query))
 
+    async def delete_query(self, query: Query) -> int:
+        matches = await self.query(query)
+        coll = self._data.get(query.collection, {})
+        removed = 0
+        for entity in matches:
+            entity_id = entity.get("_id")
+            if entity_id is not None and entity_id in coll:
+                del coll[entity_id]
+                removed += 1
+        return removed
+
     async def list_collections(self) -> list[str]:
         return list(self._data.keys())
 
