@@ -8,8 +8,6 @@ control, AI sampling) get lightweight fakes.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,20 +16,15 @@ import pytest
 from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.tasks import (
-    TaskBackendUnavailableError,
-    TaskListNotFoundError,
     TaskListPermissionError,
-    TaskNotFoundError,
     TasksService,
 )
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.tasks import (
-    StorageAwareTaskBackend,
     SyncStatus,
     Task,
     TaskBackend,
-    TaskBackendAuthError,
     TaskBackendConflictError,
     TaskBackendNotFoundError,
     TaskList,
@@ -41,7 +34,6 @@ from gilbert.interfaces.tasks import (
 )
 from gilbert.interfaces.ui import ToolOutput
 from gilbert.storage.sqlite import SQLiteStorage
-
 
 # ── Fakes ───────────────────────────────────────────────────────────
 
