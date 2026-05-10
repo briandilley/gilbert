@@ -492,6 +492,103 @@ async def test_search_limit_capped_at_50(
     await svc.stop()
 
 
+async def test_recently_added_jellyfin_per_user_fanout(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Spec §6.3 partial-mapping: a backend with ``supports_per_user=True``
+    (Jellyfin shape) gets called once per mapped Gilbert user with that
+    user's ``backend_user_id`` — never with empty user (admin fallback).
+    """
+    plex_movie = _movie("p1", "Plex Movie", backend="alpha")
+    jelly_movie = _movie("j1", "Jelly Movie", backend="beta")
+
+    class _SharedToken(FakeMediaLibraryBackend):
+        backend_name = "alpha"
+        supports_per_user = False  # shared-token Plex
+
+        def __init__(self) -> None:
+            super().__init__(
+                recently_added_entries=[
+                    RecentlyAddedEntry(
+                        item=plex_movie, added_at=plex_movie.added_at
+                    )
+                ]
+            )
+
+    class _PerUser(FakeMediaLibraryBackend):
+        """Jellyfin-shaped backend: rejects empty backend_user_id so the
+        old silent-admin-fallback bug surfaces as a test failure.
+        """
+
+        backend_name = "beta"
+        supports_per_user = True
+
+        def __init__(self) -> None:
+            super().__init__(
+                recently_added_entries=[
+                    RecentlyAddedEntry(
+                        item=jelly_movie, added_at=jelly_movie.added_at
+                    )
+                ]
+            )
+
+        async def recently_added(
+            self,
+            *,
+            kind: MediaKind | None = None,
+            limit: int = 10,
+            library_section: str = "",
+            backend_user_id: str = "",
+        ) -> list[RecentlyAddedEntry]:
+            if not backend_user_id:
+                raise MediaLibraryUnavailableError(
+                    "Jellyfin recently_added requires a per-user mapping"
+                )
+            return await super().recently_added(
+                kind=kind,
+                limit=limit,
+                library_section=library_section,
+                backend_user_id=backend_user_id,
+            )
+
+    MediaLibraryBackend._registry["alpha"] = _SharedToken
+    MediaLibraryBackend._registry["beta"] = _PerUser
+
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {
+                "alpha": {"enabled": True, "settings": {}},
+                "beta": {"enabled": True, "settings": {}},
+            },
+        },
+    )
+    await svc.start(resolver)
+    await svc.set_user_mapping("alice", "beta", "u_jelly_42")
+
+    # Tool-path: alice asks for recent. Jellyfin gets called with her id.
+    out = await svc.recently_added(limit=10, gilbert_user_id="alice")
+    ids = sorted(e.item.id for e in out)
+    assert ids == ["j1", "p1"]
+
+    beta = svc._backends["beta"]
+    # Verify the per-user id flowed through — not empty (admin fallback).
+    assert beta.recently_calls
+    assert all(call[3] == "u_jelly_42" for call in beta.recently_calls)
+
+    # Poll path (no calling user): iterates mapped users for per-user
+    # backends. Same alice mapping → one call with u_jelly_42.
+    beta.recently_calls.clear()
+    out_poll = await svc.recently_added(limit=10, gilbert_user_id=None)
+    assert sorted(e.item.id for e in out_poll) == ["j1", "p1"]
+    assert beta.recently_calls
+    assert all(call[3] == "u_jelly_42" for call in beta.recently_calls)
+    await svc.stop()
+
+
 async def test_recently_added_caps_after_merge(
     storage: SQLiteStorage, event_bus: InMemoryEventBus
 ) -> None:
@@ -556,12 +653,15 @@ async def test_continue_watching_uses_per_user_mapping(
     )
     await svc.start(resolver)
     await svc.set_user_mapping("alice", "alpha", "u_plex_42")
-    result = await svc.continue_watching(gilbert_user_id="alice")
-    assert len(result["entries"]) == 1
-    assert result["entries"][0].item.id == "p1"
+    # Protocol-shaped read returns the bare list of entries.
+    entries = await svc.continue_watching(gilbert_user_id="alice")
+    assert len(entries) == 1
+    assert entries[0].item.id == "p1"
     backend = svc._backends["alpha"]
     assert backend.continue_calls[-1][0] == "u_plex_42"
-    assert result["unmapped_backends"] == []
+    # The dict-envelope variant exposes the partial-mapping metadata.
+    envelope = await svc.continue_watching_for_user(gilbert_user_id="alice")
+    assert envelope["unmapped_backends"] == []
     await svc.stop()
 
 
@@ -592,7 +692,7 @@ async def test_continue_watching_partial_mapping_returns_unmapped_hint(
     )
     await svc.start(resolver)
     await svc.set_user_mapping("alice", "alpha", "u_plex_42")
-    result = await svc.continue_watching(gilbert_user_id="alice")
+    result = await svc.continue_watching_for_user(gilbert_user_id="alice")
     assert "beta" in result["unmapped_backends"]
     # Critical: the unmapped backend was NOT queried with admin fallback.
     beta_backend = svc._backends["beta"]
@@ -619,9 +719,123 @@ async def test_continue_watching_no_mapping_returns_error(
         },
     )
     await svc.start(resolver)
-    result = await svc.continue_watching(gilbert_user_id="alice")
+    result = await svc.continue_watching_for_user(gilbert_user_id="alice")
     assert "error" in result
     assert "link-user" in result["error"]
+    await svc.stop()
+
+
+async def test_user_can_see_returns_true_for_visible_section(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Spec §6.5 / §18: subscribers re-filter restricted-library
+    events through ``user_can_see``. A user mapped to a backend account
+    that includes a section returns True.
+    """
+
+    class _LibsBackend(FakeMediaLibraryBackend):
+        backend_name = "alpha"
+
+        def __init__(self) -> None:
+            super().__init__(libraries=["Movies", "Kids TV"])
+
+    MediaLibraryBackend._registry["alpha"] = _LibsBackend
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {"alpha": {"enabled": True, "settings": {}}},
+        },
+    )
+    await svc.start(resolver)
+    await svc.set_user_mapping("alice", "alpha", "u_42")
+    assert await svc.user_can_see("alice", "alpha", "Movies") is True
+    assert await svc.user_can_see("alice", "alpha", "Kids TV") is True
+    await svc.stop()
+
+
+async def test_user_can_see_returns_false_for_restricted_section(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """A section the user can't see → False. A user without any
+    mapping → False (returns conservatively rather than admin-fallback
+    True).
+    """
+
+    class _LibsBackend(FakeMediaLibraryBackend):
+        backend_name = "alpha"
+
+        def __init__(self) -> None:
+            super().__init__(libraries=["Movies"])  # no Kids TV
+
+    MediaLibraryBackend._registry["alpha"] = _LibsBackend
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {"alpha": {"enabled": True, "settings": {}}},
+        },
+    )
+    await svc.start(resolver)
+    await svc.set_user_mapping("alice", "alpha", "u_42")
+    # Section absent from the user's library list.
+    assert await svc.user_can_see("alice", "alpha", "Adults Only") is False
+    # No mapping at all → False (conservative; no admin fallback).
+    assert await svc.user_can_see("bob", "alpha", "Movies") is False
+    await svc.stop()
+
+
+async def test_user_can_see_caches_60_seconds(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Successive calls within the TTL hit the cache; only the first
+    call lands on ``backend.list_libraries``.
+    """
+
+    class _Counting(FakeMediaLibraryBackend):
+        backend_name = "alpha"
+
+        def __init__(self) -> None:
+            super().__init__(libraries=["Movies"])
+            self.libs_calls: int = 0
+
+        async def list_libraries(
+            self, backend_user_id: str = ""
+        ) -> list[str]:
+            self.libs_calls += 1
+            return await super().list_libraries(
+                backend_user_id=backend_user_id
+            )
+
+    MediaLibraryBackend._registry["alpha"] = _Counting
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {"alpha": {"enabled": True, "settings": {}}},
+        },
+    )
+    await svc.start(resolver)
+    await svc.set_user_mapping("alice", "alpha", "u_42")
+    backend = svc._backends["alpha"]
+    assert isinstance(backend, _Counting)
+    await svc.user_can_see("alice", "alpha", "Movies")
+    await svc.user_can_see("alice", "alpha", "Movies")
+    await svc.user_can_see("alice", "alpha", "Anything else")
+    # All three calls reused the cached library list — one fetch.
+    assert backend.libs_calls == 1
+
+    # Force the cache to expire by stamping fetched_at into the past.
+    cached_libs, _ = svc._user_libs_cache[("alpha", "u_42")]
+    svc._user_libs_cache[("alpha", "u_42")] = (cached_libs, 0.0)
+    await svc.user_can_see("alice", "alpha", "Movies")
+    assert backend.libs_calls == 2
     await svc.stop()
 
 
@@ -1187,6 +1401,7 @@ async def test_now_playing_poll_adaptive_backoff(
         lambda: {"items": [], "clients": [], "sessions": []},
     )
     svc = MediaLibraryService()
+    scheduler = _SchedulerProvider()
     resolver = _make_resolver(
         storage=storage,
         bus=event_bus,
@@ -1200,14 +1415,24 @@ async def test_now_playing_poll_adaptive_backoff(
                 "idle_max_interval_seconds": 240,
             },
         },
-        scheduler=_SchedulerProvider(),
+        scheduler=scheduler,
     )
     await svc.start(resolver)
     base = svc._now_playing_current_interval
-    for _ in range(3):
+    # Scheduler is firing at the base interval at this point.
+    assert scheduler.intervals["media_library.poll_now_playing"] == base
+
+    # Drive enough empty polls that the cap (240s) is reached and we
+    # get to assert the upper bound, not just "interval grew."
+    for _ in range(20):
         await svc._poll_now_playing()
     backed_off = svc._now_playing_current_interval
     assert backed_off > base
+    assert backed_off <= 240
+    # Scheduler's recorded interval reflects the backed-off value —
+    # if the service mutates ``_now_playing_current_interval`` without
+    # rescheduling, this assertion catches the regression.
+    assert scheduler.intervals["media_library.poll_now_playing"] == backed_off
 
     # A media.playback.started event resets cadence.
     await event_bus.publish(
@@ -1220,7 +1445,10 @@ async def test_now_playing_poll_adaptive_backoff(
     # event publish runs subscribers synchronously through asyncio
     await asyncio.sleep(0)
     assert svc._now_playing_current_interval == base
+    assert scheduler.intervals["media_library.poll_now_playing"] == base
     await svc.stop()
+    # stop() unschedules so the scheduler is empty afterward.
+    assert "media_library.poll_now_playing" not in scheduler.intervals
 
 
 async def test_recently_added_poll_baseline_is_silent_on_first_run(
@@ -1732,8 +1960,8 @@ async def test_aggregator_runs_with_zero_backends(
     assert await svc.search("anything") == []
     assert await svc.recently_added() == []
     assert (
-        await svc.continue_watching(gilbert_user_id="alice")
-    )["entries"] == []
+        await svc.continue_watching(gilbert_user_id="alice") == []
+    )
     assert await svc.list_clients() == []
     assert await svc.now_playing() == []
     assert await svc.list_backend_health() == []

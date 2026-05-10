@@ -509,6 +509,7 @@ class MediaLibraryProvider(Protocol):
         *,
         kind: MediaKind | None = None,
         gilbert_user_id: str | None = None,
+        filters: MediaSearchFilters | None = None,
     ) -> list[MediaItem]: ...
 
     async def recently_added(
@@ -516,6 +517,7 @@ class MediaLibraryProvider(Protocol):
         *,
         kind: MediaKind | None = None,
         limit: int = 10,
+        gilbert_user_id: str | None = None,
     ) -> list[RecentlyAddedEntry]: ...
 
     async def continue_watching(
@@ -532,6 +534,13 @@ class MediaLibraryProvider(Protocol):
     ) -> list[MediaSession]: ...
 
     async def list_backend_health(self) -> list[dict[str, object]]: ...
+
+    async def user_can_see(
+        self,
+        gilbert_user_id: str,
+        backend_name: str,
+        library_section: str,
+    ) -> bool: ...
 
 
 # Type alias for fan-out callable used by the aggregator's _fanout
