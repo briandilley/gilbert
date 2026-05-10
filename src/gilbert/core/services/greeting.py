@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.health import GreetingBrief, HealthProvider
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
@@ -101,6 +102,15 @@ class GreetingService(Service):
         self._briefing_max_seconds: int = 60
         self._feeds: FeedsProvider | None = None
 
+        # Health integration — when the HealthProvider capability is
+        # present and the greeted user has at least one ``health_links``
+        # row, the greeting prompt receives structured headline values
+        # (NOT a pre-canned paragraph) so the model can react to the
+        # facts in its own voice. Subject to the same non-clinical
+        # constraints as the daily-summary prompt — see spec §14.
+        self._health: HealthProvider | None = None
+        self._include_health_brief: bool = True
+
         # Camera-event announcement config + state.
         self._announce_camera_labels: tuple[str, ...] = (
             _DEFAULT_ANNOUNCE_CAMERA_LABELS
@@ -135,6 +145,11 @@ class GreetingService(Service):
                     # Optional briefing splice — when present, the
                     # greeting can include the day's top news.
                     "feeds",
+                    # Optional health-brief splice — when present and
+                    # the greeted user has at least one health_links
+                    # row, the prompt receives structured headline
+                    # values per spec §14.
+                    "health",
                 }
             ),
             ai_calls=frozenset({"greeting"}),
@@ -217,6 +232,13 @@ class GreetingService(Service):
         feeds_svc = resolver.get_capability("feeds")
         if isinstance(feeds_svc, FeedsProvider):
             self._feeds = feeds_svc
+
+        # Optional health provider — when present and the greeted
+        # user has at least one ``health_links`` row, the greeting
+        # prompt receives a ``GreetingBrief`` structured snapshot.
+        health_svc = resolver.get_capability("health")
+        if isinstance(health_svc, HealthProvider):
+            self._health = health_svc
 
         # Schedule a one-shot check for people already present at startup.
         # This handles the case where Gilbert restarts while people are
@@ -579,7 +601,10 @@ class GreetingService(Service):
 
             display_name = await self._get_display_name(user_id)
             recent = await self._get_recent_greetings(user_id)
-            greeting = await self._generate_greeting(display_name, recent)
+            health_brief = await self._fetch_health_brief(user_id)
+            greeting = await self._generate_greeting(
+                display_name, recent, health_brief=health_brief
+            )
 
             briefing_appendix = await self._maybe_briefing_text(user_id)
             announcement = (
@@ -768,7 +793,54 @@ class GreetingService(Service):
             )
             return ""
 
-    async def _generate_greeting(self, name: str, recent: list[str] | None = None) -> str:
+    async def _fetch_health_brief(self, user_id: str) -> GreetingBrief | None:
+        """Pull a ``GreetingBrief`` for the greeted user, or None.
+
+        Capability-protocol-only — never imports HealthService. Errors
+        degrade silently so a misconfigured health backend never blocks
+        a greeting.
+        """
+        if not self._include_health_brief or self._health is None:
+            return None
+        try:
+            brief = await self._health.health_brief_for_greeting(user_id)
+        except Exception:
+            logger.debug(
+                "greeting: health_brief_for_greeting failed for %s",
+                user_id,
+                exc_info=True,
+            )
+            return None
+        return brief
+
+    @staticmethod
+    def _format_health_brief(brief: GreetingBrief | None) -> str:
+        """Render the brief as a structured-prose body the greeting
+        prompt can fold in. Empty string when there's no data so the
+        prompt explicitly omits any health reference.
+        """
+        if brief is None or not brief.has_data:
+            return ""
+        parts: list[str] = []
+        if brief.sleep_hours is not None:
+            parts.append(f"Last night's sleep: {brief.sleep_hours:.1f}h.")
+        if brief.steps_today_so_far is not None:
+            parts.append(f"Steps today so far: {brief.steps_today_so_far:,}.")
+        if brief.weight_latest is not None:
+            parts.append(f"Latest weight: {brief.weight_latest:g} {brief.weight_unit.value}.")
+        if brief.resting_hr_latest is not None:
+            parts.append(f"Latest resting HR: {brief.resting_hr_latest:g} bpm.")
+        if brief.flags:
+            parts.append(f"Flags: {', '.join(brief.flags)}.")
+        return " ".join(parts)
+
+    async def _generate_greeting(
+        self,
+        name: str,
+        recent: list[str] | None = None,
+        *,
+        health_brief: GreetingBrief | None = None,
+    ) -> str:
         """Generate a personalized greeting via AI, with fallback."""
         if self._resolver is None:
             return f"Good morning, {name}!"
@@ -792,13 +864,25 @@ class GreetingService(Service):
         weather_blurb = await self._build_weather_blurb(user=None)
         weather_section = f"\n\nContext: {weather_blurb}" if weather_blurb else ""
 
+        health_blurb = self._format_health_brief(health_brief)
+        if health_blurb:
+            health_section = (
+                "\n\nHealth context (you MAY weave one short non-clinical "
+                "observation into the greeting in your own voice — do NOT "
+                "diagnose, suggest causes, or use words like concerning, "
+                "abnormal, warning, risk, or should):\n"
+                f"{health_blurb}"
+            )
+        else:
+            health_section = ""
+
         prompt = (
             f"Generate a morning greeting for {name} who just arrived at the shop. "
             f"You're Gilbert, an AI assistant at a business. Be creative — vary your "
             f"tone across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). "
             f"Mention their name. 1-2 sentences max. "
             f"Write ONLY the greeting — no quotes, no preamble."
-            f"{style_instruction}{weather_section}{avoid_section}"
+            f"{style_instruction}{weather_section}{health_section}{avoid_section}"
         )
 
         # tools_override=[] forces a zero-tool call regardless of the
