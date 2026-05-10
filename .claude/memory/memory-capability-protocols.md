@@ -22,6 +22,8 @@ Services resolve dependencies via `resolver.get_capability("name")`, which retur
 | `TunnelProvider` | `interfaces/tunnel.py` | `"tunnel"` | `public_url` property |
 | `GuestPolicy` | `interfaces/auth.py` | `"authentication"` | `is_guest_allowed()` — read by web/WS layers to decide whether unauthenticated visitors get GUEST or get redirected. |
 | `ServiceEnumerator` | `interfaces/service.py` | (resolver) | `list_services()`, `restart_service()`, `started_services`, `failed_services` |
+| `KnowledgeProvider` | `interfaces/knowledge.py` | `"knowledge"` | `index_document()`, `remove_document()`, `resolve_document()`, `get_backend()`, `backends` property — consumed by `InboxService` (attachment lookup) and `FeedsService` (push-on-receive ingestion + retention/unsubscribe cascade). The synthetic `feed_articles` `DocumentBackend` is owned PRIVATELY by `FeedsService` and is intentionally **NOT** present in `backends`. |
+| `FeedsProvider` | `interfaces/feeds.py` | `"feeds"` | `subscribe()`, `unsubscribe()`, `list_accessible_feeds()`, `get_feed()`, `search_items()`, `get_top_items()`, `mark_read()`, `build_briefing()` — consumed by `FeedBriefingService` (daily fan-out) and `GreetingService` (presence-driven briefing splice). `build_briefing` lives on this single protocol; **no separate `BriefingProvider`** (intentionally absent — Round 2 architect call). |
 
 ### Usage Pattern
 
