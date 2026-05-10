@@ -6,9 +6,22 @@ Multi-backend document knowledge store with ChromaDB vector search. Indexes docu
 ## Details
 
 ### Interface
-- `src/gilbert/interfaces/knowledge.py` — `DocumentBackend` ABC, `DocumentMeta`, `DocumentContent`, `DocumentChunk`, `SearchResult`, `SearchResponse`, `DocumentType` enum
+- `src/gilbert/interfaces/knowledge.py` — `DocumentBackend` ABC, `DocumentMeta`, `DocumentContent`, `DocumentChunk`, `SearchResult`, `SearchResponse`, `DocumentType` enum, **`KnowledgeProvider` capability protocol** (`index_document`, `remove_document`, `resolve_document`, `get_backend`, read-only `backends` property)
 - Documents identified by `source_id:path` (document_id)
 - Configuration uses per-type sub-sections (`local`, `gdrive`) instead of a sources array. Each sub-section has its own `enabled` flag and settings.
+
+### KnowledgeProvider protocol
+`@runtime_checkable Protocol` introduced alongside the feeds feature
+so consumers (`InboxService`, `FeedsService`) can `isinstance`-check
+against the protocol instead of duck-typing
+(`getattr(svc, "backends", ...)`). `KnowledgeService` already
+implemented `index_document`, `resolve_document`, `get_backend`, and
+the `backends` property — the protocol wraps the existing public
+surface. **`remove_document` is the new public method** added with
+this PR; used by `FeedsService` for retention purges and unsubscribe
+cascade. Removes the document's chunks from ChromaDB, drops the
+tracking row, deletes cached text, emits
+`knowledge.document.removed`.
 
 ### Service
 - `src/gilbert/core/services/knowledge.py` — `KnowledgeService`

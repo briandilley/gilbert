@@ -24,6 +24,13 @@ Personalized arrival greetings driven by `presence.arrived` events. Generates un
 ### Tools / slash commands
 Single tool `greet` (slash command `/greet <name>`) — calls `_generate_greeting(person_name)` and announces. No multi-target slash group.
 
+### Briefing splice (added in feature 04)
+- `start()` does `self._feeds = resolver.get_capability("feeds")` and gates on `isinstance(svc, FeedsProvider)` — the same protocol the `FeedBriefingService` consumes. **No separate `BriefingProvider`** (intentionally absent — Round 2 architect call); `build_briefing` lives on `FeedsProvider`.
+- New `include_briefing` (BOOL, default false) and `briefing_max_seconds` (INT, default 60) ConfigParams.
+- When `include_briefing=True` AND today's `last_briefed_on != today` (read from `feed_briefing_state.{user_id}`), `_maybe_briefing_text(user_id)` calls `FeedsProvider.build_briefing(user_ctx, top_n=3, max_spoken_seconds=briefing_max_seconds, mark_briefed=True)`. The returned `spoken` text is concatenated onto the personalized greeting before announcement.
+- Setting `last_briefed_on=today` is the **single point of truth** for the presence-vs-daily-fire race: whichever path runs first short-circuits the other for that user that day.
+- Degrades silently when feeds capability is absent, when the user is already briefed today, or when `build_briefing` raises — the greeting still goes out without the briefing.
+
 ### Anti-repetition
 `recent_greetings` rolls 10 entries; the most recent 7 are fed into the prompt's "Here are your recent greetings — do NOT repeat" section. Persisted per-user under `greeting_state.{user_id}`.
 
