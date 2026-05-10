@@ -117,6 +117,12 @@ _DISAMBIGUATION_MAX_CARDS = 5
 # Cached-clients retention.
 _CLIENTS_CACHE_RETENTION_SECONDS = 30 * 24 * 3600.0
 
+# Per-(backend, backend_user_id) library list cache TTL — used by
+# ``user_can_see`` for downstream event filtering. Backend-side identity
+# (NOT Gilbert user) so two Gilbert users mapped to the same Plex Home
+# account share the cache entry.
+_USER_LIBS_CACHE_TTL_SECONDS = 60.0
+
 
 # ── Default AI prompts ─────────────────────────────────────────────
 
@@ -364,7 +370,15 @@ class MediaLibraryService(Service):
         # Keyed by backend-side identifiers so two Gilbert users can
         # never see each other's data through these caches.
         self._poll_last_sessions: dict[tuple[str, str], MediaSession] = {}
-        self._poll_last_added_at: dict[tuple[str, str], float] = {}
+        # Diff state for ``recently_added`` events: per-(backend,
+        # library_section) set of ``(item_id, added_at)`` pairs seen
+        # last cycle. Set membership beats a single ``added_at`` cursor
+        # because Plex bulk imports often share second-precision
+        # timestamps — equal-timestamp items would otherwise drop on
+        # the second item.
+        self._poll_last_added_seen: dict[
+            tuple[str, str], set[tuple[str, float]]
+        ] = {}
         self._poll_first_run_done: set[str] = set()
 
         # Adaptive-backoff state for poll_now_playing.
@@ -385,6 +399,12 @@ class MediaLibraryService(Service):
         # Per-backend health state.
         self._health: dict[str, BackendHealth] = {}
 
+        # Per-(backend, backend_user_id) library cache for
+        # ``user_can_see``. Backend-side identity, 60s TTL.
+        self._user_libs_cache: dict[
+            tuple[str, str], tuple[set[str], float]
+        ] = {}
+
         # Configuration
         self._default_kind: str = "movie"
         self._preferred_genres: tuple[str, ...] = ()
@@ -398,6 +418,19 @@ class MediaLibraryService(Service):
         # Lazy-resolved scheduler (kept so a config-change can re-add
         # / refresh the poll-now-playing job at the new interval).
         self._scheduler: SchedulerProvider | None = None
+
+        # Track the actual interval the scheduler is firing at so the
+        # adaptive-backoff path can detect "no change needed" and avoid
+        # remove/add churn on every poll.
+        self._now_playing_scheduled_interval: float = 30.0
+
+        # Bus subscription handle for the playback-started reset.
+        self._playback_started_subscription: Any = None
+
+        # Service-lifetime strong refs to fire-and-forget event-publish
+        # tasks (e.g. ``_set_health``). Not per-user state — keyed by
+        # nothing user-related — so it correctly lives on ``self``.
+        self._pending_event_tasks: set[asyncio.Task[Any]] = set()
 
     # ── Service lifecycle ───────────────────────────────────────────
 
@@ -513,6 +546,9 @@ class MediaLibraryService(Service):
                     callback=self._poll_now_playing,
                     system=True,
                 )
+                self._now_playing_scheduled_interval = (
+                    self._now_playing_current_interval
+                )
             if self._poll_recently_added_enabled and self._backends:
                 scheduler.add_job(
                     name="media_library.poll_recently_added",
@@ -525,9 +561,11 @@ class MediaLibraryService(Service):
                 )
 
             # Subscribe to our own bus so a tool-driven start_play
-            # immediately resets the now-playing cadence.
+            # immediately resets the now-playing cadence. Capture the
+            # subscription handle so ``stop()`` can unsubscribe and
+            # avoid orphaned subscriptions across config-restart cycles.
             if self._event_bus is not None:
-                self._event_bus.subscribe(
+                self._playback_started_subscription = self._event_bus.subscribe(
                     "media.playback.started", self._on_playback_started_event
                 )
 
@@ -538,6 +576,33 @@ class MediaLibraryService(Service):
         )
 
     async def stop(self) -> None:
+        # Tear down scheduled polls + bus subscriptions so a same-process
+        # restart (config-change with restart_required=True) doesn't pile
+        # new jobs / subscribers on top of orphaned ones.
+        if self._scheduler is not None:
+            for job_name in (
+                "media_library.poll_now_playing",
+                "media_library.poll_recently_added",
+            ):
+                try:
+                    self._scheduler.remove_job(job_name)
+                except Exception:
+                    logger.debug(
+                        "remove_job(%s) raised (ignored)",
+                        job_name,
+                        exc_info=True,
+                    )
+        if self._playback_started_subscription is not None:
+            try:
+                # ``EventBus.subscribe`` returns an unsubscribe callable.
+                self._playback_started_subscription()
+            except Exception:
+                logger.debug(
+                    "unsubscribe(playback_started) raised (ignored)",
+                    exc_info=True,
+                )
+            self._playback_started_subscription = None
+
         for name, backend in list(self._backends.items()):
             try:
                 await backend.close()
@@ -1494,6 +1559,61 @@ class MediaLibraryService(Service):
             )
         return await backend.list_backend_users()
 
+    # ── Privacy / visibility ────────────────────────────────────────
+
+    async def user_can_see(
+        self,
+        gilbert_user_id: str,
+        backend_name: str,
+        library_section: str,
+    ) -> bool:
+        """Whether ``gilbert_user_id`` can see ``library_section`` on
+        ``backend_name``.
+
+        Used by event subscribers (notifications) to re-filter
+        restricted-library ``media.recently_added`` events before
+        delivering to a per-user UI. Spec §6.5 + §18.
+
+        The per-user library list is cached for 60s keyed by
+        ``(backend_name, backend_user_id)`` — the backend-side
+        identity, NOT the Gilbert user — so two Gilbert users mapped
+        to the same Plex Home account share the cache entry.
+        """
+        backend_user_id = await self.resolve_backend_user(
+            gilbert_user_id, backend_name
+        )
+        if not backend_user_id:
+            return False
+        libs = await self._user_libs_cached(backend_name, backend_user_id)
+        return library_section in libs
+
+    async def _user_libs_cached(
+        self, backend_name: str, backend_user_id: str
+    ) -> set[str]:
+        """60s-TTL cache of library section names per backend user."""
+        now = time.monotonic()
+        key = (backend_name, backend_user_id)
+        cached = self._user_libs_cache.get(key)
+        if cached is not None:
+            libs, fetched_at = cached
+            if (now - fetched_at) < _USER_LIBS_CACHE_TTL_SECONDS:
+                return libs
+        backend = self._backends.get(backend_name)
+        if backend is None:
+            return set()
+        try:
+            libs_list = await backend.list_libraries(
+                backend_user_id=backend_user_id
+            )
+        except MediaLibraryError:
+            # On error, return what we have (or empty); don't poison
+            # the cache with an empty set on a transient failure.
+            stale = self._user_libs_cache.get(key)
+            return stale[0] if stale else set()
+        libs = set(libs_list)
+        self._user_libs_cache[key] = (libs, now)
+        return libs
+
     # ── Aggregating reads ───────────────────────────────────────────
 
     async def search(
@@ -1548,41 +1668,202 @@ class MediaLibraryService(Service):
         *,
         kind: MediaKind | None = None,
         limit: int = 10,
+        gilbert_user_id: str | None = None,
     ) -> list[RecentlyAddedEntry]:
-        async def _op(b: MediaLibraryBackend) -> list[RecentlyAddedEntry]:
+        """Fan out ``recently_added`` across configured backends.
+
+        Per spec §6.3 partial-mapping policy: backends with
+        ``supports_per_user=True`` (Jellyfin) require a per-user
+        ``backend_user_id``. When ``gilbert_user_id`` is set (tool
+        path), pass that user's mapping; backends without a mapping
+        for this user are silently skipped (never silent admin-token
+        fallback). When ``gilbert_user_id`` is ``None`` (poll path —
+        runs as SYSTEM with no calling user), iterate every mapped
+        Gilbert user for backends that require per-user, and dedup
+        the merged result by ``(backend, item.id)``.
+
+        Backends with ``supports_per_user=False`` (Plex without Plex
+        Home) get called once with ``backend_user_id=""``.
+        """
+        async def _per_user(
+            b: MediaLibraryBackend, backend_user_id: str
+        ) -> list[RecentlyAddedEntry]:
             if not b.supports_recently_added:
                 return []
-            return await b.recently_added(kind=kind, limit=limit)
+            return await b.recently_added(
+                kind=kind, limit=limit, backend_user_id=backend_user_id
+            )
 
-        results = await self._fanout(
-            _op,
-            timeout_seconds=self._backend_timeouts.get("recently_added", 8.0),
-            op_name="recently_added",
-        )
         merged: list[RecentlyAddedEntry] = []
-        for _name, result in results:
-            if isinstance(result, BaseException):
+        seen_keys: set[tuple[str, str]] = set()
+        timeout = self._backend_timeouts.get("recently_added", 8.0)
+
+        for backend_name, backend in list(self._backends.items()):
+            if not backend.supports_recently_added:
                 continue
-            merged.extend(result)
+            try:
+                if backend.supports_per_user:
+                    # Determine which backend_user_id(s) to fan out for.
+                    if gilbert_user_id is not None:
+                        mapped_id = await self.resolve_backend_user(
+                            gilbert_user_id, backend_name
+                        )
+                        if not mapped_id:
+                            # Partial-mapping policy: skip silently.
+                            continue
+                        user_ids = [mapped_id]
+                    else:
+                        # Poll path — iterate every mapped Gilbert user.
+                        user_ids = await self._mapped_backend_user_ids(
+                            backend_name
+                        )
+                        if not user_ids:
+                            continue
+                else:
+                    user_ids = [""]
+
+                for buid in user_ids:
+                    try:
+                        entries = await asyncio.wait_for(
+                            _per_user(backend, buid), timeout=timeout
+                        )
+                    except TimeoutError:
+                        self._set_health(
+                            backend_name,
+                            "degraded",
+                            error="recently_added timeout",
+                        )
+                        continue
+                    except MediaLibraryUnavailableError as exc:
+                        self._set_health(
+                            backend_name, "unhealthy", error=str(exc)
+                        )
+                        continue
+                    except MediaLibraryError as exc:
+                        logger.warning(
+                            "recently_added on %s domain error: %s",
+                            backend_name,
+                            exc,
+                        )
+                        continue
+                    except Exception as exc:
+                        logger.warning(
+                            "recently_added on %s failed: %s",
+                            backend_name,
+                            exc,
+                            exc_info=True,
+                        )
+                        self._set_health(
+                            backend_name, "degraded", error=str(exc)
+                        )
+                        continue
+
+                    for entry in entries:
+                        key = (backend_name, entry.item.id)
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        merged.append(entry)
+                    self._set_health(backend_name, "healthy")
+            except Exception as exc:
+                logger.warning(
+                    "recently_added per-user fanout for %s failed: %s",
+                    backend_name,
+                    exc,
+                    exc_info=True,
+                )
+
         merged.sort(
             key=lambda e: (-e.added_at, e.item.backend_name, e.item.id)
         )
         return merged[:limit]
+
+    async def _mapped_backend_user_ids(
+        self, backend_name: str
+    ) -> list[str]:
+        """Distinct backend_user_ids for every Gilbert user mapped to
+        ``backend_name``. Used by the SYSTEM-context poll loop to fan
+        out per-user APIs without a calling user.
+        """
+        if self._storage is None:
+            return []
+        rows = await self._storage.query(
+            Query(
+                collection=_USER_MAP_COLLECTION,
+                filters=[
+                    Filter(
+                        field="backend_name",
+                        op=FilterOp.EQ,
+                        value=backend_name,
+                    )
+                ],
+            )
+        )
+        seen: set[str] = set()
+        out: list[str] = []
+        for row in rows:
+            buid = str(row.get("backend_user_id") or "")
+            if buid and buid not in seen:
+                seen.add(buid)
+                out.append(buid)
+        return out
 
     async def continue_watching(
         self,
         *,
         gilbert_user_id: str,
         limit: int = 10,
-    ) -> dict[str, Any]:
-        """Per-user continue-watching with the missing-mapping policy.
+    ) -> list[ContinueWatchingEntry]:
+        """Per-user continue-watching merged across mapped backends.
 
-        Returns ``{entries, unmapped_backends, hint?}``. Backends without
-        a mapping for this user are silently skipped (per spec §6.3) —
-        never silent admin-token fallback.
+        Signature matches ``MediaLibraryProvider.continue_watching``
+        exactly (spec §5.5 — Protocol parity). Backends without a
+        mapping for this user are silently skipped (partial-mapping
+        policy, spec §6.3) — never silent admin-token fallback.
+        Callers needing the dict envelope (``unmapped_backends``,
+        ``hint``, ``error``) call ``continue_watching_for_user``.
+        """
+        merged_items, _meta = await self._continue_watching_inner(
+            gilbert_user_id=gilbert_user_id, limit=limit
+        )
+        return merged_items
+
+    async def continue_watching_for_user(
+        self,
+        *,
+        gilbert_user_id: str,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Tool-facing variant returning ``{entries, unmapped_backends,
+        hint?, error?}``. The Protocol method ``continue_watching``
+        returns the bare ``list[ContinueWatchingEntry]``; the AI tool
+        path needs the metadata so it can phrase 'partial only' and
+        'no mapping at all' to the user.
+        """
+        merged_items, meta = await self._continue_watching_inner(
+            gilbert_user_id=gilbert_user_id, limit=limit
+        )
+        out: dict[str, Any] = {
+            "entries": merged_items,
+            "unmapped_backends": meta["unmapped_backends"],
+        }
+        if "error" in meta:
+            out["error"] = meta["error"]
+        if "hint" in meta:
+            out["hint"] = meta["hint"]
+        return out
+
+    async def _continue_watching_inner(
+        self,
+        *,
+        gilbert_user_id: str,
+        limit: int,
+    ) -> tuple[list[ContinueWatchingEntry], dict[str, Any]]:
+        """Shared implementation for ``continue_watching`` (Protocol)
+        and ``continue_watching_for_user`` (tool envelope).
         """
         if not self._backends:
-            return {"entries": [], "unmapped_backends": []}
+            return [], {"unmapped_backends": []}
 
         unmapped: list[str] = []
         mapped: dict[str, str] = {}
@@ -1596,8 +1877,7 @@ class MediaLibraryService(Service):
                 unmapped.append(backend_name)
 
         if not mapped:
-            return {
-                "entries": [],
+            return [], {
                 "unmapped_backends": unmapped,
                 "error": (
                     "No backend account linked to your Gilbert user; "
@@ -1645,17 +1925,14 @@ class MediaLibraryService(Service):
                 break
             idx += 1
 
-        out: dict[str, Any] = {
-            "entries": merged_items,
-            "unmapped_backends": unmapped,
-        }
+        meta: dict[str, Any] = {"unmapped_backends": unmapped}
         if unmapped:
-            out["hint"] = (
+            meta["hint"] = (
                 f"Continue-watching from {', '.join(sorted(mapped))} "
                 f"only — {', '.join(unmapped)} not linked to your "
                 f"Gilbert user."
             )
-        return out
+        return merged_items, meta
 
     async def list_clients(self) -> list[MediaClient]:
         """Union across backends. Offline (cached) clients re-surface
@@ -2159,14 +2436,18 @@ class MediaLibraryService(Service):
 
         self._poll_last_sessions = current
 
-        # Adaptive backoff.
+        # Adaptive backoff. When the interval value changes, push the
+        # new interval back into the scheduler — otherwise the scheduler
+        # keeps firing at start()'s interval forever.
         if not current:
             self._now_playing_idle_count += 1
             if self._now_playing_idle_count >= self._now_playing_idle_threshold:
-                self._now_playing_current_interval = min(
+                new_interval = min(
                     self._now_playing_current_interval * 2.0,
                     self._now_playing_idle_max_interval,
                 )
+                self._now_playing_current_interval = new_interval
+                self._reschedule_now_playing_poll(new_interval)
         else:
             if self._now_playing_idle_count > 0 or (
                 self._now_playing_current_interval
@@ -2174,6 +2455,9 @@ class MediaLibraryService(Service):
             ):
                 self._now_playing_idle_count = 0
                 self._now_playing_current_interval = (
+                    self._now_playing_base_interval
+                )
+                self._reschedule_now_playing_poll(
                     self._now_playing_base_interval
                 )
 
@@ -2185,28 +2469,27 @@ class MediaLibraryService(Service):
             "media_library.poll_recently_added" not in self._poll_first_run_done
         )
 
-        async def _op(b: MediaLibraryBackend) -> list[RecentlyAddedEntry]:
-            if not b.supports_recently_added:
-                return []
-            return await b.recently_added(limit=20)
-
-        results = await self._fanout(
-            _op,
-            timeout_seconds=self._backend_timeouts.get("recently_added", 8.0),
-            op_name="recently_added",
-        )
+        # SYSTEM context — pass gilbert_user_id=None so the per-user
+        # backends iterate every mapped user and dedup. Backends with
+        # ``supports_per_user=False`` (e.g. shared-account Plex) call
+        # once with backend_user_id="".
+        merged = await self.recently_added(limit=20, gilbert_user_id=None)
+        # Group by backend so the diff bookkeeping below is per-(backend,
+        # section). The merge order from ``recently_added`` is already
+        # newest-first; preserve that.
+        by_backend: dict[str, list[RecentlyAddedEntry]] = {}
+        for entry in merged:
+            by_backend.setdefault(entry.item.backend_name, []).append(entry)
 
         if is_baseline:
-            for name, result in results:
-                if isinstance(result, BaseException):
-                    continue
-                for entry in result:
+            for backend_name, entries in by_backend.items():
+                for entry in entries:
                     section = entry.item.library_section or ""
-                    key = (name, section)
-                    self._poll_last_added_at[key] = max(
-                        self._poll_last_added_at.get(key, 0.0),
-                        entry.added_at,
+                    key_seen = self._poll_last_added_seen.setdefault(
+                        (backend_name, section), set()
                     )
+                    key_seen.add((entry.item.id, entry.added_at))
+                    self._trim_seen_set(key_seen)
             self._poll_first_run_done.add(
                 "media_library.poll_recently_added"
             )
@@ -2215,20 +2498,21 @@ class MediaLibraryService(Service):
         if self._event_bus is None:
             return
 
-        for name, result in results:
-            if isinstance(result, BaseException):
-                continue
-            for entry in result:
+        for backend_name, entries in by_backend.items():
+            for entry in entries:
                 section = entry.item.library_section or ""
-                key = (name, section)
-                last = self._poll_last_added_at.get(key, 0.0)
-                if entry.added_at <= last:
+                section_key = (backend_name, section)
+                seen = self._poll_last_added_seen.setdefault(
+                    section_key, set()
+                )
+                seen_pair = (entry.item.id, entry.added_at)
+                if seen_pair in seen:
                     continue
                 await self._event_bus.publish(
                     Event(
                         event_type="media.recently_added",
                         data={
-                            "backend": name,
+                            "backend": backend_name,
                             "library_section": section,
                             "item_id": entry.item.id,
                             "item_title": entry.item.title,
@@ -2239,13 +2523,74 @@ class MediaLibraryService(Service):
                         source="media_library",
                     )
                 )
-                self._poll_last_added_at[key] = entry.added_at
+                seen.add(seen_pair)
+                self._trim_seen_set(seen)
+
+    @staticmethod
+    def _trim_seen_set(
+        seen: set[tuple[str, float]], *, cap: int = 200
+    ) -> None:
+        """Keep the per-(backend, section) seen set bounded.
+
+        The set tracks ``(item_id, added_at)`` pairs from the previous
+        cycle so equal-timestamp items don't lose events (spec §I10
+        diff-key tightening). When the set grows past ``cap``, drop
+        the oldest entries by ``added_at``.
+        """
+        if len(seen) <= cap:
+            return
+        # Sort by added_at ascending; keep the newest ``cap`` entries.
+        ordered = sorted(seen, key=lambda pair: pair[1])
+        for pair in ordered[: len(seen) - cap]:
+            seen.discard(pair)
 
     async def _on_playback_started_event(self, event: Event) -> None:
         # Tool-driven play resets adaptive cadence so the next poll
         # fires on the next tick rather than 5 minutes from now.
         self._now_playing_idle_count = 0
         self._now_playing_current_interval = self._now_playing_base_interval
+        self._reschedule_now_playing_poll(self._now_playing_base_interval)
+
+    def _reschedule_now_playing_poll(self, interval: float) -> None:
+        """Push a new poll interval into the scheduler.
+
+        Mutating ``self._now_playing_current_interval`` alone is
+        invisible to the scheduler — the job continues to fire at the
+        cadence captured by ``add_job`` at start() time. This helper
+        removes and re-adds the job so the scheduler honors backoff /
+        reset transitions.
+        """
+        if self._scheduler is None:
+            return
+        if not self._poll_now_playing_enabled:
+            return
+        if interval == self._now_playing_scheduled_interval:
+            return
+        try:
+            self._scheduler.remove_job("media_library.poll_now_playing")
+        except Exception:
+            logger.debug(
+                "remove_job(poll_now_playing) raised (ignored)",
+                exc_info=True,
+            )
+        try:
+            jitter = random.uniform(0.0, interval)
+            now_dt = _now_dt()
+            self._scheduler.add_job(
+                name="media_library.poll_now_playing",
+                schedule=Schedule.every(
+                    interval, start_at=now_dt + _seconds(jitter)
+                ),
+                callback=self._poll_now_playing,
+                system=True,
+            )
+            self._now_playing_scheduled_interval = interval
+        except Exception:
+            logger.warning(
+                "Failed to reschedule poll_now_playing at %.1fs",
+                interval,
+                exc_info=True,
+            )
 
     async def _reap_clients_cache(self) -> None:
         if self._storage is None:
@@ -2987,6 +3332,7 @@ class MediaLibraryService(Service):
     async def _tool_recently_added(
         self, arguments: dict[str, Any]
     ) -> ToolOutput:
+        user_id = self._require_user_id(arguments) or ""
         kind_str = str(arguments.get("kind") or "").strip()
         kind: MediaKind | None = None
         if kind_str:
@@ -2998,7 +3344,11 @@ class MediaLibraryService(Service):
             limit = int(arguments.get("limit") or 10)
         except (TypeError, ValueError):
             limit = 10
-        entries = await self.recently_added(kind=kind, limit=limit)
+        entries = await self.recently_added(
+            kind=kind,
+            limit=limit,
+            gilbert_user_id=user_id if user_id else None,
+        )
         text = json.dumps(
             {
                 "entries": [
@@ -3028,7 +3378,7 @@ class MediaLibraryService(Service):
             limit = int(arguments.get("limit") or 10)
         except (TypeError, ValueError):
             limit = 10
-        result = await self.continue_watching(
+        result = await self.continue_watching_for_user(
             gilbert_user_id=user_id, limit=limit
         )
         entries = result.get("entries", [])
@@ -3180,13 +3530,15 @@ class MediaLibraryService(Service):
         # Parallel candidate gathering with overall budget (15s).
         # Per-source caps from spec §7.2 (5 / 10 / 15 = 30 default).
         async def _continue_watching() -> list[MediaItem]:
-            r = await self.continue_watching(
+            entries = await self.continue_watching(
                 gilbert_user_id=user_id, limit=5
             )
-            return [e.item for e in r.get("entries", [])][:5]
+            return [e.item for e in entries][:5]
 
         async def _recently() -> list[MediaItem]:
-            entries = await self.recently_added(limit=10)
+            entries = await self.recently_added(
+                limit=10, gilbert_user_id=user_id
+            )
             return [e.item for e in entries][:10]
 
         async def _genre_search() -> list[MediaItem]:

@@ -37,7 +37,10 @@ class FakeMediaLibraryBackend(MediaLibraryBackend):
     supports_continue_watching = True
     supports_recently_added = True
     supports_seek = True
-    supports_per_user = True
+    # Default ``supports_per_user`` to False — the typical Plex-without-
+    # Plex-Home / shared-token deployment. Tests that need to exercise
+    # the Jellyfin-shaped per-user fan-out subclass and override.
+    supports_per_user = False
     supports_next_episode = True
 
     def __init__(
