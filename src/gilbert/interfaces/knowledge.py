@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
 
@@ -298,3 +298,55 @@ class DocumentBackend(ABC):
     def read_only(self) -> bool:
         """Whether this backend supports uploads."""
         return False
+
+
+# ── KnowledgeProvider capability protocol ─────────────────────────────
+
+
+@runtime_checkable
+class KnowledgeProvider(Protocol):
+    """Capability protocol exposed by ``KnowledgeService``.
+
+    Other services (``InboxService``, ``FeedsService``) consume the
+    knowledge service via ``resolver.get_capability("knowledge")`` +
+    ``isinstance(svc, KnowledgeProvider)`` — never via
+    ``getattr(svc, "backends", ...)`` or by importing the concrete
+    service class. Wraps the long-standing public surface of
+    ``KnowledgeService`` (``index_document``, ``remove_document``,
+    ``resolve_document``, ``get_backend``, and the read-only
+    ``backends`` property) so the architecture rule "consumers take a
+    Protocol, not a class" is enforceable.
+
+    The synthetic ``feed_articles`` ``DocumentBackend`` is owned
+    PRIVATELY by ``FeedsService`` and is intentionally NOT registered
+    in ``backends`` — feed ingestion calls ``index_document`` directly
+    with the synthetic instance.
+    """
+
+    async def index_document(
+        self,
+        backend: DocumentBackend,
+        meta: DocumentMeta,
+    ) -> int:
+        """Extract, chunk, embed, and persist one document. Returns chunk count."""
+        ...
+
+    async def remove_document(self, document_id: str) -> bool:
+        """Remove a document and its chunks from the index. Returns ``True`` on success."""
+        ...
+
+    async def resolve_document(
+        self,
+        full_path: str,
+    ) -> tuple[DocumentBackend, DocumentMeta, str] | None:
+        """Resolve a ``source_id/doc_path`` string to ``(backend, meta, doc_path)``."""
+        ...
+
+    def get_backend(self, source_id: str) -> DocumentBackend | None:
+        """Look up a registered backend by ``source_id``."""
+        ...
+
+    @property
+    def backends(self) -> dict[str, DocumentBackend]:
+        """Read-only snapshot of registered ``source_id → backend``."""
+        ...

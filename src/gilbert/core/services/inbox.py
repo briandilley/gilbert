@@ -53,6 +53,7 @@ from gilbert.interfaces.inbox import (
     can_admin_mailbox,
     determine_access,
 )
+from gilbert.interfaces.knowledge import KnowledgeProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
     Filter,
@@ -116,7 +117,12 @@ class InboxService(Service):
     def __init__(self) -> None:
         self._storage: Any = None  # StorageBackend
         self._event_bus: Any = None  # EventBus
-        self._knowledge: Any = None  # KnowledgeService (optional)
+        # ``_knowledge`` is the KnowledgeProvider capability (None when
+        # the knowledge service is absent or not started). We
+        # ``isinstance``-check against the protocol at resolve time so
+        # cross-service duck-typing (``getattr(svc, "backends", ...)``,
+        # ``svc.backends.items()``) is impossible.
+        self._knowledge: KnowledgeProvider | None = None
         self._scheduler: Any = None  # SchedulerProvider
         self._access_control: AccessControlProvider | None = None
         # Resolver is cached so capability lookups can happen lazily at
@@ -229,7 +235,11 @@ class InboxService(Service):
         if isinstance(event_bus_svc, EventBusProvider):
             self._event_bus = event_bus_svc.bus
 
-        self._knowledge = resolver.get_capability("knowledge")
+        knowledge_svc = resolver.get_capability("knowledge")
+        if isinstance(knowledge_svc, KnowledgeProvider):
+            self._knowledge = knowledge_svc
+        else:
+            self._knowledge = None
         # ``skills`` is looked up lazily — see ``_get_skills_service``.
         self._resolver = resolver
 
