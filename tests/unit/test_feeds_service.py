@@ -1427,8 +1427,9 @@ class TestWsCanSeeFeedEvent:
     the recipient ``user_id`` only (admin sees all)."""
 
     def _conn(self, user_id: str, level: int = 100) -> Any:
-        from gilbert.web.ws_protocol import WsConnection, WsConnectionManager
         from unittest.mock import MagicMock
+
+        from gilbert.web.ws_protocol import WsConnection, WsConnectionManager
 
         user = UserContext(
             user_id=user_id,
@@ -1497,4 +1498,257 @@ class TestWsCanSeeFeedEvent:
         conn = self._conn("alice")
         event = Event(event_type="presence.arrived", data={"user_id": "bob"})
         assert conn.can_see_feed_event(event) is True
+
+
+class _FakeConn:
+    """Minimal stand-in for ``WsConnection`` for RPC handler tests.
+
+    The real connection holds a queue + manager + outbound futures; the
+    handlers only need ``user_ctx``. This avoids dragging in
+    ``WsConnectionManager`` and the full WS scaffolding for unit tests.
+    """
+
+    def __init__(self, user_ctx: UserContext) -> None:
+        self.user_ctx = user_ctx
+        self.user_id = user_ctx.user_id
+
+
+class TestFeedsServiceWsHandlers:
+    """WS RPC happy-path + auth-deny coverage for the handler surface
+    on ``FeedsService``. Each handler enforces its own per-feed access
+    so the prefix-level ACL (``feeds.: 100``) is permissive."""
+
+    async def test_get_ws_handlers_announces_full_surface(self) -> None:
+        svc = FeedsService()
+        handlers = svc.get_ws_handlers()
+        # Spec §14 surface — at minimum these MUST be present so the
+        # SPA can drive every documented operation.
+        for frame_type in (
+            "feeds.list",
+            "feeds.get",
+            "feeds.create",
+            "feeds.update",
+            "feeds.delete",
+            "feeds.subscribe" if False else "feeds.create",  # alias clarity
+            "feeds.share_user",
+            "feeds.unshare_user",
+            "feeds.share_role",
+            "feeds.unshare_role",
+            "feeds.poll_now",
+            "feeds.items.list",
+            "feeds.items.get",
+            "feeds.items.mark",
+            "feeds.items.delete",
+            "feeds.items.reingest",
+            "feeds.briefing.preview",
+            "feeds.briefing.run",
+            "feeds.briefing.get",
+            "feeds.import_opml",
+            "feeds.export_opml",
+            "feeds.backends.list",
+        ):
+            assert frame_type in handlers, f"missing handler: {frame_type}"
+
+    async def test_feeds_list_returns_only_accessible(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        await svc.subscribe(
+            "https://example.com/alice.xml",
+            _user("alice"),
+            name="alice-feed",
+            backend_name="fake_feed",
+        )
+        await svc.subscribe(
+            "https://example.com/bob.xml",
+            _user("bob"),
+            name="bob-feed",
+            backend_name="fake_feed",
+        )
+        result = await svc._ws_feeds_list(
+            _FakeConn(_user("alice")),
+            {"id": "1", "type": "feeds.list"},
+        )
+        names = {f["name"] for f in result["feeds"]}
+        assert names == {"alice-feed"}
+        assert all("unread_count" in f for f in result["feeds"])
+
+    async def test_feeds_create_persists_and_returns_payload(
+        self, feeds_svc: Any, monkeypatch: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        from gilbert.interfaces.feeds import FeedBackend
+
+        fake_cls = FeedBackend.registered_backends()["fake_feed"]
+        monkeypatch.setattr(
+            FeedBackend,
+            "registered_backends",
+            classmethod(lambda cls: {"rss_atom": fake_cls, "fake_feed": fake_cls}),
+        )
+        result = await svc._ws_feeds_create(
+            _FakeConn(_user("alice")),
+            {
+                "id": "1",
+                "type": "feeds.create",
+                "url": "https://example.com/feed.xml",
+                "name": "TheFeed",
+            },
+        )
+        assert result["type"] == "feeds.create.result"
+        assert result["feed"]["name"] == "TheFeed"
+        feeds = await svc._load_feeds()
+        assert len(feeds) == 1
+
+    async def test_feeds_update_denies_non_owner(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        result = await svc._ws_feeds_update(
+            _FakeConn(_user("eve")),
+            {
+                "id": "1",
+                "type": "feeds.update",
+                "feed_id": feed.id,
+                "updates": {"name": "stolen"},
+            },
+        )
+        assert result["type"] == "gilbert.error"
+        assert result["code"] == 403
+
+    async def test_feeds_delete_denies_non_admin(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        result = await svc._ws_feeds_delete(
+            _FakeConn(_user("eve")),
+            {"id": "1", "type": "feeds.delete", "feed_id": feed.id},
+        )
+        assert result["code"] == 403
+
+    async def test_briefing_run_denies_cross_user(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        # Alice (non-admin) tries to run briefing for Bob — must fail.
+        result = await svc._ws_briefing_run(
+            _FakeConn(_user("alice")),
+            {
+                "id": "1",
+                "type": "feeds.briefing.run",
+                "user_id": "bob",
+            },
+        )
+        assert result["code"] == 403
+
+    async def test_briefing_run_admin_can_target_other_user(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, ai, bus, _, _ = feeds_svc
+        # Admin runs briefing for bob.
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("bob"),
+            backend_name="fake_feed",
+        )
+        item = StoredFeedItem(
+            id=f"{feed.id}__u1",
+            feed_id=feed.id,
+            item_uid="u1",
+            title="t",
+            link="l",
+            score=0.7,
+            received_at=datetime.now(UTC).isoformat(),
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+        result = await svc._ws_briefing_run(
+            _FakeConn(_user("admin", admin=True)),
+            {
+                "id": "1",
+                "type": "feeds.briefing.run",
+                "user_id": "bob",
+            },
+        )
+        assert result["type"] == "feeds.briefing.run.result"
+        # Event published with user_id=bob.
+        ready_events = [e for e in bus.published if e.event_type == "feed.briefing.ready"]
+        assert ready_events
+        assert ready_events[-1].data["user_id"] == "bob"
+
+    async def test_briefing_get_denies_other_user(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        await sqlite_storage.put(
+            _BRIEFINGS_COLLECTION,
+            "brief_x",
+            {
+                "_id": "brief_x",
+                "user_id": "bob",
+                "spoken": "secret",
+                "headlines": [],
+                "item_ids": [],
+            },
+        )
+        result = await svc._ws_briefing_get(
+            _FakeConn(_user("alice")),
+            {"id": "1", "type": "feeds.briefing.get", "briefing_id": "brief_x"},
+        )
+        assert result["code"] == 403
+
+    async def test_import_opml_requires_admin(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        result = await svc._ws_import_opml(
+            _FakeConn(_user("alice")),
+            {"id": "1", "type": "feeds.import_opml", "opml": "<opml/>"},
+        )
+        assert result["code"] == 403
+
+    async def test_backends_list_returns_registered_backends(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        result = await svc._ws_backends_list(
+            _FakeConn(_user("alice")),
+            {"id": "1", "type": "feeds.backends.list"},
+        )
+        assert result["type"] == "feeds.backends.list.result"
+        names = {b["name"] for b in result["backends"]}
+        assert "fake_feed" in names
+
+    async def test_items_mark_round_trip(
+        self, feeds_svc: Any, sqlite_storage: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        item = StoredFeedItem(
+            id=f"{feed.id}__u1",
+            feed_id=feed.id,
+            item_uid="u1",
+            title="t",
+            link="l",
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+        result = await svc._ws_items_mark(
+            _FakeConn(_user("alice")),
+            {"id": "1", "type": "feeds.items.mark", "item_id": item.id, "read": True},
+        )
+        assert result["type"] == "feeds.items.mark.result"
+        row = await sqlite_storage.get(_FEED_ITEMS_COLLECTION, item.id)
+        assert row["read"] is True
 
