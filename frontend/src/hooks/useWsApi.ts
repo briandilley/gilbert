@@ -74,6 +74,14 @@ import type {
   NotificationListResult,
   NotificationUrgency,
 } from "@/types/notifications";
+import type {
+  BriefingPayload,
+  Feed,
+  FeedBackendInfo,
+  FeedItem,
+  OpmlImportResult,
+  PollNowResult,
+} from "@/types/feeds";
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
 
@@ -568,6 +576,151 @@ export function useWsApi() {
         type: "calendar.find_free_time",
         ...params,
       }).then((r) => r.slots),
+
+    // ── Feeds ─────────────────────────────────────────────────────
+
+    listFeeds: () =>
+      rpc<{ feeds: Feed[] }>({ type: "feeds.list" }).then((r) => r.feeds),
+
+    getFeed: (feedId: string) =>
+      rpc<{ feed: Feed }>({ type: "feeds.get", feed_id: feedId }).then(
+        (r) => r.feed,
+      ),
+
+    createFeed: (params: {
+      url: string;
+      name?: string;
+      category?: string;
+      backend_name?: string;
+      poll_interval_sec?: number;
+    }) =>
+      rpc<{ feed: Feed }>({ type: "feeds.create", ...params }).then(
+        (r) => r.feed,
+      ),
+
+    updateFeed: (feedId: string, updates: Record<string, unknown>) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.update",
+        feed_id: feedId,
+        updates,
+      }).then((r) => r.feed),
+
+    deleteFeed: (feedId: string) =>
+      rpc<{ status: string }>({ type: "feeds.delete", feed_id: feedId }),
+
+    testFeed: (url: string, backendName = "rss_atom") =>
+      rpc<{ title: string; description: string; link: string }>({
+        type: "feeds.test",
+        url,
+        backend_name: backendName,
+      }),
+
+    pollFeedNow: (feedId: string) =>
+      rpc<PollNowResult>({ type: "feeds.poll_now", feed_id: feedId }),
+
+    shareFeedUser: (feedId: string, userId: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.share_user",
+        feed_id: feedId,
+        user_id: userId,
+      }).then((r) => r.feed),
+
+    unshareFeedUser: (feedId: string, userId: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.unshare_user",
+        feed_id: feedId,
+        user_id: userId,
+      }).then((r) => r.feed),
+
+    shareFeedRole: (feedId: string, role: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.share_role",
+        feed_id: feedId,
+        role,
+      }).then((r) => r.feed),
+
+    unshareFeedRole: (feedId: string, role: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.unshare_role",
+        feed_id: feedId,
+        role,
+      }).then((r) => r.feed),
+
+    listFeedItems: (params?: {
+      feed_id?: string;
+      query?: string;
+      unread_only?: boolean;
+      min_score?: number;
+      category?: string;
+      limit?: number;
+      page?: number;
+    }) =>
+      rpc<{ items: FeedItem[]; total: number }>({
+        type: "feeds.items.list",
+        ...(params ?? {}),
+      }),
+
+    getFeedItem: (itemId: string) =>
+      rpc<{ item: FeedItem }>({
+        type: "feeds.items.get",
+        item_id: itemId,
+      }).then((r) => r.item),
+
+    markFeedItem: (itemId: string, read: boolean) =>
+      rpc<{ status: string; read: boolean }>({
+        type: "feeds.items.mark",
+        item_id: itemId,
+        read,
+      }),
+
+    deleteFeedItem: (itemId: string) =>
+      rpc<{ status: string }>({
+        type: "feeds.items.delete",
+        item_id: itemId,
+      }),
+
+    reingestFeedItem: (itemId: string) =>
+      rpc<{ status: string }>({
+        type: "feeds.items.reingest",
+        item_id: itemId,
+      }),
+
+    previewBriefing: (params?: { top_n?: number; category?: string }) =>
+      rpc<BriefingPayload>({ type: "feeds.briefing.preview", ...(params ?? {}) }),
+
+    runBriefing: (params?: {
+      user_id?: string;
+      top_n?: number;
+      category?: string;
+      force?: boolean;
+    }) =>
+      rpc<BriefingPayload>({ type: "feeds.briefing.run", ...(params ?? {}) }),
+
+    getBriefing: (briefingId: string) =>
+      rpc<BriefingPayload>({
+        type: "feeds.briefing.get",
+        briefing_id: briefingId,
+      }),
+
+    runDailyBriefing: (force = false) =>
+      rpc<{ fired: number }>({
+        type: "feeds.briefing.daily.run",
+        force,
+      }),
+
+    importOpml: (opml: string) =>
+      rpc<{ results: OpmlImportResult[] }>({
+        type: "feeds.import_opml",
+        opml,
+      }).then((r) => r.results),
+
+    exportOpml: () =>
+      rpc<{ opml: string }>({ type: "feeds.export_opml" }).then((r) => r.opml),
+
+    listFeedBackends: () =>
+      rpc<{ backends: FeedBackendInfo[] }>({
+        type: "feeds.backends.list",
+      }).then((r) => r.backends),
 
     // ── Documents ─────────────────────────────────────────────────
 

@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
+import { BriefingCard } from "@/components/feeds/BriefingCard";
 
 interface CardStyle {
   icon: LucideIcon;
@@ -70,6 +71,7 @@ export function DashboardPage() {
           system-status panels, etc. before the standard card grid. */}
       <div className="mb-4 sm:mb-6 space-y-3">
         <UpcomingEventCard />
+        <BriefingCard />
         <PluginPanelSlot slot="dashboard.top" />
       </div>
 
