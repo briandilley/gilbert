@@ -20,6 +20,7 @@
 - [Presence Service](memory-presence-service.md) — user presence via UniFi (WiFi, cameras, badges), polling + events
 - [Scheduler Service](memory-scheduler-service.md) — system and user timers/alarms with asyncio task loops
 - [Doorbell Service](memory-doorbell-service.md) — UniFi Protect ring detection, publishes doorbell.ring events
+- [Camera Event Service](memory-camera-service.md) — generic CameraEventBackend + Frigate MQTT plugin, vision-annotated events, glob bus topics, per-camera role gating
 - [Access Control](memory-access-control.md) — RBAC with role hierarchy (admin/user/everyone), per-tool permissions
 - [Knowledge Service](memory-knowledge-service.md) — document store with ChromaDB vector search, local + Google Drive backends
 - [Screen Service](memory-screen-service.md) — remote display screens controlled by AI via SSE push

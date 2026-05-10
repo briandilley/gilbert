@@ -49,6 +49,7 @@ dependencies = [
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
     "gilbert-plugin-elevenlabs",
+    "gilbert-plugin-frigate",
     "gilbert-plugin-gemini",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
@@ -83,6 +84,7 @@ gilbert-plugin-browser = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
 gilbert-plugin-discord-webhook = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
+gilbert-plugin-frigate = { workspace = true }
 gilbert-plugin-gemini = { workspace = true }
 gilbert-plugin-google = { workspace = true }
 gilbert-plugin-groq = { workspace = true }

@@ -18,6 +18,7 @@ members = [
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
     "gilbert-plugin-elevenlabs",
+    "gilbert-plugin-frigate",
     "gilbert-plugin-gemini",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
@@ -135,6 +136,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/78/b7/15fb7a9d52e112a25b621c67b69c167805cb1f2ab8f1708a5c490d1b52fe/aiohttp-3.13.5-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:3b13560160d07e047a93f23aaa30718606493036253d5430887514715b67c9d9", size = 1772072, upload-time = "2026-03-31T22:00:07.494Z" },
     { url = "https://files.pythonhosted.org/packages/7e/df/57ba7f0c4a553fc2bd8b6321df236870ec6fd64a2a473a8a13d4f733214e/aiohttp-3.13.5-cp314-cp314t-win32.whl", hash = "sha256:9a0f4474b6ea6818b41f82172d799e4b3d29e22c2c520ce4357856fced9af2f8", size = 471819, upload-time = "2026-03-31T22:00:10.277Z" },
     { url = "https://files.pythonhosted.org/packages/62/29/2f8418269e46454a26171bfdd6a055d74febf32234e474930f2f60a17145/aiohttp-3.13.5-cp314-cp314t-win_amd64.whl", hash = "sha256:18a2f6c1182c51baa1d28d68fea51513cb2a76612f038853c0ad3c145423d3d9", size = 505441, upload-time = "2026-03-31T22:00:12.791Z" },
+]
+
+[[package]]
+name = "aiomqtt"
+version = "2.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "paho-mqtt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/44/cfc58272783a11729462dc6df5adbfeabd084f840f609054ac772ae98c19/aiomqtt-2.5.1.tar.gz", hash = "sha256:25a0a47d157e8f158d2da1110ea4786c0615518751e94f7b04976c977a8ff20d", size = 86641, upload-time = "2026-03-05T18:28:56.421Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/9e/5089fa596220bf0dc73deeb23db27904e4b3504986caf08571f6f5cb84a8/aiomqtt-2.5.1-py3-none-any.whl", hash = "sha256:fd58c3593160e4d475d90ce911cdfc4239cd64de96b0ba22edf6c86bd7afa278", size = 16051, upload-time = "2026-03-05T18:28:55.14Z" },
 ]
 
 [[package]]
@@ -953,6 +966,7 @@ dependencies = [
     { name = "gilbert-plugin-deepseek" },
     { name = "gilbert-plugin-discord-webhook" },
     { name = "gilbert-plugin-elevenlabs" },
+    { name = "gilbert-plugin-frigate" },
     { name = "gilbert-plugin-gemini" },
     { name = "gilbert-plugin-google" },
     { name = "gilbert-plugin-groq" },
@@ -1026,6 +1040,7 @@ requires-dist = [
     { name = "gilbert-plugin-deepseek", virtual = "std-plugins/deepseek" },
     { name = "gilbert-plugin-discord-webhook", virtual = "std-plugins/discord-webhook" },
     { name = "gilbert-plugin-elevenlabs", virtual = "std-plugins/elevenlabs" },
+    { name = "gilbert-plugin-frigate", virtual = "std-plugins/frigate" },
     { name = "gilbert-plugin-gemini", virtual = "std-plugins/gemini" },
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
     { name = "gilbert-plugin-groq", virtual = "std-plugins/groq" },
@@ -1147,6 +1162,17 @@ source = { virtual = "std-plugins/discord-webhook" }
 name = "gilbert-plugin-elevenlabs"
 version = "1.0.0"
 source = { virtual = "std-plugins/elevenlabs" }
+
+[[package]]
+name = "gilbert-plugin-frigate"
+version = "1.0.0"
+source = { virtual = "std-plugins/frigate" }
+dependencies = [
+    { name = "aiomqtt" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aiomqtt", specifier = ">=2.3.0,<3.0.0" }]
 
 [[package]]
 name = "gilbert-plugin-gemini"
@@ -2511,6 +2537,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/65/ee/299d360cdc32edc7d2cf530f3accf79c4fca01e96ffc950d8a52213bd8e4/packaging-26.0.tar.gz", hash = "sha256:00243ae351a257117b6a241061796684b084ed1c516a08c48a3f7e147a9d80b4", size = 143416, upload-time = "2026-01-21T20:50:39.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/b9/c538f279a4e237a006a2c98387d081e9eb060d203d8ed34467cc0f0b9b53/packaging-26.0-py3-none-any.whl", hash = "sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529", size = 74366, upload-time = "2026-01-21T20:50:37.788Z" },
+]
+
+[[package]]
+name = "paho-mqtt"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/15/0a6214e76d4d32e7f663b109cf71fb22561c2be0f701d67f93950cd40542/paho_mqtt-2.1.0.tar.gz", hash = "sha256:12d6e7511d4137555a3f6ea167ae846af2c7357b10bc6fa4f7c3968fc1723834", size = 148848, upload-time = "2024-04-29T19:52:55.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/cb/00451c3cf31790287768bb12c6bec834f5d292eaf3022afc88e14b8afc94/paho_mqtt-2.1.0-py3-none-any.whl", hash = "sha256:6db9ba9b34ed5bc6b6e3812718c7e06e2fd7444540df2455d2c51bd58808feee", size = 67219, upload-time = "2024-04-29T19:52:48.345Z" },
 ]
 
 [[package]]

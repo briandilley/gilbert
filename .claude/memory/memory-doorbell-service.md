@@ -47,4 +47,5 @@ doorbell:
 
 ## Related
 - [Scheduler Service](memory-scheduler-service.md) — runs the polling timer
+- [Camera Event Service](memory-camera-service.md) — sibling event-stream service for object-detection events (Frigate / future NVR backends)
 - `tests/unit/test_doorbell_service.py` — unit tests

@@ -522,6 +522,15 @@ class ConfigurationService(Service):
                     return list(svc.available_doorbells)
                 except Exception:
                     logger.debug("doorbells dynamic choices failed", exc_info=True)
+        elif source == "cameras":
+            from gilbert.interfaces.camera import AvailableCameraLister
+
+            svc = self._resolver.get_capability("cameras")
+            if isinstance(svc, AvailableCameraLister):
+                try:
+                    return list(svc.available_cameras)
+                except Exception:
+                    logger.debug("cameras dynamic choices failed", exc_info=True)
         elif source == "music_services":
             from gilbert.interfaces.music import LinkedMusicServiceLister
 

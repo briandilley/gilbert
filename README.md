@@ -100,6 +100,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **AI chat** with tool use — ask Gilbert to play music, check who's home, search your documents, compose an email, or push content to a wall-mounted display. Claude is the default AI via the `anthropic` plugin; swap it for any other backend that implements `AIBackend`.
 - **Presence detection** — know who's home (and where) via WiFi clients, cameras with facial recognition, and badge readers. The `unifi` plugin aggregates UniFi Network, UniFi Protect, and UniFi Access signals into a single presence stream.
 - **Doorbell monitoring** — detect ring events from UniFi Protect cameras and announce visitors over your speakers with a custom TTS voice.
+- **Object-detection cameras (Frigate)** — the `frigate` plugin subscribes to Frigate's MQTT event stream for live object-detection events ("person at the side gate", "package on the porch", "car in the driveway") and exposes AI tools (`list_cameras`, `latest_clips`, `get_snapshot`, `who_was_seen`, `count_detections`). Snapshots and clips proxy through Gilbert with `Range` support so a `<video>` tag works over a tunnel without exposing your Frigate URL or auth token. Per-camera role overrides admin-gate sensitive cameras (bedrooms, vault) without leaking events to non-admin sockets, and the greeting service can announce package deliveries across adjacent cameras as a single event via configurable zone groups + per-label dedup keys.
 - **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and uses Spotify's Web API for browse/search. The Music service exposes search, queue, station ("play more like this"), and loop/repeat tools — capabilities are gated per-backend so swappable backends only surface what they actually support.
 - **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, and any AI-generated spoken output.
 - **Email inbox** — multi-mailbox, multi-user. Every mailbox is owned by a user and can be shared with individual users or roles for full read/send access. Messages land in a per-mailbox persisted store; outbound drafts queue through a shared outbox with crash-resilient delayed sends. The `google` plugin's Gmail backend is the reference implementation — add more by implementing `EmailBackend`. Incoming mail can also be handed off to an AI chat loop via the Inbox AI Chat service.
@@ -146,6 +147,7 @@ SpeakerBackend       →  sonos plugin → SonosSpeaker
 MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
 PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
 DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend
+CameraEventBackend   →  frigate plugin → FrigateCameraBackend (MQTT push + HTTP snapshots/clips)
 EmailBackend         →  google plugin → GmailBackend
 CalendarBackend      →  google plugin → GoogleCalendarBackend
 TaskBackend          →  core (LocalTaskBackend) + google plugin (GoogleTasksBackend)
@@ -251,6 +253,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
 | **elevenlabs** | High-quality TTS for announcements and greetings |
+| **frigate** | Frigate NVR object-detection events via MQTT, plus snapshot/clip retrieval over HTTP |
 | **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |

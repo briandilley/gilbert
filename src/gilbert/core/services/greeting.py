@@ -36,6 +36,7 @@ from gilbert.interfaces.weather import (
 logger = logging.getLogger(__name__)
 
 _GREETING_COLLECTION = "greeting_state"
+_CAMERA_MUTES_COLLECTION = "camera_mutes"
 
 _DEFAULT_WEATHER_HINT_TEMPLATE = (
     "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
@@ -44,6 +45,23 @@ _DEFAULT_WEATHER_HINT_TEMPLATE = (
     "otherwise ignore. Quote only the values shown — never invent additional "
     "weather details."
 )
+
+_DEFAULT_CAMERA_ANNOUNCE_PROMPT = (
+    "Generate one short alert sentence (under 12 words) that announces a "
+    "{label} event at the {camera} camera. Use the time of day if it is "
+    "relevant ({time_of_day}: late_night, morning, midday, evening). Vary "
+    "the phrasing across calls — don't always start with \"There's…\". No "
+    "emoji. No hedging. Pick a tone consistent with the label: package = "
+    "warm and informative; person = neutral observation; glass_break / "
+    "smoke = brief and urgent."
+)
+
+_DEFAULT_ANNOUNCE_CAMERA_LABELS: tuple[str, ...] = ("package",)
+_DEFAULT_CAMERA_ANNOUNCE_DEDUP_SECONDS = 300.0
+_DEFAULT_CAMERA_ANNOUNCE_DEDUP_KEYS: dict[str, list[str]] = {
+    "package": ["label"],
+    "person": ["label", "zone_group"],
+}
 
 
 class GreetingService(Service):
@@ -82,6 +100,25 @@ class GreetingService(Service):
         self._include_briefing: bool = False
         self._briefing_max_seconds: int = 60
         self._feeds: FeedsProvider | None = None
+
+        # Camera-event announcement config + state.
+        self._announce_camera_labels: tuple[str, ...] = (
+            _DEFAULT_ANNOUNCE_CAMERA_LABELS
+        )
+        self._camera_announce_dedup_seconds: float = (
+            _DEFAULT_CAMERA_ANNOUNCE_DEDUP_SECONDS
+        )
+        self._camera_announce_dedup_keys: dict[str, list[str]] = dict(
+            _DEFAULT_CAMERA_ANNOUNCE_DEDUP_KEYS
+        )
+        self._camera_zone_groups: dict[str, list[str]] = {}
+        self._camera_announce_prompt: str = _DEFAULT_CAMERA_ANNOUNCE_PROMPT
+        self._camera_announce_per_label_prompts: dict[str, str] = {}
+        # Inverse map (camera -> zone_group) for fast dedup-key rendering.
+        self._camera_to_zone_group: dict[str, str] = {}
+        # In-memory dedup state: dedup_key -> last announce ts (epoch s).
+        self._camera_announce_dedup_state: dict[str, float] = {}
+        self._unsubscribe_camera: Any = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -128,6 +165,11 @@ class GreetingService(Service):
             raise RuntimeError("event_bus capability does not satisfy EventBusProvider")
         self._event_bus = event_bus_svc.bus
         self._unsubscribe = self._event_bus.subscribe("presence.arrived", self._on_arrival)
+        # Camera-detected events fan-out for the announce path; per-label
+        # config gates whether we actually announce.
+        self._unsubscribe_camera = self._event_bus.subscribe(
+            "camera.event.detected", self._on_camera_event
+        )
 
         # Entity storage for dedup tracking
         storage_svc = resolver.require_capability("entity_storage")
@@ -202,6 +244,9 @@ class GreetingService(Service):
     async def stop(self) -> None:
         if self._unsubscribe:
             self._unsubscribe()
+        if self._unsubscribe_camera:
+            self._unsubscribe_camera()
+            self._unsubscribe_camera = None
 
     # --- Configurable protocol ---
 
@@ -297,6 +342,70 @@ class GreetingService(Service):
                 ),
                 default=60,
             ),
+            ConfigParam(
+                key="announce_camera_labels",
+                type=ToolParameterType.ARRAY,
+                description=(
+                    "Labels to announce on camera.event.detected. "
+                    "Default ``[\"package\"]`` — add ``person`` etc. "
+                    "as opt-ins."
+                ),
+                default=list(_DEFAULT_ANNOUNCE_CAMERA_LABELS),
+            ),
+            ConfigParam(
+                key="camera_announce_dedup_seconds",
+                type=ToolParameterType.NUMBER,
+                description=(
+                    "Window in seconds for the camera-event dedup key "
+                    "(default 300s)."
+                ),
+                default=_DEFAULT_CAMERA_ANNOUNCE_DEDUP_SECONDS,
+            ),
+            ConfigParam(
+                key="camera_announce_dedup_keys",
+                type=ToolParameterType.OBJECT,
+                description=(
+                    "Per-label dedup-key shape: "
+                    "``{label: [\"label\"|\"camera\"|\"zone_group\", ...]}``. "
+                    "Default ``{package: [label], person: [label, "
+                    "zone_group]}`` so a single visitor across "
+                    "adjacent cameras counts as one announce."
+                ),
+                default=dict(_DEFAULT_CAMERA_ANNOUNCE_DEDUP_KEYS),
+            ),
+            ConfigParam(
+                key="camera_zone_groups",
+                type=ToolParameterType.OBJECT,
+                description=(
+                    "Map a logical zone name to the cameras that "
+                    "watch it: ``{front_entry: [driveway, "
+                    "front_porch, front_door]}``. Cameras not listed "
+                    "are their own one-element group."
+                ),
+                default={},
+            ),
+            ConfigParam(
+                key="camera_announce_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Prompt template for the AI-generated camera-event "
+                    "alert sentence. ``{label}``, ``{camera}``, "
+                    "``{time_of_day}`` are interpolated."
+                ),
+                default=_DEFAULT_CAMERA_ANNOUNCE_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="camera_announce_per_label_prompts",
+                type=ToolParameterType.OBJECT,
+                description=(
+                    "Per-label prompt overrides: "
+                    "``{package: \"...\", person: \"...\", "
+                    "glass_break: \"...\"}``. Tone differs by label."
+                ),
+                default={},
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -320,6 +429,51 @@ class GreetingService(Service):
             config.get("briefing_max_seconds", self._briefing_max_seconds)
             or self._briefing_max_seconds
         )
+        labels = config.get("announce_camera_labels")
+        if isinstance(labels, list):
+            self._announce_camera_labels = tuple(str(label) for label in labels)
+        try:
+            self._camera_announce_dedup_seconds = float(
+                config.get(
+                    "camera_announce_dedup_seconds",
+                    self._camera_announce_dedup_seconds,
+                )
+            )
+        except (TypeError, ValueError):
+            self._camera_announce_dedup_seconds = (
+                _DEFAULT_CAMERA_ANNOUNCE_DEDUP_SECONDS
+            )
+        keys = config.get("camera_announce_dedup_keys")
+        if isinstance(keys, dict):
+            self._camera_announce_dedup_keys = {
+                str(k): [str(part) for part in v if isinstance(part, str)]
+                for k, v in keys.items()
+                if isinstance(v, list)
+            }
+        zone_groups = config.get("camera_zone_groups")
+        if isinstance(zone_groups, dict):
+            self._camera_zone_groups = {
+                str(g): [str(c) for c in cams if isinstance(c, str)]
+                for g, cams in zone_groups.items()
+                if isinstance(cams, list)
+            }
+            inverse: dict[str, str] = {}
+            for group, cams in self._camera_zone_groups.items():
+                for cam in cams:
+                    inverse[cam] = group
+            self._camera_to_zone_group = inverse
+        prompt = config.get("camera_announce_prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            self._camera_announce_prompt = prompt
+        else:
+            self._camera_announce_prompt = _DEFAULT_CAMERA_ANNOUNCE_PROMPT
+        per_label = config.get("camera_announce_per_label_prompts")
+        if isinstance(per_label, dict):
+            self._camera_announce_per_label_prompts = {
+                str(k): str(v)
+                for k, v in per_label.items()
+                if isinstance(v, str) and v.strip()
+            }
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -742,20 +896,257 @@ class GreetingService(Service):
                 ],
                 required_role="user",
             ),
+            ToolDefinition(
+                name="mute_camera_alerts",
+                slash_command="mute",
+                slash_group="cameras",
+                slash_help=(
+                    "/cameras mute [camera] [label] [until] — silence "
+                    "camera-event announcements; bus events still flow"
+                ),
+                description=(
+                    "Silence the announcement for camera detection "
+                    "events without muting the bus event itself. "
+                    "``camera=None`` mutes the label across all "
+                    "cameras; ``label=None`` mutes every label for "
+                    "the camera. ``until`` accepts the same time-"
+                    "window grammar as latest_clips (e.g. ``8h``, "
+                    "``today``, ISO 8601). The first call returns a "
+                    "Confirm/Cancel UI block; the AI re-invokes with "
+                    "``confirm=true`` after the user clicks Confirm."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="camera",
+                        type=ToolParameterType.STRING,
+                        description="Camera to mute (or empty for all).",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="label",
+                        type=ToolParameterType.STRING,
+                        description="Label to mute (or empty for all).",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="until",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "When the mute expires. Same grammar as "
+                            "latest_clips. Default: until 08:00 "
+                            "tomorrow local."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="confirm",
+                        type=ToolParameterType.BOOLEAN,
+                        description=(
+                            "Set true on the second call after the "
+                            "user clicks Confirm in the UI block."
+                        ),
+                        required=False,
+                        default=False,
+                    ),
+                ],
+                required_role="user",
+            ),
         ]
 
-    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        if name != "greet":
-            raise KeyError(f"Unknown tool: {name}")
+    async def execute_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Any:
+        if name == "greet":
+            person_name = str(arguments.get("name", "")).strip()
+            if not person_name:
+                return "I need a name to greet."
+            greeting = await self._generate_greeting(person_name)
+            await self._announce(greeting)
+            return f'Greeted {person_name}: "{greeting}"'
+        if name == "mute_camera_alerts":
+            return await self._tool_mute_camera_alerts(arguments)
+        raise KeyError(f"Unknown tool: {name}")
 
-        person_name = arguments.get("name", "").strip()
-        if not person_name:
-            return "I need a name to greet."
+    async def _tool_mute_camera_alerts(
+        self,
+        arguments: dict[str, Any],
+    ) -> Any:
+        from gilbert.core.services._ui_blocks import confirm_or_execute
 
-        greeting = await self._generate_greeting(person_name)
-        await self._announce(greeting)
+        camera = (arguments.get("camera") or "").strip()
+        label = (arguments.get("label") or "").strip()
+        until_raw = arguments.get("until") or ""
 
-        return f'Greeted {person_name}: "{greeting}"'
+        until_ms = _parse_until_arg(until_raw, self._timezone)
+
+        async def _do_mute() -> str:
+            if self._storage_backend is None:
+                return "Storage unavailable; cannot persist mute."
+            entity_id = f"{camera or '*'}.{label or '*'}"
+            await self._storage_backend.put(
+                _CAMERA_MUTES_COLLECTION,
+                entity_id,
+                {
+                    "camera": camera,
+                    "label": label,
+                    "until_ms": until_ms,
+                    "set_at_ms": int(datetime.now(UTC).timestamp() * 1000),
+                },
+            )
+            until_iso = (
+                datetime.fromtimestamp(until_ms / 1000.0, tz=UTC).isoformat()
+                if until_ms
+                else "no end"
+            )
+            return (
+                f"Muted {camera or 'all'} / "
+                f"{label or 'all'} until {until_iso}."
+            )
+
+        until_iso = (
+            datetime.fromtimestamp(until_ms / 1000.0, tz=UTC).isoformat()
+            if until_ms
+            else "no end"
+        )
+        target = (
+            f"{camera or '*all cameras*'} / "
+            f"{label or '*all labels*'}"
+        )
+        return await confirm_or_execute(
+            confirm=bool(arguments.get("confirm")),
+            tool_name="mute_camera_alerts",
+            title="Mute camera alerts",
+            summary=(
+                f"Mute {target} until {until_iso}? Bus events still "
+                f"flow; only the announcement is suppressed."
+            ),
+            summary_lines=[
+                f"camera: {camera or 'all'}",
+                f"label: {label or 'all'}",
+                f"until: {until_iso}",
+            ],
+            arguments={
+                "camera": camera,
+                "label": label,
+                "until": until_raw,
+            },
+            execute=_do_mute,
+        )
+
+    # ── Camera-event announce + dedup ──────────────────────────────
+
+    async def _on_camera_event(self, event: Event) -> None:
+        """React to ``camera.event.detected`` — announce when configured."""
+        if not self._announce_camera_labels:
+            return
+        data = event.data or {}
+        label = str(data.get("label") or "")
+        camera = str(data.get("camera") or "")
+        if not label or not camera:
+            return
+        if label not in self._announce_camera_labels:
+            return
+
+        # Mute check — drop the announce but the bus event still flows.
+        if await self._is_camera_muted(camera, label):
+            logger.debug(
+                "camera-event announce suppressed (muted): %s/%s",
+                camera,
+                label,
+            )
+            return
+
+        # Per-label dedup key shape (default: package=label, person=label+zone_group).
+        key_parts = self._camera_announce_dedup_keys.get(label, ["label", "camera"])
+        zone_group = self._camera_to_zone_group.get(camera, camera)
+        rendered: list[str] = []
+        for part in key_parts:
+            if part == "label":
+                rendered.append(label)
+            elif part == "camera":
+                rendered.append(camera)
+            elif part == "zone_group":
+                rendered.append(zone_group)
+        dedup_key = "|".join(rendered)
+
+        now = datetime.now(UTC).timestamp()
+        last = self._camera_announce_dedup_state.get(dedup_key, 0.0)
+        if now - last < self._camera_announce_dedup_seconds:
+            return
+        self._camera_announce_dedup_state[dedup_key] = now
+
+        # Generate the alert sentence.
+        sentence = await self._generate_camera_alert(label, camera)
+        await self._announce(sentence)
+
+    async def _is_camera_muted(self, camera: str, label: str) -> bool:
+        if self._storage_backend is None:
+            return False
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        for entity_id in (
+            f"{camera}.{label}",
+            f"{camera}.*",
+            f"*.{label}",
+            "*.*",
+        ):
+            row = await self._storage_backend.get(
+                _CAMERA_MUTES_COLLECTION, entity_id
+            )
+            if row is None:
+                continue
+            until = int(row.get("until_ms") or 0)
+            if until == 0 or until > now_ms:
+                return True
+        return False
+
+    async def _generate_camera_alert(self, label: str, camera: str) -> str:
+        # Time-of-day bucket
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo(self._timezone))
+        except Exception:
+            now = datetime.now(UTC)
+        hour = now.hour
+        if hour < 5:
+            time_of_day = "late_night"
+        elif hour < 11:
+            time_of_day = "morning"
+        elif hour < 17:
+            time_of_day = "midday"
+        else:
+            time_of_day = "evening"
+
+        prompt_template = self._camera_announce_per_label_prompts.get(
+            label, self._camera_announce_prompt
+        )
+        try:
+            prompt = prompt_template.format(
+                label=label, camera=camera, time_of_day=time_of_day
+            )
+        except (KeyError, IndexError, ValueError):
+            prompt = (
+                f"Brief alert: {label} at the {camera} camera "
+                f"({time_of_day})."
+            )
+
+        if self._resolver is None:
+            return f"{label.capitalize()} at the {camera}."
+        ai_svc = self._resolver.get_capability("ai_chat")
+        if not isinstance(ai_svc, AISamplingProvider):
+            return f"{label.capitalize()} at the {camera}."
+        try:
+            response = await ai_svc.complete_one_shot(
+                messages=[Message(role=MessageRole.USER, content=prompt)],
+                profile_name=self._ai_profile,
+                tools_override=[],
+            )
+            text = response.message.content.strip()
+            if text and len(text) < 200:
+                return text
+        except Exception:
+            logger.warning("Camera alert generation failed", exc_info=True)
+        return f"{label.capitalize()} at the {camera}."
 
     # ── Announce ────────────────────────────────────────────────
 
@@ -777,3 +1168,59 @@ class GreetingService(Service):
             )
         except Exception:
             logger.warning("Failed to announce greeting", exc_info=True)
+
+
+
+def _parse_until_arg(value: str, tz_name: str) -> int:
+    """Parse a mute ``until`` argument into epoch ms.
+
+    Empty / unset → "until 08:00 tomorrow local" per the spec.
+    Accepts the camera tool grammar: ``{N}m`` / ``{N}h`` / ``{N}d``
+    (relative), ``today`` / ``tomorrow`` (start-of-day), or ISO 8601.
+    """
+    import re as _re
+    from datetime import UTC, datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(tz_name) if tz_name else UTC
+    except Exception:
+        tz = UTC
+
+    if not value:
+        # Default: 08:00 tomorrow local.
+        now_local = datetime.now(tz)
+        tomorrow = now_local.date() + timedelta(days=1)
+        until_local = datetime.combine(tomorrow, time(8, 0), tzinfo=tz)
+        return int(until_local.timestamp() * 1000)
+
+    v = value.strip().lower()
+    match = _re.fullmatch(r"(\d+)([mhd])", v)
+    if match:
+        count, unit = int(match.group(1)), match.group(2)
+        seconds = {"m": 60, "h": 3600, "d": 86400}[unit]
+        return int(
+            (datetime.now(UTC) + timedelta(seconds=count * seconds)).timestamp()
+            * 1000
+        )
+
+    if v == "today":
+        now_local = datetime.now(tz)
+        end = datetime.combine(now_local.date(), time(23, 59, 59), tzinfo=tz)
+        return int(end.timestamp() * 1000)
+    if v == "tomorrow":
+        now_local = datetime.now(tz)
+        tomorrow = now_local.date() + timedelta(days=1)
+        end = datetime.combine(tomorrow, time(8, 0), tzinfo=tz)
+        return int(end.timestamp() * 1000)
+
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        # Fall back to default
+        return _parse_until_arg("", tz_name)
+

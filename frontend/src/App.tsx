@@ -11,6 +11,7 @@ import { CollectionDetail } from "@/components/entities/CollectionDetail";
 import { EntityDetail } from "@/components/entities/EntityDetail";
 import { InboxPage } from "@/components/inbox/InboxPage";
 import { CalendarPage } from "@/components/calendar/CalendarPage";
+import { CamerasPage } from "@/components/cameras/CamerasPage";
 import { FeedsPage } from "@/components/feeds/FeedsPage";
 import { TasksPage } from "@/components/tasks/TasksPage";
 import { RolesPage } from "@/components/roles/RolesPage";
@@ -51,6 +52,7 @@ export default function App() {
           />
           <Route path="/inbox" element={<InboxPage />} />
           <Route path="/calendar" element={<CalendarPage />} />
+          <Route path="/cameras" element={<CamerasPage />} />
           <Route path="/feeds" element={<FeedsPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/security" element={<Navigate to="/security/users" replace />} />

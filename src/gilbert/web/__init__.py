@@ -65,6 +65,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     from gilbert.web.routes.agent_avatar import router as agent_avatar_router
     from gilbert.web.routes.auth import router as auth_router
     from gilbert.web.routes.browser import router as browser_router
+    from gilbert.web.routes.cameras import router as cameras_router
     from gilbert.web.routes.chat import router as chat_router
     from gilbert.web.routes.chat_uploads import router as chat_uploads_router
     from gilbert.web.routes.documents import router as documents_router
@@ -82,6 +83,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     app.include_router(agent_avatar_router)
     app.include_router(auth_router)
     app.include_router(browser_router)
+    app.include_router(cameras_router)
     app.include_router(chat_router)
     app.include_router(chat_uploads_router)
     app.include_router(documents_router)

@@ -426,3 +426,170 @@ class TestGreetingBriefingSplice:
         from gilbert.interfaces import feeds as feeds_mod
 
         assert not hasattr(feeds_mod, "BriefingProvider")
+
+
+# ── Camera-event announce tests (feature 06) ────────────────────────
+
+
+class TestGreetingCameraEvents:
+    """Cover the camera.event.detected announce path + dedup + mute."""
+
+    @pytest.mark.asyncio
+    async def test_announces_on_camera_package_event(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        # Default: announce_camera_labels = ["package"]
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "package", "camera": "porch"},
+            )
+        )
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_announce_label_not_in_list(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        # Default doesn't include person.
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "person", "camera": "porch"},
+            )
+        )
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_dedups_repeat_camera_event(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        for _ in range(3):
+            await greeting_service._on_camera_event(
+                Event(
+                    event_type="camera.event.detected",
+                    data={"label": "package", "camera": "porch"},
+                )
+            )
+        # Default dedup key for package = ["label"] — single announce.
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_announce_dedups_across_camera_zone_group(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        # Configure zone groups + add person to announce labels with
+        # ["label", "zone_group"] dedup.
+        await greeting_service.on_config_changed(
+            {
+                "announce_camera_labels": ["person"],
+                "camera_zone_groups": {
+                    "front_entry": ["driveway", "front_porch", "front_door"]
+                },
+                "camera_announce_dedup_keys": {
+                    "person": ["label", "zone_group"]
+                },
+            }
+        )
+        for cam in ("driveway", "front_porch", "front_door"):
+            await greeting_service._on_camera_event(
+                Event(
+                    event_type="camera.event.detected",
+                    data={"label": "person", "camera": cam},
+                )
+            )
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_mute_camera_alerts_returns_preview_when_not_confirmed(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        out = await greeting_service.execute_tool(
+            "mute_camera_alerts",
+            {
+                "camera": "side_gate",
+                "label": "person",
+                "until": "8h",
+            },
+        )
+        from gilbert.interfaces.ui import ToolOutput
+
+        assert isinstance(out, ToolOutput)
+        assert out.ui_blocks
+        block = out.ui_blocks[0]
+        # Confirm/Cancel buttons present.
+        button_element = next(
+            e for e in block.elements if e.type == "buttons"
+        )
+        values = {opt.value for opt in button_element.options}
+        assert {"confirm", "cancel"} == values
+
+    @pytest.mark.asyncio
+    async def test_mute_camera_alerts_suppresses_announce(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        # Mute the (porch, package) combo.
+        await greeting_service.execute_tool(
+            "mute_camera_alerts",
+            {
+                "camera": "porch",
+                "label": "package",
+                "until": "8h",
+                "confirm": True,
+            },
+        )
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "package", "camera": "porch"},
+            )
+        )
+        assert called == []
