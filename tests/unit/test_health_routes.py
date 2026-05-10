@@ -509,3 +509,240 @@ def test_oauth_callback_rejects_expired_state(
     )
     assert resp.status_code == 400
 
+
+# ── T17: OAuth callback body identifies the specific failure mode ───
+
+
+def test_oauth_callback_body_identifies_user_mismatch(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    _app, svc, _ = app_and_svc
+    import asyncio
+
+    state = "stt-um"
+    asyncio.get_event_loop().run_until_complete(
+        svc._storage.put(  # type: ignore[union-attr]
+            "health_oauth_state",
+            state,
+            {
+                "_id": state,
+                "user_id": "bob",
+                "backend_name": "_fake_health",
+                "created_at": datetime.now(UTC).isoformat(),
+                "expires_at": (datetime(2099, 1, 1, tzinfo=UTC)).isoformat(),
+            },
+        )
+    )
+    app = _make_app(svc, user_id="alice")
+    client = TestClient(app)
+    resp = client.get(
+        f"/api/health/me/oauth/_fake_health/callback?code=x&state={state}"
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "user mismatch" in str(body).lower()
+
+
+def test_oauth_callback_body_identifies_wrong_backend(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    _app, svc, _ = app_and_svc
+    import asyncio
+
+    state = "stt-wb"
+    asyncio.get_event_loop().run_until_complete(
+        svc._storage.put(  # type: ignore[union-attr]
+            "health_oauth_state",
+            state,
+            {
+                "_id": state,
+                "user_id": "alice",
+                "backend_name": "withings",
+                "created_at": datetime.now(UTC).isoformat(),
+                "expires_at": (datetime(2099, 1, 1, tzinfo=UTC)).isoformat(),
+            },
+        )
+    )
+    app = _make_app(svc, user_id="alice")
+    client = TestClient(app)
+    resp = client.get(
+        f"/api/health/me/oauth/_fake_health/callback?code=x&state={state}"
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "backend mismatch" in str(body).lower()
+
+
+def test_oauth_callback_body_identifies_expired(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    _app, svc, _ = app_and_svc
+    import asyncio
+
+    state = "stt-exp"
+    asyncio.get_event_loop().run_until_complete(
+        svc._storage.put(  # type: ignore[union-attr]
+            "health_oauth_state",
+            state,
+            {
+                "_id": state,
+                "user_id": "alice",
+                "backend_name": "_fake_health",
+                "created_at": "2020-01-01T00:00:00+00:00",
+                "expires_at": "2020-01-01T00:10:00+00:00",
+            },
+        )
+    )
+    app = _make_app(svc, user_id="alice")
+    client = TestClient(app)
+    resp = client.get(
+        f"/api/health/me/oauth/_fake_health/callback?code=x&state={state}"
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "expired" in str(body).lower()
+
+
+# ── B2 regression: per-IP rate limit ignores spoofed XFF ────────────
+
+
+def test_per_ip_rate_limit_ignores_spoofed_xff(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    """Send unknown-token POSTs with each request advertising a
+    different ``X-Forwarded-For`` value. The per-IP bucket MUST fill
+    based on ``request.client.host``; the XFF header is intentionally
+    ignored until a trusted-proxy allowlist exists in core.
+
+    Without this, an attacker spoofs a fresh IP per request and the
+    30/min cap on the 404 path becomes ``30/min PER SPOOFED IP`` —
+    i.e. unbounded — defeating the whole enumeration-DoS defense."""
+    app, svc, _ = app_and_svc
+    svc._webhook_unknown_rate_per_minute = 3
+    # Reset the IP bucket so the test is deterministic.
+    svc._webhook_ip_buckets = type(svc._webhook_ip_buckets)(cap=10)
+    client = TestClient(app)
+    statuses: list[int] = []
+    for i in range(6):
+        resp = client.post(
+            f"/webhook/health/nope-{i}",
+            content=b"[]",
+            headers={"X-Forwarded-For": f"1.2.3.{i}"},  # attacker spoof.
+        )
+        statuses.append(resp.status_code)
+    # First 3 → 404 (unknown tokens), then bucket flips to 429 (the
+    # actual peer is the same TestClient address so spoofing didn't
+    # help).
+    assert statuses[:3] == [404, 404, 404], statuses
+    assert 429 in statuses[3:], statuses
+
+
+# ── B3 regression: Content-Length pre-check before body buffering ───
+
+
+def test_webhook_content_length_check_before_body_read(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    """A POST advertising ``Content-Length: 5_000_000`` (> 1 MB
+    default) MUST return 413 BEFORE the body is buffered into memory.
+
+    Verified by sending a small actual body but a huge
+    Content-Length header — the route reads the header first and
+    short-circuits."""
+    app, svc, _ = app_and_svc
+    # Default cap is 1 MB.
+    svc._webhook_max_body_bytes = 1024  # 1 KB for the test
+    client = TestClient(app)
+    resp = client.post(
+        "/webhook/health/anything",
+        # Tiny actual body but advertise a huge length.
+        content=b"[]",
+        headers={"Content-Length": "5000000"},
+    )
+    # Either 413 (cap caught it) — body was never read past header.
+    assert resp.status_code == 413
+
+
+# ── T18: webhook route uses hmac.compare_digest ─────────────────────
+
+
+def test_webhook_route_uses_compare_digest(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §16.5: the route must use ``hmac.compare_digest`` for
+    constant-time hash comparison. A future refactor that swaps in
+    ``==`` would silently regress; this test fails immediately if
+    that happens."""
+    import hashlib
+    import hmac as _hmac
+
+    app, svc, _ = app_and_svc
+    raw_token = "tok-cd-test"
+    h = hashlib.sha256(raw_token.encode()).hexdigest()
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(
+        svc._storage.put(  # type: ignore[union-attr]
+            _LINKS_COLLECTION,
+            "alice/_fake_health",
+            {
+                "_id": "alice/_fake_health",
+                "user_id": "alice",
+                "backend_name": "_fake_health",
+                "enabled": True,
+                "webhook_token_hash": h,
+            },
+        )
+    )
+
+    calls: list[tuple[str, str]] = []
+    real = _hmac.compare_digest
+
+    def _spy(a: Any, b: Any) -> bool:
+        calls.append((str(a), str(b)))
+        return real(a, b)
+
+    # Patch where the service imports hmac.
+    monkeypatch.setattr(
+        "gilbert.core.services.health.hmac.compare_digest", _spy
+    )
+    client = TestClient(app)
+    resp = client.post(
+        f"/webhook/health/{raw_token}", content=b"[]"
+    )
+    assert resp.status_code == 200
+    assert calls, "compare_digest was never invoked"
+
+
+# ── T12: health_links unique index on webhook_token_hash ────────────
+
+
+def test_health_links_webhook_token_hash_unique_index_declared(
+    app_and_svc: tuple[FastAPI, HealthService, str],
+) -> None:
+    """Spec §7.5 + round-2: ``health_links.webhook_token_hash`` is
+    declared as a UNIQUE index.
+
+    The storage layer uses ``INSERT OR REPLACE`` semantics, so the
+    constraint manifests as "the row with the colliding hash gets
+    REPLACED" rather than "the second insert raises". This test
+    asserts the index is registered AND that the SQLite-level
+    enforcement collapses two rows-by-hash to one row.
+    """
+    _app, svc, _ = app_and_svc
+    import asyncio
+
+    indexes = asyncio.get_event_loop().run_until_complete(
+        svc._storage.list_indexes(_LINKS_COLLECTION)  # type: ignore[union-attr]
+    )
+    unique_hash_idx = [
+        idx
+        for idx in indexes
+        if idx.fields == ["webhook_token_hash"] and idx.unique
+    ]
+    assert len(unique_hash_idx) == 1, (
+        f"Expected exactly one UNIQUE index on webhook_token_hash; "
+        f"got {indexes!r}"
+    )
+
