@@ -218,6 +218,20 @@ consumers into compliance is cheaper than two separate cleanups.
 
 ### Design decisions
 
+- **`inbox_ai_chat.system_prompt` is a ConfigParam.** The Inbox-AI
+  per-message reply flow (see `core/services/inbox_ai_chat.py`)
+  exposes its system prompt as `ConfigParam(multiline=True,
+  ai_prompt=True, default=_DEFAULT_INBOX_AI_CHAT_PROMPT)`. The default
+  bakes in `add_task` extraction guidance and the
+  Message-Id-as-`idempotency_key` rule introduced in feature 05
+  (tasks). Cached on `self._system_prompt` in `on_config_changed` with
+  the standard blank-fallback. Replaces the previously inlined
+  `context_prefix` literal so deployments can re-tune Inbox-AI
+  behavior without code changes. Just before calling `ai.chat()` the
+  service also calls `set_current_user(user_ctx)` so any tool that
+  reads `get_current_user()` (notably `tasks.add_task`) sees the
+  resolved sender — see [Tasks Service](memory-tasks-service.md)
+  §"Inbox-AI integration".
 - **No default mailbox anywhere.** Plugins that need to send mail
   configure an explicit `mailbox_id` in their own config. AI tools
   require `mailbox_id` on every call. Avoids ambiguity about "which
