@@ -266,6 +266,7 @@ class TasksService(Service):
                     "task.completed",
                     "task.updated",
                     "task.deleted",
+                    "task.restored",
                     "task.cancelled",
                     "task.due_soon",
                     "task.push_failed",
@@ -1629,6 +1630,28 @@ class TasksService(Service):
         {"title", "notes", "due_at", "due_at_tz", "priority", "tags", "project"}
     )
 
+    @classmethod
+    def _user_facing_patch(cls, task: Task) -> dict[str, Any]:
+        """Project a Task to a dict containing only user-facing mutable
+        fields plus ``status`` / ``completed_at`` so a sync-tick retry
+        can reconstruct the upstream row without leaking internal
+        bookkeeping (``_id``, ``sync_status``, ``last_push_error``,
+        ``idempotency_key``, ``retry_count`` etc.).
+
+        Backends contract per spec §6.7.2: ``update_task`` is patch-shaped.
+        """
+        return {
+            "title": task.title,
+            "notes": task.notes,
+            "due_at": task.due_at,
+            "due_at_tz": task.due_at_tz,
+            "priority": int(task.priority.value),
+            "tags": list(task.tags),
+            "project": task.project,
+            "status": task.status.value,
+            "completed_at": task.completed_at,
+        }
+
     async def update_task(
         self,
         task_id: str,
@@ -1992,6 +2015,7 @@ class TasksService(Service):
         due_before: str = "",
         due_after: str = "",
         limit: int = 50,
+        offset: int = 0,
     ) -> list[Task]:
         assert self._storage is not None
         user_ctx = get_current_user()
@@ -2047,6 +2071,7 @@ class TasksService(Service):
                 filters=filters,
                 sort=[SortField(field="due_at", descending=False)],
                 limit=limit,
+                offset=max(0, offset),
             )
         )
         return [Task.from_dict(row) for row in rows]
@@ -2157,6 +2182,7 @@ class TasksService(Service):
             else SyncStatus.PENDING_PUSH
         )
         await self._storage.put(_TASKS_COLLECTION, task.id, task.to_dict())
+        await self._publish_task_event("task.restored", task, task_list)
         return task
 
     # ── Sync tick ────────────────────────────────────────────────────
@@ -2222,11 +2248,15 @@ class TasksService(Service):
                     else:
                         # Re-push as a fresh add_task; without per-row
                         # patch tracking the tick can only ensure the
-                        # row exists upstream.
+                        # row exists upstream. Build a patch that
+                        # contains ONLY user-facing mutable fields —
+                        # backends should never see `_id`, `sync_status`,
+                        # `last_push_error`, `idempotency_key`, etc.
+                        retry_patch = self._user_facing_patch(task)
                         try:
                             await asyncio.wait_for(
                                 runtime.backend.update_task(
-                                    task.source_id, task.to_dict()
+                                    task.source_id, retry_patch
                                 ),
                                 timeout=self._push_timeout_sec,
                             )
@@ -3589,6 +3619,16 @@ class TasksService(Service):
                 status = TaskStatus.OPEN
         limit_raw = int(frame.get("limit", 50) or 50)
         limit = max(1, min(200, limit_raw))
+        # Cursor is an opaque string token; v1 encodes the next-page
+        # offset into the entity-store's existing offset primitive.
+        # Spec §6.2-9 requires the (cursor, limit) pair on tasks.list.
+        cursor_raw = str(frame.get("cursor") or "")
+        try:
+            offset = int(cursor_raw) if cursor_raw else 0
+        except ValueError:
+            offset = 0
+        if offset < 0:
+            offset = 0
         results = await self.search_tasks(
             list_id=(str(frame.get("list_id") or "") or None),
             backend=(str(frame.get("backend") or "") or None),
@@ -3598,8 +3638,11 @@ class TasksService(Service):
             due_before=str(frame.get("due_before") or ""),
             due_after=str(frame.get("due_after") or ""),
             limit=limit,
+            offset=offset,
         )
         lists = {tl.id: tl for tl in await self._load_lists()}
+        # If we got back a full page, signal more may exist.
+        next_cursor = str(offset + limit) if len(results) >= limit else None
         return {
             "type": "tasks.list.result",
             "ref": frame.get("id"),
@@ -3612,6 +3655,7 @@ class TasksService(Service):
                 )
                 for t in results
             ],
+            "next_cursor": next_cursor,
         }
 
     async def _ws_tasks_get(

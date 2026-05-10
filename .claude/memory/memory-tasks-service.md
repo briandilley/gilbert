@@ -222,15 +222,17 @@ field, used only for upstream lookups. Tests assert this for
 
 Per-handler authz uses `can_access_list` / `can_admin_list`. Errors
 map: 403 permission, 404 unknown, 400 bad arg, 409 delete-with-pending.
-`tasks.list` enforces `limit` clamped to [1, 200].
+`tasks.list` enforces `limit` clamped to [1, 200] and accepts an
+opaque `cursor` token (v1 encodes the next-page offset) — the
+response carries `next_cursor: str | null` so SPAs can paginate.
 
 ### Events published
 
 All carry `list_id` (and `task_id` for per-task events):
 
 - `task.created`, `task.completed`, `task.updated`, `task.cancelled`,
-  `task.deleted` (carries `soft: bool`), `task.due_soon`,
-  `task.push_failed`, `task.sync_recovered`
+  `task.deleted` (carries `soft: bool`), `task.restored`,
+  `task.due_soon`, `task.push_failed`, `task.sync_recovered`
 - `tasks.list.created`, `tasks.list.updated`, `tasks.list.deleted`,
   `tasks.list.shares.changed`, `tasks.list.degraded`,
   `tasks.list.recovered`
