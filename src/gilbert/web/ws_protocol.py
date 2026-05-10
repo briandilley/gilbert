@@ -139,6 +139,30 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_feed_event(self, event: Event) -> bool:
+        """Content-level filter for feed events that target a user.
+
+        ``feed.briefing.ready`` carries a ``user_id`` (the recipient of
+        the briefing) and is fanned out only to that user (admins see
+        all). Per spec §12: "fanned out only to the recipient ``user_id``
+        via a dedicated filter, not to every user — analogous to how
+        notification events work."
+
+        ``feed.ingest.throttled`` is also user-targeted (carries the
+        owner's ``user_id``). Other ``feed.*`` events (item / subscription
+        / shares) are feed-scoped, not user-scoped, and pass this filter
+        — the SPA / consumer applies a per-feed ACL check on top by
+        keeping a cache of accessible feed_ids.
+        """
+        if not event.event_type.startswith("feed."):
+            return True
+        # Admins (level 0 or below) see all feed events.
+        if self.user_level <= 0:
+            return True
+        if event.event_type in ("feed.briefing.ready", "feed.ingest.throttled"):
+            return event.data.get("user_id") == self.user_id
+        return True
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -372,6 +396,8 @@ class WsConnectionManager:
             if not conn.can_see_workspace_event(event):
                 continue
             if not conn.can_see_notification_event(event):
+                continue
+            if not conn.can_see_feed_event(event):
                 continue
             conn.send_event(event)
 
