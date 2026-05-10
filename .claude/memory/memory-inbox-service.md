@@ -204,6 +204,18 @@ all inbox configuration lives in entity storage. The service's
 `config_params()` exposes only `max_body_length` as a global setting;
 everything else lives on individual mailbox records.
 
+### KnowledgeProvider duck-typing fix (landed with feeds feature)
+
+`InboxService._knowledge` is now typed as
+`KnowledgeProvider | None` and resolved at `start()` via
+`isinstance(svc, KnowledgeProvider)`. The pre-existing duck-typing
+violation (line 104 `self._knowledge: Any = None`, lines 1483/1489
+`self._knowledge.backends.items()`) is gone — same call-site code
+now goes through the typed `KnowledgeProvider.backends` property
+declared in `interfaces/knowledge.py`. This was a co-requirement of
+the feeds feature: introducing the protocol once and bringing both
+consumers into compliance is cheaper than two separate cleanups.
+
 ### Design decisions
 
 - **No default mailbox anywhere.** Plugins that need to send mail
