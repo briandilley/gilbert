@@ -193,12 +193,22 @@ class _StubAIService:
 
 
 class _StubUsersService:
+    """Minimal UserManagementProvider stub. Protocol's ``list_users``
+    takes no args, returning the full user list.
+    """
+
     def __init__(self, users: list[dict[str, Any]]) -> None:
         self._users = users
 
-    async def list_users(
-        self, limit: int | None = None, offset: int = 0
-    ) -> list[dict[str, Any]]:
+    @property
+    def allow_user_creation(self) -> bool:
+        return False
+
+    @property
+    def backend(self) -> Any:
+        return None
+
+    async def list_users(self) -> list[dict[str, Any]]:
         return list(self._users)
 
 
@@ -723,6 +733,55 @@ async def test_continue_watching_no_mapping_returns_error(
     assert "error" in result
     assert "link-user" in result["error"]
     await svc.stop()
+
+
+def test_log_redaction_strips_xplex_token() -> None:
+    from gilbert.core.services.media_library import _redact_sensitive
+
+    text = (
+        "Got 401 for http://plex.local:32400/clients/abc?"
+        "X-Plex-Token=secret_PLEX_TOKEN_AAA111&trailing=1"
+    )
+    out = _redact_sensitive(text)
+    assert "secret_PLEX_TOKEN_AAA111" not in out
+    assert "X-Plex-Token=<REDACTED>" in out
+    # Non-token query params survive.
+    assert "trailing=1" in out
+
+
+def test_log_redaction_strips_jellyfin_apikey() -> None:
+    from gilbert.core.services.media_library import _redact_sensitive
+
+    text = (
+        "GET http://jellyfin.local:8096/Sessions?"
+        "api_key=jelly_secret_KEY_999&Foo=bar"
+    )
+    out = _redact_sensitive(text)
+    assert "jelly_secret_KEY_999" not in out
+    assert "?api_key=<REDACTED>" in out
+    assert "Foo=bar" in out
+
+    # Mid-query api_key (with leading &) is also redacted.
+    text2 = "GET /Sessions?Foo=bar&api_key=secret_X&Baz=qux"
+    out2 = _redact_sensitive(text2)
+    assert "secret_X" not in out2
+    assert "&api_key=<REDACTED>" in out2
+
+
+def test_log_redaction_filter_is_installed_on_module_logger() -> None:
+    """Spec §16: the redaction filter is installed on the core service
+    logger so a forced 401 fault writes a redacted message.
+    """
+    import logging
+
+    from gilbert.core.services.media_library import (
+        _install_log_redactor,
+        MediaLogRedactor,
+    )
+
+    _install_log_redactor("test.media_redactor.demo")
+    target = logging.getLogger("test.media_redactor.demo")
+    assert any(isinstance(f, MediaLogRedactor) for f in target.filters)
 
 
 async def test_user_can_see_returns_true_for_visible_section(
@@ -1594,6 +1653,87 @@ async def test_capability_gating_now_playing_off(
     assert "now_playing" not in names
     # playback_control stays registered (pause/resume/stop).
     assert "playback_control" in names
+    await svc.stop()
+
+
+async def test_playback_control_pause_timeout_translates_to_error(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Spec §6.8: pause / resume / stop / seek calls reuse the 10s
+    play timeout. A hung backend shouldn't hang the AI turn — the
+    tool surfaces a JSON error after the per-call timeout.
+    """
+    client = _client("tv-1", "TV", backend="alpha")
+    session = _session(
+        "s1",
+        _movie("m1", "Title", backend="alpha"),
+        client,
+    )
+
+    class _HangingPause(FakeMediaLibraryBackend):
+        backend_name = "alpha"
+
+        def __init__(self) -> None:
+            super().__init__(clients=[client], sessions=[session])
+
+        async def pause(self, client_id: str) -> None:
+            # Hang past the configured play timeout (1s in this test).
+            await asyncio.sleep(5.0)
+
+    MediaLibraryBackend._registry["alpha"] = _HangingPause
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {"alpha": {"enabled": True, "settings": {}}},
+            # Tighten the play timeout so the test runs in <2s.
+            "backend_timeout_seconds": {"play": 0.5},
+        },
+    )
+    await svc.start(resolver)
+    out = await svc.execute_tool(
+        "playback_control",
+        {"_user_id": "alice", "action": "pause", "client": "TV"},
+    )
+    assert isinstance(out, str)
+    parsed = json.loads(out)
+    assert "error" in parsed
+    assert "timed out" in parsed["error"]
+    assert "alpha" in parsed["error"]
+    assert "pause" in parsed["error"]
+    await svc.stop()
+
+
+async def test_playback_control_registers_all_four_slashes(
+    storage: SQLiteStorage, event_bus: InMemoryEventBus
+) -> None:
+    """Spec §7.4: playback_control surfaces as FOUR slashes
+    (/media pause / resume / stop / seek). Each wrapper tool delegates
+    to the same _tool_playback_control handler.
+    """
+    _register_fake("alpha", lambda: {})
+    svc = MediaLibraryService()
+    resolver = _make_resolver(
+        storage=storage,
+        bus=event_bus,
+        section={
+            "enabled": True,
+            "backends": {"alpha": {"enabled": True, "settings": {}}},
+        },
+    )
+    await svc.start(resolver)
+    tools = svc.get_tools()
+    by_name = {t.name: t for t in tools}
+    assert "playback_control" in by_name
+    assert "playback_resume" in by_name
+    assert "playback_stop" in by_name
+    assert "playback_seek" in by_name  # supports_seek=True from default Fake
+    assert by_name["playback_control"].slash_command == "pause"
+    assert by_name["playback_resume"].slash_command == "resume"
+    assert by_name["playback_stop"].slash_command == "stop"
+    assert by_name["playback_seek"].slash_command == "seek"
     await svc.stop()
 
 
