@@ -18,14 +18,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
+import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
-from dataclasses import asdict
+from collections.abc import AsyncIterator  # noqa: F401  — re-exported for downstream subclasses
+from dataclasses import asdict  # noqa: F401  — re-exported for downstream subclasses
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
@@ -1097,32 +1098,56 @@ class CameraEventService(Service):
         value: str | None,
         *,
         default: str = "24h",
+        user_tz: str | None = None,
     ) -> int | None:
         """Parse a relative / "today" / "yesterday" / ISO-8601 string.
 
         Returns epoch ms or ``None`` if value is empty/None.
+
+        ``user_tz`` (an IANA name like ``"America/New_York"``) anchors
+        ``today`` / ``yesterday`` to the caller's local midnight rather
+        than UTC midnight — so a user in ``America/Los_Angeles`` asking
+        for "today" at 23:00 local gets events from 00:00 local, not
+        from 00:00 UTC (which would be 17:00 the previous day local).
+        Falls back to UTC if ``user_tz`` is empty or unknown.
         """
         if value is None or value == "":
             value = default
         if not value:
             return None
         v = value.strip().lower()
-        now = datetime.now(UTC)
 
-        # Relative shorthand: 30m / 4h / 7d
+        tz: ZoneInfo
+        if user_tz:
+            try:
+                tz = ZoneInfo(user_tz)
+            except (ZoneInfoNotFoundError, ValueError):
+                tz = ZoneInfo("UTC")
+        else:
+            tz = ZoneInfo("UTC")
+        now_local = datetime.now(tz)
+
+        # Relative shorthand: 30m / 4h / 7d (always relative to "now",
+        # so TZ doesn't matter — the elapsed delta is the same).
         match = re.fullmatch(r"(\d+)([mhd])", v)
         if match:
             count, unit = int(match.group(1)), match.group(2)
             seconds = {"m": 60, "h": 3600, "d": 86400}[unit]
-            return int((now - timedelta(seconds=count * seconds)).timestamp() * 1000)
+            return int(
+                (datetime.now(UTC) - timedelta(seconds=count * seconds)).timestamp()
+                * 1000
+            )
 
         if v == "today":
+            # Anchor to local midnight, then convert back to epoch ms.
             start = datetime(
-                now.year, now.month, now.day, tzinfo=UTC
+                now_local.year, now_local.month, now_local.day, tzinfo=tz
             )
             return int(start.timestamp() * 1000)
         if v == "yesterday":
-            start = datetime(now.year, now.month, now.day, tzinfo=UTC) - timedelta(days=1)
+            start = datetime(
+                now_local.year, now_local.month, now_local.day, tzinfo=tz
+            ) - timedelta(days=1)
             return int(start.timestamp() * 1000)
 
         # ISO 8601
@@ -1130,7 +1155,7 @@ class CameraEventService(Service):
             normalized = value.replace("Z", "+00:00")
             dt = datetime.fromisoformat(normalized)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
+                dt = dt.replace(tzinfo=tz)
             return int(dt.timestamp() * 1000)
         except ValueError:
             return None
@@ -1330,16 +1355,23 @@ class CameraEventService(Service):
         arguments: dict[str, Any],
     ) -> str | ToolOutput:
         roles = _extract_roles(arguments)
+        user_tz = _extract_user_tz(arguments)
         if name == "list_cameras":
             return await self._tool_list_cameras(roles)
         if name == "latest_clips":
-            return await self._tool_latest_clips(arguments, roles)
+            return await self._tool_latest_clips(
+                arguments, roles, user_tz=user_tz
+            )
         if name == "get_snapshot":
             return await self._tool_get_snapshot(arguments, roles)
         if name == "who_was_seen":
-            return await self._tool_who_was_seen(arguments, roles)
+            return await self._tool_who_was_seen(
+                arguments, roles, user_tz=user_tz
+            )
         if name == "count_detections":
-            return await self._tool_count_detections(arguments, roles)
+            return await self._tool_count_detections(
+                arguments, roles, user_tz=user_tz
+            )
         raise KeyError(f"Unknown tool: {name}")
 
     def _camera_visible_to(self, camera: str, roles: frozenset[str]) -> bool:
@@ -1384,11 +1416,17 @@ class CameraEventService(Service):
         self,
         arguments: dict[str, Any],
         roles: frozenset[str],
+        *,
+        user_tz: str | None = None,
     ) -> str:
         camera = (arguments.get("camera") or "").strip() or None
         label = (arguments.get("label") or "").strip() or None
-        since = self._parse_time_window(arguments.get("since"), default="24h")
-        until = self._parse_time_window(arguments.get("until"), default="")
+        since = self._parse_time_window(
+            arguments.get("since"), default="24h", user_tz=user_tz
+        )
+        until = self._parse_time_window(
+            arguments.get("until"), default="", user_tz=user_tz
+        )
         try:
             limit = int(arguments.get("limit", 20) or 20)
         except (TypeError, ValueError):
@@ -1484,14 +1522,20 @@ class CameraEventService(Service):
         self,
         arguments: dict[str, Any],
         roles: frozenset[str],
+        *,
+        user_tz: str | None = None,
     ) -> str:
         camera = (arguments.get("camera") or "").strip()
         if not camera:
             return "camera is required."
         if not self._camera_visible_to(camera, roles):
             return "(no events visible for that camera)"
-        since = self._parse_time_window(arguments.get("since"), default="today")
-        until = self._parse_time_window(arguments.get("until"), default="")
+        since = self._parse_time_window(
+            arguments.get("since"), default="today", user_tz=user_tz
+        )
+        until = self._parse_time_window(
+            arguments.get("until"), default="", user_tz=user_tz
+        )
         events = await self.latest_events(
             camera=camera, since_ms=since, until_ms=until, limit=200
         )
@@ -1538,9 +1582,15 @@ class CameraEventService(Service):
         self,
         arguments: dict[str, Any],
         roles: frozenset[str],
+        *,
+        user_tz: str | None = None,
     ) -> str:
-        since = self._parse_time_window(arguments.get("since"), default="24h")
-        until = self._parse_time_window(arguments.get("until"), default="")
+        since = self._parse_time_window(
+            arguments.get("since"), default="24h", user_tz=user_tz
+        )
+        until = self._parse_time_window(
+            arguments.get("until"), default="", user_tz=user_tz
+        )
         events = await self.latest_events(
             since_ms=since, until_ms=until, limit=2000
         )
@@ -1561,16 +1611,21 @@ class CameraEventService(Service):
             "by_label": by_label,
             "by_camera_label": by_camera_label,
         }
-        # Render as the structured-counts contract; the AI composes prose.
-        return (
-            f"total={result['total']} by_camera={result['by_camera']} "
-            f"by_label={result['by_label']} "
-            f"by_camera_label={result['by_camera_label']}"
-        )
+        # Return parseable JSON — the AI consumes structured buckets
+        # rather than parsing prose, and downstream tools can traverse
+        # by_camera_label programmatically.
+        return json.dumps(result)
 
     # ── WS handler provider ─────────────────────────────────────────
 
     def get_ws_handlers(self) -> dict[str, RpcHandler]:
+        # Note: ``cameras.zones.update`` is intentionally NOT registered
+        # here. Frigate exposes zone configuration as read-only from
+        # Gilbert's perspective, so a "save zones" RPC would be a stub
+        # that always 501s. Registering only the handlers we actually
+        # implement keeps the public surface honest — the SPA can
+        # branch on whether the frame type exists rather than parsing
+        # error codes.
         return {
             "cameras.list": self._ws_cameras_list,
             "cameras.get": self._ws_cameras_get,
@@ -1579,7 +1634,6 @@ class CameraEventService(Service):
             "cameras.events.since": self._ws_events_since,
             "cameras.snapshots.get": self._ws_snapshot_get,
             "cameras.zones.list": self._ws_zones_list,
-            "cameras.zones.update": self._ws_zones_update,
             "cameras.mutes.list": self._ws_mutes_list,
             "cameras.mutes.set": self._ws_mutes_set,
             "cameras.mutes.clear": self._ws_mutes_clear,
@@ -1804,20 +1858,6 @@ class CameraEventService(Service):
             "zones": rows,
         }
 
-    async def _ws_zones_update(
-        self,
-        conn: Any,
-        frame: dict[str, Any],
-    ) -> dict[str, Any]:
-        # Frigate zone configuration is read-only from Gilbert's point
-        # of view (the backend does not support push-config). Surface a
-        # clear 501 so the SPA can disable the editor.
-        return self._err(
-            frame,
-            "Zone updates are not supported by the current backend",
-            501,
-        )
-
     async def _ws_mutes_list(
         self,
         conn: Any,
@@ -2025,13 +2065,19 @@ def _extract_roles(arguments: dict[str, Any]) -> frozenset[str]:
     return frozenset()
 
 
+def _extract_user_tz(arguments: dict[str, Any]) -> str | None:
+    """Pull the caller's IANA timezone from the AI-injected ``_user_tz``.
+
+    AI service.py injects ``arguments["_user_tz"] = user_ctx.tz`` when
+    the caller has a timezone configured. Returning ``None`` here means
+    "fall back to UTC for date math" — the caller may have no TZ set.
+    """
+    raw = arguments.get("_user_tz")
+    if isinstance(raw, str) and raw:
+        return raw
+    return None
+
+
 __all__ = [
     "CameraEventService",
 ]
-
-
-# Keep ``asdict`` referenced — used by helper utilities or tests in
-# downstream subclasses.
-_ = asdict
-_ = AsyncIterator
-_ = ZoneInfo

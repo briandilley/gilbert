@@ -24,7 +24,6 @@ import {
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
 import { BriefingCard } from "@/components/feeds/BriefingCard";
-import { RecentDetectionCard } from "@/components/cameras/RecentDetectionCard";
 import { DueTodayCard } from "@/components/tasks/DueTodayCard";
 
 interface CardStyle {
@@ -98,9 +97,10 @@ export function DashboardPage() {
         })}
       </div>
 
-      {/* Below-the-grid slot: long-form widgets go here. */}
+      {/* Below-the-grid slot: long-form widgets (e.g. the frigate
+          plugin's ``RecentEventsCard``) mount here via the plugin
+          panel registry. */}
       <div className="mt-4 sm:mt-6 space-y-3">
-        <RecentDetectionCard />
         <PluginPanelSlot slot="dashboard.bottom" />
       </div>
     </div>
