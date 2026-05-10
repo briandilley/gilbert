@@ -1752,3 +1752,225 @@ class TestFeedsServiceWsHandlers:
         row = await sqlite_storage.get(_FEED_ITEMS_COLLECTION, item.id)
         assert row["read"] is True
 
+
+class TestSsrfGuard:
+    """Regression for S2 — private host / metadata server protection."""
+
+    def test_ipv4_loopback_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert _is_private_or_metadata_host("127.0.0.1")
+        assert _is_private_or_metadata_host("localhost")
+        assert _is_private_or_metadata_host("0.0.0.0")
+
+    def test_ipv4_private_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        for host in ("10.0.0.1", "172.16.0.1", "192.168.1.1"):
+            assert _is_private_or_metadata_host(host), host
+
+    def test_aws_metadata_169_254_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert _is_private_or_metadata_host("169.254.169.254")
+        assert _is_private_or_metadata_host("169.254.0.1")
+
+    def test_cgnat_100_64_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert _is_private_or_metadata_host("100.64.0.1")
+        assert _is_private_or_metadata_host("100.127.255.255")
+
+    def test_ipv4_multicast_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert _is_private_or_metadata_host("224.0.0.1")
+
+    def test_ipv6_loopback_and_link_local_blocked(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert _is_private_or_metadata_host("::1")
+        assert _is_private_or_metadata_host("fe80::1")
+        assert _is_private_or_metadata_host("fc00::1")  # ULA
+        assert _is_private_or_metadata_host("ff02::1")  # multicast
+        assert _is_private_or_metadata_host("::")  # unspecified
+
+    def test_public_hosts_pass(self) -> None:
+        from gilbert.core.services.feeds import _is_private_or_metadata_host
+
+        assert not _is_private_or_metadata_host("8.8.8.8")
+        assert not _is_private_or_metadata_host("example.com")
+        assert not _is_private_or_metadata_host("2001:4860:4860::8888")
+
+    def test_registrable_suffix_handles_co_uk(self) -> None:
+        from gilbert.core.services.feeds import _registrable_suffix
+
+        assert _registrable_suffix("news.bbc.co.uk") == "bbc.co.uk"
+        assert _registrable_suffix("bbc.co.uk") == "bbc.co.uk"
+        assert _registrable_suffix("foo.com.au") == "foo.com.au"
+        assert _registrable_suffix("foo.example.com") == "example.com"
+
+    async def test_safe_to_fetch_blocks_metadata_host(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        from gilbert.interfaces.feeds import Feed as FeedDC
+
+        feed = FeedDC(id="f1", url="https://safe.example.com/feed.xml")
+        # Hostile feed tries to redirect us into AWS metadata.
+        ok = await svc._safe_to_fetch(feed, "http://169.254.169.254/latest/meta-data/")
+        assert ok is False
+
+    async def test_safe_to_fetch_blocks_loopback(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        from gilbert.interfaces.feeds import Feed as FeedDC
+
+        feed = FeedDC(id="f1", url="https://safe.example.com/feed.xml")
+        ok = await svc._safe_to_fetch(feed, "http://localhost:8080/x")
+        assert ok is False
+
+    async def test_safe_to_fetch_blocks_ipv6_loopback(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        from gilbert.interfaces.feeds import Feed as FeedDC
+
+        feed = FeedDC(id="f1", url="https://safe.example.com/feed.xml")
+        ok = await svc._safe_to_fetch(feed, "http://[::1]/api")
+        assert ok is False
+
+
+class TestSubscribeIdempotency:
+    """Regression for S5 — duplicate subscribe(url) for same owner is a
+    no-op so OPML re-imports don't double the row count."""
+
+    async def test_subscribe_same_url_returns_existing(
+        self, feeds_svc: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        first = await svc.subscribe(
+            "https://example.com/dup.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        second = await svc.subscribe(
+            "https://example.com/dup.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        assert second.id == first.id
+        feeds = await svc._load_feeds()
+        assert len(feeds) == 1
+
+    async def test_opml_reimport_does_not_duplicate(
+        self, feeds_svc: Any, monkeypatch: Any
+    ) -> None:
+        svc, _, _, _, _ = feeds_svc
+        from gilbert.interfaces.feeds import FeedBackend
+
+        fake_cls = FeedBackend.registered_backends()["fake_feed"]
+        monkeypatch.setattr(
+            FeedBackend,
+            "registered_backends",
+            classmethod(lambda cls: {"rss_atom": fake_cls, "fake_feed": fake_cls}),
+        )
+        opml = """<?xml version="1.0"?>
+<opml version="2.0"><body>
+  <outline type="rss" xmlUrl="https://example.com/a.xml"/>
+  <outline type="rss" xmlUrl="https://example.com/b.xml"/>
+</body></opml>"""
+        await svc.import_opml(opml, _user("alice"))
+        await svc.import_opml(opml, _user("alice"))
+        feeds = await svc._load_feeds()
+        assert len(feeds) == 2
+
+    async def test_subscribe_per_user_scoping(
+        self, feeds_svc: Any
+    ) -> None:
+        # Different owners can each subscribe to the same URL.
+        svc, _, _, _, _ = feeds_svc
+        f1 = await svc.subscribe(
+            "https://example.com/shared.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        f2 = await svc.subscribe(
+            "https://example.com/shared.xml",
+            _user("bob"),
+            backend_name="fake_feed",
+        )
+        assert f1.id != f2.id
+        assert f1.owner_user_id == "alice"
+        assert f2.owner_user_id == "bob"
+
+
+class TestContentTypeGuard:
+    """S6 — non-HTML content types must be rejected at ingestion."""
+
+    async def test_ingest_rejects_text_plain(
+        self, feeds_svc: Any, sqlite_storage: Any, monkeypatch: Any
+    ) -> None:
+        svc, _, _, knowledge, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        feed.ingest_to_knowledge = True
+        await sqlite_storage.put(_FEEDS_COLLECTION, feed.id, feed.to_dict())
+        item = StoredFeedItem(
+            id=f"{feed.id}__plain",
+            feed_id=feed.id,
+            item_uid="plain",
+            title="t",
+            link="https://example.org/news",
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+
+        async def fake_fetch(_url: str) -> tuple[bytes, str, int]:
+            return (b"hello world" * 200, "text/plain", 200)
+
+        monkeypatch.setattr(svc, "_fetch_article_body", fake_fetch)
+
+        async def fake_safe(_feed: Any, _link: str) -> bool:
+            return True
+
+        monkeypatch.setattr(svc, "_safe_to_fetch", fake_safe)
+        await svc._ingest_item(feed, FeedItem(item_uid="plain", title="t", link="https://example.org/news"))
+        # text/plain → never indexed.
+        assert knowledge.indexed == []
+
+    async def test_ingest_accepts_html(
+        self, feeds_svc: Any, sqlite_storage: Any, monkeypatch: Any
+    ) -> None:
+        svc, _, _, knowledge, _ = feeds_svc
+        feed = await svc.subscribe(
+            "https://example.com/x.xml",
+            _user("alice"),
+            backend_name="fake_feed",
+        )
+        feed.ingest_to_knowledge = True
+        await sqlite_storage.put(_FEEDS_COLLECTION, feed.id, feed.to_dict())
+        item = StoredFeedItem(
+            id=f"{feed.id}__html",
+            feed_id=feed.id,
+            item_uid="html",
+            title="t",
+            link="https://example.org/news",
+        )
+        await sqlite_storage.put(_FEED_ITEMS_COLLECTION, item.id, item.to_dict())
+
+        async def fake_fetch(_url: str) -> tuple[bytes, str, int]:
+            return (b"<html><body>" + b"hello world " * 200 + b"</body></html>", "text/html", 200)
+
+        monkeypatch.setattr(svc, "_fetch_article_body", fake_fetch)
+
+        async def fake_safe(_feed: Any, _link: str) -> bool:
+            return True
+
+        monkeypatch.setattr(svc, "_safe_to_fetch", fake_safe)
+        await svc._ingest_item(feed, FeedItem(item_uid="html", title="t", link="https://example.org/news"))
+        assert len(knowledge.indexed) == 1
+
