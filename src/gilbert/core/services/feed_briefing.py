@@ -78,7 +78,7 @@ class FeedBriefingService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="feed_briefing",
-            capabilities=frozenset({"feed_briefing"}),
+            capabilities=frozenset({"feed_briefing", "ws_handlers"}),
             requires=frozenset({"feeds", "scheduler"}),
             optional=frozenset(
                 {
@@ -503,4 +503,45 @@ class FeedBriefingService(Service):
     # within the WS RPC dispatch. The fallback tick runs as a system
     # job so the ContextVar isn't relevant for the daily fire path.
     _ = get_current_user
+
+    # ── WebSocket RPC handlers ───────────────────────────────────────
+    #
+    # Singleton admin-only surface for triggering the daily fan-out
+    # manually from the SPA settings page or operator scripts. Per-user
+    # briefing builds (`feeds.briefing.run`) live on ``FeedsService``
+    # since that's where the AI call and prompt live.
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "feeds.briefing.daily.run": self._ws_daily_run,
+        }
+
+    def _is_admin(self, user_ctx: UserContext) -> bool:
+        if user_ctx.user_id == UserContext.SYSTEM.user_id:
+            return True
+        # Best-effort: defer to AccessControlProvider if available;
+        # otherwise fall back to a role-name check.
+        if self._resolver is not None:
+            from gilbert.interfaces.auth import AccessControlProvider
+
+            acl_svc = self._resolver.get_capability("access_control")
+            if isinstance(acl_svc, AccessControlProvider):
+                return acl_svc.get_effective_level(user_ctx) <= 0
+        return "admin" in user_ctx.roles
+
+    async def _ws_daily_run(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn.user_ctx):
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Admin role required",
+                "code": 403,
+            }
+        force = bool(frame.get("force") or False)
+        fired = await self.run_now(force=force)
+        return {
+            "type": "feeds.briefing.daily.run.result",
+            "ref": frame.get("id"),
+            "fired": fired,
+        }
 
