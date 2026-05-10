@@ -401,7 +401,7 @@ export function NotificationBell() {
             ))
           )}
         </div>
-        <div className="px-3 py-2 border-t">
+        <div className="px-3 py-2 border-t flex items-center justify-between gap-3">
           <button
             type="button"
             className="text-xs text-muted-foreground hover:text-foreground"
@@ -411,6 +411,16 @@ export function NotificationBell() {
             }}
           >
             View all
+          </button>
+          <button
+            type="button"
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              navigate("/account/notifications");
+              setOpen(false);
+            }}
+          >
+            Manage delivery routes →
           </button>
         </div>
       </DropdownMenuContent>

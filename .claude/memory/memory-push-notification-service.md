@@ -45,6 +45,13 @@ fan-out service therefore separates the bus subscriber from delivery:
 sync code. Per-route tasks are spawned with ``context=...`` at the
 call site.
 
+On ``stop()``, each worker is cancelled. The worker's ``except
+asyncio.CancelledError`` branch explicitly calls ``task.cancel()`` +
+``await asyncio.gather(task, return_exceptions=True)`` on the
+in-flight ``_fan_out`` task before exiting, so spawned per-route HTTP
+work cannot outlive shutdown — important under
+``python -X dev`` which would otherwise emit ResourceWarnings.
+
 ### Delivery guarantees
 **v1 is at-most-once.** Crash between publish and worker completion
 drops the in-flight push; the persisted notification is unaffected.
@@ -122,6 +129,16 @@ A single ``_authorize_route_access(conn, row, write=...)`` helper is
 the trust boundary. Owner-only for writes; admins can read other users'
 routes via ``push.routes.list``. Admin testing other users' routes is
 denied by default (consent over debugging).
+
+When the caller of ``push.routes.list`` is **not** the row owner (i.e.
+an admin reading another user's routes), ``_serialize_route`` walks
+the backend's ``destination_params()`` and replaces the value of every
+``sensitive=True`` key in ``destination_data`` with ``"********"``.
+The owner reading their own routes still gets unmasked values so the
+SPA can prefill the edit form. Pushover ``user_key``, Telegram
+``chat_id``-paired secrets, Discord ``webhook_url``, and ntfy
+``auth_token`` (any ``sensitive=True`` per-user fields) are covered
+by this single mechanism.
 
 ### AI tools
 ``slash_namespace = "notify"``. Four tools:
