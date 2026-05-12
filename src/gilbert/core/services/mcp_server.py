@@ -594,7 +594,7 @@ class MCPServerService(Service):
 
         if self._resolver is None:
             return _ws_error(frame, "Service not started", code=503)
-        ai_svc = self._resolver.get_capability("ai")
+        ai_svc = self._resolver.get_capability("ai_chat")
         if not isinstance(ai_svc, AIToolDiscoveryProvider):
             return _ws_error(frame, "AI service unavailable", code=503)
 

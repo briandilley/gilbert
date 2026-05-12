@@ -36,7 +36,7 @@ class _ResolverShim(ServiceResolver):
     """Adapts ``ServiceManager.get_by_capability`` → ``ServiceResolver.get_capability``.
 
     The MCP HTTP app's constructor wants a ``ServiceResolver`` so it
-    can call ``get_capability("ai")`` etc. during request handling.
+    can call ``get_capability("ai_chat")`` etc. during request handling.
     The service manager provides the same lookup under a slightly
     different name; this shim is the thinnest possible adapter."""
 
@@ -54,11 +54,7 @@ class _ResolverShim(ServiceResolver):
         return svc
 
     def get_all(self, capability: str) -> list[Service]:
-        # The MCP HTTP app uses ``ai.discover_tools`` which internally
-        # calls the real resolver's ``get_all``, so this shim's
-        # ``get_all`` is never called directly. Return an empty list
-        # as a safe default if a future change ever does call it.
-        return []
+        return self._gilbert.service_manager.get_all_by_capability(capability)
 
 
 class _McpAsgiEndpoint:

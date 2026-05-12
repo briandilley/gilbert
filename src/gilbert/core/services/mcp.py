@@ -1730,7 +1730,7 @@ class MCPService(Service):
         resolver = self._resolver
         if resolver is None:
             return _error(-32000, "MCP service not started")
-        ai_svc = resolver.get_capability("ai")
+        ai_svc = resolver.get_capability("ai_chat")
         if not isinstance(ai_svc, AISamplingProvider):
             return _error(-32000, "AI service unavailable")
 

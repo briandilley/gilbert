@@ -113,7 +113,7 @@ class MCPServerHttpApp:
             client = _current_client.get()
             if client is None:
                 return []
-            ai_svc = self._resolver.get_capability("ai")
+            ai_svc = self._resolver.get_capability("ai_chat")
             if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return []
             user_ctx = _current_user.get(None) or _user_ctx_for(client)
@@ -147,7 +147,7 @@ class MCPServerHttpApp:
             client = _current_client.get()
             if client is None:
                 return [_error_text("no client context")]
-            ai_svc = self._resolver.get_capability("ai")
+            ai_svc = self._resolver.get_capability("ai_chat")
             if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return [_error_text("AI service unavailable")]
             user_ctx = _current_user.get(None) or _user_ctx_for(client)

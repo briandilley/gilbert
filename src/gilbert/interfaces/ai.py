@@ -427,7 +427,7 @@ class ChatTurnResult(NamedTuple):
 class AIProvider(Protocol):
     """Protocol for services providing conversational AI capabilities.
 
-    Callers resolve this via ``resolver.get_capability("ai")`` and
+    Callers resolve this via ``resolver.get_capability("ai_chat")`` and
     ``isinstance(svc, AIProvider)`` to type-narrow before invoking
     the ``chat`` entry point. Kept deliberately narrow — only the
     fields the existing greeting/roast/etc callers actually use. If
