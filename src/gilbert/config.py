@@ -136,27 +136,26 @@ class MusicConfig(BaseConfig):
     settings: dict[str, Any] = {}
 
 
-class UniFiControllerConfig(BaseConfig):
-    """Connection config for a single UniFi OS controller."""
-
-    host: str = ""
-    username: str = ""
-    password: str = ""
-    verify_ssl: bool = False
-
-
 class PresenceConfig(BaseConfig):
-    """Presence detection configuration."""
+    """Presence detection configuration.
+
+    Per-backend sub-sections (``unifi_network``, ``unifi_protect``,
+    ``device_person_map``, ``zone_aliases``, ``face_lookback_minutes``,
+    backend-specific lookback windows, …) are intentionally **not**
+    declared here — that would hard-code backend-specific schema into
+    core. ``PresenceService`` instead passes the full raw config
+    section to ``PresenceBackend.initialize()``, and each backend
+    reads whatever sub-keys it needs from the dict. ``BaseConfig``
+    has ``extra="allow"`` so unknown keys in the raw YAML / entity
+    store pass through unchanged.
+
+    Same pattern as ``KnowledgeConfig`` — extends the registry-driven
+    backend discovery to the config layer.
+    """
 
     enabled: bool = False
     backend: str = "unifi"
     poll_interval_seconds: int = 30
-    unifi_network: UniFiControllerConfig = UniFiControllerConfig()
-    unifi_protect: UniFiControllerConfig = UniFiControllerConfig()
-    device_person_map: dict[str, str] = {}
-    zone_aliases: dict[str, list[str]] = {}
-    face_lookback_minutes: int = 30
-    badge_lookback_hours: int = 24
     settings: dict[str, Any] = {}
 
 
