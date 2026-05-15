@@ -4,6 +4,7 @@ import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Select,
   SelectContent,
@@ -38,11 +39,17 @@ export function CollectionACLs() {
       queryClient.invalidateQueries({ queryKey: ["collection-acls"] }),
   });
 
-  if (isLoading) return <LoadingSpinner text="Loading collections..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Collections</h1>
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Collections"
+        description="Per-collection read / write role requirements for the entity store."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading collections..." className="p-4" />
+        ) : (
       <Card>
       <CardContent className="p-0">
         <div className="overflow-x-auto">
@@ -126,6 +133,8 @@ export function CollectionACLs() {
         </div>
       </CardContent>
     </Card>
-    </>
+        )}
+      </div>
+    </div>
   );
 }

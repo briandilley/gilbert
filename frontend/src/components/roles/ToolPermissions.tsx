@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/utils";
 
 interface Tool {
@@ -61,27 +62,35 @@ export function ToolPermissions() {
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [data?.tools]);
 
-  if (isLoading) return <LoadingSpinner text="Loading tools..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Tools</h1>
-      <div className="space-y-2">
-        {groups.map(([provider, tools]) => (
-          <ProviderGroup
-            key={provider}
-            provider={provider}
-            tools={tools}
-            roleNames={data?.role_names ?? []}
-            overrideCount={tools.filter((t) => t.has_override).length}
-            onSet={(toolName, role) =>
-              setMutation.mutate({ toolName, role })
-            }
-            onClear={(toolName) => clearMutation.mutate(toolName)}
-          />
-        ))}
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Tools"
+        description="Minimum role required to invoke each AI tool. Defaults are declared by the tool's provider; explicit overrides take precedence."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading tools..." className="p-4" />
+        ) : (
+          <div className="space-y-2">
+            {groups.map(([provider, tools]) => (
+              <ProviderGroup
+                key={provider}
+                provider={provider}
+                tools={tools}
+                roleNames={data?.role_names ?? []}
+                overrideCount={tools.filter((t) => t.has_override).length}
+                onSet={(toolName, role) =>
+                  setMutation.mutate({ toolName, role })
+                }
+                onClear={(toolName) => clearMutation.mutate(toolName)}
+              />
+            ))}
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
 

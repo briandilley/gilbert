@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { KeyRoundIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function UserRoles() {
   const queryClient = useQueryClient();
@@ -45,19 +46,23 @@ export function UserRoles() {
     mutation.mutate({ userId, roles: next });
   }
 
-  if (isLoading) return <LoadingSpinner text="Loading users..." className="p-4" />;
-
   return (
-    <div className="space-y-4">
-      <h1 className="text-xl sm:text-2xl font-semibold text-center">Users</h1>
-      {data?.allow_user_creation && (
-        <div className="flex justify-end">
-          <Button size="sm" onClick={() => setShowForm((v) => !v)}>
-            {showForm ? <XIcon className="h-4 w-4 mr-1" /> : <PlusIcon className="h-4 w-4 mr-1" />}
-            {showForm ? "Cancel" : "Create User"}
-          </Button>
-        </div>
-      )}
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Users"
+        description="User accounts and the roles they hold."
+        actions={
+          data?.allow_user_creation ? (
+            <Button size="sm" onClick={() => setShowForm((v) => !v)}>
+              {showForm ? <XIcon /> : <PlusIcon />}
+              {showForm ? "Cancel" : "Create user"}
+            </Button>
+          ) : null
+        }
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
+        {isLoading && <LoadingSpinner text="Loading users..." className="p-4" />}
 
       {showForm && (
         <CreateUserForm
@@ -135,6 +140,7 @@ export function UserRoles() {
           </div>
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }

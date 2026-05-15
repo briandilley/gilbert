@@ -5,6 +5,7 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Select,
   SelectContent,
@@ -37,16 +38,19 @@ export function RpcPermissions() {
       queryClient.invalidateQueries({ queryKey: ["rpc-permissions"] }),
   });
 
-  if (isLoading) return <LoadingSpinner text="Loading RPC rules..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">RPC</h1>
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="RPC"
+        description="Which WebSocket RPC operations each role can call. Longest prefix match wins."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading RPC rules..." className="p-4" />
+        ) : (
       <Card>
       <CardContent className="p-0">
-        <p className="px-3 py-2 text-xs text-muted-foreground border-b">
-          Controls which WebSocket RPC operations each role can call. Longest prefix match wins.
-        </p>
         <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -101,6 +105,8 @@ export function RpcPermissions() {
         </div>
       </CardContent>
     </Card>
-    </>
+        )}
+      </div>
+    </div>
   );
 }
