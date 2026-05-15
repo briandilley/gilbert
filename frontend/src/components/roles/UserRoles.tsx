@@ -74,64 +74,67 @@ export function UserRoles() {
       )}
 
       <Card>
-        <CardContent className="p-0">
+        <CardContent className="px-0 py-0">
           <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b">
-                <th className="px-3 py-2 text-left font-medium">User</th>
-                <th className="hidden md:table-cell px-3 py-2 text-left font-medium">Username</th>
-                <th className="hidden lg:table-cell px-3 py-2 text-left font-medium">Email</th>
+              <tr className="border-b border-border">
+                <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">User</th>
+                <th className="hidden md:table-cell px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Username</th>
+                <th className="hidden lg:table-cell px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Email</th>
                 {data?.role_names.map((r) => (
-                  <th key={r} className="px-3 py-2 text-center font-medium">
+                  <th key={r} className="px-3 py-2 text-center font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
                     {r}
                   </th>
                 ))}
                 <th className="px-3 py-2 w-10" />
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-border">
               {data?.users.map((u) => (
-                <tr key={u.user_id} className="border-b">
-                  <td className="px-3 py-2 break-words">{u.display_name}</td>
-                  <td className="hidden md:table-cell px-3 py-2 text-muted-foreground break-words">{u.username}</td>
-                  <td className="hidden lg:table-cell px-3 py-2 text-muted-foreground break-words">{u.email}</td>
+                <tr key={u.user_id} className="hover:bg-foreground/[0.025] transition-colors">
+                  <td className="px-3 py-2 break-words font-medium">{u.display_name}</td>
+                  <td className="hidden md:table-cell px-3 py-2 text-muted-foreground break-words font-mono text-xs">{u.username}</td>
+                  <td className="hidden lg:table-cell px-3 py-2 text-muted-foreground break-words font-mono text-xs">{u.email}</td>
                   {data.role_names.map((r) => (
                     <td key={r} className="px-3 py-2 text-center">
                       <input
                         type="checkbox"
                         checked={u.roles.includes(r)}
                         onChange={() => toggle(u.user_id, u.roles, r)}
-                        className="accent-primary"
+                        className="accent-(--signal)"
                       />
                     </td>
                   ))}
-                  <td className="px-3 py-2 text-center flex gap-1 justify-center">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                      onClick={() => {
-                        const pw = prompt(`New password for "${u.display_name || u.user_id}":`);
-                        if (pw) resetPasswordMutation.mutate({ userId: u.user_id, password: pw });
-                      }}
-                    >
-                      <KeyRoundIcon className="h-4 w-4" />
-                    </Button>
-                    {u.user_id !== "root" && (
+                  <td className="px-3 py-2 text-center">
+                    <div className="flex gap-1 justify-center">
                       <Button
                         variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                        size="icon-xs"
                         onClick={() => {
-                          if (confirm(`Delete user "${u.display_name || u.user_id}"?`)) {
-                            deleteMutation.mutate(u.user_id);
-                          }
+                          const pw = prompt(`New password for "${u.display_name || u.user_id}":`);
+                          if (pw) resetPasswordMutation.mutate({ userId: u.user_id, password: pw });
                         }}
+                        title="Reset password"
                       >
-                        <Trash2Icon className="h-4 w-4" />
+                        <KeyRoundIcon />
                       </Button>
-                    )}
+                      {u.user_id !== "root" && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="hover:text-destructive"
+                          onClick={() => {
+                            if (confirm(`Delete user "${u.display_name || u.user_id}"?`)) {
+                              deleteMutation.mutate(u.user_id);
+                            }
+                          }}
+                          title="Delete"
+                        >
+                          <Trash2Icon />
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

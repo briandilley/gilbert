@@ -50,23 +50,23 @@ export function RpcPermissions() {
           <LoadingSpinner text="Loading RPC rules..." className="p-4" />
         ) : (
       <Card>
-      <CardContent className="p-0">
+      <CardContent className="px-0 py-0">
         <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b">
-              <th className="px-3 py-2 text-left font-medium">Frame Type</th>
-              <th className="px-3 py-2 text-left font-medium">Min Role</th>
+            <tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Frame type</th>
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Min role</th>
               <th className="px-3 py-2 w-16"></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-border">
             {data?.rules.map((rule) => (
-              <tr key={rule.frame_prefix} className="border-b">
+              <tr key={rule.frame_prefix} className="hover:bg-foreground/[0.025] transition-colors">
                 <td className="px-3 py-2">
-                  <code className="text-xs">{rule.frame_prefix}</code>
+                  <code className="font-mono text-xs">{rule.frame_prefix}</code>
                   {rule.source === "override" && (
-                    <Badge variant="outline" className="text-[10px] ml-2">override</Badge>
+                    <Badge variant="outline" className="ml-2">override</Badge>
                   )}
                 </td>
                 <td className="px-3 py-2">
