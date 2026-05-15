@@ -113,6 +113,10 @@ class SpeakerService(Service):
         self._enabled = True
         self._apply_config(section)
 
+        # Side-effect import so the bundled local backend registers.
+        # Third-party backends (Sonos, …) register themselves via plugins.
+        import gilbert.integrations.local_speaker  # noqa: F401
+
         backend_name = section.get("backend", "sonos")
         self._backend_name = backend_name
         backends = SpeakerBackend.registered_backends()
@@ -179,6 +183,9 @@ class SpeakerService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
+        # Side-effect import so the bundled local backend shows up in
+        # the ``backend`` choices dropdown even before the service starts.
+        import gilbert.integrations.local_speaker  # noqa: F401
         from gilbert.interfaces.speaker import SpeakerBackend
 
         params = [

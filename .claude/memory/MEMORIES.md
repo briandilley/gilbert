@@ -11,7 +11,7 @@
 - [Service Registry](memory-service-registry.md) — legacy DI container, coexists with ServiceManager
 - [Multi-backend Aggregator Pattern](memory-multi-backend-pattern.md) — services with multiple backends use aggregator pattern
 - [User & Auth System](memory-user-auth-system.md) — multi-user support with local accounts, external providers, roles, sessions
-- [Speaker System](memory-speaker-system.md) — speaker control with Sonos/SoCo, aliases, grouping, TTS announcements
+- [Speaker System](memory-speaker-system.md) — speaker control with Sonos + local-host backends, aliases, grouping, TTS announcements
 - [Music Service](memory-music-service.md) — Sonos-backed browse/search/play with SMAPI auth flow and speaker integration
 - [Lights & Shades Services](memory-lights-shades-services.md) — generic lights + shades core services with backend-pluggable architecture (Lutron RadioRA backend), capability-gated tools
 - [Thermostat Service](memory-thermostat-service.md) — generic thermostat core service with backend-pluggable architecture (Nexia / American Standard backend), capability-gated tools
