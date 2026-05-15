@@ -48,3 +48,6 @@
 - [Plugin UI Extensions](memory-plugin-ui-extensions.md) — Plugin.ui_panels() + <PluginPanelSlot> + per-plugin frontend/ dir
 - [Plugin runtime_dependencies](memory-runtime-dependencies.md) — Plugin.runtime_dependencies() + 'gilbert doctor' for non-pip OS deps
 - [Migration System](memory-migrations.md) — arbitrary one-shot upgrade scripts (core + per-plugin), `gilbert.cli.migrate`, `./gilbert.sh update` and prompt at start
+- [Frontend Design System](memory-frontend-design-system.md) — Technical Broadsheet aesthetic: mono carries meaning, hairlines over fills, one signal-amber accent, sharp 8px max radii
+- [Settings UI](memory-settings-ui.md) — design-system pilot: left rail + global StatusBar + SettingsContext (state lift) + PromptEditorDialog for AI prompts
+- [Chat Transcript](memory-chat-transcript.md) — feed-style turns with rail rows, mono-rail tool calls, no bubbles or avatars
