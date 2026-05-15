@@ -186,11 +186,14 @@ above the content.
 
 `<Badge variant="active" dot>RUNNING</Badge>`
 
-- 18px tall, mono, 10.5px uppercase, tracking `+0.06em`.
+- 18px tall, mono 11px, tracking-tight.
 - Optional 6px dot (semantic-colored) prefix via `dot` prop.
 - Variants map to state: `active` / `pending` / `success` /
   `warning` / `error` / `off`. Plus `neutral` and `outline` for
   meta/count.
+- **Case is up to the caller.** Write `RUNNING` for shouty state
+  pills; `3 messages` for quiet counts. Don't expect the badge to
+  uppercase for you.
 
 ### Empty state
 

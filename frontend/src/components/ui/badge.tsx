@@ -27,9 +27,16 @@ import { cn } from "@/lib/utils"
  */
 const badgeVariants = cva(
   [
+    // Base: layout + typography common to every variant. Mono is
+    // the system's "this is meta/data, not prose" signal — every
+    // badge inherits it. Case is up to the caller: write
+    // ``RUNNING`` if you want shout-y state, ``3 messages`` if you
+    // want a quiet count. Don't bake uppercase into the base — most
+    // existing call sites pass mixed-case labels and would render
+    // wrong.
     "group/badge inline-flex h-[18px] w-fit shrink-0 items-center gap-1.5",
     "rounded-sm px-1.5",
-    "font-mono text-[10.5px] font-medium uppercase tracking-[0.06em] leading-none",
+    "font-mono text-[11px] font-medium tracking-tight leading-none",
     "whitespace-nowrap",
     "border border-transparent",
     "transition-colors duration-(--duration-fast) ease-(--ease-out)",
