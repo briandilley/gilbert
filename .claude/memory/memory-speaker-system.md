@@ -1,7 +1,7 @@
 # Speaker System
 
 ## Summary
-Speaker control with an abstract interface and a Sonos implementation backed by `aiosonos` (S2 local WebSocket API). Supports discovery, grouping, playback, volume, aliases, and native short-clip announcements. SoCo (the legacy UPnP/SMAPI library) was removed in the aiosonos migration — S1 speakers are no longer supported.
+Speaker control with an abstract interface and two bundled backends: `sonos` (third-party plugin, S2 WebSocket via `aiosonos`) and `local` (vendor-free, plays through the host's audio output via a CLI player subprocess). Supports discovery, grouping (Sonos only), playback, volume, aliases, and short-clip announcements. SoCo (the legacy UPnP/SMAPI library) was removed in the aiosonos migration — S1 speakers are no longer supported.
 
 ## Details
 
@@ -22,6 +22,16 @@ Speaker control with an abstract interface and a Sonos implementation backed by 
 - **Spotify URIs** (`spotify:track:…`, `spotify:playlist:…`, etc.) are detected via `_extract_spotify_ref` and routed through `playback.load_content` with a `MetadataId` of `{serviceId: "9", objectId: <uri>}` — `accountId` is intentionally omitted so Sonos resolves the household's default linked Spotify account.
 - **State mapping**: aiosonos's `PLAYBACK_STATE_*` strings map to our `PlaybackState` enum via `_PLAYBACK_STATE_MAP`.
 - `scripts/check_sonos_s2.py` is the migration-preflight tool: it uses zeroconf + the info endpoint to verify every LAN speaker speaks S2.
+
+### Local Backend
+- `src/gilbert/integrations/local_speaker.py` — `LocalSpeakerBackend` (`backend_name = "local"`). Vendor-free, lives in `integrations/` per the layer rules; the speaker service side-effect-imports it so the `local` choice shows up alongside `sonos` in the backend dropdown.
+- Exposes a **single virtual speaker** (`speaker_id = "local"`, name configurable via `display_name`). `list_speakers` always returns one entry. No grouping (`supports_grouping = False`), no repeat (`supports_repeat = False`).
+- **Player selection**: `player_command` config param overrides auto-detect. Auto-detect prefers `afplay` on macOS, then `ffplay`, `mpv`, `mpg123`. `initialize()` raises if none are found and the user didn't pre-configure one.
+- **Playback**: `play_uri` streams the request's HTTP(S) URI to a temp file with `httpx` (most CLI players can't read URLs directly), then spawns the player via `asyncio.create_subprocess_exec`. The temp file is deleted when the subprocess exits or `stop()` is called.
+- **Volume** is per-clip via the player's CLI flag (`afplay -v 0–1`, `ffplay -volume 0–100`, `mpv --volume=0–100`, `mpg123 -f 0–32768`). The host's system mixer is never touched. `set_volume` stores the level and applies it to the *next* clip; the active subprocess is not adjusted mid-clip.
+- **Announce**: same code path as normal playback — the upstream `_announce_inner` flow still works because it polls `_estimate_mp3_duration` and then calls `restore()`, which is a no-op here. The backend has no ducking/restore concept; if music was playing, it's stopped and replaced by the announcement, then the speaker is silent until the next `play_uri`.
+- **State**: `_state` flips to `PLAYING` when the subprocess spawns and back to `STOPPED` from a fire-and-forget `_watch_proc` task when the player exits. `get_playback_state` also resynchronizes lazily if the proc has exited without the watcher running yet.
+- No additional Python deps — uses `httpx` (already in core), `asyncio.subprocess`, and `shutil.which`. Cross-platform: works on any OS that has one of the supported CLI players on PATH.
 
 ### Service
 - `src/gilbert/core/services/speaker.py` — `SpeakerService` implementing Service, Configurable, ToolProvider.
@@ -52,4 +62,5 @@ Speaker control with an abstract interface and a Sonos implementation backed by 
 - `src/gilbert/core/services/tts.py` — TTS service dependency for announcements.
 - `std-plugins/sonos/tests/test_sonos_speaker.py` — 21 tests covering the aiosonos wiring.
 - `tests/unit/test_speaker_service.py` — service-layer unit tests.
+- `tests/unit/test_local_speaker.py` — LocalSpeakerBackend unit tests (subprocess + httpx mocked).
 - `scripts/check_sonos_s2.py` — S2 preflight check.
