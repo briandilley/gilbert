@@ -190,6 +190,64 @@ pull_latest() {
     done
 }
 
+apply_pending_branch() {
+    # Honor a pending branch switch requested via the SourceUpdateService
+    # action on the settings page. The service has already validated
+    # that the target branch exists on ``origin`` and the working tree
+    # was clean at the time it wrote the sentinel; here we just do the
+    # mechanical git work before the next ``uv sync``. On any failure
+    # we remove the sentinel and continue on the current branch — the
+    # user will see the error in the stderr log and can re-apply via
+    # the UI once they've resolved the underlying issue.
+    local sentinel="$SCRIPT_DIR/.gilbert/pending-branch.txt"
+    [ -f "$sentinel" ] || return 0
+
+    local target
+    target=$(head -n 1 "$sentinel" | tr -d '[:space:]')
+    if [ -z "$target" ]; then
+        echo "Pending branch sentinel is empty — removing." >&2
+        rm -f "$sentinel"
+        return 0
+    fi
+
+    echo "Applying pending branch switch: $target"
+
+    # Re-check working-tree clean — the user could have touched files
+    # between the service action and the supervisor restart.
+    local dirty
+    dirty=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no || true)
+    if [ -n "$dirty" ]; then
+        echo "Refusing to switch — working tree no longer clean:" >&2
+        echo "$dirty" | sed 's/^/  /' >&2
+        rm -f "$sentinel"
+        return 0
+    fi
+
+    if ! git -C "$SCRIPT_DIR" fetch --quiet origin "$target"; then
+        echo "Failed to fetch origin/$target — removing sentinel and continuing on current branch." >&2
+        rm -f "$sentinel"
+        return 0
+    fi
+
+    if ! git -C "$SCRIPT_DIR" checkout "$target"; then
+        echo "git checkout $target failed — removing sentinel and continuing on current branch." >&2
+        rm -f "$sentinel"
+        return 0
+    fi
+
+    # Fast-forward to origin's tip if we just attached to an existing
+    # local branch that's behind the remote. ``--ff-only`` keeps us
+    # honest — no implicit merges.
+    git -C "$SCRIPT_DIR" merge --ff-only "origin/$target" 2>/dev/null || true
+
+    # Submodule SHAs are pinned per branch; update so plugin sources
+    # match what the new branch expects.
+    git -C "$SCRIPT_DIR" submodule update --init --recursive
+
+    rm -f "$sentinel"
+    echo "Now on branch: $(git -C "$SCRIPT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo 'unknown')"
+}
+
 run_gilbert_supervised() {
     # Supervisor loop: run Gilbert, inspect its exit code, restart on
     # ``RESTART_EXIT_CODE`` (re-syncing the venv first so new plugin
@@ -209,6 +267,10 @@ run_gilbert_supervised() {
             echo "Supervisor stopping."
             break
         fi
+
+        # Handle a pending branch switch BEFORE sync_python_deps so the
+        # uv sync picks up the new branch's dependency manifest.
+        apply_pending_branch
 
         sync_python_deps
 
