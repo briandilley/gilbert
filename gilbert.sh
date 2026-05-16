@@ -190,27 +190,54 @@ pull_latest() {
     done
 }
 
+# Probe window for the post-switch auto-rollback. If Gilbert exits with
+# a crash code within this many seconds of the supervisor launching it
+# on a freshly-switched branch, the supervisor reverts to the
+# pre-switch ("last known good") branch before retrying. 90s is enough
+# for a slow first-boot under uv sync; faster crashes (import errors,
+# missing-symbol failures) fire well inside it.
+LKG_PROBE_WINDOW=90
+
+_lkg_branch_path() { echo "$SCRIPT_DIR/.gilbert/lkg-branch.txt"; }
+_post_switch_marker_path() { echo "$SCRIPT_DIR/.gilbert/post-switch-start.txt"; }
+_last_rollback_path() { echo "$SCRIPT_DIR/.gilbert/last-rollback.json"; }
+
+clear_lkg_markers() {
+    # Clear the pre-switch "last known good" branch marker and the
+    # post-switch boot timestamp. Called after a successful run on
+    # the new branch (Gilbert exited cleanly, requested a restart,
+    # or ran longer than the probe window before crashing) — at that
+    # point the switch is "committed" and we don't roll back on
+    # subsequent crashes.
+    rm -f "$(_lkg_branch_path)" "$(_post_switch_marker_path)"
+}
+
 apply_pending_branch() {
     # Honor a pending branch switch requested via the SourceUpdateService
     # action on the settings page. The service has already validated
-    # that the target branch exists on ``origin`` and the working tree
-    # was clean at the time it wrote the sentinel; here we just do the
-    # mechanical git work before the next ``uv sync``. On any failure
-    # we remove the sentinel and continue on the current branch — the
-    # user will see the error in the stderr log and can re-apply via
-    # the UI once they've resolved the underlying issue.
+    # that the target branch + remote exist and the working tree was
+    # clean at the time it wrote the sentinel; here we do the mechanical
+    # git work before the next ``uv sync``. On any failure we remove
+    # the sentinel and continue on the current branch — the user will
+    # see the error in the stderr log and can re-apply via the UI once
+    # they've resolved the underlying issue.
+    #
+    # Sentinel format is two lines:
+    #     <target_remote>
+    #     <target_branch>
     local sentinel="$SCRIPT_DIR/.gilbert/pending-branch.txt"
     [ -f "$sentinel" ] || return 0
 
-    local target
-    target=$(head -n 1 "$sentinel" | tr -d '[:space:]')
-    if [ -z "$target" ]; then
-        echo "Pending branch sentinel is empty — removing." >&2
+    local target_remote target_branch
+    target_remote=$(sed -n '1p' "$sentinel" | tr -d '[:space:]')
+    target_branch=$(sed -n '2p' "$sentinel" | tr -d '[:space:]')
+    if [ -z "$target_remote" ] || [ -z "$target_branch" ]; then
+        echo "Pending branch sentinel malformed (need remote + branch on separate lines) — removing." >&2
         rm -f "$sentinel"
         return 0
     fi
 
-    echo "Applying pending branch switch: $target"
+    echo "Applying pending branch switch: $target_remote/$target_branch"
 
     # Re-check working-tree clean — the user could have touched files
     # between the service action and the supervisor restart.
@@ -223,29 +250,122 @@ apply_pending_branch() {
         return 0
     fi
 
-    if ! git -C "$SCRIPT_DIR" fetch --quiet origin "$target"; then
-        echo "Failed to fetch origin/$target — removing sentinel and continuing on current branch." >&2
-        rm -f "$sentinel"
+    # Capture the pre-switch state as the LKG marker BEFORE any
+    # destructive git work, so a fetch or checkout failure leaves us
+    # able to recover. Default the tracking remote to "origin" when
+    # the current branch isn't tracking anything (newly-initialized
+    # repo or branches created from a SHA).
+    local current_branch current_remote
+    current_branch=$(git -C "$SCRIPT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
+    if [ -n "$current_branch" ]; then
+        current_remote=$(git -C "$SCRIPT_DIR" config "branch.$current_branch.remote" 2>/dev/null || echo "")
+        [ -z "$current_remote" ] && current_remote="origin"
+        mkdir -p "$SCRIPT_DIR/.gilbert"
+        printf '%s\n%s\n' "$current_remote" "$current_branch" > "$(_lkg_branch_path)"
+    fi
+
+    if ! git -C "$SCRIPT_DIR" fetch --quiet "$target_remote" "$target_branch"; then
+        echo "Failed to fetch $target_remote/$target_branch — aborting switch." >&2
+        rm -f "$sentinel" "$(_lkg_branch_path)"
         return 0
     fi
 
-    if ! git -C "$SCRIPT_DIR" checkout "$target"; then
-        echo "git checkout $target failed — removing sentinel and continuing on current branch." >&2
-        rm -f "$sentinel"
+    # ``switch -C`` force-creates the local branch from the specified
+    # remote ref, repointing tracking if the local branch already
+    # existed against a different remote. The user explicitly clicked
+    # "switch to $target_remote/$target_branch," so repointing matches
+    # intent — no surprise. ``--track`` sets upstream so ``git pull``
+    # on the new branch follows the same remote.
+    if ! git -C "$SCRIPT_DIR" switch -C "$target_branch" --track "$target_remote/$target_branch"; then
+        echo "git switch failed — aborting." >&2
+        rm -f "$sentinel" "$(_lkg_branch_path)"
         return 0
     fi
-
-    # Fast-forward to origin's tip if we just attached to an existing
-    # local branch that's behind the remote. ``--ff-only`` keeps us
-    # honest — no implicit merges.
-    git -C "$SCRIPT_DIR" merge --ff-only "origin/$target" 2>/dev/null || true
 
     # Submodule SHAs are pinned per branch; update so plugin sources
     # match what the new branch expects.
     git -C "$SCRIPT_DIR" submodule update --init --recursive
 
     rm -f "$sentinel"
-    echo "Now on branch: $(git -C "$SCRIPT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo 'unknown')"
+    # Drop the post-switch marker so the supervisor's exit-code handler
+    # knows we're inside the probe window and may need to roll back.
+    date +%s > "$(_post_switch_marker_path)"
+    echo "Switched to $target_remote/$target_branch (HEAD: $(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "?"))"
+}
+
+maybe_rollback_to_lkg() {
+    # Returns 0 if a rollback fired and the caller should ``continue``
+    # the supervisor loop on the rolled-back branch, or 1 if no
+    # rollback is applicable. Three preconditions for a rollback:
+    #
+    #   1. The post-switch probe marker exists (a recent switch happened).
+    #   2. The LKG marker exists (we know where to roll back to).
+    #   3. The elapsed seconds since the post-switch boot is under
+    #      LKG_PROBE_WINDOW (the crash was inside the probe window).
+    #
+    # On a successful rollback we write ``.gilbert/last-rollback.json``
+    # so the SourceUpdateService's ``check`` action can surface what
+    # happened in the next session.
+    local exit_code=$1
+    local elapsed=$2
+    local post_switch lkg
+    post_switch=$(_post_switch_marker_path)
+    lkg=$(_lkg_branch_path)
+
+    [ -f "$post_switch" ] || return 1
+    [ -f "$lkg" ] || return 1
+    [ "$elapsed" -lt "$LKG_PROBE_WINDOW" ] || return 1
+
+    local lkg_remote lkg_branch
+    lkg_remote=$(sed -n '1p' "$lkg" | tr -d '[:space:]')
+    lkg_branch=$(sed -n '2p' "$lkg" | tr -d '[:space:]')
+    if [ -z "$lkg_remote" ] || [ -z "$lkg_branch" ]; then
+        echo "LKG marker malformed — cannot rollback." >&2
+        clear_lkg_markers
+        return 1
+    fi
+
+    local from_branch from_remote
+    from_branch=$(git -C "$SCRIPT_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
+    from_remote=$(git -C "$SCRIPT_DIR" config "branch.$from_branch.remote" 2>/dev/null || echo "")
+    [ -z "$from_remote" ] && from_remote="origin"
+
+    echo "Auto-rollback: $from_remote/$from_branch crashed after ${elapsed}s (exit $exit_code), reverting to $lkg_remote/$lkg_branch" >&2
+
+    if ! git -C "$SCRIPT_DIR" fetch --quiet "$lkg_remote" "$lkg_branch"; then
+        echo "Rollback fetch failed — manual recovery required (run ./gilbert.sh stop, fix, then ./gilbert.sh start)." >&2
+        clear_lkg_markers
+        return 1
+    fi
+    if ! git -C "$SCRIPT_DIR" switch -C "$lkg_branch" --track "$lkg_remote/$lkg_branch"; then
+        echo "Rollback checkout failed — manual recovery required." >&2
+        clear_lkg_markers
+        return 1
+    fi
+    git -C "$SCRIPT_DIR" submodule update --init --recursive
+
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # Write the rollback record. JSON keys mirror the structure the
+    # SourceUpdateService's ``check`` action surfaces. ``cat`` with a
+    # heredoc keeps the shell-side templating simple — no escapes
+    # needed because remote / branch are constrained to a safe regex
+    # by the service before we ever wrote the sentinel.
+    cat > "$(_last_rollback_path)" <<JSON
+{
+  "from_remote": "$from_remote",
+  "from_branch": "$from_branch",
+  "to_remote": "$lkg_remote",
+  "to_branch": "$lkg_branch",
+  "exit_code": $exit_code,
+  "elapsed_seconds": $elapsed,
+  "timestamp": "$ts"
+}
+JSON
+
+    clear_lkg_markers
+    echo "Rolled back to $lkg_remote/$lkg_branch — relaunching."
+    return 0
 }
 
 run_gilbert_supervised() {
@@ -289,15 +409,21 @@ run_gilbert_supervised() {
         # doesn't abort the script before we can inspect the code.
         # Duplicate stderr to ``$STDERR_LOG`` so glibc abort messages and
         # other non-Python-logging output survive a crash.
+        local launch_start elapsed
+        launch_start=$(date +%s)
         set +e
         uv run python -m gilbert 2> >(tee -a "$stderr_log_abs" >&2)
         exit_code=$?
         set -e
-        echo "===== Gilbert exited with code $exit_code at $(date -Iseconds) =====" \
+        elapsed=$(($(date +%s) - launch_start))
+        echo "===== Gilbert exited with code $exit_code at $(date -Iseconds) (ran ${elapsed}s) =====" \
             >> "$stderr_log_abs"
 
         case "$exit_code" in
             0)
+                # Clean exit means the switch (if any) booted at least
+                # once successfully — commit it by clearing markers.
+                clear_lkg_markers
                 echo "Gilbert stopped cleanly."
                 break
                 ;;
@@ -308,19 +434,42 @@ run_gilbert_supervised() {
                     echo "Restart requested, but supervisor is stopping."
                     break
                 fi
+                # If the restart was requested mid-probe-window we
+                # still consider the switch "successful enough" —
+                # Gilbert booted, took the restart request, and shut
+                # down gracefully. Clear LKG so subsequent crashes
+                # don't fall back to a state we already promoted past.
+                clear_lkg_markers
                 crash_count=0
                 echo "Gilbert requested a restart — resyncing and relaunching..."
                 continue
                 ;;
             130)
+                clear_lkg_markers
                 echo "Gilbert interrupted (Ctrl+C) — not restarting."
                 break
                 ;;
             143)
+                clear_lkg_markers
                 echo "Gilbert terminated (SIGTERM) — not restarting."
                 break
                 ;;
             *)
+                # Crash path. First check whether this is a "broken
+                # switch" inside the post-switch probe window — if so,
+                # roll back to LKG immediately rather than burning
+                # MAX_CRASH_RESTARTS attempts on a known-broken branch.
+                if maybe_rollback_to_lkg "$exit_code" "$elapsed"; then
+                    crash_count=0
+                    continue
+                fi
+                # Ran longer than the probe window? The switch
+                # succeeded; this is a normal post-boot crash. Clear
+                # the markers and let the existing crash-retry logic
+                # handle it.
+                if [ -f "$(_post_switch_marker_path)" ] && [ "$elapsed" -ge "$LKG_PROBE_WINDOW" ]; then
+                    clear_lkg_markers
+                fi
                 crash_count=$((crash_count + 1))
                 if [ "$crash_count" -ge "$MAX_CRASH_RESTARTS" ]; then
                     echo "Gilbert crashed $crash_count times in a row (last exit $exit_code) — giving up. See $STDERR_LOG." >&2
