@@ -10,9 +10,10 @@ Admin-only "switch the running Gilbert instance to a different git branch on ``o
 - Service info: ``name="source_update"``, no capabilities, no requires, ``optional={"configuration"}``, ``toggleable=False``. Not toggleable on purpose — disabling the update mechanism via UI would strand an admin who needs to switch branches to recover from a broken deploy.
 - Bound to the host Gilbert app via ``bind_gilbert(self)`` (called in ``Gilbert.start()`` right after registration, same pattern as ``PluginManagerService``). Used to invoke ``Gilbert.request_restart()`` once the sentinel is on disk.
 - Config namespace: ``source_update``. Config category: ``System``.
-- Config params: ``target_branch`` (string, default ""). Setting the value alone does NOT switch — the user must click ``Apply``.
+- Config params: ``target_branch`` (string, default "", ``choices_from="origin_branches"``). Dropdown is populated from the service's branch cache; setting the value alone does NOT switch — the user must click ``Apply``.
 - Config actions:
   - ``check`` (admin) — read-only. Reports current branch, origin URL, and dirty status. Returns the file list in ``data["dirty_files"]`` and a bool in ``data["dirty"]``.
+  - ``refresh_branches`` (admin) — read-only. ``git fetch origin`` then re-runs ``git ls-remote --heads origin`` to repopulate the cache. Use after pushing a new branch to ``origin`` if it doesn't show up in the dropdown.
   - ``apply`` (admin) — destructive. Validates → writes sentinel → calls ``request_restart()``. Has a ``confirm`` prompt so the UI shows a confirmation dialog.
 - Validation chain in ``_action_apply``:
   1. ``target_branch`` non-empty.
@@ -23,6 +24,13 @@ Admin-only "switch the running Gilbert instance to a different git branch on ``o
   6. ``git ls-remote --heads origin <branch>`` returns a matching ref.
 - Audit log: ``logging.getLogger("gilbert.source_update.audit")`` records every ``branch_switch_requested`` event with ``user_id`` (from the request contextvar), ``from_branch``, ``to_branch``, and ISO timestamp.
 - All git subprocess calls go through ``_git(*args)`` which raises ``_GitError`` on non-zero exit; the action methods catch ``_GitError`` and surface the stderr in the ``ConfigActionResult.message``.
+
+### Branch cache (dropdown source)
+- ``SourceUpdateService.cached_remote_branches`` (sync property) returns the last-known sorted list of branches on ``origin``.
+- Implements the ``RemoteBranchLister`` protocol (``src/gilbert/interfaces/source_update.py``) so ``ConfigurationService._resolve_dynamic_choices`` can resolve ``choices_from="origin_branches"`` without duck-typing the concrete service class. Service advertises the ``source_update`` capability so the resolver can find it.
+- Populated best-effort in ``start()`` via ``_fetch_remote_branches()`` (one ``git ls-remote --heads origin`` call). If the fetch fails (no network, auth issue), the cache stays empty and a warning is logged — the user can refresh from the UI once the underlying issue is resolved.
+- Refreshed by the ``refresh_branches`` config action, which also calls ``git fetch origin`` first so the ``ls-remote`` reflects the latest remote state.
+- Parser is defensive: ignores non-``refs/heads/`` refs (tags, HEAD pointer), malformed lines, and deduplicates via ``dict.fromkeys`` before sorting alphabetically.
 
 ### Sentinel file
 - Path: ``.gilbert/pending-branch.txt``. Single line — the target branch name, nothing else. Format chosen so the shell side can ``cat`` it directly without a JSON parser.
@@ -41,7 +49,7 @@ Admin-only "switch the running Gilbert instance to a different git branch on ``o
 - The mechanism is, by design, "any admin can run code on the server by pushing to ``origin`` and clicking Apply." Treat ``origin`` write access as production deploy access.
 
 ### Tests
-- ``tests/unit/test_source_update.py`` — 20 tests covering both actions, the dirty-tree refusal, branch-existence check, shell-injection rejection, sentinel write, ``request_restart`` invocation, no-op when already on target, and the regex pattern + ``_discover_repo_root`` helper.
+- ``tests/unit/test_source_update.py`` — covers all three actions (``check``, ``refresh_branches``, ``apply``), the dirty-tree refusal, branch-existence check, shell-injection rejection, sentinel write, ``request_restart`` invocation, no-op when already on target, ``_BRANCH_RE``, ``_discover_repo_root``, the branch-cache populate/refresh flow (including dedup + garbage-line resilience), and verifies the service satisfies the ``RemoteBranchLister`` protocol + advertises the ``source_update`` capability.
 
 ## Related
 - ``gilbert.sh:apply_pending_branch`` — supervisor-side sentinel consumer.

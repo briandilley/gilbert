@@ -553,6 +553,17 @@ class ConfigurationService(Service):
                     return [p.name for p in profiles]
                 except Exception:
                     logger.debug("ai_profiles dynamic choices failed", exc_info=True)
+        elif source == "origin_branches":
+            from gilbert.interfaces.source_update import RemoteBranchLister
+
+            svc = self._resolver.get_capability("source_update")
+            if isinstance(svc, RemoteBranchLister):
+                try:
+                    return list(svc.cached_remote_branches)
+                except Exception:
+                    logger.debug(
+                        "origin_branches dynamic choices failed", exc_info=True
+                    )
         elif source == "inbox_mailboxes":
             # Returns labeled choices: the dropdown shows the friendly
             # name + email but stores the bare mailbox id as the value.

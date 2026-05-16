@@ -66,7 +66,13 @@ class _GitDouble:
                 raise _GitError("fetch failed")
             return ""
         if first == "ls-remote":
-            # ls-remote --heads origin <branch> — match against our set.
+            # Two shapes: ``ls-remote --heads origin`` (full list) and
+            # ``ls-remote --heads origin <branch>`` (single-branch
+            # existence probe). Distinguish by argv length.
+            if len(args) == 3:  # full list
+                return "\n".join(
+                    f"sha-{b}\trefs/heads/{b}" for b in sorted(self._remote_heads)
+                ) + "\n"
             branch = args[-1] if args else ""
             if branch in self._remote_heads:
                 return f"abc123\trefs/heads/{branch}\n"
@@ -232,6 +238,103 @@ async def test_apply_without_gilbert_binding_warns_and_does_not_restart(
     assert sentinel.exists()
 
 
+# --- Actions: refresh_branches + cache ---
+
+
+@pytest.mark.asyncio
+async def test_refresh_branches_populates_cache(
+    service: SourceUpdateService, git: _GitDouble
+) -> None:
+    git._remote_heads = {"main", "feature/foo", "feature/bar", "develop"}
+    result = await service.invoke_config_action("refresh_branches", {})
+    assert result.status == "ok"
+    assert "Found 4 branch(es)" in result.message
+    # Branches should be alphabetical.
+    assert service.cached_remote_branches == [
+        "develop",
+        "feature/bar",
+        "feature/foo",
+        "main",
+    ]
+    # ``data["branches"]`` mirrors the cache for consumers that want
+    # the list without a follow-up resolver call.
+    assert result.data["branches"] == service.cached_remote_branches
+
+
+@pytest.mark.asyncio
+async def test_refresh_branches_handles_fetch_failure(
+    service: SourceUpdateService, git: _GitDouble
+) -> None:
+    git.fail_fetch = True
+    # Pre-seed the cache so we can confirm a failed refresh doesn't
+    # silently wipe it.
+    service._cached_remote_branches = ["main"]
+    result = await service.invoke_config_action("refresh_branches", {})
+    assert result.status == "error"
+    assert "fetch failed" in result.message
+    assert service.cached_remote_branches == ["main"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_branches_dedupes_and_ignores_garbage_lines(
+    service: SourceUpdateService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Custom double that returns non-heads refs + a garbage line, to
+    # exercise the parser's resilience.
+    async def fake_git(*args: str) -> str:
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "ls-remote":
+            return (
+                "sha1\trefs/heads/main\n"
+                "sha2\trefs/heads/main\n"  # duplicate
+                "sha3\trefs/tags/v1.0\n"   # tag — ignore
+                "garbage-line-no-tab\n"      # malformed — ignore
+                "sha4\trefs/heads/feature/x\n"
+            )
+        return ""
+
+    monkeypatch.setattr(service, "_git", fake_git)
+    result = await service.invoke_config_action("refresh_branches", {})
+    assert result.status == "ok"
+    assert service.cached_remote_branches == ["feature/x", "main"]
+
+
+def test_cached_remote_branches_returns_copy() -> None:
+    svc = SourceUpdateService()
+    svc._cached_remote_branches = ["main", "feature/x"]
+    snapshot = svc.cached_remote_branches
+    snapshot.append("hostile-mutation")
+    # Internal state shouldn't be mutated by an outsider.
+    assert svc._cached_remote_branches == ["main", "feature/x"]
+
+
+def test_service_implements_remote_branch_lister() -> None:
+    from gilbert.interfaces.source_update import RemoteBranchLister
+    svc = SourceUpdateService()
+    assert isinstance(svc, RemoteBranchLister)
+
+
+def test_service_advertises_source_update_capability() -> None:
+    svc = SourceUpdateService()
+    assert "source_update" in svc.service_info().capabilities
+
+
+def test_target_branch_param_uses_origin_branches_dropdown() -> None:
+    svc = SourceUpdateService()
+    params = {p.key: p for p in svc.config_params()}
+    assert params["target_branch"].choices_from == "origin_branches"
+
+
+def test_refresh_branches_action_is_admin_only() -> None:
+    svc = SourceUpdateService()
+    actions = {a.key: a for a in svc.config_actions()}
+    assert "refresh_branches" in actions
+    assert actions["refresh_branches"].required_role == "admin"
+    # No confirm prompt — refreshing is read-only.
+    assert actions["refresh_branches"].confirm == ""
+
+
 # --- Actions: unknown ---
 
 
@@ -250,7 +353,7 @@ async def test_unknown_action_returns_error(
 def test_actions_are_admin_only() -> None:
     svc = SourceUpdateService()
     actions = svc.config_actions()
-    assert {a.key for a in actions} == {"check", "apply"}
+    assert {a.key for a in actions} == {"check", "refresh_branches", "apply"}
     for a in actions:
         assert a.required_role == "admin", f"{a.key} should be admin-only"
     # Apply must require explicit confirmation in the UI.

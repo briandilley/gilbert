@@ -59,13 +59,22 @@ class SourceUpdateService(Service):
         self._target_branch: str = ""
         self._repo_root: Path = Path.cwd()
         self._gilbert: Any = None
+        # Last-known branches on ``origin``. Populated on service start
+        # (best-effort — a network failure logs a warning but doesn't
+        # block startup) and refreshed via the ``refresh_branches``
+        # action. Read-only consumers go through the ``cached_remote_branches``
+        # property so the ``RemoteBranchLister`` protocol stays intact.
+        self._cached_remote_branches: list[str] = []
 
     # --- Service ---
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="source_update",
-            capabilities=frozenset(),
+            # Advertises ``source_update`` so the ConfigurationService's
+            # dynamic-choices resolver can find this instance for the
+            # ``origin_branches`` ``choices_from``.
+            capabilities=frozenset({"source_update"}),
             requires=frozenset(),
             optional=frozenset({"configuration"}),
             # Not toggleable — disabling the update mechanism via UI
@@ -83,10 +92,22 @@ class SourceUpdateService(Service):
             if isinstance(config_svc, ConfigurationReader):
                 section = config_svc.get_section(self.config_namespace)
                 self._target_branch = str(section.get("target_branch", "") or "")
+        # Best-effort branch-cache population. If ``git ls-remote``
+        # fails (no network, auth issue, repo not on a remote), the
+        # dropdown stays empty until the user clicks Refresh branches.
+        try:
+            self._cached_remote_branches = await self._fetch_remote_branches()
+        except _GitError as exc:
+            logger.warning(
+                "Source-update service: initial branch cache empty (%s); "
+                "use the Refresh branches action once the issue is resolved",
+                exc,
+            )
         logger.info(
-            "Source-update service started — repo=%s target_branch=%r",
+            "Source-update service started — repo=%s target_branch=%r branches=%d",
             self._repo_root,
             self._target_branch,
+            len(self._cached_remote_branches),
         )
 
     async def stop(self) -> None:
@@ -99,6 +120,16 @@ class SourceUpdateService(Service):
         same pattern as ``PluginManagerService``.
         """
         self._gilbert = gilbert
+
+    # --- RemoteBranchLister capability ---
+
+    @property
+    def cached_remote_branches(self) -> list[str]:
+        """Last-known branches on ``origin`` (alphabetical, deduplicated).
+
+        Returns a copy so callers can't mutate the internal cache.
+        """
+        return list(self._cached_remote_branches)
 
     # --- Configurable ---
 
@@ -117,11 +148,14 @@ class SourceUpdateService(Service):
                 type=ToolParameterType.STRING,
                 description=(
                     "Branch on ``origin`` that the ``Apply`` action will "
-                    "switch to. Leave empty to do nothing. Setting this "
-                    "value does **not** switch on its own — you must "
-                    "click Apply."
+                    "switch to. Selectable from the list of branches "
+                    "the service knows about — use ``Refresh branches`` "
+                    "to repopulate after pushing a new branch. Leave "
+                    "empty to do nothing. Setting this value does "
+                    "**not** switch on its own — you must click Apply."
                 ),
                 default="",
+                choices_from="origin_branches",
             ),
         ]
 
@@ -139,6 +173,17 @@ class SourceUpdateService(Service):
                     "Show current branch, the configured ``origin`` "
                     "remote, and whether the working tree is clean. "
                     "Does not modify any files."
+                ),
+                required_role="admin",
+            ),
+            ConfigAction(
+                key="refresh_branches",
+                label="Refresh branches",
+                description=(
+                    "Re-run ``git fetch origin`` and rebuild the list "
+                    "of branches available in the ``target_branch`` "
+                    "dropdown. Use after pushing a new branch to "
+                    "``origin`` if you don't see it in the picker."
                 ),
                 required_role="admin",
             ),
@@ -166,6 +211,8 @@ class SourceUpdateService(Service):
     ) -> ConfigActionResult:
         if key == "check":
             return await self._action_check()
+        if key == "refresh_branches":
+            return await self._action_refresh_branches()
         if key == "apply":
             return await self._action_apply()
         return ConfigActionResult(
@@ -174,6 +221,21 @@ class SourceUpdateService(Service):
         )
 
     # --- Action implementations ---
+
+    async def _action_refresh_branches(self) -> ConfigActionResult:
+        try:
+            await self._fetch_origin()
+            self._cached_remote_branches = await self._fetch_remote_branches()
+        except _GitError as exc:
+            return ConfigActionResult(status="error", message=str(exc))
+        return ConfigActionResult(
+            status="ok",
+            message=(
+                f"Found {len(self._cached_remote_branches)} branch(es) on "
+                "``origin``. The ``target_branch`` dropdown is now up to date."
+            ),
+            data={"branches": list(self._cached_remote_branches)},
+        )
 
     async def _action_check(self) -> ConfigActionResult:
         try:
@@ -319,6 +381,25 @@ class SourceUpdateService(Service):
         # an empty stdout means no matching ref.
         out = await self._git("ls-remote", "--heads", "origin", branch)
         return f"refs/heads/{branch}" in out
+
+    async def _fetch_remote_branches(self) -> list[str]:
+        """List every branch on ``origin`` via a single ls-remote.
+
+        Output format is one line per ref:
+            <sha><TAB>refs/heads/<branch-name>
+        We strip the prefix and return the names sorted alphabetically.
+        Duplicates aren't possible (refs are unique on the remote) but
+        we ``dict.fromkeys`` defensively in case a future remote-helper
+        emits something weird.
+        """
+        out = await self._git("ls-remote", "--heads", "origin")
+        names: list[str] = []
+        for line in out.splitlines():
+            parts = line.strip().split("\t", 1)
+            if len(parts) != 2 or not parts[1].startswith("refs/heads/"):
+                continue
+            names.append(parts[1][len("refs/heads/") :])
+        return sorted(dict.fromkeys(names))
 
     async def _git(self, *args: str) -> str:
         proc = await asyncio.create_subprocess_exec(
