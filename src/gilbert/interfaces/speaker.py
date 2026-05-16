@@ -291,6 +291,23 @@ class SpeakerBackend(ABC):
 
 
 @runtime_checkable
+class EventBusAwareSpeakerBackend(Protocol):
+    """Optional protocol for backends that publish playback frames via the event bus.
+
+    The ``browser`` backend implements this so it can push
+    ``speaker.browser.*`` events to a target user's WebSocket
+    connections. The speaker service wires the bus in after
+    construction and before ``initialize`` — mirrors how the TTS
+    service hands ``AICapableTTSBackend`` an ``AISamplingProvider``.
+    """
+
+    def set_event_bus_provider(self, provider: object) -> None:
+        """Receive the active ``EventBusProvider`` (passed as ``object``
+        to avoid a circular import; backends ``isinstance``-check it)."""
+        ...
+
+
+@runtime_checkable
 class SpeakerProvider(Protocol):
     """Protocol for services providing speaker control capabilities."""
 

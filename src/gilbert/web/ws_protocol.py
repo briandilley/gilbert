@@ -139,6 +139,19 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_speaker_browser_event(self, event: Event) -> bool:
+        """Content-level filter for browser-speaker playback frames.
+
+        ``speaker.browser.*`` events are addressed to a specific user
+        (their browser tab is the playback device) via the ``user_id``
+        field on ``event.data``. Other users' connections never see
+        them — playback in a private chat must stay private even when
+        admins are subscribed broadly.
+        """
+        if not event.event_type.startswith("speaker.browser."):
+            return True
+        return event.data.get("user_id") == self.user_id
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -372,6 +385,8 @@ class WsConnectionManager:
             if not conn.can_see_workspace_event(event):
                 continue
             if not conn.can_see_notification_event(event):
+                continue
+            if not conn.can_see_speaker_browser_event(event):
                 continue
             conn.send_event(event)
 

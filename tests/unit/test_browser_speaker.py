@@ -1,0 +1,258 @@
+"""Tests for BrowserSpeakerBackend — bus-event playback into a user's SPA tab."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from gilbert.core.context import set_current_conversation_id, set_current_user
+from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
+from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.events import Event, EventBus
+from gilbert.interfaces.speaker import PlayRequest
+
+# --- Stub bus + provider ---
+
+
+class StubBus(EventBus):
+    """Captures every published event so tests can assert against them."""
+
+    def __init__(self) -> None:
+        self.published: list[Event] = []
+
+    def subscribe(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
+
+    def subscribe_pattern(self, pattern: str, handler: Any) -> Any:
+        return lambda: None
+
+    async def publish(self, event: Event) -> None:
+        self.published.append(event)
+
+
+class StubBusProvider:
+    """Satisfies ``EventBusProvider`` for ``set_event_bus_provider``."""
+
+    def __init__(self, bus: EventBus) -> None:
+        self._bus = bus
+
+    @property
+    def bus(self) -> EventBus:
+        return self._bus
+
+
+def _alice() -> UserContext:
+    return UserContext(
+        user_id="user-alice",
+        email="alice@example.com",
+        display_name="Alice",
+        roles=frozenset({"user"}),
+    )
+
+
+def _bob() -> UserContext:
+    return UserContext(
+        user_id="user-bob",
+        email="bob@example.com",
+        display_name="Bob",
+        roles=frozenset({"user"}),
+    )
+
+
+@pytest.fixture
+def backend() -> BrowserSpeakerBackend:
+    return BrowserSpeakerBackend()
+
+
+@pytest.fixture
+def bus() -> StubBus:
+    return StubBus()
+
+
+# --- Tests ---
+
+
+@pytest.mark.asyncio
+async def test_set_event_bus_provider_accepts_provider(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    # No assertion error from the warning path means the bus is wired.
+    set_current_user(_alice())
+    await backend.play_uri(PlayRequest(uri="http://x/y.mp3"))
+    assert len(bus.published) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_event_bus_provider_ignores_non_provider(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    backend.set_event_bus_provider(object())
+    await backend.initialize({})
+    set_current_user(_alice())
+    with pytest.raises(RuntimeError, match="no event bus"):
+        await backend.play_uri(PlayRequest(uri="http://x/y.mp3"))
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_returns_one_entry_per_user(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    await backend.initialize({"display_name": "Headphones"})
+
+    set_current_user(_alice())
+    speakers_alice = await backend.list_speakers()
+    assert len(speakers_alice) == 1
+    assert speakers_alice[0].speaker_id == "browser:user-alice"
+    assert speakers_alice[0].name == "Headphones"
+
+    set_current_user(_bob())
+    speakers_bob = await backend.list_speakers()
+    assert len(speakers_bob) == 1
+    assert speakers_bob[0].speaker_id == "browser:user-bob"
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_empty_for_system_user(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    await backend.initialize({})
+    set_current_user(UserContext.SYSTEM)
+    assert await backend.list_speakers() == []
+
+
+@pytest.mark.asyncio
+async def test_get_speaker_only_matches_current_users_id(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    await backend.initialize({})
+    set_current_user(_alice())
+    assert (await backend.get_speaker("browser:user-alice")) is not None
+    # Alice can't fetch Bob's speaker info even by id — every user sees
+    # only their own browser.
+    assert (await backend.get_speaker("browser:user-bob")) is None
+
+
+@pytest.mark.asyncio
+async def test_play_uri_publishes_event_scoped_to_caller(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(_alice())
+    set_current_conversation_id("conv-42")
+
+    await backend.play_uri(
+        PlayRequest(
+            uri="http://host/clip.mp3",
+            volume=55,
+            title="hello",
+            announce=True,
+        )
+    )
+
+    assert len(bus.published) == 1
+    event = bus.published[0]
+    assert event.event_type == "speaker.browser.play"
+    assert event.data["user_id"] == "user-alice"
+    assert event.data["url"] == "http://host/clip.mp3"
+    assert event.data["volume"] == 55
+    assert event.data["conversation_id"] == "conv-42"
+    assert event.data["announce"] is True
+
+
+@pytest.mark.asyncio
+async def test_play_uri_rejects_cross_user_target(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(_alice())
+    # Alice tries to play to Bob's browser — must be refused.
+    with pytest.raises(PermissionError, match="own browser"):
+        await backend.play_uri(
+            PlayRequest(uri="http://x", speaker_ids=["browser:user-bob"])
+        )
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_play_uri_volume_clamps_to_0_100(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(_alice())
+    await backend.play_uri(PlayRequest(uri="http://x", volume=999))
+    await backend.play_uri(PlayRequest(uri="http://x", volume=-5))
+    assert bus.published[0].data["volume"] == 100
+    assert bus.published[1].data["volume"] == 0
+
+
+@pytest.mark.asyncio
+async def test_play_uri_defaults_to_configured_volume(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({"default_volume": 35})
+    set_current_user(_alice())
+    await backend.play_uri(PlayRequest(uri="http://x"))
+    assert bus.published[0].data["volume"] == 35
+
+
+@pytest.mark.asyncio
+async def test_stop_publishes_event_only_for_current_user(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(_alice())
+
+    # No speaker_ids → stop our own browser.
+    await backend.stop()
+    assert bus.published[-1].event_type == "speaker.browser.stop"
+    assert bus.published[-1].data["user_id"] == "user-alice"
+
+    bus.published.clear()
+    # Foreign speaker id → no-op (don't emit a stop for someone else).
+    await backend.stop(speaker_ids=["browser:user-bob"])
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_stop_silent_for_system_user(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(UserContext.SYSTEM)
+    await backend.stop()
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_get_volume_returns_configured_default(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    await backend.initialize({"default_volume": 42})
+    assert await backend.get_volume("browser:user-alice") == 42
+
+
+@pytest.mark.asyncio
+async def test_set_volume_is_no_op(backend: BrowserSpeakerBackend) -> None:
+    await backend.initialize({"default_volume": 70})
+    await backend.set_volume("browser:user-alice", 5)
+    # No-op — get_volume still returns the configured default.
+    assert await backend.get_volume("browser:user-alice") == 70
+
+
+def test_backend_registers_under_browser_name() -> None:
+    import gilbert.integrations.browser_speaker  # noqa: F401
+    from gilbert.interfaces.speaker import SpeakerBackend
+
+    assert "browser" in SpeakerBackend.registered_backends()
+    assert (
+        SpeakerBackend.registered_backends()["browser"] is BrowserSpeakerBackend
+    )

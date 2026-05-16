@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { TurnBubble } from "./TurnBubble";
+import { BrowserAudioBubbles } from "./BrowserAudioBubbles";
 import type { ChatTurn } from "@/types/chat";
 import type { UIBlock } from "@/types/ui";
 import { UIBlockRenderer } from "@/components/ui/UIBlockRenderer";
@@ -9,6 +10,9 @@ interface MessageListProps {
   uiBlocks: UIBlock[];
   isShared: boolean;
   currentUserId?: string;
+  /** Active conversation id — used to scope inline browser-speaker
+   *  audio bubbles to the chat they were emitted into. */
+  conversationId?: string;
   onBlockSubmit: (blockId: string, values: Record<string, unknown>) => void;
 }
 
@@ -23,6 +27,7 @@ export function MessageList({
   uiBlocks,
   isShared,
   currentUserId,
+  conversationId,
   onBlockSubmit,
 }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -129,6 +134,10 @@ export function MessageList({
             <UIBlockRenderer block={block} onSubmit={onBlockSubmit} />
           </div>
         ))}
+
+        {conversationId ? (
+          <BrowserAudioBubbles conversationId={conversationId} />
+        ) : null}
 
         <div ref={bottomRef} />
       </div>

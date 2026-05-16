@@ -1,7 +1,7 @@
 # Speaker System
 
 ## Summary
-Speaker control with an abstract interface and two bundled backends: `sonos` (third-party plugin, S2 WebSocket via `aiosonos`) and `local` (vendor-free, plays through the host's audio output via a CLI player subprocess). Supports discovery, grouping (Sonos only), playback, volume, aliases, and short-clip announcements. SoCo (the legacy UPnP/SMAPI library) was removed in the aiosonos migration — S1 speakers are no longer supported.
+Speaker control with an abstract interface and three bundled backends: `sonos` (third-party plugin, S2 WebSocket via `aiosonos`), `local` (vendor-free, plays through the host's audio output via a CLI player subprocess), and `browser` (vendor-free, plays in the requesting user's SPA tab via bus events scoped per-user). Supports discovery, grouping (Sonos only), playback, volume, aliases, and short-clip announcements. SoCo (the legacy UPnP/SMAPI library) was removed in the aiosonos migration — S1 speakers are no longer supported.
 
 ## Details
 
@@ -33,6 +33,18 @@ Speaker control with an abstract interface and two bundled backends: `sonos` (th
 - **State**: `_state` flips to `PLAYING` when the subprocess spawns and back to `STOPPED` from a fire-and-forget `_watch_proc` task when the player exits. `get_playback_state` also resynchronizes lazily if the proc has exited without the watcher running yet.
 - No additional Python deps — uses `httpx` (already in core), `asyncio.subprocess`, and `shutil.which`. Cross-platform: works on any OS that has one of the supported CLI players on PATH.
 
+### Browser Backend
+- `src/gilbert/integrations/browser_speaker.py` — `BrowserSpeakerBackend` (`backend_name = "browser"`). Vendor-free; side-effect imported in `SpeakerService.start()` and `config_params()`. Targeted at homelab / headless deployments where the box running Gilbert has no audio output.
+- Each authenticated user's connected SPA tab acts as their private speaker. `list_speakers` reads `get_current_user()` from the contextvar and returns a single `SpeakerInfo(speaker_id="browser:<user_id>")` entry — per the multi-user isolation rule, the backend holds no per-user state; identity comes from the request context.
+- **Capability injection**: implements the `EventBusAwareSpeakerBackend` protocol (in `interfaces/speaker.py`) — SpeakerService calls `set_event_bus_provider(...)` between construction and `initialize()` (same shape as TTS's `AICapableTTSBackend` pattern). Without a bus, `play_uri` raises so wiring problems surface at the call site, not silently.
+- **Playback**: `play_uri` publishes a `speaker.browser.play` event with `data={user_id, conversation_id, url, title, volume, announce, position_seconds}`. `stop` publishes `speaker.browser.stop` with `data={user_id}`. Per-user routing is enforced at two layers:
+  1. The backend rejects cross-user targets (`PermissionError` if `caller != target`) — strict policy until admin broadcasting is added.
+  2. `WsConnection.can_see_speaker_browser_event` (in `web/ws_protocol.py`) delivers `speaker.browser.*` frames only to the connection whose `user_id == event.data["user_id"]`. Added to the `_dispatch_event` filter chain alongside `can_see_notification_event`.
+- **Event ACL**: `"speaker.browser.": 100` (user-level) in `DEFAULT_EVENT_VISIBILITY` (in `interfaces/acl.py`). User-level prefix permission + per-connection user_id narrowing is the same shape as `notification.*`.
+- **Volume**: per-clip via `request.volume`. `get_volume` returns the configured default; `set_volume` is a no-op because we can't reach into the browser's HTMLAudioElement after the fact (and don't need to — the next clip carries the new volume).
+- **SPA wiring**: `frontend/src/hooks/useBrowserSpeaker.tsx` exposes a `BrowserSpeakerProvider` (mounted at `main.tsx` inside `WebSocketProvider`) that subscribes to `speaker.browser.play` / `speaker.browser.stop` via `useEventBus`. It maintains a per-conversation history (bounded at 25 clips) and auto-plays each arrival via a single `Audio` element so a new clip preempts the previous one (autoplay failure is logged but non-fatal — the bubble's own `<audio controls>` lets the user retry). `frontend/src/components/chat/BrowserAudioBubbles.tsx` renders each clip as an inline audio bubble with `<audio controls>` at the tail of `MessageList`, scoped to the active conversation id.
+- **Announce flow compat**: `_announce_inner` in `SpeakerService` writes the TTS file, calls `backend.snapshot` (no-op for browser), `play_on_speakers(announce=True)` (publishes the event), sleeps `_estimate_mp3_duration(audio)` seconds, then `backend.restore` (also no-op). The duration sleep is enough for the SPA to finish playing.
+
 ### Service
 - `src/gilbert/core/services/speaker.py` — `SpeakerService` implementing Service, Configurable, ToolProvider.
 - Capabilities: `speaker_control`, `ai_tools`.
@@ -63,4 +75,6 @@ Speaker control with an abstract interface and two bundled backends: `sonos` (th
 - `std-plugins/sonos/tests/test_sonos_speaker.py` — 21 tests covering the aiosonos wiring.
 - `tests/unit/test_speaker_service.py` — service-layer unit tests.
 - `tests/unit/test_local_speaker.py` — LocalSpeakerBackend unit tests (subprocess + httpx mocked).
+- `tests/unit/test_browser_speaker.py` — BrowserSpeakerBackend unit tests (stub bus, contextvar-driven user identity).
+- `tests/unit/test_ws_protocol.py` — `TestBrowserSpeakerFiltering` covers the per-user `can_see_speaker_browser_event` filter.
 - `scripts/check_sonos_s2.py` — S2 preflight check.

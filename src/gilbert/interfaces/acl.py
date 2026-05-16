@@ -39,6 +39,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # can_see_notification_event filter narrows delivery to the
     # specific recipient by matching event.data["user_id"].
     "notification.": 100,
+    # Browser-speaker playback frames are user-level events; the WS
+    # layer's can_see_speaker_browser_event filter narrows delivery
+    # to the specific recipient by matching event.data["user_id"].
+    "speaker.browser.": 100,
     # auth.user.roles.changed fires on role mutation. The WS layer
     # restricts delivery to admins + the affected user themselves.
     "auth.": 100,

@@ -113,8 +113,9 @@ class SpeakerService(Service):
         self._enabled = True
         self._apply_config(section)
 
-        # Side-effect import so the bundled local backend registers.
-        # Third-party backends (Sonos, …) register themselves via plugins.
+        # Side-effect imports so the bundled vendor-free backends
+        # register. Third-party backends (Sonos, …) register via plugins.
+        import gilbert.integrations.browser_speaker  # noqa: F401
         import gilbert.integrations.local_speaker  # noqa: F401
 
         backend_name = section.get("backend", "sonos")
@@ -124,6 +125,17 @@ class SpeakerService(Service):
         if backend_cls is None:
             raise ValueError(f"Unknown speaker backend: {backend_name}")
         self._backend = backend_cls()
+
+        # Hand the backend an event-bus provider if it asked for one
+        # (currently only ``BrowserSpeakerBackend`` — it publishes
+        # ``speaker.browser.*`` frames to a target user's WS connections).
+        from gilbert.interfaces.events import EventBusProvider
+        from gilbert.interfaces.speaker import EventBusAwareSpeakerBackend
+
+        if isinstance(self._backend, EventBusAwareSpeakerBackend):
+            bus_svc = resolver.get_capability("event_bus")
+            if isinstance(bus_svc, EventBusProvider):
+                self._backend.set_event_bus_provider(bus_svc)
 
         init_config: dict[str, object] = dict(self._config)
         await self._backend.initialize(init_config)

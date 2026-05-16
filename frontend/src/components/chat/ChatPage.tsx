@@ -1226,6 +1226,7 @@ export function ChatPage() {
             uiBlocks={uiBlocks}
             isShared={isShared}
             currentUserId={user?.user_id}
+            conversationId={activeConvId ?? undefined}
             onBlockSubmit={handleBlockSubmit}
           />
         )}
