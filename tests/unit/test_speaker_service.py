@@ -1166,3 +1166,15 @@ async def test_resolve_names_maps_display_names_to_namespaced_ids(
     svc = speaker_service_with_fake_backend
     result = await svc.resolve_names(["FakeSpeaker1"])
     assert result == {"FakeSpeaker1": "fake:uid-1"}
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_returns_namespaced_ids(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    speakers = await svc.list_speakers()
+    assert speakers, "expected at least one speaker from the fake backend"
+    for s in speakers:
+        assert ":" in s.speaker_id, f"id {s.speaker_id!r} not namespaced"
+        assert s.backend_name, f"backend_name not stamped on {s}"

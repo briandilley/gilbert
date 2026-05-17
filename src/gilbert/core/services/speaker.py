@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from gilbert.core.output import cleanup_old_files, get_output_dir
@@ -120,27 +121,62 @@ class SpeakerService(Service):
         matches a known speaker. Names that don't match any speaker are
         omitted (callers decide whether that's an error).
 
-        Calls the backend directly and stamps the ``<backend>:`` prefix
-        because ``list_speakers()`` does not yet emit namespaced ids
-        (Task 5 will change that; at that point this can delegate to
-        ``list_speakers()`` without the inline prefix stamp).
+        Delegates to ``list_speakers()`` which already returns namespaced
+        ids, so no inline prefix stamping is needed here.
         """
         out: dict[str, str] = {}
-        if self._backend is None:
-            return out
-        backend_name = self._backend.backend_name
-        speakers = await self._backend.list_speakers()
+        speakers = await self.list_speakers()  # already namespaced
         by_name = {s.name: s for s in speakers}
         for name in names:
             s = by_name.get(name)
             if s is not None:
-                out[name] = f"{backend_name}:{s.speaker_id}"
+                out[name] = s.speaker_id
         return out
 
     @property
     def cached_speakers(self) -> list[SpeakerInfo]:
         """Last-known speaker list (populated after start)."""
         return list(self._speaker_cache)
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        """Return all speakers with namespaced IDs (``<backend>:<native>``) and
+        ``backend_name`` stamped on each entry.
+
+        Callers should always use this method rather than calling
+        ``_backend.list_speakers()`` directly so that the namespacing
+        contract is uniformly enforced.
+        """
+        if self._backend is None:
+            return []
+        raw = await self._backend.list_speakers()
+        name = self._backend.backend_name
+        return [
+            replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name)
+            for s in raw
+        ]
+
+    async def list_speaker_groups(self) -> list["SpeakerGroup"]:
+        """Return all speaker groups with namespaced IDs and ``backend_name`` stamped.
+
+        ``coordinator_id`` and every entry in ``member_ids`` are
+        namespaced as ``<backend>:<native>`` to match what
+        ``list_speakers()`` returns.
+        """
+        from gilbert.interfaces.speaker import SpeakerGroup  # local import to avoid circular at module level
+
+        if self._backend is None:
+            return []
+        raw = await self._backend.list_groups()
+        name = self._backend.backend_name
+        return [
+            replace(
+                g,
+                coordinator_id=f"{name}:{g.coordinator_id}",
+                member_ids=[f"{name}:{m}" for m in g.member_ids],
+                backend_name=name,
+            )
+            for g in raw
+        ]
 
     async def start(self, resolver: ServiceResolver) -> None:
         # Store resolver references for runtime use
@@ -224,9 +260,9 @@ class SpeakerService(Service):
             )
         )
 
-        # Populate speaker cache for dynamic choices
+        # Populate speaker cache for dynamic choices (namespaced)
         try:
-            self._speaker_cache = await self._backend.list_speakers()
+            self._speaker_cache = await self.list_speakers()
         except Exception:
             logger.debug("Could not cache speakers on start")
 
