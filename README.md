@@ -2,7 +2,7 @@
 
 An AI-powered assistant for home and business automation. Gilbert combines a modular, interface-driven architecture with an agentic AI core — giving it the ability to control speakers, greet people at the door, manage email, spin up a radio DJ, expose its tools over MCP, and much more, all orchestrated through natural conversation or automated event-driven workflows.
 
-Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local documents); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
+Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, MCP transports); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
 
 Gilbert is a **multi-user system from the ground up** — every piece of state (mailboxes, chat history, documents, MCP servers, scheduled jobs) is owned by a specific user, shared via roles and per-collection ACLs, and gated by a role-based access control layer that consistently applies across the web UI, chat, tools, events, and the MCP endpoint.
 
@@ -123,7 +123,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 
 ### Interface-First Design
 
-Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface. All vendor-specific implementations live in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) submodule; core ships only with vendor-free backends (local auth, local filesystem documents).
+Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface. All vendor-specific implementations live in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) submodule; core ships only with vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, MCP transports).
 
 ```
 Interface (core)     →  Implementation (plugin)

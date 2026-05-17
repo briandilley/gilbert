@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gilbert.core.context import (
+from gilbert.interfaces.context import (
     get_current_conversation_id,
     get_current_user,
     set_current_conversation_id,
@@ -1177,7 +1177,7 @@ class AIService(Service):
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
         # NOTE: the active conversation id lives in a ContextVar (see
-        # gilbert.core.context.{get,set}_current_conversation_id), not
+        # gilbert.interfaces.context.{get,set}_current_conversation_id), not
         # on the AIService instance. The service is a singleton shared
         # across users; an instance attribute would race when two
         # conversations overlap (two users, two tabs, shared rooms),
@@ -3431,7 +3431,7 @@ class AIService(Service):
         # name is the family marker; other ``_conversation_id``
         # consumers (knowledge, attachments, etc.) don't have that
         # substring and keep their normal conv.
-        from gilbert.core.context import get_workspace_conversation_id
+        from gilbert.interfaces.context import get_workspace_conversation_id
         ws_conv = get_workspace_conversation_id()
         if ws_conv and "workspace" in tc.tool_name:
             arguments["_conversation_id"] = ws_conv
@@ -3457,7 +3457,7 @@ class AIService(Service):
         # .set() persists in the running context just like it did before
         # this refactor, preserving the historical behavior.
         if user_ctx is not None:
-            from gilbert.core.context import set_current_user
+            from gilbert.interfaces.context import set_current_user
 
             set_current_user(user_ctx)
 
@@ -3820,7 +3820,7 @@ class AIService(Service):
         # Propagate caller identity through the async context so
         # tools can resolve it via core.context.get_current_user().
         if user_ctx is not None:
-            from gilbert.core.context import set_current_user
+            from gilbert.interfaces.context import set_current_user
 
             set_current_user(user_ctx)
 

@@ -464,7 +464,7 @@ class SpeakerService(Service):
         if not await self._browser_echo_should_fire():
             return
         try:
-            from gilbert.core.context import (
+            from gilbert.interfaces.context import (
                 get_current_conversation_id,
                 get_current_user,
             )
@@ -501,7 +501,7 @@ class SpeakerService(Service):
         if not await self._browser_echo_should_fire():
             return
         try:
-            from gilbert.core.context import get_current_user
+            from gilbert.interfaces.context import get_current_user
             from gilbert.interfaces.events import Event
 
             user = get_current_user()
@@ -523,7 +523,7 @@ class SpeakerService(Service):
         # the backend's own publish covers the user already.
         if self._backend_name == "browser":
             return False
-        from gilbert.core.context import get_current_user
+        from gilbert.interfaces.context import get_current_user
 
         user = get_current_user()
         if not user.user_id or user.user_id == "system":

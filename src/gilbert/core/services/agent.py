@@ -2217,7 +2217,7 @@ class AgentService(Service):
             if target_goal_id:
                 goal = await self.get_goal(target_goal_id)
                 if goal and goal.war_room_conversation_id:
-                    from gilbert.core.context import _workspace_conversation_id
+                    from gilbert.interfaces.context import _workspace_conversation_id
                     ws_token = _workspace_conversation_id.set(
                         goal.war_room_conversation_id
                     )
@@ -2238,7 +2238,7 @@ class AgentService(Service):
                 _active_agent_id.reset(agent_token)
                 _active_delegation_chain.reset(chain_token)
                 if ws_token is not None:
-                    from gilbert.core.context import _workspace_conversation_id
+                    from gilbert.interfaces.context import _workspace_conversation_id
                     _workspace_conversation_id.reset(ws_token)
 
             # ChatTurnResult uses `response_text`; map to run.final_message_text.

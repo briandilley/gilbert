@@ -258,7 +258,7 @@ class InboxAIChatService(Service):
         # Propagate SYSTEM identity so InboxProvider's read methods
         # (which pull the current user from the async context) don't
         # apply per-user visibility filters to this background handler.
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(UserContext.SYSTEM)
 

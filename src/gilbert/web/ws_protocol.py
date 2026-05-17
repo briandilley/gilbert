@@ -509,9 +509,9 @@ async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str,
             }
 
     # Propagate the current user through the async context so services
-    # can read it via gilbert.core.context.get_current_user() without
+    # can read it via gilbert.interfaces.context.get_current_user() without
     # explicit threading on every read method.
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     set_current_user(conn.user_ctx)
     return await handler(conn, frame)

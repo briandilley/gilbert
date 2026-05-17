@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_user
+from gilbert.interfaces.context import set_current_user
 from gilbert.core.services.inbox import InboxService, _MailboxRuntime
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.email import (

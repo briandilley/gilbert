@@ -2691,7 +2691,7 @@ async def test_maybe_compress_history_generates_summary(
         )
     )
 
-    from gilbert.core.context import set_current_conversation_id
+    from gilbert.interfaces.context import set_current_conversation_id
 
     msgs = [Message(role=MessageRole.USER, content=f"m{i}") for i in range(20)]
     set_current_conversation_id("conv-compress")
@@ -2742,7 +2742,7 @@ async def test_maybe_compress_history_backend_failure(
     failing_backend.generate = AsyncMock(side_effect=RuntimeError("API down"))
     ai_service._backends = {"stub": failing_backend}
 
-    from gilbert.core.context import set_current_conversation_id
+    from gilbert.interfaces.context import set_current_conversation_id
 
     msgs = [Message(role=MessageRole.USER, content=f"m{i}") for i in range(10)]
     set_current_conversation_id("conv-fail")
@@ -2962,7 +2962,7 @@ async def test_parallel_per_task_context_isolation(
     that siblings read from."""
     import asyncio as _asyncio
 
-    from gilbert.core.context import get_current_user, set_current_user
+    from gilbert.interfaces.context import get_current_user, set_current_user
 
     backend = _ParallelStubBackend()
     outer_user = UserContext(

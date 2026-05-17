@@ -28,7 +28,7 @@ Configuration is two-tier: `gilbert.yaml` for bootstrap (`storage`, `logging`, `
 - `src/gilbert/interfaces/` — ABCs, protocol definitions, shared data types (`acl.py`, `knowledge.py` ext mappings, AI profile dataclass), WS connection protocol.
 - `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging, config loading, shared business logic (`core/chat.py`).
 - `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services (WS RPC handlers via `WsHandlerProvider`).
-- `src/gilbert/integrations/` — Concrete vendor-free backend implementations (`LocalAuth`, `LocalDocuments`).
+- `src/gilbert/integrations/` — Concrete vendor-free backend implementations (`LocalAuth`, `LocalDocuments`, `LocalSpeakerBackend`, `BrowserSpeakerBackend`, and the bundled MCP transports `StdioMCPBackend` / `HttpMCPBackend` / `SseMCPBackend` / `BrowserMCPBackend`).
 - `src/gilbert/storage/` — Storage backend implementations (SQLite).
 - `src/gilbert/plugins/` — Plugin loader.
 - `src/gilbert/web/` — Web server, SPA assets, API routes (thin layer — no business logic).

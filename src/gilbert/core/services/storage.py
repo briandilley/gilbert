@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver

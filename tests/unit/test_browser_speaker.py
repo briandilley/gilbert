@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_conversation_id, set_current_user
+from gilbert.interfaces.context import set_current_conversation_id, set_current_user
 from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.events import Event, EventBus
