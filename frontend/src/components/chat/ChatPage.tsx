@@ -1176,13 +1176,33 @@ export function ChatPage() {
                         : "ghost"
                     }
                     size="icon-sm"
-                    disabled={
+                    // NB: deliberately NOT setting ``disabled``. HTML-
+                    // disabled buttons swallow pointer events in every
+                    // major browser, which means the Tooltip never sees
+                    // a hover signal and can't show "why is this greyed
+                    // out?" — defeating the purpose of having a tooltip
+                    // here. Instead we communicate the state via
+                    // ``aria-disabled`` + opacity, and gate the click
+                    // handler so a click in the disabled state is a
+                    // visible-cursor no-op.
+                    aria-disabled={
                       !browserEcho.ready || browserEcho.redundantWithPrimary
                     }
+                    aria-pressed={browserEcho.enabled}
+                    className={
+                      !browserEcho.ready || browserEcho.redundantWithPrimary
+                        ? "cursor-not-allowed opacity-40"
+                        : undefined
+                    }
                     onClick={() => {
+                      if (
+                        !browserEcho.ready ||
+                        browserEcho.redundantWithPrimary
+                      ) {
+                        return;
+                      }
                       void browserEcho.setEnabled(!browserEcho.enabled);
                     }}
-                    aria-pressed={browserEcho.enabled}
                   />
                 }
               >
@@ -1191,9 +1211,11 @@ export function ChatPage() {
               <TooltipContent>
                 {browserEcho.redundantWithPrimary
                   ? "Browser echo unavailable — primary speaker backend is already 'browser', so audio always plays through this tab. Switch the primary backend in Settings → Media → Speaker to use this toggle."
-                  : browserEcho.enabled
-                    ? "Browser echo: ON (Gilbert also plays through this tab)"
-                    : "Browser echo: OFF (click to also play through this tab)"}
+                  : !browserEcho.ready
+                    ? "Loading browser echo state…"
+                    : browserEcho.enabled
+                      ? "Browser echo: ON (Gilbert also plays through this tab)"
+                      : "Browser echo: OFF (click to also play through this tab)"}
               </TooltipContent>
             </Tooltip>
 
