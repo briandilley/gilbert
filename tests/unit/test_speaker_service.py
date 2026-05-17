@@ -1244,6 +1244,40 @@ async def test_tool_ungroup_speakers_passes_native_ids_to_backend(
     )
 
 
+# ---------------------------------------------------------------------------
+# Task 6: _route_id / _route_ids helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_route_id_splits_and_returns_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    backend, native = service._route_id("stub:uid-1")
+    assert backend is service._backend
+    assert native == "uid-1"
+
+
+@pytest.mark.asyncio
+async def test_route_id_raises_for_unknown_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    with pytest.raises(KeyError, match="nope"):
+        service._route_id("nope:xyz")
+
+
+@pytest.mark.asyncio
+async def test_route_ids_groups_by_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    grouped = service._route_ids(["stub:a", "stub:b"])
+    assert grouped == {"stub": ["a", "b"]}
+
+
+@pytest.mark.asyncio
+async def test_route_ids_raises_for_unknown_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    with pytest.raises(KeyError, match="ghost"):
+        service._route_ids(["stub:a", "ghost:b"])
+
+
 @pytest.mark.asyncio
 async def test_tool_list_groups_returns_namespaced_ids(
     service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver

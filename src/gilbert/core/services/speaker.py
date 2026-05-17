@@ -28,6 +28,7 @@ from gilbert.interfaces.speaker import (
     PlayRequest,
     SpeakerBackend,
     SpeakerInfo,
+    split_speaker_id,
     to_browser_url,
 )
 from gilbert.interfaces.tools import (
@@ -520,6 +521,32 @@ class SpeakerService(Service):
         """Strip namespace prefix from a list of speaker IDs (see ``_native_id``)."""
         return [SpeakerService._native_id(sid) for sid in speaker_ids]
 
+    def _route_id(self, speaker_id: str) -> tuple[SpeakerBackend, str]:
+        """Split a namespaced speaker id and return ``(backend, native_id)``.
+
+        Raises ``KeyError`` if the prefix names a backend that isn't loaded.
+        Raises ``ValueError`` (via ``split_speaker_id``) if the id isn't
+        namespaced.
+        """
+        backend_name, native_id = split_speaker_id(speaker_id)
+        backend = self.backends.get(backend_name)
+        if backend is None:
+            raise KeyError(f"speaker backend {backend_name!r} not loaded")
+        return backend, native_id
+
+    def _route_ids(self, speaker_ids: list[str]) -> dict[str, list[str]]:
+        """Group namespaced speaker ids by backend, returning ``{backend_name: [native_id, ...]}``.
+
+        Raises ``KeyError`` if any id names a backend that isn't loaded.
+        """
+        grouped: dict[str, list[str]] = {}
+        for sid in speaker_ids:
+            backend_name, native_id = split_speaker_id(sid)
+            if backend_name not in self.backends:
+                raise KeyError(f"speaker backend {backend_name!r} not loaded")
+            grouped.setdefault(backend_name, []).append(native_id)
+        return grouped
+
     def _audio_url(self, file_path: str) -> str:
         """Build an HTTP URL for an output file so speakers can fetch it.
 
@@ -801,7 +828,8 @@ class SpeakerService(Service):
         # group members share transport state, so any one is enough.
         if target_ids:
             try:
-                state = await backend.get_playback_state(self._native_id(target_ids[0]))
+                routed_backend, native = self._route_id(target_ids[0])
+                state = await routed_backend.get_playback_state(native)
             except Exception:
                 state = PlaybackState.STOPPED
             if state == PlaybackState.PLAYING:
@@ -859,7 +887,8 @@ class SpeakerService(Service):
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
                 raise KeyError(f"Unknown speaker or alias: {speaker_name!r}")
-            return await backend.get_now_playing(self._native_id(sid))
+            routed_backend, native = self._route_id(sid)
+            return await routed_backend.get_now_playing(native)
 
         if self._last_speaker_ids:
             return await backend.get_now_playing(self._native_id(self._last_speaker_ids[0]))
@@ -1083,7 +1112,8 @@ class SpeakerService(Service):
 
         while elapsed < timeout:
             try:
-                state = await self._require_backend().get_playback_state(self._native_id(target_id))
+                routed_backend, native = self._route_id(target_id)
+                state = await routed_backend.get_playback_state(native)
                 if state not in (PlaybackState.PLAYING, PlaybackState.TRANSITIONING):
                     return
             except Exception:
@@ -1456,7 +1486,8 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        await self._require_backend().set_volume(self._native_id(sid), volume)
+        backend, native = self._route_id(sid)
+        await backend.set_volume(native, volume)
         return json.dumps({"status": "ok", "speaker": name, "volume": volume})
 
     async def _tool_get_volume(self, arguments: dict[str, Any]) -> str:
@@ -1464,7 +1495,8 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        volume = await self._require_backend().get_volume(self._native_id(sid))
+        backend, native = self._route_id(sid)
+        volume = await backend.get_volume(native)
         return json.dumps({"speaker": name, "volume": volume})
 
     async def _tool_set_alias(self, arguments: dict[str, Any]) -> str:
