@@ -134,3 +134,45 @@ async def test_reinit_backends_drops_section_not_in_config():
     # Remove fake_a entirely from config
     await svc._reinit_backends({"fake_b": {"enabled": True}})
     assert set(svc._backends) == {"fake_b"}
+
+
+# ---------------------------------------------------------------------------
+# Task 10: list_speakers / list_speaker_groups merge across backends
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_merges_across_backends():
+    svc = SpeakerService()
+    svc._backends = {
+        "fake_a": FakeSpeakerBackendA(),
+        "fake_b": FakeSpeakerBackendB(),
+    }
+    speakers = await svc.list_speakers()
+    backends_present = {s.backend_name for s in speakers}
+    assert backends_present == {"fake_a", "fake_b"}
+    ids = sorted(s.speaker_id for s in speakers)
+    assert ids == ["fake_a:a1", "fake_a:a2", "fake_b:b1"]
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_tolerates_one_backend_raising():
+    svc = SpeakerService()
+    a = FakeSpeakerBackendA()
+    b = FakeSpeakerBackendB()
+
+    async def boom(self=None):
+        raise RuntimeError("backend unreachable")
+    b.list_speakers = boom  # type: ignore[method-assign]
+    svc._backends = {"fake_a": a, "fake_b": b}
+
+    speakers = await svc.list_speakers()
+    assert all(s.backend_name == "fake_a" for s in speakers)
+    assert len(speakers) == 2  # fake_a still returns its two speakers
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_returns_empty_when_no_backends():
+    svc = SpeakerService()
+    speakers = await svc.list_speakers()
+    assert speakers == []

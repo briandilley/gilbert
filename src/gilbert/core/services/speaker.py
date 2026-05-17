@@ -132,46 +132,64 @@ class SpeakerService(Service):
         return list(self._speaker_cache)
 
     async def list_speakers(self) -> list[SpeakerInfo]:
-        """Return all speakers with namespaced IDs (``<backend>:<native>``) and
-        ``backend_name`` stamped on each entry.
+        """Return speakers across all loaded backends.
 
-        Callers should always use this method rather than calling
-        ``_backend.list_speakers()`` directly so that the namespacing
-        contract is uniformly enforced.
+        Each ``SpeakerInfo.speaker_id`` is namespaced as ``<backend>:<native>``
+        and ``backend_name`` is stamped. If any single backend's ``list_speakers``
+        raises, the failure is logged and that backend's slice is omitted; other
+        backends still contribute.
         """
         if not self._backends:
             return []
-        backend = self._require_single_backend()
-        raw = await backend.list_speakers()
-        name = backend.backend_name
-        return [
-            replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name)
-            for s in raw
-        ]
+        items = list(self._backends.items())
+        results = await asyncio.gather(
+            *(b.list_speakers() for _, b in items),
+            return_exceptions=True,
+        )
+        merged: list[SpeakerInfo] = []
+        for (name, _), result in zip(items, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("speaker backend '%s' list_speakers failed: %s", name, result)
+                continue
+            for s in result:
+                merged.append(replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name))
+        return merged
 
     async def list_speaker_groups(self) -> list["SpeakerGroup"]:
-        """Return all speaker groups with namespaced IDs and ``backend_name`` stamped.
+        """Return groups across all loaded backends that support grouping.
 
         ``coordinator_id`` and every entry in ``member_ids`` are
         namespaced as ``<backend>:<native>`` to match what
-        ``list_speakers()`` returns.
+        ``list_speakers()`` returns. Backends that don't support grouping
+        are skipped. If a grouping-capable backend's ``list_groups`` raises,
+        the failure is logged and that backend's slice is omitted.
         """
         from gilbert.interfaces.speaker import SpeakerGroup  # local import to avoid circular at module level
 
         if not self._backends:
             return []
-        backend = self._require_single_backend()
-        raw = await backend.list_groups()
-        name = backend.backend_name
-        return [
-            replace(
-                g,
-                coordinator_id=f"{name}:{g.coordinator_id}",
-                member_ids=[f"{name}:{m}" for m in g.member_ids],
-                backend_name=name,
-            )
-            for g in raw
-        ]
+        grouping = [(name, b) for name, b in self._backends.items() if b.supports_grouping]
+        if not grouping:
+            return []
+        results = await asyncio.gather(
+            *(b.list_groups() for _, b in grouping),
+            return_exceptions=True,
+        )
+        merged: list[SpeakerGroup] = []
+        for (name, _), result in zip(grouping, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("speaker backend '%s' list_groups failed: %s", name, result)
+                continue
+            for g in result:
+                merged.append(
+                    replace(
+                        g,
+                        coordinator_id=f"{name}:{g.coordinator_id}",
+                        member_ids=[f"{name}:{m}" for m in g.member_ids],
+                        backend_name=name,
+                    )
+                )
+        return merged
 
     async def start(self, resolver: ServiceResolver) -> None:
         # Store resolver references for runtime use
