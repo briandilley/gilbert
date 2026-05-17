@@ -86,6 +86,7 @@ class SpeakerInfo:
     is_group_coordinator: bool = False
     volume: int = 0
     state: PlaybackState = PlaybackState.STOPPED
+    backend_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ class SpeakerGroup:
     name: str
     coordinator_id: str
     member_ids: list[str] = field(default_factory=list)
+    backend_name: str = ""
 
 
 @dataclass(frozen=True)
