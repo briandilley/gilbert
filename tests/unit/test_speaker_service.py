@@ -1278,6 +1278,46 @@ async def test_route_ids_raises_for_unknown_backend(service: SpeakerService, res
         service._route_ids(["stub:a", "ghost:b"])
 
 
+# ---------------------------------------------------------------------------
+# Task 7: Multi-speaker dispatch routes via _route_ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Confirm namespaced ids are stripped before reaching the backend."""
+    await service.start(resolver)
+    captured: dict = {}
+
+    async def capture_play(request: PlayRequest) -> None:
+        captured["ids"] = list(request.speaker_ids)
+
+    stub_backend.play_uri = capture_play  # type: ignore[method-assign]
+
+    await service.play_on_speakers(uri="http://example.com/x.mp3", speaker_names=["Speaker 1", "Speaker 2"])
+    assert captured["ids"] == ["uid-1", "uid-2"], (
+        f"Backend.play_uri must receive native ids, got {captured['ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    await service.start(resolver)
+    captured: dict = {}
+
+    async def capture_stop(ids: list[str]) -> None:
+        captured["ids"] = list(ids)
+
+    stub_backend.stop = capture_stop  # type: ignore[method-assign]
+
+    await service.stop_speakers(speaker_names=["Speaker 1", "Speaker 2"])
+    assert captured["ids"] == ["uid-1", "uid-2"]
+
+
 @pytest.mark.asyncio
 async def test_tool_list_groups_returns_namespaced_ids(
     service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver

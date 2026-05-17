@@ -752,17 +752,24 @@ class SpeakerService(Service):
         if not announce:
             await self.prepare_speakers(target_ids)
 
-        await self._require_backend().play_uri(
-            PlayRequest(
-                uri=uri,
-                speaker_ids=self._native_ids(target_ids),
-                volume=volume,
-                title=title,
-                position_seconds=position_seconds,
-                didl_meta=didl_meta,
-                announce=announce,
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            backend = self.backends[backend_name]
+            coros.append(
+                backend.play_uri(
+                    PlayRequest(
+                        uri=uri,
+                        speaker_ids=native_ids,
+                        volume=volume,
+                        title=title,
+                        position_seconds=position_seconds,
+                        didl_meta=didl_meta,
+                        announce=announce,
+                    )
+                )
             )
-        )
+        await asyncio.gather(*coros)
 
         # Optional second hop: fan the same playback out to the calling
         # user's connected browser tab if they've opted in. Runs after
@@ -794,14 +801,21 @@ class SpeakerService(Service):
         """
         target_ids = await self._resolve_target_ids(speaker_names)
         await self.prepare_speakers(target_ids)
-        await self._require_backend().enqueue_uri(
-            PlayRequest(
-                uri=uri,
-                speaker_ids=self._native_ids(target_ids),
-                title=title,
-                didl_meta=didl_meta,
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            backend = self.backends[backend_name]
+            coros.append(
+                backend.enqueue_uri(
+                    PlayRequest(
+                        uri=uri,
+                        speaker_ids=native_ids,
+                        title=title,
+                        didl_meta=didl_meta,
+                    )
+                )
             )
-        )
+        await asyncio.gather(*coros)
 
     async def play_queue_on_speakers(
         self,
@@ -835,7 +849,12 @@ class SpeakerService(Service):
             if state == PlaybackState.PLAYING:
                 return False
 
-        await backend.play_queue(self._native_ids(target_ids))
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.play_queue(native_ids))
+        await asyncio.gather(*coros)
         return True
 
     async def set_repeat_on_speakers(
@@ -853,9 +872,14 @@ class SpeakerService(Service):
         absence of support surfaces as a UI error rather than an
         exception.
         """
-        backend = self._require_backend()
+        self._require_backend()
         target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.set_repeat(mode, self._native_ids(target_ids))
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.set_repeat(mode, native_ids))
+        await asyncio.gather(*coros)
 
     async def stop_speakers(
         self,
@@ -863,7 +887,12 @@ class SpeakerService(Service):
     ) -> None:
         """Stop playback on the specified speakers."""
         target_ids = await self._resolve_target_ids(speaker_names)
-        await self._require_backend().stop(self._native_ids(target_ids))
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.stop(native_ids))
+        await asyncio.gather(*coros)
         await self._maybe_echo_stop_to_browser()
 
     async def get_now_playing(
