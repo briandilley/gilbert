@@ -241,7 +241,7 @@ def resolver(storage_service: StorageService) -> ServiceResolver:
 @pytest.fixture
 def service(stub_backend: StubSpeakerBackend) -> SpeakerService:
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
     return svc
 
@@ -265,7 +265,7 @@ async def test_start_disabled_without_config(resolver: ServiceResolver) -> None:
     svc = SpeakerService()
     await svc.start(resolver)
     assert not svc._enabled
-    assert svc._backend is None
+    assert not svc._backends
 
 
 async def test_start_initializes_backend(
@@ -273,9 +273,9 @@ async def test_start_initializes_backend(
 ) -> None:
     """When the backend is set and enabled, initialization works correctly."""
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
-    await svc._backend.initialize({})
+    await stub_backend.initialize({})
     assert stub_backend.initialized
 
 
@@ -318,7 +318,7 @@ def test_get_tools_with_grouping(service: SpeakerService) -> None:
 def test_get_tools_without_grouping() -> None:
     backend = StubSpeakerBackend(grouping=False)
     svc = SpeakerService()
-    svc._backend = backend
+    svc._backends = {backend.backend_name: backend}
     svc._enabled = True
     tools = svc.get_tools()
     names = [t.name for t in tools]
@@ -735,7 +735,7 @@ async def test_announce_with_tts(
     mock_resolver.require_capability.side_effect = require_cap
 
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(mock_resolver)
 
@@ -808,7 +808,7 @@ async def test_get_now_playing_falls_back_to_playing_speaker(
 ) -> None:
     """With nothing last-used, a speaker that's currently playing wins."""
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
     await svc.start(resolver)
 
@@ -939,7 +939,7 @@ async def _make_speaker_service_with_tts(
     mock_resolver.require_capability.side_effect = require_cap
 
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(mock_resolver)
     return service
@@ -1066,7 +1066,7 @@ async def test_get_speaker_locks_reuses_and_sorts(
     ``asyncio.Lock`` instance, and the returned list is always sorted
     by ID regardless of input order."""
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(resolver)
 
@@ -1138,7 +1138,8 @@ class FakeSpeakerBackend(SpeakerBackend):
 def speaker_service_with_fake_backend() -> SpeakerService:
     """SpeakerService wired with a FakeSpeakerBackend (backend_name='fake')."""
     svc = SpeakerService()
-    svc._backend = FakeSpeakerBackend()
+    fake = FakeSpeakerBackend()
+    svc._backends = {fake.backend_name: fake}
     svc._enabled = True
     return svc
 
@@ -1149,7 +1150,7 @@ async def test_backends_mapping_exposes_loaded_backend(
 ) -> None:
     svc = speaker_service_with_fake_backend
     assert "fake" in svc.backends
-    assert svc.backends["fake"] is svc._backend
+    assert svc.backends["fake"] is svc._backends["fake"]
 
 
 @pytest.mark.asyncio
@@ -1157,7 +1158,7 @@ async def test_get_backend_returns_loaded_or_none(
     speaker_service_with_fake_backend: SpeakerService,
 ) -> None:
     svc = speaker_service_with_fake_backend
-    assert svc.get_backend("fake") is svc._backend
+    assert svc.get_backend("fake") is svc._backends["fake"]
     assert svc.get_backend("nonexistent") is None
 
 
@@ -1253,7 +1254,7 @@ async def test_tool_ungroup_speakers_passes_native_ids_to_backend(
 async def test_route_id_splits_and_returns_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
     backend, native = service._route_id("stub:uid-1")
-    assert backend is service._backend
+    assert backend is service._backends["stub"]
     assert native == "uid-1"
 
 

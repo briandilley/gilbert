@@ -53,7 +53,7 @@ class SpeakerService(Service):
     """Exposes a SpeakerBackend as a service with speaker control and announce capabilities."""
 
     def __init__(self) -> None:
-        self._backend: SpeakerBackend | None = None
+        self._backends: dict[str, SpeakerBackend] = {}
         self._backend_name: str = "sonos"
         self._enabled: bool = False
         self._config: dict[str, object] = {}
@@ -95,21 +95,9 @@ class SpeakerService(Service):
         )
 
     @property
-    def backend(self) -> SpeakerBackend | None:
-        return self._backend
-
-    @property
     def backends(self) -> Mapping[str, SpeakerBackend]:
-        """Mapping of currently-loaded backends, keyed by ``backend_name``.
-
-        Interim — Task 8 replaces the single ``_backend`` with
-        ``_backends: dict``; for now we return a one-entry mapping so
-        consumers can migrate against the new protocol shape ahead of
-        the storage refactor.
-        """
-        if self._backend is None:
-            return {}
-        return {self._backend.backend_name: self._backend}
+        """Mapping of currently-loaded backends, keyed by ``backend_name``."""
+        return self._backends
 
     def get_backend(self, name: str) -> SpeakerBackend | None:
         """Return a loaded backend by name, or ``None`` if not loaded."""
@@ -147,10 +135,11 @@ class SpeakerService(Service):
         ``_backend.list_speakers()`` directly so that the namespacing
         contract is uniformly enforced.
         """
-        if self._backend is None:
+        if not self._backends:
             return []
-        raw = await self._backend.list_speakers()
-        name = self._backend.backend_name
+        backend = self._require_single_backend()
+        raw = await backend.list_speakers()
+        name = backend.backend_name
         return [
             replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name)
             for s in raw
@@ -165,10 +154,11 @@ class SpeakerService(Service):
         """
         from gilbert.interfaces.speaker import SpeakerGroup  # local import to avoid circular at module level
 
-        if self._backend is None:
+        if not self._backends:
             return []
-        raw = await self._backend.list_groups()
-        name = self._backend.backend_name
+        backend = self._require_single_backend()
+        raw = await backend.list_groups()
+        name = backend.backend_name
         return [
             replace(
                 g,
@@ -214,11 +204,12 @@ class SpeakerService(Service):
 
         backend_name = section.get("backend", "sonos")
         self._backend_name = backend_name
-        backends = SpeakerBackend.registered_backends()
-        backend_cls = backends.get(backend_name)
+        registered = SpeakerBackend.registered_backends()
+        backend_cls = registered.get(backend_name)
         if backend_cls is None:
             raise ValueError(f"Unknown speaker backend: {backend_name}")
-        self._backend = backend_cls()
+        backend = backend_cls()
+        self._backends[backend.backend_name] = backend
 
         # Hand the backend an event-bus provider if it asked for one
         # (currently only ``BrowserSpeakerBackend`` — it publishes
@@ -233,9 +224,9 @@ class SpeakerService(Service):
         if isinstance(bus_svc, EventBusProvider):
             self._event_bus_provider = bus_svc
 
-        if isinstance(self._backend, EventBusAwareSpeakerBackend):
+        if isinstance(backend, EventBusAwareSpeakerBackend):
             if isinstance(bus_svc, EventBusProvider):
-                self._backend.set_event_bus_provider(bus_svc)
+                backend.set_event_bus_provider(bus_svc)
 
         # User-prefs lookup for the browser-echo fan-out. Optional —
         # without it the fan-out helper bails early and only the
@@ -247,7 +238,7 @@ class SpeakerService(Service):
             self._users_svc = users_svc
 
         init_config: dict[str, object] = dict(self._config)
-        await self._backend.initialize(init_config)
+        await backend.initialize(init_config)
 
         # Ensure alias index
         from gilbert.interfaces.storage import IndexDefinition
@@ -269,11 +260,27 @@ class SpeakerService(Service):
 
         logger.info("Speaker service started")
 
-    def _require_backend(self) -> SpeakerBackend:
-        """Return the backend or raise if the service is not enabled."""
-        if self._backend is None:
+    def _require_single_backend(self) -> SpeakerBackend:
+        """Return a single loaded backend, or raise if none are loaded.
+
+        When exactly one backend is loaded it is returned directly.
+        When more than one is loaded the first by sorted name is returned
+        and a warning is logged — callers that haven't been updated yet to
+        use per-backend routing fall back gracefully. This is a transitional
+        helper; Task 11 audits and removes most callers.
+        """
+        if not self._backends:
             raise RuntimeError("Speaker service is not enabled")
-        return self._backend
+        if len(self._backends) > 1:
+            first_name = sorted(self._backends)[0]
+            logger.warning(
+                "_require_single_backend called with %d backends loaded; "
+                "picking %r. Caller should be updated to route per-backend.",
+                len(self._backends),
+                first_name,
+            )
+            return self._backends[first_name]
+        return next(iter(self._backends.values()))
 
     def _get_storage_backend(self) -> Any:
         """Get the storage backend from the storage service."""
@@ -332,8 +339,8 @@ class SpeakerService(Service):
             ),
         ]
         # Use live backend instance if available, otherwise fall back to registry class
-        if self._backend is not None:
-            backend_params = self._backend.backend_config_params()
+        if self._backends:
+            backend_params = self._require_single_backend().backend_config_params()
         else:
             backends = SpeakerBackend.registered_backends()
             backend_cls = backends.get(self._backend_name)
@@ -363,7 +370,7 @@ class SpeakerService(Service):
     def config_actions(self) -> list[ConfigAction]:
         return all_backend_actions(
             registry=SpeakerBackend.registered_backends(),
-            current_backend=self._backend,
+            current_backend=self._backends.get(self._backend_name),
         )
 
     async def invoke_config_action(
@@ -371,17 +378,17 @@ class SpeakerService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(self._backend, key, payload)
+        return await invoke_backend_action(self._backends.get(self._backend_name), key, payload)
 
     async def stop(self) -> None:
-        if self._backend is not None:
-            await self._backend.close()
+        for backend in list(self._backends.values()):
+            await backend.close()
 
     # --- Alias management ---
 
     async def set_alias(self, speaker_id: str, alias: str) -> None:
         """Assign an alias name to a speaker. Raises ValueError on collision."""
-        backend = self._require_backend()
+        backend = self._require_single_backend()
         # Check the alias doesn't collide with an existing speaker name
         speakers = await backend.list_speakers()
         for s in speakers:
@@ -444,7 +451,7 @@ class SpeakerService(Service):
         ``list_speakers()`` so callers can feed the result to
         ``_route_id`` without a separate namespace-stamping step.
         """
-        self._require_backend()  # raise if no backend configured
+        self._require_single_backend()  # raise if no backend configured
         speakers = await self.list_speakers()  # namespaced via service
 
         # 1) Exact case-sensitive name match — wins unambiguously
@@ -481,8 +488,8 @@ class SpeakerService(Service):
                 # Legacy aliases stored before Task 13 migration may hold a bare
                 # native ID.  Stamp the prefix in-memory when only one backend
                 # is loaded so the caller always receives a namespaced id.
-                if ":" not in sid_str and self._backend is not None:
-                    sid_str = f"{self._backend.backend_name}:{sid_str}"
+                if ":" not in sid_str and self._backends:
+                    sid_str = f"{self._require_single_backend().backend_name}:{sid_str}"
                 return sid_str
             return None
 
@@ -710,7 +717,7 @@ class SpeakerService(Service):
 
         Backends that don't support grouping are skipped.
         """
-        backend = self._require_backend()
+        backend = self._require_single_backend()
         if not backend.supports_grouping or not speaker_ids:
             return
 
@@ -834,7 +841,7 @@ class SpeakerService(Service):
         losing the listener's position mid-song. Returns ``True`` when
         a Play was actually issued.
         """
-        backend = self._require_backend()
+        self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
         await self.prepare_speakers(target_ids)
 
@@ -872,7 +879,7 @@ class SpeakerService(Service):
         absence of support surfaces as a UI error rather than an
         exception.
         """
-        self._require_backend()
+        self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
         grouped = self._route_ids(target_ids)
         coros = []
@@ -911,7 +918,7 @@ class SpeakerService(Service):
 
         Returns a ``NowPlaying`` with ``state=STOPPED`` if no speakers exist.
         """
-        backend = self._require_backend()
+        backend = self._require_single_backend()
         if speaker_name:
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
@@ -1013,7 +1020,7 @@ class SpeakerService(Service):
         if not isinstance(self._tts_svc, TTSProvider):
             raise TypeError("Expected TTSService for text_to_speech capability")
 
-        backend = self._require_backend()
+        backend = self._require_single_backend()
 
         # Generate TTS audio
         request = SynthesisRequest(
@@ -1385,7 +1392,7 @@ class SpeakerService(Service):
         ]
 
         # Add grouping tools if the backend supports it
-        if self._backend is not None and self._backend.supports_grouping:
+        if self._backends and self._require_single_backend().supports_grouping:
             tools.extend(
                 [
                     ToolDefinition(
@@ -1459,7 +1466,7 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown tool: {name}")
 
     async def _tool_list_speakers(self) -> str:
-        speakers = await self._require_backend().list_speakers()
+        speakers = await self._require_single_backend().list_speakers()
 
         # Enrich with aliases
         storage = self._get_storage_backend()
@@ -1591,7 +1598,7 @@ class SpeakerService(Service):
         speaker_ids = await self.resolve_speaker_names(speaker_names)
 
         try:
-            group = await self._require_backend().group_speakers(self._native_ids(speaker_ids))
+            group = await self._require_single_backend().group_speakers(self._native_ids(speaker_ids))
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
@@ -1607,5 +1614,5 @@ class SpeakerService(Service):
     async def _tool_ungroup_speakers(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments["speakers"]
         speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._require_backend().ungroup_speakers(self._native_ids(speaker_ids))
+        await self._require_single_backend().ungroup_speakers(self._native_ids(speaker_ids))
         return json.dumps({"status": "ungrouped"})
