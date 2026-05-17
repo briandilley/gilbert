@@ -461,7 +461,7 @@ class MusicService(Service):
         speaker_svc = self._get_speaker_svc()
         if not isinstance(speaker_svc, SpeakerProvider):
             return False
-        return bool(speaker_svc.backend.supports_repeat)
+        return any(b.supports_repeat for b in speaker_svc.backends.values())
 
     async def start_station(
         self,

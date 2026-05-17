@@ -1,6 +1,7 @@
 """Speaker system interface — discover, group, and play audio on speakers."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -366,8 +367,21 @@ class SpeakerProvider(Protocol):
     """Protocol for services providing speaker control capabilities."""
 
     @property
-    def backend(self) -> SpeakerBackend:
-        """Access the speaker backend."""
+    def backends(self) -> Mapping[str, "SpeakerBackend"]:
+        """Mapping of currently-loaded backends, keyed by ``backend_name``."""
+        ...
+
+    def get_backend(self, name: str) -> "SpeakerBackend | None":
+        """Return a loaded backend by name, or ``None`` if not loaded."""
+        ...
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        """Resolve speaker display names to namespaced ids.
+
+        Returns ``{name: "<backend>:<native>"}``. Names that don't match
+        any known speaker are omitted from the result (callers decide
+        whether that's an error).
+        """
         ...
 
     async def announce(

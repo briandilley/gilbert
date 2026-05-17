@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from gilbert.core.output import cleanup_old_files, get_output_dir
@@ -94,6 +95,47 @@ class SpeakerService(Service):
     @property
     def backend(self) -> SpeakerBackend | None:
         return self._backend
+
+    @property
+    def backends(self) -> Mapping[str, SpeakerBackend]:
+        """Mapping of currently-loaded backends, keyed by ``backend_name``.
+
+        Interim — Task 8 replaces the single ``_backend`` with
+        ``_backends: dict``; for now we return a one-entry mapping so
+        consumers can migrate against the new protocol shape ahead of
+        the storage refactor.
+        """
+        if self._backend is None:
+            return {}
+        return {self._backend.backend_name: self._backend}
+
+    def get_backend(self, name: str) -> SpeakerBackend | None:
+        """Return a loaded backend by name, or ``None`` if not loaded."""
+        return self.backends.get(name)
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        """Map speaker display names to namespaced speaker ids.
+
+        Returns ``{name: "<backend>:<native>"}`` for each name that
+        matches a known speaker. Names that don't match any speaker are
+        omitted (callers decide whether that's an error).
+
+        Calls the backend directly and stamps the ``<backend>:`` prefix
+        because ``list_speakers()`` does not yet emit namespaced ids
+        (Task 5 will change that; at that point this can delegate to
+        ``list_speakers()`` without the inline prefix stamp).
+        """
+        out: dict[str, str] = {}
+        if self._backend is None:
+            return out
+        backend_name = self._backend.backend_name
+        speakers = await self._backend.list_speakers()
+        by_name = {s.name: s for s in speakers}
+        for name in names:
+            s = by_name.get(name)
+            if s is not None:
+                out[name] = f"{backend_name}:{s.speaker_id}"
+        return out
 
     @property
     def cached_speakers(self) -> list[SpeakerInfo]:

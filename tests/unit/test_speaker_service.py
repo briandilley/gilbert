@@ -1077,3 +1077,92 @@ async def test_get_speaker_locks_reuses_and_sorts(
     third = await service._get_speaker_locks(["uid-1", "uid-1", "uid-1"])
     assert len(third) == 1
     assert third[0] is service._speaker_locks["uid-1"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3+4: SpeakerProvider protocol — backends / get_backend / resolve_names
+# ---------------------------------------------------------------------------
+
+
+class FakeSpeakerBackend(SpeakerBackend):
+    """Minimal backend for testing the new SpeakerProvider protocol shape."""
+
+    backend_name: str = "fake"
+    supports_repeat: bool = False
+
+    def __init__(self) -> None:
+        self.initialized = False
+        self.closed = False
+        self._speakers: list[SpeakerInfo] = [
+            SpeakerInfo(
+                speaker_id="uid-1",
+                name="FakeSpeaker1",
+                ip_address="",
+            ),
+        ]
+
+    async def initialize(self, config: dict[str, object]) -> None:
+        self.initialized = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        return list(self._speakers)
+
+    async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
+        for s in self._speakers:
+            if s.speaker_id == speaker_id:
+                return s
+        return None
+
+    async def play_uri(self, request: PlayRequest) -> None:
+        pass
+
+    async def stop(self, speaker_ids: list[str] | None = None) -> None:
+        pass
+
+    async def get_volume(self, speaker_id: str) -> int:
+        return 50
+
+    async def set_volume(self, speaker_id: str, volume: int) -> None:
+        pass
+
+    async def get_playback_state(self, speaker_id: str) -> PlaybackState:
+        return PlaybackState.STOPPED
+
+
+@pytest.fixture
+def speaker_service_with_fake_backend() -> SpeakerService:
+    """SpeakerService wired with a FakeSpeakerBackend (backend_name='fake')."""
+    svc = SpeakerService()
+    svc._backend = FakeSpeakerBackend()
+    svc._enabled = True
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_backends_mapping_exposes_loaded_backend(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    assert "fake" in svc.backends
+    assert svc.backends["fake"] is svc._backend
+
+
+@pytest.mark.asyncio
+async def test_get_backend_returns_loaded_or_none(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    assert svc.get_backend("fake") is svc._backend
+    assert svc.get_backend("nonexistent") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_names_maps_display_names_to_namespaced_ids(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    result = await svc.resolve_names(["FakeSpeaker1"])
+    assert result == {"FakeSpeaker1": "fake:uid-1"}
