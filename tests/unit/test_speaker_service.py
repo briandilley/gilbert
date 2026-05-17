@@ -25,6 +25,8 @@ from gilbert.interfaces.tts import AudioFormat, SynthesisResult
 class StubSpeakerBackend(SpeakerBackend):
     """In-memory speaker backend for testing."""
 
+    backend_name: str = "stub"
+
     def __init__(self, *, grouping: bool = True) -> None:
         self.initialized = False
         self.closed = False
@@ -483,10 +485,10 @@ async def test_play_queue_on_speakers_noop_when_already_playing(
 
 async def test_set_and_resolve_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-2", "Living Room Speaker")
+    await service.set_alias("stub:uid-2", "Living Room Speaker")
 
     sid = await service.resolve_speaker_name("Living Room Speaker")
-    assert sid == "uid-2"
+    assert sid == "stub:uid-2"
 
 
 async def test_alias_collision_with_speaker_name(
@@ -494,16 +496,16 @@ async def test_alias_collision_with_speaker_name(
 ) -> None:
     await service.start(resolver)
     with pytest.raises(ValueError, match="collides with existing speaker name"):
-        await service.set_alias("uid-1", "Speaker 2")
+        await service.set_alias("stub:uid-1", "Speaker 2")
 
 
 async def test_alias_collision_with_other_alias(
     service: SpeakerService, resolver: ServiceResolver
 ) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-1", "Kitchen")
+    await service.set_alias("stub:uid-1", "Kitchen")
     with pytest.raises(ValueError, match="already assigned"):
-        await service.set_alias("uid-2", "Kitchen")
+        await service.set_alias("stub:uid-2", "Kitchen")
 
 
 async def test_resolve_name_prefers_exact_case_match(
@@ -539,8 +541,8 @@ async def test_resolve_name_prefers_exact_case_match(
     )
     await service.start(resolver)
 
-    assert await service.resolve_speaker_name("Garage") == "uid-garage-lower"
-    assert await service.resolve_speaker_name("GARAGE") == "uid-garage-upper"
+    assert await service.resolve_speaker_name("Garage") == "stub:uid-garage-lower"
+    assert await service.resolve_speaker_name("GARAGE") == "stub:uid-garage-upper"
 
 
 async def test_resolve_name_raises_on_ambiguous_case(
@@ -581,7 +583,7 @@ async def test_resolve_name_raises_on_ambiguous_case(
 
 async def test_remove_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-2", "Bedroom")
+    await service.set_alias("stub:uid-2", "Bedroom")
     await service.remove_alias("Bedroom")
 
     sid = await service.resolve_speaker_name("Bedroom")
@@ -592,7 +594,7 @@ async def test_alias_in_play_command(
     service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
 ) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-3", "Office")
+    await service.set_alias("stub:uid-3", "Office")
 
     await service.execute_tool(
         "play_audio",
@@ -618,12 +620,12 @@ async def test_tool_set_alias(service: SpeakerService, resolver: ServiceResolver
     assert parsed["status"] == "ok"
 
     sid = await service.resolve_speaker_name("Front Porch")
-    assert sid == "uid-1"
+    assert sid == "stub:uid-1"
 
 
 async def test_tool_remove_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-1", "Garage")
+    await service.set_alias("stub:uid-1", "Garage")
     result = await service.execute_tool("remove_speaker_alias", {"alias": "Garage"})
     parsed = json.loads(result)
     assert parsed["status"] == "ok"

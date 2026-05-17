@@ -438,9 +438,13 @@ class SpeakerService(Service):
         only when no exact match exists and exactly one speaker
         matches case-insensitively — ambiguous case-insensitive
         matches raise to force the caller to use the exact casing.
+
+        Returns namespaced IDs (``<backend>:<native>``) consistent with
+        ``list_speakers()`` so callers can feed the result to
+        ``_route_id`` without a separate namespace-stamping step.
         """
-        backend = self._require_backend()
-        speakers = await backend.list_speakers()
+        self._require_backend()  # raise if no backend configured
+        speakers = await self.list_speakers()  # namespaced via service
 
         # 1) Exact case-sensitive name match — wins unambiguously
         # even when other speakers share the lowercased spelling.
@@ -471,7 +475,15 @@ class SpeakerService(Service):
         )
         if results:
             sid = results[0].get("speaker_id")
-            return str(sid) if sid is not None else None
+            if sid is not None:
+                sid_str = str(sid)
+                # Legacy aliases stored before Task 13 migration may hold a bare
+                # native ID.  Stamp the prefix in-memory when only one backend
+                # is loaded so the caller always receives a namespaced id.
+                if ":" not in sid_str and self._backend is not None:
+                    sid_str = f"{self._backend.backend_name}:{sid_str}"
+                return sid_str
+            return None
 
         return None
 
@@ -484,6 +496,29 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown speaker or alias: {name!r}")
             ids.append(sid)
         return ids
+
+    @staticmethod
+    def _native_id(speaker_id: str) -> str:
+        """Strip the ``<backend>:`` namespace prefix from a speaker ID.
+
+        Pre-Task-6 shim: the service layer always works with namespaced IDs
+        (``<backend>:<native>``), but the single-backend delegate still
+        expects bare native IDs. ``_route_id`` in Task 6 will replace this
+        with full backend dispatch; until then, strip and return the native
+        part.
+
+        Accepts bare IDs (no ``":"`` present) for backwards-compatibility
+        with data that hasn't been migrated yet.
+        """
+        if ":" in speaker_id:
+            _, _, native = speaker_id.partition(":")
+            return native
+        return speaker_id
+
+    @staticmethod
+    def _native_ids(speaker_ids: list[str]) -> list[str]:
+        """Strip namespace prefix from a list of speaker IDs (see ``_native_id``)."""
+        return [SpeakerService._native_id(sid) for sid in speaker_ids]
 
     def _audio_url(self, file_path: str) -> str:
         """Build an HTTP URL for an output file so speakers can fetch it.
@@ -634,9 +669,9 @@ class SpeakerService(Service):
             return ids
         if self._last_speaker_ids:
             return list(self._last_speaker_ids)
-        # Fall back to all speakers
-        backend = self._require_backend()
-        speakers = await backend.list_speakers()
+        # Fall back to all speakers — use service-level list_speakers() so
+        # the returned IDs are consistently namespaced.
+        speakers = await self.list_speakers()
         return [s.speaker_id for s in speakers]
 
     async def prepare_speakers(self, speaker_ids: list[str]) -> None:
@@ -652,10 +687,11 @@ class SpeakerService(Service):
         if not backend.supports_grouping or not speaker_ids:
             return
 
-        if len(speaker_ids) == 1:
-            await backend.ungroup_speakers(speaker_ids)
+        native = self._native_ids(speaker_ids)
+        if len(native) == 1:
+            await backend.ungroup_speakers(native)
         else:
-            await backend.group_speakers(speaker_ids)
+            await backend.group_speakers(native)
 
     # --- Playback ---
 
@@ -692,7 +728,7 @@ class SpeakerService(Service):
         await self._require_backend().play_uri(
             PlayRequest(
                 uri=uri,
-                speaker_ids=target_ids,
+                speaker_ids=self._native_ids(target_ids),
                 volume=volume,
                 title=title,
                 position_seconds=position_seconds,
@@ -734,7 +770,7 @@ class SpeakerService(Service):
         await self._require_backend().enqueue_uri(
             PlayRequest(
                 uri=uri,
-                speaker_ids=target_ids,
+                speaker_ids=self._native_ids(target_ids),
                 title=title,
                 didl_meta=didl_meta,
             )
@@ -765,13 +801,13 @@ class SpeakerService(Service):
         # group members share transport state, so any one is enough.
         if target_ids:
             try:
-                state = await backend.get_playback_state(target_ids[0])
+                state = await backend.get_playback_state(self._native_id(target_ids[0]))
             except Exception:
                 state = PlaybackState.STOPPED
             if state == PlaybackState.PLAYING:
                 return False
 
-        await backend.play_queue(target_ids)
+        await backend.play_queue(self._native_ids(target_ids))
         return True
 
     async def set_repeat_on_speakers(
@@ -791,7 +827,7 @@ class SpeakerService(Service):
         """
         backend = self._require_backend()
         target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.set_repeat(mode, target_ids)
+        await backend.set_repeat(mode, self._native_ids(target_ids))
 
     async def stop_speakers(
         self,
@@ -799,7 +835,7 @@ class SpeakerService(Service):
     ) -> None:
         """Stop playback on the specified speakers."""
         target_ids = await self._resolve_target_ids(speaker_names)
-        await self._require_backend().stop(target_ids)
+        await self._require_backend().stop(self._native_ids(target_ids))
         await self._maybe_echo_stop_to_browser()
 
     async def get_now_playing(
@@ -823,10 +859,10 @@ class SpeakerService(Service):
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
                 raise KeyError(f"Unknown speaker or alias: {speaker_name!r}")
-            return await backend.get_now_playing(sid)
+            return await backend.get_now_playing(self._native_id(sid))
 
         if self._last_speaker_ids:
-            return await backend.get_now_playing(self._last_speaker_ids[0])
+            return await backend.get_now_playing(self._native_id(self._last_speaker_ids[0]))
 
         speakers = await backend.list_speakers()
         if not speakers:
@@ -946,7 +982,7 @@ class SpeakerService(Service):
         # Sonos backends that implement snapshot/restore still work.
         if target_ids is None:
             target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.snapshot(target_ids)
+        await backend.snapshot(self._native_ids(target_ids))
 
         # Play on speakers — topology handled by play_on_speakers.
         # ``announce=True`` tells backends that support it (Sonos) to
@@ -976,7 +1012,7 @@ class SpeakerService(Service):
         # Restore previous playback state (no-op on aiosonos; kept for
         # non-Sonos backends that still need the manual restore).
         try:
-            await backend.restore(target_ids)
+            await backend.restore(self._native_ids(target_ids))
         except Exception:
             logger.debug("Failed to restore playback after announcement")
 
@@ -1047,7 +1083,7 @@ class SpeakerService(Service):
 
         while elapsed < timeout:
             try:
-                state = await self._require_backend().get_playback_state(target_id)
+                state = await self._require_backend().get_playback_state(self._native_id(target_id))
                 if state not in (PlaybackState.PLAYING, PlaybackState.TRANSITIONING):
                     return
             except Exception:
@@ -1420,7 +1456,7 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        await self._require_backend().set_volume(sid, volume)
+        await self._require_backend().set_volume(self._native_id(sid), volume)
         return json.dumps({"status": "ok", "speaker": name, "volume": volume})
 
     async def _tool_get_volume(self, arguments: dict[str, Any]) -> str:
@@ -1428,7 +1464,7 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        volume = await self._require_backend().get_volume(sid)
+        volume = await self._require_backend().get_volume(self._native_id(sid))
         return json.dumps({"speaker": name, "volume": volume})
 
     async def _tool_set_alias(self, arguments: dict[str, Any]) -> str:
