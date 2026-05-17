@@ -268,9 +268,166 @@ async def test_resolve_user_id_by_name_skips_system_pseudo_users(
 
 
 class _FakeConn:
-    """Minimal stand-in for a WsConnection."""
+    """Minimal stand-in for a WsConnection.
 
-    pass
+    Carries an optional ``user_id`` so handlers that read the caller's
+    identity (``users.prefs.*``) can be driven from tests without
+    standing up the auth stack.
+    """
+
+    def __init__(self, user_id: str = "") -> None:
+        self.user_id = user_id
+
+
+# --- User prefs (metadata + RPC) ---
+
+
+async def test_get_user_pref_returns_default_when_user_missing(
+    user_service: UserService,
+) -> None:
+    val = await user_service.get_user_pref("nope", "speaker.browser_echo", False)
+    assert val is False
+
+
+async def test_get_user_pref_returns_default_when_key_missing(
+    user_service: UserService,
+) -> None:
+    # Root exists but has no ``speaker.browser_echo`` metadata key.
+    val = await user_service.get_user_pref(
+        _ROOT_USER_ID, "speaker.browser_echo", False
+    )
+    assert val is False
+
+
+async def test_set_and_get_user_pref_roundtrips(
+    user_service: UserService,
+) -> None:
+    await user_service.set_user_pref(_ROOT_USER_ID, "speaker.browser_echo", True)
+    val = await user_service.get_user_pref(
+        _ROOT_USER_ID, "speaker.browser_echo", False
+    )
+    assert val is True
+
+
+async def test_set_user_pref_preserves_other_metadata(
+    user_service: UserService,
+) -> None:
+    # Seed an unrelated key, then write our pref — the original must
+    # survive.
+    await user_service.set_user_pref(_ROOT_USER_ID, "ui.theme", "dark")
+    await user_service.set_user_pref(_ROOT_USER_ID, "speaker.browser_echo", True)
+    assert (
+        await user_service.get_user_pref(_ROOT_USER_ID, "ui.theme", None) == "dark"
+    )
+    assert (
+        await user_service.get_user_pref(
+            _ROOT_USER_ID, "speaker.browser_echo", False
+        )
+        is True
+    )
+
+
+async def test_set_user_pref_unknown_user_raises(
+    user_service: UserService,
+) -> None:
+    with pytest.raises(KeyError):
+        await user_service.set_user_pref("ghost", "x", "y")
+
+
+async def test_ws_prefs_get_self_only(
+    user_service: UserService,
+) -> None:
+    # Unauthenticated connection — refused.
+    reply = await user_service._ws_user_prefs_get(
+        _FakeConn(user_id=""), {"id": "1", "key": "speaker.browser_echo"}
+    )
+    assert reply["type"] == "gilbert.error"
+    assert reply["code"] == 401
+
+
+async def test_ws_prefs_get_requires_key(
+    user_service: UserService,
+) -> None:
+    reply = await user_service._ws_user_prefs_get(
+        _FakeConn(user_id=_ROOT_USER_ID), {"id": "1"}
+    )
+    assert reply["type"] == "gilbert.error"
+    assert reply["code"] == 400
+
+
+async def test_ws_prefs_get_returns_value(
+    user_service: UserService,
+) -> None:
+    await user_service.set_user_pref(_ROOT_USER_ID, "speaker.browser_echo", True)
+    reply = await user_service._ws_user_prefs_get(
+        _FakeConn(user_id=_ROOT_USER_ID),
+        {"id": "1", "key": "speaker.browser_echo", "default": False},
+    )
+    assert reply["type"] == "gilbert.result"
+    assert reply["value"] is True
+
+
+async def test_ws_prefs_get_returns_default_when_unset(
+    user_service: UserService,
+) -> None:
+    reply = await user_service._ws_user_prefs_get(
+        _FakeConn(user_id=_ROOT_USER_ID),
+        {"id": "1", "key": "speaker.browser_echo", "default": False},
+    )
+    assert reply["type"] == "gilbert.result"
+    assert reply["value"] is False
+
+
+async def test_ws_prefs_set_self_only(user_service: UserService) -> None:
+    reply = await user_service._ws_user_prefs_set(
+        _FakeConn(user_id=""),
+        {"id": "1", "key": "speaker.browser_echo", "value": True},
+    )
+    assert reply["type"] == "gilbert.error"
+    assert reply["code"] == 401
+
+
+async def test_ws_prefs_set_persists(user_service: UserService) -> None:
+    reply = await user_service._ws_user_prefs_set(
+        _FakeConn(user_id=_ROOT_USER_ID),
+        {"id": "1", "key": "speaker.browser_echo", "value": True},
+    )
+    assert reply["type"] == "gilbert.result"
+    assert reply["ok"] is True
+    # Round-trips on disk.
+    assert (
+        await user_service.get_user_pref(
+            _ROOT_USER_ID, "speaker.browser_echo", False
+        )
+        is True
+    )
+
+
+async def test_ws_prefs_set_uses_connection_identity(
+    user_service: UserService,
+) -> None:
+    # Even if the frame contained a ``user_id``, the handler ignores it
+    # and uses ``conn.user_id``. Verify by passing an obviously bogus
+    # frame ``user_id`` — the persisted value should land on the
+    # *connection's* user, not the frame's.
+    await user_service._ws_user_prefs_set(
+        _FakeConn(user_id=_ROOT_USER_ID),
+        {
+            "id": "1",
+            "key": "speaker.browser_echo",
+            "value": True,
+            "user_id": "attacker",
+        },
+    )
+    # Root flipped.
+    assert (
+        await user_service.get_user_pref(
+            _ROOT_USER_ID, "speaker.browser_echo", False
+        )
+        is True
+    )
+    # No "attacker" user exists, so nothing got created for that id.
+    assert await user_service.get_user("attacker") is None
 
 
 async def test_ws_create_user(user_service: UserService) -> None:

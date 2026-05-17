@@ -258,51 +258,44 @@ def test_backend_registers_under_browser_name() -> None:
     )
 
 
-# --- _to_browser_url: scheme/host stripping for Gilbert-minted URLs ---
+# --- to_browser_url: scheme/host stripping for Gilbert-minted URLs ---
+# (Module-level helper in ``interfaces/speaker.py``; both BrowserSpeakerBackend
+# and the SpeakerService fan-out path use it. Tests live here because
+# the browser case is where the behavior matters most.)
 
 
 def test_to_browser_url_strips_scheme_and_host_for_output_urls() -> None:
-    # SpeakerService.announce() builds these — must become relative so the
-    # SPA loads them against its own origin (works behind HTTPS proxies).
+    from gilbert.interfaces.speaker import to_browser_url
     url = "http://192.168.1.42:8000/output/speaker/announce-abc.mp3"
-    assert (
-        BrowserSpeakerBackend._to_browser_url(url)
-        == "/output/speaker/announce-abc.mp3"
-    )
+    assert to_browser_url(url) == "/output/speaker/announce-abc.mp3"
 
 
 def test_to_browser_url_preserves_query_string() -> None:
+    from gilbert.interfaces.speaker import to_browser_url
     url = "http://x:8000/output/speaker/foo.mp3?ttl=600"
-    assert (
-        BrowserSpeakerBackend._to_browser_url(url)
-        == "/output/speaker/foo.mp3?ttl=600"
-    )
+    assert to_browser_url(url) == "/output/speaker/foo.mp3?ttl=600"
 
 
 def test_to_browser_url_leaves_external_urls_alone() -> None:
-    # Free-form ``play_audio`` URLs pointing at podcast.example.com etc.
-    # must NOT be stripped — that would point them at the SPA origin.
+    from gilbert.interfaces.speaker import to_browser_url
     url = "https://podcast.example.com/episode-12.mp3"
-    assert BrowserSpeakerBackend._to_browser_url(url) == url
+    assert to_browser_url(url) == url
 
 
 def test_to_browser_url_leaves_already_relative_urls_alone() -> None:
-    assert (
-        BrowserSpeakerBackend._to_browser_url("/output/speaker/foo.mp3")
-        == "/output/speaker/foo.mp3"
-    )
+    from gilbert.interfaces.speaker import to_browser_url
+    assert to_browser_url("/output/speaker/foo.mp3") == "/output/speaker/foo.mp3"
 
 
 def test_to_browser_url_leaves_non_output_paths_alone() -> None:
-    # Heuristic: only ``/output/`` paths are Gilbert-minted. Anything
-    # else stays absolute so we don't break URLs the AI was explicitly
-    # told to play.
+    from gilbert.interfaces.speaker import to_browser_url
     url = "http://example.com/api/some-file.mp3"
-    assert BrowserSpeakerBackend._to_browser_url(url) == url
+    assert to_browser_url(url) == url
 
 
 def test_to_browser_url_handles_empty_string() -> None:
-    assert BrowserSpeakerBackend._to_browser_url("") == ""
+    from gilbert.interfaces.speaker import to_browser_url
+    assert to_browser_url("") == ""
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,6 @@ of who else is connected.
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse, urlunparse
 
 from gilbert.core.context import get_current_conversation_id, get_current_user
 from gilbert.interfaces.configuration import ConfigParam
@@ -27,6 +26,7 @@ from gilbert.interfaces.speaker import (
     PlayRequest,
     SpeakerBackend,
     SpeakerInfo,
+    to_browser_url,
 )
 from gilbert.interfaces.tools import ToolParameterType
 
@@ -182,7 +182,7 @@ class BrowserSpeakerBackend(SpeakerBackend):
                 data={
                     "user_id": target_user_id,
                     "conversation_id": get_current_conversation_id() or "",
-                    "url": self._to_browser_url(request.uri),
+                    "url": to_browser_url(request.uri),
                     "title": request.title,
                     "volume": volume,
                     "announce": request.announce,
@@ -249,36 +249,3 @@ class BrowserSpeakerBackend(SpeakerBackend):
                 return sid[len(_SPEAKER_ID_PREFIX) :]
         return caller_user_id
 
-    @staticmethod
-    def _to_browser_url(url: str) -> str:
-        """Strip scheme + host from a Gilbert-minted audio URL.
-
-        ``SpeakerService.announce()`` builds audio URLs targeting the
-        server's LAN IP on a hardcoded ``http://`` scheme via
-        ``_audio_url()`` — fine for Sonos (a physical device on the
-        LAN), broken for a browser that loaded Gilbert via HTTPS
-        through a reverse proxy. The browser would either get blocked
-        by mixed-content rules or HTTPS-upgrade the link and hit
-        ``SSL_ERROR_RX_RECORD_TOO_LONG`` against Gilbert's plaintext
-        port.
-
-        We rewrite our own URLs to relative paths so the SPA resolves
-        them against ``window.location.origin`` — whatever scheme +
-        host actually got the user to Gilbert.
-
-        External URLs (free-form ``play_audio`` calls pointing at an
-        arbitrary HTTPS resource) are left absolute: stripping their
-        host would point them at the SPA origin and break them. We
-        detect "ours" by the ``/output/`` path prefix the speaker
-        service uses for every transient output it serves.
-        """
-        if not url:
-            return url
-        parsed = urlparse(url)
-        if not parsed.scheme:
-            return url  # already relative
-        if not parsed.path.startswith("/output/"):
-            return url  # external resource — leave it alone
-        return urlunparse(
-            ("", "", parsed.path, parsed.params, parsed.query, parsed.fragment)
-        )

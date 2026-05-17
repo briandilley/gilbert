@@ -4,8 +4,47 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlparse, urlunparse
 
 from gilbert.interfaces.configuration import ConfigParam
+
+
+def to_browser_url(url: str) -> str:
+    """Strip scheme + host from a Gilbert-minted ``/output/`` audio URL.
+
+    ``SpeakerService._audio_url()`` mints absolute URLs targeting the
+    server's LAN IP on a hardcoded ``http://`` scheme — fine for Sonos
+    (physical LAN device, plain HTTP), broken for a browser that loaded
+    Gilbert via HTTPS through a reverse proxy. Symptom in the browser:
+    mixed-content block, or HTTPS-upgrade → TLS handshake against a
+    plaintext port → ``SSL_ERROR_RX_RECORD_TOO_LONG``.
+
+    This helper strips scheme + host from URLs whose path starts with
+    ``/output/`` (the prefix the speaker service uses for transient
+    output files). The SPA then resolves the relative path against
+    ``window.location.origin`` — whatever scheme + host actually got
+    the user to Gilbert.
+
+    External URLs (free-form ``play_audio`` calls pointing at e.g.
+    ``https://podcast.example.com/ep.mp3``) are left absolute —
+    stripping their host would point them at the SPA origin and break
+    them. The ``/output/`` prefix is the heuristic for "ours."
+
+    Lives on ``interfaces/`` so both ``BrowserSpeakerBackend`` (which
+    publishes ``speaker.browser.play`` directly) and ``SpeakerService``
+    (which fans out to a browser echo when a user has opted in) can
+    share one implementation.
+    """
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        return url
+    if not parsed.path.startswith("/output/"):
+        return url
+    return urlunparse(
+        ("", "", parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
 
 
 class PlaybackState(StrEnum):

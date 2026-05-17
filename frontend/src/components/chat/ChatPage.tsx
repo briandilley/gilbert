@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/sheet";
 import {
   FolderOpenIcon,
+  HeadphonesIcon,
   MenuIcon,
   MessageSquareIcon,
   PlusIcon,
@@ -49,6 +50,7 @@ import {
   UserPlusIcon,
   UsersRoundIcon,
 } from "lucide-react";
+import { useBrowserEchoPref } from "@/hooks/useBrowserEchoPref";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PromptDialog } from "@/components/ui/PromptDialog";
@@ -74,6 +76,7 @@ export function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const browserEcho = useBrowserEchoPref();
   const [promptDialog, setPromptDialog] = useState<{
     title: string;
     placeholder?: string;
@@ -1161,6 +1164,29 @@ export function ChatPage() {
                 <SparklesIcon className="size-4" />
               </TooltipTrigger>
               <TooltipContent>Skills</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant={browserEcho.enabled ? "default" : "ghost"}
+                    size="icon-sm"
+                    disabled={!browserEcho.ready}
+                    onClick={() => {
+                      void browserEcho.setEnabled(!browserEcho.enabled);
+                    }}
+                    aria-pressed={browserEcho.enabled}
+                  />
+                }
+              >
+                <HeadphonesIcon className="size-4" />
+              </TooltipTrigger>
+              <TooltipContent>
+                {browserEcho.enabled
+                  ? "Browser echo: ON (Gilbert also plays through this tab)"
+                  : "Browser echo: OFF (click to also play through this tab)"}
+              </TooltipContent>
             </Tooltip>
 
             <Tooltip>
