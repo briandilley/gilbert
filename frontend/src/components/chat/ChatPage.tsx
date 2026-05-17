@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
@@ -10,6 +10,7 @@ import type {
   ChatRound,
   ChatRoundTool,
   ChatTurn,
+  ConversationSummary,
   FileAttachment,
 } from "@/types/chat";
 import type { GilbertEvent } from "@/types/events";
@@ -61,6 +62,7 @@ export function ChatPage() {
   const { user } = useAuth();
   const api = useWsApi();
   const { connected, rpc } = useWebSocket();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   // Browser-native @-mention notifications. The hook owns its own
@@ -126,11 +128,22 @@ export function ChatPage() {
   }, [activeConvId]);
 
   // Reset the user's "unread mentions" cursor when they open a room.
-  // Fire-and-forget — a failure just means the sidebar badge stays
-  // until the next ``chat.conversation.list`` refresh. Personal
+  // Optimistically zero the count in the cached conversations list so
+  // the sidebar badge clears immediately — the server-side cursor
+  // advance is async and the next ``chat.conversation.list`` refresh
+  // would otherwise leave a stale badge on screen. Personal
   // conversations don't have mention tracking so we skip them.
   useEffect(() => {
     if (!activeConvId || !connected || !isShared) return;
+    queryClient.setQueryData<ConversationSummary[] | undefined>(
+      ["conversations"],
+      (prev) =>
+        prev?.map((c) =>
+          c.conversation_id === activeConvId
+            ? { ...c, unread_mentions_count: 0 }
+            : c,
+        ),
+    );
     void rpc({
       type: "chat.conversation.mark_mentions_read",
       conversation_id: activeConvId,
@@ -138,7 +151,7 @@ export function ChatPage() {
       // eslint-disable-next-line no-console
       console.debug("mark_mentions_read failed", err);
     });
-  }, [activeConvId, connected, isShared]);
+  }, [activeConvId, connected, isShared, queryClient, rpc]);
 
   // Keep pendingCountRef in sync so addFiles can read the current count
   // without taking pendingAttachments as a callback dep (that would

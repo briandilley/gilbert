@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { Marked, type TokenizerAndRendererExtension } from "marked";
 import { markedHighlight } from "marked-highlight";
 import hljs from "highlight.js/lib/core";
@@ -102,35 +102,33 @@ export function MarkdownContent({
 }: MarkdownContentProps) {
   const { user } = useAuth();
   const ownUserId = user?.user_id ?? "";
-  const rootRef = useRef<HTMLDivElement>(null);
 
   const html = useMemo(() => {
     const raw = marked.parse(content, { async: false }) as string;
     // ``data-user-id`` is the only non-standard attribute on the
     // mention chip — DOMPurify would otherwise strip it and the SPA
     // would lose the self-mention highlight hook.
-    return DOMPurify.sanitize(raw, { ADD_ATTR: ["data-user-id"] });
-  }, [content]);
-
-  // Tag chips pointing at the current viewer with a stable
-  // ``.mention-self`` class on mount. We can't bake a per-user
-  // ``.mention[data-user-id="<me>"]`` rule into static CSS, so we
-  // add the class here and let the design-system stylesheet target
-  // the static class name.
-  useEffect(() => {
-    const root = rootRef.current;
-    if (!root || !ownUserId) return;
-    for (const el of root.querySelectorAll(".mention")) {
-      const target = el.getAttribute("data-user-id");
-      if (target === ownUserId) {
-        el.classList.add("mention-self");
-      }
-    }
-  }, [ownUserId, html]);
+    const sanitized = DOMPurify.sanitize(raw, { ADD_ATTR: ["data-user-id"] });
+    // Inject the ``mention-self`` class for chips pointing at the
+    // current viewer. Doing this at HTML-generation time (rather
+    // than via a post-mount useEffect) makes the highlight present
+    // on the very first render — including streaming updates where
+    // ``useAuth()`` may have already populated by the time the
+    // chip text arrives. The previous useEffect-based approach lost
+    // the class every time ``dangerouslySetInnerHTML`` replaced the
+    // contents, then raced ``user`` resolution on first paint.
+    if (!ownUserId) return sanitized;
+    // ``data-user-id`` is double-quoted by the marked extension
+    // (see mentionExtension.renderer), so a simple string-replace
+    // is safe. We tighten with the class prefix to avoid double-
+    // adding if the chip already has the self class somehow.
+    const needle = `<span class="mention" data-user-id="${ownUserId}"`;
+    const replacement = `<span class="mention mention-self" data-user-id="${ownUserId}"`;
+    return sanitized.split(needle).join(replacement);
+  }, [content, ownUserId]);
 
   return (
     <div
-      ref={rootRef}
       className={`markdown-content ${className}`}
       dangerouslySetInnerHTML={{ __html: html }}
     />
