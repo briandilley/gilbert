@@ -20,6 +20,7 @@ from gilbert.core.registry import ServiceRegistry
 from gilbert.core.service_manager import ServiceManager
 from gilbert.core.services import (
     AuthService,
+    CalendarService,
     EventBusService,
     InboxService,
     LightsService,
@@ -262,6 +263,12 @@ class Gilbert:
         self.service_manager.register(ProposalsService())
 
         self.service_manager.register(InboxService())
+
+        # Calendar — multi-account calendar events, free/busy, and AI
+        # tools. Registered alongside Inbox so the start order is
+        # predictable; `app.py` is the only module that imports the
+        # concrete class.
+        self.service_manager.register(CalendarService())
 
         from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 

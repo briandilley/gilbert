@@ -24,6 +24,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
 import { cn } from "@/lib/utils";
 
 interface CardStyle {
@@ -90,6 +91,7 @@ export function DashboardPage() {
         {/* Above-the-grid slot: plugins can drop banner-style widgets,
             system-status panels, etc. before the standard card grid. */}
         <div className="space-y-3 empty:hidden">
+          <UpcomingEventCard />
           <PluginPanelSlot slot="dashboard.top" />
         </div>
 

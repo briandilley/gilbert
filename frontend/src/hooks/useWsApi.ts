@@ -30,6 +30,14 @@ import type {
   OutboxStatus,
   EmailBackendInfo,
 } from "@/types/inbox";
+import type {
+  CalendarAccount,
+  CalendarBackendInfo,
+  CalendarEvent,
+  EventDraft,
+  FreeBusyBlock,
+  FreeSlot,
+} from "@/types/calendar";
 import type { UIBlock } from "@/types/ui";
 import type { SkillInfo } from "@/types/skills";
 import type {
@@ -409,6 +417,157 @@ export function useWsApi() {
     listEmailBackends: () =>
       rpc<{ backends: EmailBackendInfo[] }>({ type: "inbox.backends.list" })
         .then((r) => r.backends),
+
+    // ── Calendar: accounts ────────────────────────────────────────
+
+    listCalendarAccounts: () =>
+      rpc<{ accounts: CalendarAccount[] }>({ type: "calendar.accounts.list" })
+        .then((r) => r.accounts),
+
+    getCalendarAccount: (accountId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.get", account_id: accountId,
+      }).then((r) => r.account),
+
+    createCalendarAccount: (account: {
+      name: string;
+      email_address: string;
+      backend_name: string;
+      backend_config: Record<string, unknown>;
+      calendar_id?: string;
+      timezone?: string;
+      working_hours_start_hour?: number;
+      working_hours_end_hour?: number;
+      poll_enabled?: boolean;
+      poll_interval_sec?: number;
+      upcoming_event_lookahead_minutes?: number;
+    }) =>
+      rpc<{ account: CalendarAccount }>({ type: "calendar.accounts.create", ...account })
+        .then((r) => r.account),
+
+    updateCalendarAccount: (accountId: string, updates: Record<string, unknown>) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.update", account_id: accountId, updates,
+      }).then((r) => r.account),
+
+    deleteCalendarAccount: (accountId: string) =>
+      rpc<{ status: string }>({ type: "calendar.accounts.delete", account_id: accountId }),
+
+    testCalendarConnection: (accountId: string) =>
+      rpc<{ ok: boolean; error?: string; calendars?: { id: string; name: string; timezone: string; primary: boolean }[] }>(
+        { type: "calendar.accounts.test_connection", account_id: accountId },
+      ),
+
+    probeCalendarsForAccount: (accountId: string) =>
+      rpc<{ calendars: { id: string; name: string; timezone: string; primary: boolean }[] }>(
+        { type: "calendar.accounts.probe_calendars", account_id: accountId },
+      ).then((r) => r.calendars),
+
+    revealCalendarBackendConfig: (accountId: string) =>
+      rpc<{ backend_config: Record<string, unknown> }>(
+        { type: "calendar.accounts.reveal_backend_config", account_id: accountId },
+      ).then((r) => r.backend_config),
+
+    shareCalendarUser: (accountId: string, userId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.share_user", account_id: accountId, user_id: userId,
+      }).then((r) => r.account),
+
+    unshareCalendarUser: (accountId: string, userId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.unshare_user", account_id: accountId, user_id: userId,
+      }).then((r) => r.account),
+
+    shareCalendarRole: (accountId: string, role: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.share_role", account_id: accountId, role,
+      }).then((r) => r.account),
+
+    unshareCalendarRole: (accountId: string, role: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.unshare_role", account_id: accountId, role,
+      }).then((r) => r.account),
+
+    listCalendarBackends: () =>
+      rpc<{ backends: CalendarBackendInfo[] }>({ type: "calendar.backends.list" })
+        .then((r) => r.backends),
+
+    // ── Calendar: events / freebusy ───────────────────────────────
+
+    listCalendarEvents: (params: {
+      time_min: string;
+      time_max: string;
+      account_id?: string | null;
+      max_results?: number;
+    }) =>
+      rpc<{ events: CalendarEvent[]; warnings: string[] }>({
+        type: "calendar.events.list",
+        ...params,
+      }),
+
+    getCalendarEvent: (accountId: string, eventId: string) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.get",
+        account_id: accountId,
+        event_id: eventId,
+      }).then((r) => r.event),
+
+    createCalendarEvent: (accountId: string, draft: EventDraft) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.create",
+        account_id: accountId,
+        event: draft,
+      }).then((r) => r.event),
+
+    updateCalendarEvent: (
+      accountId: string,
+      eventId: string,
+      draft: Partial<EventDraft>,
+      ifMatchEtag?: string,
+    ) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.update",
+        account_id: accountId,
+        event_id: eventId,
+        event: draft,
+        if_match_etag: ifMatchEtag || "",
+      }).then((r) => r.event),
+
+    deleteCalendarEvent: (
+      accountId: string,
+      eventId: string,
+      sendCancellations = false,
+    ) =>
+      rpc<{ status: string }>({
+        type: "calendar.events.delete",
+        account_id: accountId,
+        event_id: eventId,
+        send_cancellations: sendCancellations,
+      }),
+
+    getCalendarFreeBusy: (params: {
+      time_min: string;
+      time_max: string;
+      account_id?: string | null;
+    }) =>
+      rpc<{ blocks: FreeBusyBlock[] }>({
+        type: "calendar.freebusy.get",
+        ...params,
+      }).then((r) => r.blocks),
+
+    findCalendarFreeTime: (params: {
+      time_min: string;
+      time_max: string;
+      duration_minutes: number;
+      account_id?: string | null;
+      respect_working_hours?: boolean;
+      max_results?: number;
+      attendee_emails?: string[];
+    }) =>
+      rpc<{ slots: FreeSlot[] }>({
+        type: "calendar.find_free_time",
+        ...params,
+      }).then((r) => r.slots),
 
     // ── Documents ─────────────────────────────────────────────────
 
