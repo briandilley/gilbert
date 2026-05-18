@@ -11,6 +11,7 @@ import asyncio
 import fnmatch
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -76,6 +77,7 @@ class WsConnection:
         self.user_ctx = user_ctx
         self.user_level = user_level
         self.manager = manager
+        self.connection_id: str = uuid.uuid4().hex
         self.subscriptions: set[str] = {"*"}  # auto-subscribe to all
         self.shared_conv_ids: set[str] = set()
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=200)
@@ -87,6 +89,10 @@ class WsConnection:
     @property
     def user_id(self) -> str:
         return self.user_ctx.user_id
+
+    @property
+    def display_name(self) -> str:
+        return self.user_ctx.display_name or self.user_id
 
     @property
     def roles(self) -> frozenset[str]:

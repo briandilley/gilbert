@@ -212,3 +212,30 @@ async def test_play_on_speakers_system_user_bypasses_check(
         uri="http://example.com/x.mp3",
         speaker_ids=["browser:bob"],
     )
+
+
+@pytest.mark.asyncio
+async def test_ws_activate_works_with_real_wsconnection(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    """Regression test: the handler reads attributes that must actually exist
+    on WsConnection. Use a real instance instead of MagicMock so missing
+    attributes blow up as they would in production."""
+    from unittest.mock import MagicMock
+
+    from gilbert.web.ws_protocol import WsConnection
+
+    user_ctx = UserContext(
+        user_id="alice", display_name="Alice", email="", roles=frozenset({"user"})
+    )
+    manager = MagicMock()
+    conn = WsConnection(user_ctx=user_ctx, user_level=10, manager=manager)
+
+    result = await svc_with_browser_backend._ws_browser_speaker_activate(conn, {})
+
+    assert result == {"status": "ok"}
+    backend = svc_with_browser_backend._backends["browser"]
+    assert "alice" in backend._active_connections
+    # connection_id was the UUID assigned by WsConnection.__init__
+    [actual_conn_id] = backend._active_connections["alice"].keys()
+    assert actual_conn_id == conn.connection_id

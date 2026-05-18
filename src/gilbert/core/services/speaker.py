@@ -1392,7 +1392,7 @@ class SpeakerService(Service):
             return {"status": "error", "error": "browser speaker backend not loaded"}
         conn_id = conn.connection_id
         user_id = conn.user_id or ""
-        display_name = getattr(conn, "display_name", "") or user_id
+        display_name = conn.display_name
         backend.activate(conn_id=conn_id, user_id=user_id, display_name=display_name)
         logger.info(
             "[DEBUG] SpeakerService._ws_browser_speaker_activate user_id=%r conn_id=%r display=%r; total active: %d",
