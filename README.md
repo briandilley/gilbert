@@ -106,7 +106,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Doorbell monitoring** — detect ring events from UniFi Protect cameras and announce visitors over your speakers with a custom TTS voice.
 - **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and uses Spotify's Web API for browse/search. The Music service exposes search, queue, station ("play more like this"), and loop/repeat tools — capabilities are gated per-backend so swappable backends only surface what they actually support.
 - **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, and any AI-generated spoken output.
-- **Speech-to-text** — the bundled `local_whisper` backend (faster-whisper, no API key) transcribes audio files and browser-mic streams. Extensible via the multi-backend aggregator: add Deepgram, AssemblyAI, or any other provider as a plugin implementing `BatchTranscriptionBackend` or `StreamingTranscriptionBackend`.
+- **Speech-to-text** — the bundled `local_whisper` backend (faster-whisper, no API key) transcribes audio files and browser-mic streams. Extensible via the multi-backend aggregator: the `openai`, `groq`, and `elevenlabs` plugins add batch transcription backends; the `deepgram` and `elevenlabs` plugins add streaming backends; the `porcupine` and `openwakeword` plugins add wake-word detection backends.
 - **Email inbox** — multi-mailbox, multi-user. Every mailbox is owned by a user and can be shared with individual users or roles for full read/send access. Messages land in a per-mailbox persisted store; outbound drafts queue through a shared outbox with crash-resilient delayed sends. The `google` plugin's Gmail backend is the reference implementation — add more by implementing `EmailBackend`. Incoming mail can also be handed off to an AI chat loop via the Inbox AI Chat service.
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
@@ -142,7 +142,14 @@ AIBackend            →  anthropic plugin → AnthropicAI (Claude)
                         bedrock plugin   → BedrockAI (AWS Bedrock Converse API)
 VisionBackend        →  anthropic plugin → AnthropicVision
 TTSBackend           →  elevenlabs plugin → ElevenLabsTTS
-BatchTranscriptionBackend → core (LocalWhisper / faster-whisper, no API key)
+BatchTranscriptionBackend → core (local_whisper / faster-whisper, no API key)
+                        openai plugin    → OpenAIWhisperBackend (whisper-1 / gpt-4o-transcribe)
+                        groq plugin      → GroqWhisperBackend (whisper-large-v3 family)
+                        elevenlabs plugin → ElevenLabsScribeBackend (scribe_v1, diarization)
+StreamingTranscriptionBackend → elevenlabs plugin → ElevenLabsScribeLiveBackend (WebSocket)
+                        deepgram plugin  → DeepgramBackend (Nova-3 WebSocket)
+WakeWordBackend      →  porcupine plugin → PorcupineBackend (Picovoice, custom .ppn)
+                        openwakeword plugin → OpenWakeWordBackend (local ONNX, no API key)
 SpeakerBackend       →  core (LocalSpeaker, BrowserSpeaker) + sonos plugin → SonosSpeaker
 MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
 PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
@@ -248,12 +255,16 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 |---|---|
 | **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
-| **elevenlabs** | High-quality TTS for announcements and greetings |
+| **deepgram** | Deepgram Nova streaming speech-to-text backend |
+| **elevenlabs** | High-quality TTS + Scribe batch and streaming speech-to-text backends |
 | **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents |
+| **groq** | Groq LPU chat backend + Groq Whisper batch speech-to-text backend |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
-| **openai** | OpenAI GPT chat backend (configure alongside or instead of anthropic) |
+| **openai** | OpenAI GPT chat backend + Whisper batch speech-to-text backend |
 | **openai-compatible** | Vendor-neutral Chat Completions backend for vLLM, LM Studio, corporate proxies, and other endpoints without a dedicated plugin |
+| **openwakeword** | Local wake-word detection (ONNX models, no API key required) |
+| **porcupine** | Picovoice Porcupine wake-word detection (built-in and custom keywords) |
 | **slack** | Socket Mode bot bridging Slack DMs/mentions to the AI service |
 | **sonos** | Sonos speaker control and Sonos-linked music service access |
 | **tavily** | Web search backend with AI-generated summaries |
