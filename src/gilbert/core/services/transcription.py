@@ -410,12 +410,37 @@ class TranscriptionService(Service):
             except Exception:  # noqa: BLE001
                 logger.exception("error closing transcription backend %r", wb)
 
-    # --- Config actions (stub — filled in in Task 8) --------------
+    # --- Config actions (Task 8) --------------------------------
 
     def config_actions(self) -> list[ConfigAction]:
-        return []
+        from gilbert.core.services._backend_actions import all_backend_actions
+
+        actions: list[ConfigAction] = []
+        for _role, registry, loaded in (
+            ("batch", BatchTranscriptionBackend.registered_backends(), self._batch_backends),
+            ("streaming", StreamingTranscriptionBackend.registered_backends(), self._streaming_backends),
+            ("wake_word", WakeWordBackend.registered_backends(), self._wake_word_backends),
+        ):
+            # Picking *any* loaded instance is fine — actions are class-
+            # level metadata. Loaded instance is used only for live invokes.
+            current = next(iter(loaded.values()), None)
+            actions.extend(all_backend_actions(registry=registry, current_backend=current))
+        return actions
 
     async def invoke_config_action(
         self, key: str, payload: dict[str, Any]
     ) -> ConfigActionResult:
+        from gilbert.core.services._backend_actions import invoke_backend_action
+
+        # Try each role's loaded backends in turn. The action key's
+        # backend-name prefix disambiguates which one to invoke.
+        for loaded in (self._batch_backends, self._streaming_backends, self._wake_word_backends):
+            for inst in loaded.values():
+                result = await invoke_backend_action(inst, key, payload)
+                # If the result is non-error, or if it's an error but not
+                # the "doesn't support" sentinel, this backend owns the action.
+                # Otherwise try the next one.
+                msg_lower = (result.message or "").lower()
+                if result.status != "error" or "doesn't support" not in msg_lower:
+                    return result
         return ConfigActionResult(status="error", message=f"unknown action {key!r}")

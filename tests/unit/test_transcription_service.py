@@ -354,3 +354,18 @@ def test_list_backends_returns_loaded_per_role():
     out = svc.list_backends()
     assert out == {"batch": ["a"], "streaming": ["b"], "wake_word": []}
     assert svc.list_backends("batch") == {"batch": ["a"]}
+
+
+# --- Config actions tests (Task 8) ---
+
+
+def test_config_actions_aggregate_from_backend_classes():
+    """Service exposes backend-declared config actions, tagged by backend."""
+    # _FakeBatch doesn't declare any actions, so we just verify the call
+    # shape works and returns a list. A backend that DOES declare actions
+    # (e.g., LocalWhisperBackend in Task 12 or third-party backends in
+    # follow-up PRs) will populate this.
+    svc = TranscriptionService()
+    svc._batch_backends["_fake_batch"] = _FakeBatch()
+    actions = svc.config_actions()
+    assert isinstance(actions, list)
