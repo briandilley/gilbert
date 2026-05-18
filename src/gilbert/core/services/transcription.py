@@ -180,20 +180,9 @@ class TranscriptionService(Service):
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        """Apply config updates without a full service restart.
-
-        Defers actual backend reinit until Task 5 wires ``_reinit_backends``.
-        """
-        out_ttl = config.get("output_ttl_seconds")
-        if out_ttl is not None:
-            self._output_ttl_seconds = int(out_ttl)
+        self._apply_config_section(config)
         for role in ("batch", "streaming", "wake_word"):
-            section = config.get(role, {})
-            if not isinstance(section, dict):
-                continue
-            default = section.get("default")
-            if isinstance(default, str):
-                setattr(self, f"_default_{role}", default)
+            await self._reinit_backends_for_role(role)
 
     # --- Backends -------------------------------------------------
 
@@ -209,10 +198,122 @@ class TranscriptionService(Service):
     def wake_word_backends(self) -> Mapping[str, WakeWordBackend]:
         return self._wake_word_backends
 
-    # --- Lifecycle (stubs — filled in in later tasks) -------------
+    # --- Internal config plumbing ---------------------------------
+
+    def _apply_config_section(self, section: dict[str, Any]) -> None:
+        """Cache the resolved transcription config section."""
+        self._config_section = section
+        if not isinstance(section, dict):
+            return
+        out_ttl = section.get("output_ttl_seconds")
+        if out_ttl is not None:
+            self._output_ttl_seconds = int(out_ttl)
+        for role in ("batch", "streaming", "wake_word"):
+            sub = section.get(role, {})
+            if isinstance(sub, dict):
+                default = sub.get("default")
+                if isinstance(default, str):
+                    setattr(self, f"_default_{role}", default)
+
+    def _role_registry(self, role: str) -> dict[str, type]:
+        if role == "batch":
+            return BatchTranscriptionBackend.registered_backends()
+        if role == "streaming":
+            return StreamingTranscriptionBackend.registered_backends()
+        if role == "wake_word":
+            return WakeWordBackend.registered_backends()
+        raise ValueError(f"unknown role {role!r}")
+
+    def _role_loaded(self, role: str) -> dict[str, Any]:
+        if role == "batch":
+            return self._batch_backends
+        if role == "streaming":
+            return self._streaming_backends
+        if role == "wake_word":
+            return self._wake_word_backends
+        raise ValueError(f"unknown role {role!r}")
+
+    async def _reinit_backends_for_role(self, role: str) -> None:
+        """Reconcile loaded backends for ``role`` against the latest config."""
+        section = getattr(self, "_config_section", {}) or {}
+        sub = section.get(role, {})
+        backends_cfg = sub.get("backends", {}) if isinstance(sub, dict) else {}
+        if not isinstance(backends_cfg, dict):
+            backends_cfg = {}
+        loaded = self._role_loaded(role)
+        registry = self._role_registry(role)
+        for name, cls in registry.items():
+            cfg = backends_cfg.get(name, {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            enabled = cfg.get("enabled", False) is True
+            existing = loaded.get(name)
+            if not enabled:
+                if existing is not None:
+                    try:
+                        await existing.close()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("error closing %s backend %r", role, name)
+                    loaded.pop(name, None)
+                self._startup_failures[role].pop(name, None)
+                continue
+            settings = cfg.get("settings", {}) if isinstance(cfg, dict) else {}
+            if not isinstance(settings, dict):
+                settings = {}
+            if existing is None:
+                try:
+                    inst = cls()
+                    await inst.initialize(settings)
+                except Exception as exc:  # noqa: BLE001
+                    self._startup_failures[role][name] = repr(exc)
+                    logger.exception("failed to initialize %s backend %r", role, name)
+                    continue
+                loaded[name] = inst
+                self._startup_failures[role].pop(name, None)
+            # Already loaded: leave as-is.
+
+    # --- Lifecycle ------------------------------------------------
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+        # Side-effect imports: register bundled vendor-free backends
+        # before we ask the registries which to load. Guarded so the
+        # service is still functional while LocalWhisperBackend is
+        # being implemented in Task 12.
+        try:
+            import gilbert.integrations.local_whisper  # noqa: F401
+        except ImportError:
+            pass
+
+        section: dict[str, Any] = {}
+        config_svc = resolver.get_capability("configuration")
+        if config_svc is not None:
+            from gilbert.interfaces.configuration import ConfigurationReader
+
+            if isinstance(config_svc, ConfigurationReader):
+                section = config_svc.get_section(self.config_namespace)
+
+        if not section.get("enabled", False):
+            logger.info("Transcription service disabled")
+            return
+
+        self._enabled = True
+        self._apply_config_section(section)
+
+        bus_svc = resolver.get_capability("event_bus")
+        if bus_svc is not None:
+            self._event_bus_provider = bus_svc
+        acl_svc = resolver.get_capability("access_control")
+        if isinstance(acl_svc, AccessControlProvider):
+            self._access_control = acl_svc
+
+        for role in ("batch", "streaming", "wake_word"):
+            await self._reinit_backends_for_role(role)
+        logger.info(
+            "Transcription service started (batch=%s streaming=%s wake_word=%s)",
+            sorted(self._batch_backends), sorted(self._streaming_backends),
+            sorted(self._wake_word_backends),
+        )
 
     async def stop(self) -> None:
         for bb in list(self._batch_backends.values()):
