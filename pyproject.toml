@@ -57,6 +57,7 @@ dependencies = [
     "gilbert-plugin-unifi",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
+    "faster-whisper>=1.2.1",
 ]
 
 [tool.uv.sources]
