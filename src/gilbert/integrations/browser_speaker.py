@@ -221,6 +221,7 @@ class BrowserSpeakerBackend(SpeakerBackend):
                     "volume": volume,
                     "announce": request.announce,
                     "position_seconds": request.position_seconds,
+                    "kind": request.kind,
                 },
                 source="speaker.browser",
             )

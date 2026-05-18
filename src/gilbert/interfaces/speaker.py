@@ -140,6 +140,12 @@ class PlayRequest:
     restores playback when finished — no snapshot/restore dance
     required. Other backends can treat this as a hint or ignore it.
     """
+    kind: str = ""
+    """Free-form classifier used by speaker backends that fan out to
+    client UIs (e.g. ``"chat_speech"`` for Gilbert reading a chat reply
+    aloud). Backends with no UI dimension (Sonos, local) ignore it.
+    The browser backend stamps it onto the ``speaker.browser.play``
+    event so the SPA can categorize incoming clips."""
 
 
 @dataclass(frozen=True)

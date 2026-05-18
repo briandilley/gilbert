@@ -924,6 +924,7 @@ class SpeakerService(Service):
         position_seconds: float | None = None,
         didl_meta: str = "",
         announce: bool = False,
+        kind: str = "",
     ) -> None:
         """Play a URI on the specified speakers.
 
@@ -967,6 +968,7 @@ class SpeakerService(Service):
                         position_seconds=position_seconds,
                         didl_meta=didl_meta,
                         announce=announce,
+                        kind=kind,
                     )
                 )
             )
