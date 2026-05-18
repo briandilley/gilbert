@@ -97,21 +97,22 @@ async def test_set_event_bus_provider_ignores_non_provider(
 
 
 @pytest.mark.asyncio
-async def test_list_speakers_returns_one_entry_per_user(
+async def test_list_speakers_returns_one_entry_per_active_user(
     backend: BrowserSpeakerBackend,
 ) -> None:
     await backend.initialize({"display_name": "Headphones"})
 
-    set_current_user(_alice())
-    speakers_alice = await backend.list_speakers()
-    assert len(speakers_alice) == 1
-    assert speakers_alice[0].speaker_id == "browser:user-alice"
-    assert speakers_alice[0].name == "Headphones"
+    backend.activate(conn_id="conn-1", user_id="user-alice", display_name="Alice")
+    speakers = await backend.list_speakers()
+    assert len(speakers) == 1
+    assert speakers[0].speaker_id == "user-alice"
+    assert speakers[0].name == "Alice's Browser"
 
-    set_current_user(_bob())
-    speakers_bob = await backend.list_speakers()
-    assert len(speakers_bob) == 1
-    assert speakers_bob[0].speaker_id == "browser:user-bob"
+    backend.activate(conn_id="conn-2", user_id="user-bob", display_name="Bob")
+    speakers = await backend.list_speakers()
+    assert len(speakers) == 2
+    assert {s.speaker_id for s in speakers} == {"user-alice", "user-bob"}
+    assert {s.name for s in speakers} == {"Alice's Browser", "Bob's Browser"}
 
 
 @pytest.mark.asyncio
