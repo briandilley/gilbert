@@ -243,3 +243,66 @@ async def test_startup_failure_is_recorded_not_raised():
         assert "boom" in svc._startup_failures["batch"]["_boom_batch"]
     finally:
         BatchTranscriptionBackend._registry.pop("_boom_batch", None)
+
+
+# --- Batch routing tests (Task 6) ---
+
+
+@pytest.mark.asyncio
+async def test_transcribe_routes_to_default():
+    svc = TranscriptionService()
+    svc._apply_config_section({
+        "batch": {
+            "default": "_fake_batch",
+            "backends": {"_fake_batch": {"enabled": True, "settings": {}}},
+        },
+    })
+    await svc._reinit_backends_for_role("batch")
+    result = await svc.transcribe(TranscriptionRequest(audio=b"\x00" * 10))
+    assert result.text == "fake"
+    assert svc.batch_backends["_fake_batch"].calls[0].audio == b"\x00" * 10
+
+
+@pytest.mark.asyncio
+async def test_transcribe_explicit_backend_overrides_default():
+    class _OtherBatch(BatchTranscriptionBackend):
+        backend_name = "_other_batch"
+
+        def __init__(self):
+            self.calls = []
+
+        async def initialize(self, config):
+            pass
+
+        async def close(self):
+            pass
+
+        async def transcribe(self, request):
+            self.calls.append(request)
+            return TranscriptionResult(text="other")
+
+    try:
+        svc = TranscriptionService()
+        svc._apply_config_section({
+            "batch": {
+                "default": "_fake_batch",
+                "backends": {
+                    "_fake_batch": {"enabled": True},
+                    "_other_batch": {"enabled": True},
+                },
+            },
+        })
+        await svc._reinit_backends_for_role("batch")
+        out = await svc.transcribe(TranscriptionRequest(audio=b"\x00"), backend="_other_batch")
+        assert out.text == "other"
+        # Default backend was NOT used
+        assert svc.batch_backends["_fake_batch"].calls == []
+    finally:
+        BatchTranscriptionBackend._registry.pop("_other_batch", None)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_raises_when_no_backend_available():
+    svc = TranscriptionService()  # nothing loaded, no default
+    with pytest.raises(RuntimeError, match="no transcription backend available"):
+        await svc.transcribe(TranscriptionRequest(audio=b""))

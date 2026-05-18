@@ -28,6 +28,8 @@ from gilbert.interfaces.tools import ToolParameterType
 from gilbert.interfaces.transcription import (
     BatchTranscriptionBackend,
     StreamingTranscriptionBackend,
+    TranscriptionRequest,
+    TranscriptionResult,
     TranscriptionStream,
     WakeWordBackend,
     WakeWordDetector,
@@ -271,6 +273,27 @@ class TranscriptionService(Service):
                 loaded[name] = inst
                 self._startup_failures[role].pop(name, None)
             # Already loaded: leave as-is.
+
+    # --- Public API: BatchTranscriber -----------------------------------
+
+    async def transcribe(
+        self,
+        request: TranscriptionRequest,
+        backend: str | None = None,
+    ) -> TranscriptionResult:
+        """Transcribe audio via the configured batch backend."""
+        name = backend or self._default_batch
+        if not name or name not in self._batch_backends:
+            # If no default but only one is loaded, use it.
+            if len(self._batch_backends) == 1:
+                name = next(iter(self._batch_backends))
+            else:
+                raise RuntimeError(
+                    f"no transcription backend available for batch "
+                    f"(asked for {backend!r}, default={self._default_batch!r}, "
+                    f"loaded={sorted(self._batch_backends)})"
+                )
+        return await self._batch_backends[name].transcribe(request)
 
     # --- Lifecycle ------------------------------------------------
 
