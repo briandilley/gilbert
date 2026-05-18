@@ -706,12 +706,14 @@ class SpeakerService(Service):
         title: str,
         announce: bool,
         position_seconds: float | None,
+        explicit_target_ids: list[str],
     ) -> None:
         """Mirror a primary play_uri to the caller's browser tab.
 
         Fires after the primary backend's ``play_uri`` when:
         - the caller has the ``speaker.browser_echo`` pref enabled,
         - the primary backend isn't ``browser`` (would double-play),
+        - the caller's own browser is NOT already in the explicit target set (would double-play),
         - the event bus and users capability are both wired.
 
         Any error here is logged + swallowed: the primary play already
@@ -720,6 +722,13 @@ class SpeakerService(Service):
         """
         if not await self._browser_echo_should_fire():
             return
+        # Skip if the caller's own browser is in the explicit target set.
+        from gilbert.interfaces.context import get_current_user
+        user = get_current_user()
+        if user and user.user_id:
+            caller_browser_id = f"browser:{user.user_id}"
+            if caller_browser_id in explicit_target_ids:
+                return
         try:
             from gilbert.interfaces.context import (
                 get_current_conversation_id,
@@ -938,6 +947,7 @@ class SpeakerService(Service):
             title=title,
             announce=announce,
             position_seconds=position_seconds,
+            explicit_target_ids=target_ids,
         )
 
     async def enqueue_on_speakers(

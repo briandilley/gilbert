@@ -92,6 +92,7 @@ async def test_echo_publishes_when_pref_enabled(svc: SpeakerService) -> None:
         title="hello",
         announce=True,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     bus: _FakeBus = svc._event_bus_provider.bus
@@ -118,6 +119,7 @@ async def test_echo_silent_when_pref_disabled(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     assert svc._event_bus_provider.bus.published == []
@@ -137,6 +139,7 @@ async def test_echo_silent_when_primary_is_browser(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     assert svc._event_bus_provider.bus.published == []
@@ -153,6 +156,7 @@ async def test_echo_silent_for_system_user(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     assert svc._event_bus_provider.bus.published == []
@@ -171,6 +175,7 @@ async def test_echo_silent_when_event_bus_missing(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
 
@@ -185,6 +190,7 @@ async def test_echo_silent_when_users_svc_missing(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     assert svc._event_bus_provider.bus.published == []
@@ -203,6 +209,7 @@ async def test_echo_swallows_pref_lookup_errors(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
     assert svc._event_bus_provider.bus.published == []
 
@@ -218,6 +225,7 @@ async def test_echo_defaults_volume_when_none(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
 
     assert svc._event_bus_provider.bus.published[0].data["volume"] == 80
@@ -234,6 +242,7 @@ async def test_echo_clamps_volume(svc: SpeakerService) -> None:
         title="",
         announce=False,
         position_seconds=None,
+        explicit_target_ids=["sonos:living"],
     )
     assert svc._event_bus_provider.bus.published[-1].data["volume"] == 100
 
@@ -325,3 +334,85 @@ def test_speaker_service_exposes_speaker_info_handler() -> None:
     svc = SpeakerService()
     handlers = svc.get_ws_handlers()
     assert "speaker.info" in handlers
+
+
+# ── Task 14: explicit-target-set check ────────────────────────────────
+
+
+@pytest.fixture
+def speaker_service_browser_echo() -> SpeakerService:
+    """Fixture for browser-echo tests with multiple backends wired."""
+    s = SpeakerService()
+    s._backend_name = "sonos"  # primary != browser
+    s._event_bus_provider = _FakeBusProvider()
+    s._users_svc = _FakeUsersSvc()
+    # Enable the pref for alice
+    s._users_svc._prefs["alice"] = {"speaker.browser_echo": True}
+    return s
+
+
+@pytest.mark.asyncio
+async def test_echo_skips_when_callers_browser_in_target_set(
+    speaker_service_browser_echo: SpeakerService,
+) -> None:
+    """Echo must not fire when caller's own browser ID is already a target."""
+    svc = speaker_service_browser_echo
+    events_before = list(svc._event_bus_provider.bus.published)
+
+    # Caller is alice (per fixture); pref on; primary_backend != "browser"
+    set_current_user(UserContext(
+        user_id="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        roles=frozenset({"user"}),
+    ))
+
+    await svc._maybe_echo_to_browser(
+        uri="http://example.com/x.mp3",
+        volume=80,
+        title="test",
+        announce=False,
+        position_seconds=None,
+        explicit_target_ids=["sonos:living", "browser:alice"],
+    )
+
+    echo_events = [
+        e for e in svc._event_bus_provider.bus.published[len(events_before):]
+        if e.event_type == "speaker.browser.play" and e.source == "speaker.echo"
+    ]
+    assert echo_events == [], (
+        "Echo must skip when caller's browser is in the explicit target set"
+    )
+
+
+@pytest.mark.asyncio
+async def test_echo_fires_when_targeting_other_users_browser(
+    speaker_service_browser_echo: SpeakerService,
+) -> None:
+    """Echo for caller's browser fires even if a DIFFERENT user's browser is a target."""
+    svc = speaker_service_browser_echo  # caller is alice
+    events_before = list(svc._event_bus_provider.bus.published)
+
+    set_current_user(UserContext(
+        user_id="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        roles=frozenset({"user"}),
+    ))
+
+    await svc._maybe_echo_to_browser(
+        uri="http://example.com/x.mp3",
+        volume=80,
+        title="test",
+        announce=False,
+        position_seconds=None,
+        explicit_target_ids=["browser:bob"],
+    )
+
+    echo_for_alice = [
+        e for e in svc._event_bus_provider.bus.published[len(events_before):]
+        if e.event_type == "speaker.browser.play"
+        and e.source == "speaker.echo"
+        and e.data.get("user_id") == "alice"
+    ]
+    assert len(echo_for_alice) == 1, "Alice's echo fires for non-alice browser targets"
