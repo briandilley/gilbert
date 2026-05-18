@@ -174,6 +174,12 @@ export interface RoundUsage {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  /** AI backend (provider) name that handled this round — ``anthropic``,
+   *  ``openai``, ``gemini``, etc. Empty when usage was recorded before
+   *  this field shipped. */
+  backend?: string;
+  /** Model ID the backend reported for this round's response. */
+  model?: string;
 }
 
 export interface TurnUsage extends RoundUsage {

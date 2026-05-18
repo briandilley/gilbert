@@ -167,6 +167,11 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
     totals = _empty_round_usage()
     totals["rounds"] = 0
     saw_any = False
+    # Track the most recent (backend, model) seen so the per-turn chip
+    # in the chat UI can label the totals with the provider that
+    # produced the answer. The final_usage round wins when present.
+    last_backend = ""
+    last_model = ""
     for rnd in turn.get("rounds", []) or []:
         usage = rnd.get("usage")
         if not isinstance(usage, dict):
@@ -180,6 +185,10 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
         totals["cache_read_tokens"] += int(usage.get("cache_read_tokens", 0) or 0)
         totals["cost_usd"] += float(usage.get("cost_usd", 0.0) or 0.0)
         totals["rounds"] += 1
+        if usage.get("backend"):
+            last_backend = str(usage["backend"])
+        if usage.get("model"):
+            last_model = str(usage["model"])
     final = turn.get("final_usage")
     if isinstance(final, dict):
         saw_any = True
@@ -191,9 +200,17 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
         totals["cache_read_tokens"] += int(final.get("cache_read_tokens", 0) or 0)
         totals["cost_usd"] += float(final.get("cost_usd", 0.0) or 0.0)
         totals["rounds"] += 1
+        if final.get("backend"):
+            last_backend = str(final["backend"])
+        if final.get("model"):
+            last_model = str(final["model"])
     if not saw_any:
         return None
     totals["cost_usd"] = round(totals["cost_usd"], 6)
+    if last_backend:
+        totals["backend"] = last_backend
+    if last_model:
+        totals["model"] = last_model
     return totals
 
 
@@ -5434,6 +5451,14 @@ class AIService(Service):
                 )
 
         turn_totals["cost_usd"] = round(turn_totals["cost_usd"] + cost, 6)
+        # Stamp the latest round's provider/model onto the running turn
+        # totals too — the per-turn chip in the chat UI reads these from
+        # ``turn_usage``. Turns that mix backends mid-flight (rare — only
+        # happens if the user swaps profiles between rounds) will show
+        # the final round's values, which matches what the answer was
+        # produced by.
+        turn_totals["backend"] = backend_name
+        turn_totals["model"] = response.model
 
         return {
             "input_tokens": usage.input_tokens,
@@ -5441,6 +5466,8 @@ class AIService(Service):
             "cache_creation_tokens": usage.cache_creation_tokens,
             "cache_read_tokens": usage.cache_read_tokens,
             "cost_usd": round(cost, 6),
+            "backend": backend_name,
+            "model": response.model,
         }
 
     def _resolve_usage_recorder(self) -> UsageRecorder | None:
