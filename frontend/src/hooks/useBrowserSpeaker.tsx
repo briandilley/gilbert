@@ -3,154 +3,199 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { useEventBus } from "./useEventBus";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import type { GilbertEvent } from "@/types/events";
 
-/** A single audio reply pushed by the BrowserSpeakerBackend. */
-export interface BrowserAudioClip {
-  /** Stable client-side id for React keys. */
+const STORAGE_KEY = "browser_speaker.enabled";
+const HISTORY_LIMIT = 10;
+
+export interface PlayItem {
   id: string;
-  /** HTTP URL the SPA can fetch via an HTMLAudioElement. */
   url: string;
-  /** TTS source line or caller-supplied title; rendered above the player. */
   title: string;
-  /** 0–100. Applied to ``<audio>.volume`` on autoplay and on each <audio>. */
-  volume: number;
-  /** Conversation the clip is anchored to. Empty string = no chat context. */
-  conversationId: string;
-  /** ISO-8601 timestamp from the originating bus event. */
-  timestamp: string;
-  /** True once the provider has called .play() at least once on this clip. */
-  played: boolean;
+  volume: number; // 0-100
+  receivedAt: number;
 }
 
-interface BrowserSpeakerContextValue {
-  clipsForConversation: (conversationId: string) => BrowserAudioClip[];
-  allClips: BrowserAudioClip[];
+interface BrowserSpeakerStore {
+  enabled: boolean;
+  history: PlayItem[];
+  lastPlayed: PlayItem | null;
+  isPlaying: boolean;
+  setEnabled: (v: boolean) => void;
+  replay: (id: string) => void;
+  clearHistory: () => void;
 }
 
-const defaultCtx: BrowserSpeakerContextValue = {
-  clipsForConversation: () => [],
-  allClips: [],
-};
+const BrowserSpeakerContext = createContext<BrowserSpeakerStore | null>(null);
 
-const BrowserSpeakerContext =
-  createContext<BrowserSpeakerContextValue>(defaultCtx);
+function readPersistedEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
-// Cap per-conversation history so a long-running session can't grow
-// unbounded. Older clips drop off the front of the list — the user can
-// still re-trigger via the AI if they want it again.
-const MAX_CLIPS_PER_CONVERSATION = 25;
+function persistEnabled(v: boolean): void {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, v ? "true" : "false");
+  } catch {
+    // Storage may be unavailable; ignore.
+  }
+}
 
-/**
- * Subscribes to ``speaker.browser.play`` / ``speaker.browser.stop`` events,
- * auto-plays new clips via an HTMLAudioElement, and exposes the history
- * so the chat transcript can render inline audio bubbles.
- *
- * Lives inside ``WebSocketProvider`` because it depends on the WS bus.
- */
 export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
-  const [clips, setClips] = useState<BrowserAudioClip[]>([]);
-  // Single autoplay element so a new clip preempts the previous one
-  // instead of overlapping. Per-clip <audio controls> elements inside
-  // each bubble are independent and let the user replay at will.
-  const autoplayRef = useRef<HTMLAudioElement | null>(null);
+  const [enabled, setEnabledState] = useState<boolean>(readPersistedEnabled);
+  const [history, setHistory] = useState<PlayItem[]>([]);
+  const [lastPlayed, setLastPlayed] = useState<PlayItem | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const { connected, rpc, subscribe } = useWebSocket();
 
-  const handlePlay = useCallback((event: GilbertEvent) => {
-    const data = event.data as Record<string, unknown>;
-    const url = typeof data.url === "string" ? data.url : "";
-    if (!url) return;
-    const clip: BrowserAudioClip = {
-      id:
-        typeof event.timestamp === "string" && event.timestamp.length > 0
-          ? `${event.timestamp}-${Math.random().toString(36).slice(2, 8)}`
-          : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      url,
-      title: typeof data.title === "string" ? data.title : "",
-      volume: clampVolume(data.volume),
-      conversationId:
-        typeof data.conversation_id === "string" ? data.conversation_id : "",
-      timestamp: event.timestamp,
-      played: false,
+  // Singleton <audio> element kept across renders.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  if (audioRef.current === null && typeof document !== "undefined") {
+    const el = document.createElement("audio");
+    el.preload = "metadata";
+    el.style.display = "none";
+    document.body.appendChild(el);
+    audioRef.current = el;
+    el.addEventListener("ended", () => setIsPlaying(false));
+    el.addEventListener("pause", () => setIsPlaying(false));
+  }
+
+  // Activation sync — fire activate/deactivate to the server based on
+  // [enabled, connected]. Re-activates on reconnect if enabled is true.
+  const lastSyncedRef = useRef<boolean>(false);
+  useEffect(() => {
+    const want = enabled && connected;
+    if (want === lastSyncedRef.current) return;
+    lastSyncedRef.current = want;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (want) {
+          await rpc({ type: "browser_speaker.activate" });
+        } else {
+          await rpc({ type: "browser_speaker.deactivate" });
+        }
+      } catch {
+        // Treat as transient; next state change retries.
+        // Reset so a future change re-tries properly.
+        if (!cancelled) lastSyncedRef.current = !want;
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
+  }, [enabled, connected, rpc]);
 
-    setClips((prev) => {
-      // Trim per-conversation. We keep clips for *all* conversations
-      // so navigating away and back still shows recent replies, but
-      // each conversation's bucket is bounded.
-      const sameConv = prev.filter(
-        (c) => c.conversationId === clip.conversationId,
-      );
-      const otherConv = prev.filter(
-        (c) => c.conversationId !== clip.conversationId,
-      );
-      const trimmedSame = [...sameConv, clip].slice(-MAX_CLIPS_PER_CONVERSATION);
-      return [...otherConv, ...trimmedSame];
-    });
+  // Event subscription — append to history, autoplay if enabled.
+  useEffect(() => {
+    const handler = (event: GilbertEvent) => {
+      const data = event.data as Record<string, unknown>;
+      const url = typeof data.url === "string" ? data.url : "";
+      if (!url) return;
+      const item: PlayItem = {
+        id:
+          typeof event.timestamp === "string" && event.timestamp.length > 0
+            ? `${event.timestamp}-${Math.random().toString(36).slice(2, 8)}`
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        url,
+        title: typeof data.title === "string" ? data.title : "",
+        volume: clampVolume(data.volume),
+        receivedAt: Date.now(),
+      };
+      setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
+      setLastPlayed(item);
+      if (enabled && audioRef.current) {
+        const el = audioRef.current;
+        el.src = url;
+        el.volume = Math.max(0, Math.min(1, item.volume / 100));
+        setIsPlaying(true);
+        el.play().catch(() => setIsPlaying(false));
+      }
+    };
+    return subscribe("speaker.browser.play", handler);
+  }, [enabled, subscribe]);
 
-    // Stop any prior autoplay before starting the new one. The user's
-    // per-bubble <audio controls> elements are unaffected — they own
-    // their own playback state.
-    if (autoplayRef.current) {
-      autoplayRef.current.pause();
-      autoplayRef.current = null;
+  const setEnabled = useCallback((v: boolean) => {
+    persistEnabled(v);
+    setEnabledState(v);
+    if (!v && audioRef.current) {
+      audioRef.current.pause();
+      setIsPlaying(false);
     }
-    const audio = new Audio(clip.url);
-    audio.volume = clip.volume / 100;
-    autoplayRef.current = audio;
-    audio.play().catch((err) => {
-      // Chrome / Safari block autoplay when there's no recent gesture.
-      // Failing is fine — the user can hit play on the bubble manually.
-      // eslint-disable-next-line no-console
-      console.warn("speaker.browser.play: autoplay blocked", err);
-    });
   }, []);
 
-  const handleStop = useCallback(() => {
-    if (autoplayRef.current) {
-      autoplayRef.current.pause();
-      autoplayRef.current = null;
-    }
-  }, []);
+  const replay = useCallback(
+    (id: string) => {
+      const el = audioRef.current;
+      if (!el) return;
+      const item = history.find((h) => h.id === id);
+      if (!item) return;
+      el.src = item.url;
+      el.volume = Math.max(0, Math.min(1, item.volume / 100));
+      setIsPlaying(true);
+      el.play().catch(() => setIsPlaying(false));
+    },
+    [history],
+  );
 
-  useEventBus("speaker.browser.play", handlePlay);
-  useEventBus("speaker.browser.stop", handleStop);
+  const clearHistory = useCallback(() => setHistory([]), []);
 
-  // Tear down the autoplay element on unmount so a hot-reload doesn't
-  // leave dangling audio playing.
+  // Cleanup the singleton audio element on unmount.
   useEffect(() => {
     return () => {
-      if (autoplayRef.current) {
-        autoplayRef.current.pause();
-        autoplayRef.current = null;
+      const el = audioRef.current;
+      if (el) {
+        el.pause();
+        el.remove();
+        audioRef.current = null;
       }
     };
   }, []);
 
-  const clipsForConversation = useCallback(
-    (conversationId: string) =>
-      clips.filter((c) => c.conversationId === conversationId),
-    [clips],
+  const store = useMemo<BrowserSpeakerStore>(
+    () => ({
+      enabled,
+      history,
+      lastPlayed,
+      isPlaying,
+      setEnabled,
+      replay,
+      clearHistory,
+    }),
+    [enabled, history, lastPlayed, isPlaying, setEnabled, replay, clearHistory],
   );
 
   return (
-    <BrowserSpeakerContext.Provider
-      value={{ clipsForConversation, allClips: clips }}
-    >
+    <BrowserSpeakerContext.Provider value={store}>
       {children}
     </BrowserSpeakerContext.Provider>
   );
 }
 
-/** Read the audio clips that belong to the given conversation. */
-export function useBrowserSpeakerClips(
-  conversationId: string,
-): BrowserAudioClip[] {
-  return useContext(BrowserSpeakerContext).clipsForConversation(conversationId);
+export function useBrowserSpeaker(): BrowserSpeakerStore {
+  const ctx = useContext(BrowserSpeakerContext);
+  if (ctx === null) {
+    throw new Error("useBrowserSpeaker must be used inside <BrowserSpeakerProvider>");
+  }
+  return ctx;
+}
+
+/**
+ * Transitional stub — removed after BrowserAudioBubbles is deleted (Hdr-Task 9).
+ * Returns an empty array typed as PlayItem[] so BrowserAudioBubbles still compiles.
+ */
+export function useBrowserSpeakerClips(_conversationId: string): PlayItem[] {
+  return [];
 }
 
 function clampVolume(raw: unknown): number {

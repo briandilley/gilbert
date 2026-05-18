@@ -42,7 +42,6 @@ import {
 } from "@/components/ui/sheet";
 import {
   FolderOpenIcon,
-  HeadphonesIcon,
   MenuIcon,
   MessageSquareIcon,
   PlusIcon,
@@ -50,7 +49,6 @@ import {
   UserPlusIcon,
   UsersRoundIcon,
 } from "lucide-react";
-import { useBrowserEchoPref } from "@/hooks/useBrowserEchoPref";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PromptDialog } from "@/components/ui/PromptDialog";
@@ -76,7 +74,6 @@ export function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const browserEcho = useBrowserEchoPref();
   const [promptDialog, setPromptDialog] = useState<{
     title: string;
     placeholder?: string;
@@ -1164,59 +1161,6 @@ export function ChatPage() {
                 <SparklesIcon className="size-4" />
               </TooltipTrigger>
               <TooltipContent>Skills</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant={
-                      browserEcho.enabled && !browserEcho.redundantWithPrimary
-                        ? "default"
-                        : "ghost"
-                    }
-                    size="icon-sm"
-                    // NB: deliberately NOT setting ``disabled``. HTML-
-                    // disabled buttons swallow pointer events in every
-                    // major browser, which means the Tooltip never sees
-                    // a hover signal and can't show "why is this greyed
-                    // out?" — defeating the purpose of having a tooltip
-                    // here. Instead we communicate the state via
-                    // ``aria-disabled`` + opacity, and gate the click
-                    // handler so a click in the disabled state is a
-                    // visible-cursor no-op.
-                    aria-disabled={
-                      !browserEcho.ready || browserEcho.redundantWithPrimary
-                    }
-                    aria-pressed={browserEcho.enabled}
-                    className={
-                      !browserEcho.ready || browserEcho.redundantWithPrimary
-                        ? "cursor-not-allowed opacity-40"
-                        : undefined
-                    }
-                    onClick={() => {
-                      if (
-                        !browserEcho.ready ||
-                        browserEcho.redundantWithPrimary
-                      ) {
-                        return;
-                      }
-                      void browserEcho.setEnabled(!browserEcho.enabled);
-                    }}
-                  />
-                }
-              >
-                <HeadphonesIcon className="size-4" />
-              </TooltipTrigger>
-              <TooltipContent>
-                {browserEcho.redundantWithPrimary
-                  ? "Browser echo unavailable — primary speaker backend is already 'browser', so audio always plays through this tab. Switch the primary backend in Settings → Media → Speaker to use this toggle."
-                  : !browserEcho.ready
-                    ? "Loading browser echo state…"
-                    : browserEcho.enabled
-                      ? "Browser echo: ON (Gilbert also plays through this tab)"
-                      : "Browser echo: OFF (click to also play through this tab)"}
-              </TooltipContent>
             </Tooltip>
 
             <Tooltip>
