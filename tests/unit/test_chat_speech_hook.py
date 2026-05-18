@@ -56,7 +56,7 @@ class _FakeSpeaker:
     async def play_on_speakers(self, **kwargs: Any) -> None:
         self.play_calls.append(kwargs)
 
-    def _audio_url(self, file_path: str) -> str:
+    def audio_url(self, file_path: str) -> str:
         return f"http://test/output/{file_path.rsplit('/', 1)[-1]}"
 
 

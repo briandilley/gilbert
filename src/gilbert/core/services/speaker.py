@@ -684,7 +684,7 @@ class SpeakerService(Service):
             grouped.setdefault(backend_name, []).append(native_id)
         return grouped
 
-    def _audio_url(self, file_path: str) -> str:
+    def audio_url(self, file_path: str) -> str:
         """Build an HTTP URL for an output file so speakers can fetch it.
 
         Speakers need to access audio over HTTP — they can't read local files.
@@ -1268,7 +1268,7 @@ class SpeakerService(Service):
         # route through a short-overlay clip path so the listener
         # doesn't hear music stop completely, and the previous track
         # resumes automatically when the clip ends.
-        audio_url = self._audio_url(str(file_path.resolve()))
+        audio_url = self.audio_url(str(file_path.resolve()))
         await self.play_on_speakers(
             uri=audio_url,
             speaker_names=speaker_names,

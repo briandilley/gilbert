@@ -5522,7 +5522,7 @@ class AIService(Service):
             cleanup_old_files(output_dir, 3600)
             file_path = output_dir / f"chat-speech-{uuid.uuid4()}.mp3"
             file_path.write_bytes(result.audio)
-            audio_url = speaker_svc._audio_url(str(file_path.resolve()))  # type: ignore[attr-defined]
+            audio_url = speaker_svc.audio_url(str(file_path.resolve()))  # type: ignore[attr-defined]
             await speaker_svc.play_on_speakers(  # type: ignore[attr-defined]
                 uri=audio_url,
                 speaker_ids=[target_id],
@@ -5830,10 +5830,14 @@ class AIService(Service):
                     )
 
         # Read-aloud hook — fire and forget. Never delay the chat reply.
+        # Copy the request's contextvars (current_user, current_conversation_id)
+        # so the detached task's RBAC checks see the real caller, not the
+        # default anonymous context.
         if response_text and conv_id:
             if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
                 asyncio.create_task(
-                    self._speak_response(conn.user_ctx, conv_id, response_text)
+                    self._speak_response(conn.user_ctx, conv_id, response_text),
+                    context=contextvars.copy_context(),
                 )
 
         return {
@@ -6136,11 +6140,13 @@ class AIService(Service):
                     },
                 )
 
-        # Read-aloud hook — fire and forget.
+        # Read-aloud hook — fire and forget; copy contextvars so the detached
+        # task's RBAC checks see the real caller.
         if response_text and conv_id:
             if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
                 asyncio.create_task(
-                    self._speak_response(conn.user_ctx, conv_id, response_text)
+                    self._speak_response(conn.user_ctx, conv_id, response_text),
+                    context=contextvars.copy_context(),
                 )
 
         return {
