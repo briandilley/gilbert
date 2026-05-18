@@ -486,9 +486,8 @@ class SpeakerService(Service):
 
     async def set_alias(self, speaker_id: str, alias: str) -> None:
         """Assign an alias name to a speaker. Raises ValueError on collision."""
-        backend = self._require_single_backend()
-        # Check the alias doesn't collide with an existing speaker name
-        speakers = await backend.list_speakers()
+        # Check the alias doesn't collide with an existing speaker name across all backends
+        speakers = await self.list_speakers()
         for s in speakers:
             if s.name.lower() == alias.lower():
                 raise ValueError(f"Alias '{alias}' collides with existing speaker name '{s.name}'")
@@ -614,29 +613,6 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown speaker or alias: {name!r}")
             ids.append(sid)
         return ids
-
-    @staticmethod
-    def _native_id(speaker_id: str) -> str:
-        """Strip the ``<backend>:`` namespace prefix from a speaker ID.
-
-        Pre-Task-6 shim: the service layer always works with namespaced IDs
-        (``<backend>:<native>``), but the single-backend delegate still
-        expects bare native IDs. ``_route_id`` in Task 6 will replace this
-        with full backend dispatch; until then, strip and return the native
-        part.
-
-        Accepts bare IDs (no ``":"`` present) for backwards-compatibility
-        with data that hasn't been migrated yet.
-        """
-        if ":" in speaker_id:
-            _, _, native = speaker_id.partition(":")
-            return native
-        return speaker_id
-
-    @staticmethod
-    def _native_ids(speaker_ids: list[str]) -> list[str]:
-        """Strip namespace prefix from a list of speaker IDs (see ``_native_id``)."""
-        return [SpeakerService._native_id(sid) for sid in speaker_ids]
 
     def _route_id(self, speaker_id: str) -> tuple[SpeakerBackend, str]:
         """Split a namespaced speaker id and return ``(backend, native_id)``.
@@ -835,16 +811,24 @@ class SpeakerService(Service):
         - Already correct: returns immediately.
 
         Backends that don't support grouping are skipped.
+        Groups that span multiple backends are not supported — callers
+        should ensure all speaker_ids belong to the same backend when
+        grouping is required.
         """
-        backend = self._require_single_backend()
-        if not backend.supports_grouping or not speaker_ids:
+        if not speaker_ids:
             return
-
-        native = self._native_ids(speaker_ids)
-        if len(native) == 1:
-            await backend.ungroup_speakers(native)
-        else:
-            await backend.group_speakers(native)
+        grouped = self._route_ids(speaker_ids)
+        coros: list[Any] = []
+        for backend_name, native_ids in grouped.items():
+            b = self._backends[backend_name]
+            if not b.supports_grouping:
+                continue
+            if len(native_ids) == 1:
+                coros.append(b.ungroup_speakers(native_ids))
+            else:
+                coros.append(b.group_speakers(native_ids))
+        if coros:
+            await asyncio.gather(*coros)
 
     async def group_speakers(self, speaker_ids: list[str]) -> None:
         """Group the given speakers. All must be on the same backend.
@@ -1076,7 +1060,8 @@ class SpeakerService(Service):
 
         Returns a ``NowPlaying`` with ``state=STOPPED`` if no speakers exist.
         """
-        backend = self._require_single_backend()
+        if not self._backends:
+            raise RuntimeError("Speaker service is not enabled")
         if speaker_name:
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
@@ -1085,15 +1070,18 @@ class SpeakerService(Service):
             return await routed_backend.get_now_playing(native)
 
         if self._last_speaker_ids:
-            return await backend.get_now_playing(self._native_id(self._last_speaker_ids[0]))
+            routed_backend, native = self._route_id(self._last_speaker_ids[0])
+            return await routed_backend.get_now_playing(native)
 
         speakers = await self.list_speakers()
         if not speakers:
             return NowPlaying(state=PlaybackState.STOPPED)
         for s in speakers:
             if s.state == PlaybackState.PLAYING:
-                return await backend.get_now_playing(self._native_id(s.speaker_id))
-        return await backend.get_now_playing(self._native_id(speakers[0].speaker_id))
+                routed_backend, native = self._route_id(s.speaker_id)
+                return await routed_backend.get_now_playing(native)
+        routed_backend, native = self._route_id(speakers[0].speaker_id)
+        return await routed_backend.get_now_playing(native)
 
     # --- Announce ---
 
@@ -1178,8 +1166,6 @@ class SpeakerService(Service):
         if not isinstance(self._tts_svc, TTSProvider):
             raise TypeError("Expected TTSService for text_to_speech capability")
 
-        backend = self._require_single_backend()
-
         # Generate TTS audio
         request = SynthesisRequest(
             text=text,
@@ -1205,7 +1191,10 @@ class SpeakerService(Service):
         # Sonos backends that implement snapshot/restore still work.
         if target_ids is None:
             target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.snapshot(self._native_ids(target_ids))
+        grouped = self._route_ids(target_ids)
+        await asyncio.gather(
+            *(self._backends[bname].snapshot(nids) for bname, nids in grouped.items())
+        )
 
         # Play on speakers — topology handled by play_on_speakers.
         # ``announce=True`` tells backends that support it (Sonos) to
@@ -1235,7 +1224,9 @@ class SpeakerService(Service):
         # Restore previous playback state (no-op on aiosonos; kept for
         # non-Sonos backends that still need the manual restore).
         try:
-            await backend.restore(self._native_ids(target_ids))
+            await asyncio.gather(
+                *(self._backends[bname].restore(nids) for bname, nids in grouped.items())
+            )
         except Exception:
             logger.debug("Failed to restore playback after announcement")
 
@@ -1549,8 +1540,8 @@ class SpeakerService(Service):
             ),
         ]
 
-        # Add grouping tools if the backend supports it
-        if self._backends and self._require_single_backend().supports_grouping:
+        # Add grouping tools if any loaded backend supports it
+        if self._backends and any(b.supports_grouping for b in self._backends.values()):
             tools.extend(
                 [
                     ToolDefinition(
@@ -1624,7 +1615,7 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown tool: {name}")
 
     async def _tool_list_speakers(self) -> str:
-        speakers = await self._require_single_backend().list_speakers()
+        speakers = await self.list_speakers()
 
         # Enrich with aliases
         storage = self._get_storage_backend()
