@@ -5495,6 +5495,7 @@ class AIService(Service):
         swallowed so a TTS hiccup never breaks the chat reply itself.
         """
         import uuid
+
         from gilbert.core.chat import strip_markdown_for_speech
         from gilbert.core.output import cleanup_old_files, get_output_dir
         from gilbert.interfaces.tts import SynthesisRequest
@@ -5509,20 +5510,20 @@ class AIService(Service):
             speaker_svc = self._resolver.get_capability("speaker_control")
             if tts_svc is None or speaker_svc is None:
                 return
-            speakers = await speaker_svc.list_speakers()
+            speakers = await speaker_svc.list_speakers()  # type: ignore[attr-defined]
             target_id = f"browser:{user.user_id}"
             if not any(s.speaker_id == target_id for s in speakers):
                 return
             voice_id = getattr(self, "_chat_speech_voice", "") or ""
-            result = await tts_svc.synthesize(
+            result = await tts_svc.synthesize(  # type: ignore[attr-defined]
                 SynthesisRequest(text=plain, voice_id=voice_id)
             )
             output_dir = get_output_dir("speaker")
             cleanup_old_files(output_dir, 3600)
             file_path = output_dir / f"chat-speech-{uuid.uuid4()}.mp3"
             file_path.write_bytes(result.audio)
-            audio_url = speaker_svc._audio_url(str(file_path.resolve()))
-            await speaker_svc.play_on_speakers(
+            audio_url = speaker_svc._audio_url(str(file_path.resolve()))  # type: ignore[attr-defined]
+            await speaker_svc.play_on_speakers(  # type: ignore[attr-defined]
                 uri=audio_url,
                 speaker_ids=[target_id],
                 title="Gilbert",

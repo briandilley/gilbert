@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
+from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.speaker import PlayRequest
-from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
 
 
 class _CapturingBus(EventBus):
@@ -111,8 +111,6 @@ async def test_speaker_service_threads_kind_through_browser_echo() -> None:
     the kind classifier — not just the direct-target path."""
     from gilbert.core.services.speaker import SpeakerService
     from gilbert.interfaces.speaker import (
-        PlayRequest as _PR,
-        PlaybackState,
         SpeakerBackend,
         SpeakerInfo,
     )
@@ -126,7 +124,7 @@ async def test_speaker_service_threads_kind_through_browser_echo() -> None:
         supports_repeat = False
 
         def __init__(self) -> None:
-            self.played: list[_PR] = []
+            self.played: list[PlayRequest] = []
 
         async def initialize(self, config: dict) -> None:
             pass
@@ -140,7 +138,7 @@ async def test_speaker_service_threads_kind_through_browser_echo() -> None:
         async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
             return SpeakerInfo(speaker_id="primary-1", name="Primary", ip_address="")
 
-        async def play_uri(self, request: _PR) -> None:
+        async def play_uri(self, request: PlayRequest) -> None:
             self.played.append(request)
 
         async def stop(self, speaker_ids: list[str] | None = None) -> None:

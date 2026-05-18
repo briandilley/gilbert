@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gilbert.core.services.ai import AIService, _CHAT_SPEECH_COLLECTION
+from gilbert.core.services.ai import _CHAT_SPEECH_COLLECTION, AIService
 
 
 class _InMemoryStorage:
