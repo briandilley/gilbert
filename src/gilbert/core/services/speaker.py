@@ -1464,7 +1464,8 @@ class SpeakerService(Service):
                     "``uploads/``, ``outputs/``, or ``scratch/``), first call "
                     "``share_workspace_file`` to mint an HTTP URL for it, then "
                     "pass that URL's ``url`` field here as ``uri``. Passing a "
-                    "raw path like ``uploads/song.mp3`` will fail."
+                    "raw path like ``uploads/song.mp3`` will fail. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -1502,7 +1503,10 @@ class SpeakerService(Service):
                 slash_group="speaker",
                 slash_command="stop",
                 slash_help="Stop playback: /speaker stop [speakers]",
-                description="Stop playback on speakers.",
+                description=(
+                    "Stop playback on speakers. "
+                    'Pass "my browser", "my speaker", or "for me" to stop the caller\'s own browser tab.'
+                ),
                 parameters=[
                     ToolParameter(
                         name="speakers",
@@ -1518,7 +1522,10 @@ class SpeakerService(Service):
                 slash_group="speaker",
                 slash_command="volume",
                 slash_help="Set speaker volume: /speaker volume <speaker> <0-100>",
-                description="Set volume on a speaker.",
+                description=(
+                    "Set volume on a speaker. "
+                    'Pass "my browser", "my speaker", or "for me" to set the caller\'s own browser tab volume.'
+                ),
                 parameters=[
                     ToolParameter(
                         name="speaker",
@@ -1596,7 +1603,8 @@ class SpeakerService(Service):
                     "This is the primary tool for speaking text out loud — it handles everything: "
                     "generates audio via TTS, groups speakers if needed, sets volume, and plays. "
                     "If no speakers specified, uses last-used speakers or all. "
-                    "Use this instead of 'speak' when you want audio played on speakers."
+                    "Use this instead of 'speak' when you want audio played on speakers. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(

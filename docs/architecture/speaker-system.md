@@ -81,6 +81,30 @@ Speaker control with an abstract interface and three bundled backends: `sonos` (
 
 **Migration:** boot-time migration `0001_namespace_speaker_aliases_and_config` namespaces legacy bare alias rows (stored before the multi-backend era) and rewrites the legacy `speaker.backend: <name>` config to `primary_backend + backends.<name>.enabled`. Handles gracefully when a plugin-provided backend fails to initialize during the migration.
 
+### Browser speaker activation model
+
+A user's browser tab is a speaker **only while two conditions hold**:
+
+1. The user toggled "Receive audio on this tab" on (header control, persisted in localStorage).
+2. The tab's WebSocket connection is alive.
+
+The tab signals activation by sending `browser_speaker.activate` on connect (when the toggle is on); the server stores `(user_id, connection_id, display_name)` in `BrowserSpeakerBackend._active_connections`. When the connection drops, a `WsConnection.add_close_callback` fires to clean up. When the user flips the toggle off, the tab sends `browser_speaker.deactivate`.
+
+`BrowserSpeakerBackend.list_speakers()` enumerates all users with at least one active registration. `SpeakerService.list_speakers()` then filters by role — non-admins see only their own `browser:<self>` entry; admins see all. The same role check (`_check_browser_target_permissions`) gates dispatch: non-admins can only target their own browser; admins can target any.
+
+The browser-speaker echo gate (mirroring a non-browser primary play to the caller's browser) is enabled iff the caller has an active registration. The retired `speaker.browser_echo` user-metadata pref is replaced by the activation state — the toggle IS the opt-in.
+
+#### Magic name aliases
+
+`SpeakerService.resolve_speaker_name` recognizes a small set of aliases that resolve to the caller's own browser without consulting storage:
+
+- `my browser`
+- `my speaker`
+- `for me`
+- `me`
+
+These are case- and whitespace-insensitive. AI tool descriptions mention them so the model can use natural phrasing.
+
 ### Configuration
 - Config model: `SpeakerConfig` in `src/gilbert/config.py`.
 - YAML section: `speaker:` with `enabled`, `backend`, `default_announce_volume`, `settings`.

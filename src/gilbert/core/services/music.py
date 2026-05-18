@@ -754,7 +754,8 @@ class MusicService(Service):
                     "already-built queue use ``play_queue``. "
                     "By default searches favorites first, then playlists, "
                     "then runs a fresh search. Set ``source`` to restrict "
-                    "the lookup."
+                    "the lookup. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -817,7 +818,8 @@ class MusicService(Service):
                     "this one item and starts it. Takes the full item "
                     "as a JSON payload so the speaker backend can resolve "
                     "it without a second search round-trip. Sibling of "
-                    "``queue_item`` (which appends instead of replacing)."
+                    "``queue_item`` (which appends instead of replacing). "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -866,7 +868,8 @@ class MusicService(Service):
                         "this'. For immediate playback that replaces the "
                         "queue use ``play_music`` instead. Searches "
                         "favorites first, then playlists, then a fresh "
-                        "search. Set ``source`` to restrict the lookup."
+                        "search. Set ``source`` to restrict the lookup. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -914,7 +917,8 @@ class MusicService(Service):
                         "music is already playing: in that case it's a "
                         "no-op (returns ``already_playing``) so the "
                         "current track doesn't restart from the "
-                        "beginning of the queue."
+                        "beginning of the queue. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -938,7 +942,8 @@ class MusicService(Service):
                         "without interrupting playback. Takes the full "
                         "item as a JSON payload produced by a prior "
                         "search result. Sibling of ``play_item`` (which "
-                        "replaces the queue instead of appending)."
+                        "replaces the queue instead of appending). "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -981,7 +986,8 @@ class MusicService(Service):
                         "Use when the user wants ongoing music in a "
                         "vibe rather than a specific item — phrases like "
                         "'play some indie rock', 'something like Wilco', "
-                        "'a station based on this song'."
+                        "'a station based on this song'. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -1024,7 +1030,8 @@ class MusicService(Service):
                         "``off`` plays through and stops, ``track`` "
                         "repeats the current song, ``all`` repeats the "
                         "whole queue. Use for 'play this on loop', "
-                        "'repeat this song', 'put it on repeat'."
+                        "'repeat this song', 'put it on repeat'. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
