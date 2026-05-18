@@ -13,6 +13,8 @@ from gilbert.interfaces.transcription import (
     TranscriptSegment,
     WakeEvent,
     WakeWordConfig,
+    pcm_silence,
+    resample_pcm,
 )
 
 
@@ -66,3 +68,39 @@ def test_wake_word_config_and_event():
     assert cfg.sensitivity == 0.5
     ev = WakeEvent(keyword="hey gilbert", at_seconds=1.23)
     assert ev.confidence is None
+
+
+def test_pcm_silence_zero_seconds_is_empty():
+    assert pcm_silence(0.0, 16000) == b""
+
+
+def test_pcm_silence_length_matches_rate():
+    # 1 second of 16kHz 16-bit PCM = 16000 samples * 2 bytes = 32000 bytes
+    data = pcm_silence(1.0, 16000)
+    assert len(data) == 32000
+    assert data == b"\x00" * 32000
+
+
+def test_pcm_silence_partial_second():
+    # 0.5s @ 16kHz = 8000 samples * 2 bytes
+    assert len(pcm_silence(0.5, 16000)) == 16000
+
+
+def test_resample_pcm_identity_when_rates_match():
+    src = b"\x01\x00" * 100
+    assert resample_pcm(src, 16000, 16000) == src
+
+
+def test_resample_pcm_downsample_halves_length():
+    # 100 samples of 16-bit PCM downsampled from 32k → 16k = 50 samples
+    src = b"\x01\x00" * 100  # 200 bytes
+    out = resample_pcm(src, 32000, 16000)
+    assert len(out) == 100  # 50 samples * 2 bytes
+
+
+def test_resample_pcm_upsample_doubles_length():
+    src = b"\x01\x00" * 100  # 200 bytes (100 samples)
+    out = resample_pcm(src, 16000, 32000)
+    # Upsample doubles the sample count → 400 bytes. audioop.ratecv may
+    # round; allow ±2 samples.
+    assert abs(len(out) - 400) <= 4

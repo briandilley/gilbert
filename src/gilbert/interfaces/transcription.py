@@ -12,6 +12,7 @@ aggregator that loads backends from all three registries.
 
 from __future__ import annotations
 
+import audioop
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -138,3 +139,34 @@ class WakeEvent:
     keyword: str
     at_seconds: float
     confidence: float | None = None
+
+
+# --- Audio helpers ---------------------------------------------------
+#
+# Pure, vendor-free. Live in ``interfaces/`` so both the core service
+# and plugin tests can use them without depending on any backend.
+# Mirrors how ``interfaces/tts.py`` ships ``append_silence``.
+
+
+def pcm_silence(seconds: float, sample_rate: int) -> bytes:
+    """Generate ``seconds`` of 16-bit little-endian PCM silence at ``sample_rate``.
+
+    Returns ``b""`` for non-positive ``seconds``. Always mono (1 channel).
+    """
+    if seconds <= 0:
+        return b""
+    samples = int(seconds * sample_rate)
+    return b"\x00\x00" * samples
+
+
+def resample_pcm(audio: bytes, src_rate: int, dst_rate: int) -> bytes:
+    """Resample 16-bit little-endian mono PCM from ``src_rate`` → ``dst_rate``.
+
+    Pass-through when the rates already match. Uses ``audioop.ratecv``
+    which is shipped with stdlib in 3.12 (deprecated in 3.13 but still
+    functional; swap to ``soxr`` later if/when that becomes a problem).
+    """
+    if src_rate == dst_rate:
+        return audio
+    converted, _ = audioop.ratecv(audio, 2, 1, src_rate, dst_rate, None)
+    return converted
