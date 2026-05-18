@@ -84,6 +84,47 @@ def mentions_gilbert(message: str) -> bool:
     return bool(_GILBERT_MENTION.search(message))
 
 
+_RE_FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
+_RE_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_RE_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_RE_INLINE_CODE = re.compile(r"`([^`]+)`")
+_RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+_RE_LIST_ITEM = re.compile(r"^\s*[-*+]\s+(.+)$", re.MULTILINE)
+_RE_ORDERED_ITEM = re.compile(r"^\s*\d+\.\s+(.+)$", re.MULTILINE)
+_RE_EMPHASIS = re.compile(r"(\*\*|__|\*|_)(.+?)\1")
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_BLANK_RUN = re.compile(r"\n\s*\n+")
+
+
+def strip_markdown_for_speech(text: str) -> str:
+    """Strip markdown structure so the text reads naturally when spoken.
+
+    Drops code blocks (un-speakable), drops link URLs (keeps anchor text),
+    drops images, strips emphasis markers, periodizes headings and list
+    items so TTS pauses between them, and collapses blank-line runs into
+    a single sentence break. Regex-based — no markdown library dependency.
+
+    Used by ``AIService._speak_response`` to prepare chat replies for TTS.
+    """
+    if not text:
+        return ""
+    out = _RE_FENCED_CODE.sub(" ", text)
+    out = _RE_IMAGE.sub(" ", out)
+    out = _RE_LINK.sub(r"\1", out)
+    out = _RE_INLINE_CODE.sub(r"\1", out)
+    out = _RE_HEADING.sub(r"\1. ", out)
+    out = _RE_LIST_ITEM.sub(r"\1.", out)
+    out = _RE_ORDERED_ITEM.sub(r"\1.", out)
+    out = _RE_EMPHASIS.sub(r"\2", out)
+    out = _RE_HTML_TAG.sub(" ", out)
+    out = _RE_BLANK_RUN.sub(". ", out)
+    # Collapse any residual runs of whitespace to single spaces.
+    out = re.sub(r"[ \t]+", " ", out)
+    # Trim and collapse stray ". ." into a single ".".
+    out = re.sub(r"\.\s*\.+", ".", out)
+    return out.strip()
+
+
 def build_room_context(data: dict[str, Any], user: UserContext) -> str:
     """Build a system prompt for shared room conversations."""
     title = data.get("title", "Shared Room")
