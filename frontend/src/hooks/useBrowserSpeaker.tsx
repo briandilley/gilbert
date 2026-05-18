@@ -20,6 +20,8 @@ export interface PlayItem {
   title: string;
   volume: number; // 0-100
   receivedAt: number;
+  kind: string; // "" for generic, "chat_speech" for read-aloud clips
+  conversationId: string;
 }
 
 interface BrowserSpeakerStore {
@@ -111,11 +113,19 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
         title: typeof data.title === "string" ? data.title : "",
         volume: clampVolume(data.volume),
         receivedAt: Date.now(),
+        kind: typeof data.kind === "string" ? data.kind : "",
+        conversationId:
+          typeof data.conversation_id === "string" ? data.conversation_id : "",
       };
-      setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
+      if (item.kind !== "chat_speech") {
+        setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
+      }
       setLastPlayed(item);
       if (enabled && audioRef.current) {
         const el = audioRef.current;
+        // Belt-and-suspenders: explicitly stop any in-flight clip before
+        // swapping src so the interrupt is deterministic across browsers.
+        if (!el.paused) el.pause();
         el.src = url;
         el.volume = Math.max(0, Math.min(1, item.volume / 100));
         setIsPlaying(true);
