@@ -69,6 +69,7 @@ export function TopBar() {
     enabled: connected && !!user,
   });
   const groups: NavGroup[] = data?.nav ?? [];
+  const browserSpeakerAvailable = data?.browser_speaker_available ?? false;
 
   const initials =
     user?.display_name
@@ -141,7 +142,7 @@ export function TopBar() {
         {/* Plugins can drop widgets next to the bell. */}
         <PluginPanelSlot slot="header.widgets" />
 
-        <BrowserSpeakerControl />
+        {browserSpeakerAvailable && <BrowserSpeakerControl />}
 
         <NotificationBell />
 

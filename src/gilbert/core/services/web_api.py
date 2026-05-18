@@ -522,11 +522,24 @@ class WebApiService(Service):
         ]
         cards.extend(_visible_plugin_cards(gilbert, _visible))
 
+        # The TopBar's <BrowserSpeakerControl/> needs a signal to hide
+        # itself when the ``browser`` speaker backend isn't loaded — its
+        # activate/deactivate RPCs would no-op anyway. Surface a simple
+        # boolean rather than leaking the full backend list to every nav
+        # consumer.
+        speaker_svc = sm.get_by_capability("speaker_control")
+        browser_speaker_available = (
+            speaker_svc is not None
+            and speaker_svc.enabled
+            and getattr(speaker_svc, "backends", {}).get("browser") is not None
+        )
+
         return {
             "type": "dashboard.get.result",
             "ref": frame.get("id"),
             "cards": cards,
             "nav": visible_nav,
+            "browser_speaker_available": browser_speaker_available,
         }
 
     async def _ws_ui_routes_list(
