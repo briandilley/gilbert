@@ -1311,7 +1311,38 @@ class SpeakerService(Service):
     # --- WsHandlerProvider protocol ---
 
     def get_ws_handlers(self) -> dict[str, Any]:
-        return {"speaker.info": self._ws_speaker_info}
+        return {
+            "speaker.info": self._ws_speaker_info,
+            "browser_speaker.activate": self._ws_browser_speaker_activate,
+            "browser_speaker.deactivate": self._ws_browser_speaker_deactivate,
+        }
+
+    async def _ws_browser_speaker_activate(
+        self, conn: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Register the auth'd connection as an active browser-speaker."""
+        backend = self._backends.get("browser")
+        if backend is None:
+            return {"status": "error", "error": "browser speaker backend not loaded"}
+        conn_id = conn.connection_id
+        user_id = conn.user_id or ""
+        display_name = getattr(conn, "display_name", "") or user_id
+        backend.activate(conn_id=conn_id, user_id=user_id, display_name=display_name)
+        # Ensure registration vanishes when the WS drops, even if the
+        # client never sends an explicit deactivate (tab closed).
+        conn.add_close_callback(lambda: backend.deactivate(conn_id=conn_id))
+        await self._refresh_cached_speakers()
+        return {"status": "ok"}
+
+    async def _ws_browser_speaker_deactivate(
+        self, conn: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._backends.get("browser")
+        if backend is None:
+            return {"status": "error", "error": "browser speaker backend not loaded"}
+        backend.deactivate(conn_id=conn.connection_id)
+        await self._refresh_cached_speakers()
+        return {"status": "ok"}
 
     async def _ws_speaker_info(
         self, conn: Any, frame: dict[str, Any]
