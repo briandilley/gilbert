@@ -153,11 +153,6 @@ class SpeakerService(Service):
         from gilbert.interfaces.context import get_current_user
 
         user = get_current_user()
-        logger.info(
-            "[DEBUG] SpeakerService.list_speakers user=%r is_admin=%s merged_browser_ids=%s",
-            user.user_id, self._is_admin(user),
-            [s.speaker_id for s in merged if s.backend_name == "browser"],
-        )
         if self._is_admin(user):
             return merged
         return [
@@ -1394,10 +1389,6 @@ class SpeakerService(Service):
         user_id = conn.user_id or ""
         display_name = conn.display_name
         backend.activate(conn_id=conn_id, user_id=user_id, display_name=display_name)
-        logger.info(
-            "[DEBUG] SpeakerService._ws_browser_speaker_activate user_id=%r conn_id=%r display=%r; total active: %d",
-            user_id, conn_id, display_name, len(backend._active_connections),
-        )
         # Ensure registration vanishes when the WS drops, even if the
         # client never sends an explicit deactivate (tab closed).
         conn.add_close_callback(lambda: backend.deactivate(conn_id=conn_id))
@@ -1411,10 +1402,6 @@ class SpeakerService(Service):
         if backend is None or not isinstance(backend, BrowserSpeakerProtocol):
             return {"status": "error", "error": "browser speaker backend not loaded"}
         backend.deactivate(conn_id=conn.connection_id)
-        logger.info(
-            "[DEBUG] SpeakerService._ws_browser_speaker_deactivate conn_id=%r; total active: %d",
-            conn.connection_id, len(backend._active_connections),
-        )
         await self._refresh_cached_speakers()
         return {"status": "ok"}
 

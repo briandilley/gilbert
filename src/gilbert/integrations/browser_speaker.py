@@ -103,10 +103,6 @@ class BrowserSpeakerBackend(SpeakerBackend):
         """
         self._active_connections.setdefault(user_id, {})[conn_id] = display_name
         self._conn_to_user[conn_id] = user_id
-        logger.info(
-            "[DEBUG] BrowserSpeakerBackend.activate user_id=%r conn_id=%r display=%r; total active: %d",
-            user_id, conn_id, display_name, len(self._active_connections),
-        )
 
     def deactivate(self, *, conn_id: str) -> None:
         """Unregister a connection. No-op if conn_id is unknown."""
@@ -119,10 +115,6 @@ class BrowserSpeakerBackend(SpeakerBackend):
         conns.pop(conn_id, None)
         if not conns:
             self._active_connections.pop(user_id, None)
-        logger.info(
-            "[DEBUG] BrowserSpeakerBackend.deactivate user_id=%r conn_id=%r; total active: %d",
-            user_id, conn_id, len(self._active_connections),
-        )
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
@@ -156,10 +148,6 @@ class BrowserSpeakerBackend(SpeakerBackend):
 
         Role-based filtering happens upstream in ``SpeakerService.list_speakers``.
         """
-        logger.info(
-            "[DEBUG] BrowserSpeakerBackend.list_speakers active_connections=%r",
-            {uid: list(conns.keys()) for uid, conns in self._active_connections.items()},
-        )
         out: list[SpeakerInfo] = []
         for user_id, conns in self._active_connections.items():
             if not conns:
