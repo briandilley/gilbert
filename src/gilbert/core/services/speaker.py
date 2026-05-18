@@ -583,11 +583,23 @@ class SpeakerService(Service):
             sid = results[0].get("speaker_id")
             if sid is not None:
                 sid_str = str(sid)
-                # Legacy aliases stored before Task 13 migration may hold a bare
-                # native ID.  Stamp the prefix in-memory when only one backend
-                # is loaded so the caller always receives a namespaced id.
-                if ":" not in sid_str and self._backends:
-                    sid_str = f"{self._require_single_backend().backend_name}:{sid_str}"
+                if ":" in sid_str:
+                    return sid_str
+                # Legacy bare id — try to namespace it in-memory by scanning
+                # all loaded backends.  This covers installs that haven't run
+                # the 0001 migration yet, or where the migration couldn't
+                # identify the backend at migration time.
+                for backend_name, backend in self._backends.items():
+                    try:
+                        speakers = await backend.list_speakers()
+                    except Exception:
+                        continue
+                    if any(s.speaker_id == sid_str for s in speakers):
+                        return f"{backend_name}:{sid_str}"
+                # Cannot namespace — return as-is; _route_id will raise
+                # KeyError/ValueError later, which is the correct behaviour
+                # (surfaces the un-migrated data clearly rather than silently
+                # routing to the wrong backend).
                 return sid_str
             return None
 
