@@ -104,3 +104,131 @@ def test_resample_pcm_upsample_doubles_length():
     # Upsample doubles the sample count → 400 bytes. audioop.ratecv may
     # round; allow ±2 samples.
     assert abs(len(out) - 400) <= 4
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Backend ABCs and capability protocols
+# ---------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+from gilbert.interfaces.transcription import (  # noqa: E402
+    BatchTranscriber,
+    BatchTranscriptionBackend,
+    StreamingTranscriber,
+    StreamingTranscriptionBackend,
+    TranscriptionStream,
+    WakeWordBackend,
+    WakeWordDetector,
+    WakeWordListener,
+)
+
+
+def test_batch_backend_registry_records_subclasses():
+    class _MyBatch(BatchTranscriptionBackend):
+        backend_name = "_test_batch_registry"
+
+        async def initialize(self, config):  # type: ignore[override]
+            pass
+
+        async def close(self):  # type: ignore[override]
+            pass
+
+        async def transcribe(self, request):  # type: ignore[override]
+            raise NotImplementedError
+
+    try:
+        assert (
+            BatchTranscriptionBackend.registered_backends().get("_test_batch_registry")
+            is _MyBatch
+        )
+    finally:
+        BatchTranscriptionBackend._registry.pop("_test_batch_registry", None)
+
+
+def test_streaming_backend_registry_records_subclasses():
+    class _MyStream(StreamingTranscriptionBackend):
+        backend_name = "_test_stream_registry"
+
+        async def initialize(self, config):  # type: ignore[override]
+            pass
+
+        async def close(self):  # type: ignore[override]
+            pass
+
+        async def open_stream(self, config):  # type: ignore[override]
+            raise NotImplementedError
+
+    try:
+        assert (
+            StreamingTranscriptionBackend.registered_backends().get("_test_stream_registry")
+            is _MyStream
+        )
+    finally:
+        StreamingTranscriptionBackend._registry.pop("_test_stream_registry", None)
+
+
+def test_wake_word_backend_registry_records_subclasses():
+    class _MyWake(WakeWordBackend):
+        backend_name = "_test_wake_registry"
+
+        async def initialize(self, config):  # type: ignore[override]
+            pass
+
+        async def close(self):  # type: ignore[override]
+            pass
+
+        async def open_detector(self, config):  # type: ignore[override]
+            raise NotImplementedError
+
+    try:
+        assert (
+            WakeWordBackend.registered_backends().get("_test_wake_registry")
+            is _MyWake
+        )
+    finally:
+        WakeWordBackend._registry.pop("_test_wake_registry", None)
+
+
+def test_unnamed_subclass_is_not_registered():
+    initial = dict(BatchTranscriptionBackend.registered_backends())
+
+    class _Anon(BatchTranscriptionBackend):
+        # no backend_name → must not register
+        async def initialize(self, config):  # type: ignore[override]
+            pass
+
+        async def close(self):  # type: ignore[override]
+            pass
+
+        async def transcribe(self, request):  # type: ignore[override]
+            raise NotImplementedError
+
+    assert BatchTranscriptionBackend.registered_backends() == initial
+
+
+def test_capability_protocols_runtime_checkable():
+    class _BatchOnly:
+        async def transcribe(self, request, backend=None):
+            ...
+
+    class _StreamingOnly:
+        async def open_stream(self, config, backend=None):
+            ...
+
+    class _WakeOnly:
+        async def open_detector(self, config, backend=None):
+            ...
+
+    assert isinstance(_BatchOnly(), BatchTranscriber)
+    assert isinstance(_StreamingOnly(), StreamingTranscriber)
+    assert isinstance(_WakeOnly(), WakeWordListener)
+    assert not isinstance(_BatchOnly(), StreamingTranscriber)
+
+
+def test_stream_and_detector_are_abcs():
+    with pytest.raises(TypeError):
+        TranscriptionStream()  # type: ignore[abstract]
+    with pytest.raises(TypeError):
+        WakeWordDetector()  # type: ignore[abstract]

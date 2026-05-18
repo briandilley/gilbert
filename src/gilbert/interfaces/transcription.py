@@ -13,8 +13,13 @@ aggregator that loads backends from all three registries.
 from __future__ import annotations
 
 import audioop
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol, runtime_checkable
+
+from gilbert.interfaces.configuration import ConfigParam
 
 
 class AudioEncoding(StrEnum):
@@ -170,3 +175,162 @@ def resample_pcm(audio: bytes, src_rate: int, dst_rate: int) -> bytes:
         return audio
     converted, _ = audioop.ratecv(audio, 2, 1, src_rate, dst_rate, None)
     return converted
+
+
+# --- Streaming / detector primitive ABCs -----------------------------
+
+
+class TranscriptionStream(ABC):
+    """A live streaming-transcription session opened by a backend.
+
+    Producer pushes audio chunks via ``send``; consumer reads
+    ``TranscriptionEvent``s from the ``events()`` async iterator.
+    ``close()`` signals end-of-audio — ``events()`` should still drain
+    any final events the backend emits during shutdown.
+    """
+
+    @abstractmethod
+    async def send(self, chunk: bytes) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    def events(self) -> AsyncIterator[TranscriptionEvent]: ...
+
+
+class WakeWordDetector(ABC):
+    """A live wake-word-detection session opened by a backend."""
+
+    @abstractmethod
+    async def send(self, chunk: bytes) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    def events(self) -> AsyncIterator[WakeEvent]: ...
+
+
+# --- Backend ABCs with registries -----------------------------------
+
+class BatchTranscriptionBackend(ABC):
+    """One-shot bytes-in / text-out transcription."""
+
+    _registry: dict[str, type[BatchTranscriptionBackend]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            BatchTranscriptionBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type[BatchTranscriptionBackend]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list[ConfigParam]:
+        return []
+
+    @abstractmethod
+    async def initialize(self, config: dict[str, object]) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    async def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult: ...
+
+    async def list_languages(self) -> list[str]:
+        """Optional: best-effort list of supported language codes. Default empty."""
+        return []
+
+
+class StreamingTranscriptionBackend(ABC):
+    """Streaming transcription — push chunks, read transcript events."""
+
+    _registry: dict[str, type[StreamingTranscriptionBackend]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            StreamingTranscriptionBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type[StreamingTranscriptionBackend]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list[ConfigParam]:
+        return []
+
+    @abstractmethod
+    async def initialize(self, config: dict[str, object]) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    async def open_stream(self, config: StreamConfig) -> TranscriptionStream: ...
+
+
+class WakeWordBackend(ABC):
+    """Continuous wake-word detection — push chunks, read wake events."""
+
+    _registry: dict[str, type[WakeWordBackend]] = {}
+    backend_name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.backend_name:
+            WakeWordBackend._registry[cls.backend_name] = cls
+
+    @classmethod
+    def registered_backends(cls) -> dict[str, type[WakeWordBackend]]:
+        return dict(cls._registry)
+
+    @classmethod
+    def backend_config_params(cls) -> list[ConfigParam]:
+        return []
+
+    @abstractmethod
+    async def initialize(self, config: dict[str, object]) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    async def open_detector(self, config: WakeWordConfig) -> WakeWordDetector: ...
+
+
+# --- Consumer-facing capability protocols ----------------------------
+
+@runtime_checkable
+class BatchTranscriber(Protocol):
+    """Service-level protocol for any object that can batch-transcribe."""
+
+    async def transcribe(
+        self,
+        request: TranscriptionRequest,
+        backend: str | None = None,
+    ) -> TranscriptionResult: ...
+
+
+@runtime_checkable
+class StreamingTranscriber(Protocol):
+    async def open_stream(
+        self,
+        config: StreamConfig,
+        backend: str | None = None,
+    ) -> TranscriptionStream: ...
+
+
+@runtime_checkable
+class WakeWordListener(Protocol):
+    async def open_detector(
+        self,
+        config: WakeWordConfig,
+        backend: str | None = None,
+    ) -> WakeWordDetector: ...
