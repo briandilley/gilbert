@@ -40,7 +40,13 @@ from gilbert.interfaces.music import (
     Playable,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState, SpeakerProvider, split_speaker_id
+from gilbert.interfaces.speaker import (
+    LoopMode,
+    NowPlaying,
+    PlaybackState,
+    SpeakerProvider,
+    split_speaker_id,
+)
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
