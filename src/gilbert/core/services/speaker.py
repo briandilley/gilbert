@@ -48,6 +48,9 @@ _ALIAS_COLLECTION = "speaker_aliases"
 # user speaker prefs sit alongside without collision.
 _BROWSER_ECHO_PREF_KEY = "speaker.browser_echo"
 
+# Magic aliases that resolve to the caller's own browser
+_MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
+
 
 class SpeakerService(Service):
     """Exposes a SpeakerBackend as a service with speaker control and announce capabilities."""
@@ -596,6 +599,17 @@ class SpeakerService(Service):
         ``list_speakers()`` so callers can feed the result to
         ``_route_id`` without a separate namespace-stamping step.
         """
+        # Magic aliases — resolve to the caller's own browser regardless of
+        # whether they're actually active. Downstream dispatch is a silent
+        # no-op for inactive browser targets, which is the right behavior.
+        if name.strip().lower() in _MY_BROWSER_ALIASES:
+            from gilbert.interfaces.context import get_current_user
+
+            user = get_current_user()
+            if user and user.user_id:
+                return f"browser:{user.user_id}"
+            return None
+
         self._require_single_backend()  # raise if no backend configured
         speakers = await self.list_speakers()  # namespaced via service
 
