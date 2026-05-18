@@ -1,13 +1,16 @@
 """Tests for SpeakerService browser RPCs, role filter, and permissions."""
+
 from __future__ import annotations
 
-import pytest
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from gilbert.core.services.speaker import SpeakerService
 from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.context import set_current_user
 
 
 def _make_admin() -> UserContext:
@@ -96,11 +99,6 @@ async def test_get_ws_handlers_exposes_browser_speaker_rpcs(
     handlers = svc_with_browser_backend.get_ws_handlers()
     assert "browser_speaker.activate" in handlers
     assert "browser_speaker.deactivate" in handlers
-
-
-from unittest.mock import AsyncMock, patch
-
-from gilbert.interfaces.context import set_current_user
 
 
 @pytest.mark.asyncio

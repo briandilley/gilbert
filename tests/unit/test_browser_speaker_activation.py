@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
-from gilbert.interfaces.speaker import SpeakerInfo
 
 
 @pytest.fixture

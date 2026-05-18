@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import logging
 
-from gilbert.interfaces.context import get_current_conversation_id, get_current_user
 from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.context import get_current_conversation_id, get_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.speaker import (
     PlaybackState,

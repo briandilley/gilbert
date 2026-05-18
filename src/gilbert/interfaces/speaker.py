@@ -346,6 +346,27 @@ class SpeakerBackend(ABC):
 
 
 @runtime_checkable
+class BrowserSpeakerProtocol(Protocol):
+    """Protocol for the browser-speaker activation model.
+
+    ``BrowserSpeakerBackend`` (in ``gilbert.integrations.browser_speaker``)
+    implements this; ``SpeakerService`` narrows via ``isinstance`` to
+    call activation methods and read the active-connections map without
+    a concrete-class import (which would violate layer rules).
+    """
+
+    _active_connections: dict[str, dict[str, str]]
+
+    def activate(self, *, conn_id: str, user_id: str, display_name: str) -> None:
+        """Register ``conn_id`` as an active browser-speaker connection for ``user_id``."""
+        ...
+
+    def deactivate(self, *, conn_id: str) -> None:
+        """Remove ``conn_id`` from the active-connections map."""
+        ...
+
+
+@runtime_checkable
 class EventBusAwareSpeakerBackend(Protocol):
     """Optional protocol for backends that publish playback frames via the event bus.
 

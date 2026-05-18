@@ -22,11 +22,13 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import (
+    BrowserSpeakerProtocol,
     LoopMode,
     NowPlaying,
     PlaybackState,
     PlayRequest,
     SpeakerBackend,
+    SpeakerGroup,
     SpeakerInfo,
     split_speaker_id,
     to_browser_url,
@@ -159,7 +161,7 @@ class SpeakerService(Service):
             if s.backend_name != "browser" or s.speaker_id == f"browser:{user.user_id}"
         ]
 
-    async def list_speaker_groups(self) -> list["SpeakerGroup"]:
+    async def list_speaker_groups(self) -> list[SpeakerGroup]:
         """Return groups across all loaded backends that support grouping.
 
         ``coordinator_id`` and every entry in ``member_ids`` are
@@ -168,7 +170,6 @@ class SpeakerService(Service):
         are skipped. If a grouping-capable backend's ``list_groups`` raises,
         the failure is logged and that backend's slice is omitted.
         """
-        from gilbert.interfaces.speaker import SpeakerGroup  # local import to avoid circular at module level
 
         if not self._backends:
             return []
@@ -821,7 +822,7 @@ class SpeakerService(Service):
         if not user or not user.user_id or user.user_id == "system":
             return False
         browser = self._backends.get("browser")
-        if browser is None:
+        if browser is None or not isinstance(browser, BrowserSpeakerProtocol):
             return False
         return bool(browser._active_connections.get(user.user_id))
 
@@ -1383,7 +1384,7 @@ class SpeakerService(Service):
     ) -> dict[str, Any]:
         """Register the auth'd connection as an active browser-speaker."""
         backend = self._backends.get("browser")
-        if backend is None:
+        if backend is None or not isinstance(backend, BrowserSpeakerProtocol):
             return {"status": "error", "error": "browser speaker backend not loaded"}
         conn_id = conn.connection_id
         user_id = conn.user_id or ""
@@ -1399,7 +1400,7 @@ class SpeakerService(Service):
         self, conn: Any, payload: dict[str, Any]
     ) -> dict[str, Any]:
         backend = self._backends.get("browser")
-        if backend is None:
+        if backend is None or not isinstance(backend, BrowserSpeakerProtocol):
             return {"status": "error", "error": "browser speaker backend not loaded"}
         backend.deactivate(conn_id=conn.connection_id)
         await self._refresh_cached_speakers()
