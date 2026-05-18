@@ -54,6 +54,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { summarizeUsage } from "@/lib/usage";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { ChatSpeechToggle } from "@/components/chat/ChatSpeechToggle";
 
 export function ChatPage() {
   const { user } = useAuth();
@@ -1130,6 +1131,8 @@ export function ChatPage() {
                 <Separator orientation="vertical" className="h-5 mx-1" />
               </>
             )}
+
+            <ChatSpeechToggle conversationId={activeConvId} />
 
             {activeConvId && (
               <Tooltip>
