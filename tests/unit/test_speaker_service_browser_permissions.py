@@ -96,3 +96,54 @@ async def test_get_ws_handlers_exposes_browser_speaker_rpcs(
     handlers = svc_with_browser_backend.get_ws_handlers()
     assert "browser_speaker.activate" in handlers
     assert "browser_speaker.deactivate" in handlers
+
+
+from gilbert.interfaces.context import set_current_user
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_admin_sees_all_browser_entries(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="alice", display_name="Alice")
+    backend.activate(conn_id="c2", user_id="bob", display_name="Bob")
+
+    set_current_user(_make_admin())
+    speakers = await svc.list_speakers()
+
+    browser_ids = {s.speaker_id for s in speakers if s.backend_name == "browser"}
+    assert browser_ids == {"browser:alice", "browser:bob"}
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_non_admin_sees_only_own_browser(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="alice", display_name="Alice")
+    backend.activate(conn_id="c2", user_id="bob", display_name="Bob")
+
+    set_current_user(_make_user("alice"))
+    speakers = await svc.list_speakers()
+
+    browser_ids = {s.speaker_id for s in speakers if s.backend_name == "browser"}
+    assert browser_ids == {"browser:alice"}
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_system_user_sees_all_browser_entries(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="alice", display_name="Alice")
+    backend.activate(conn_id="c2", user_id="bob", display_name="Bob")
+
+    set_current_user(UserContext.SYSTEM)
+    speakers = await svc.list_speakers()
+
+    browser_ids = {s.speaker_id for s in speakers if s.backend_name == "browser"}
+    assert browser_ids == {"browser:alice", "browser:bob"}

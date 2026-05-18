@@ -14,7 +14,7 @@ from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
 )
-from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
     ConfigActionResult,
@@ -85,6 +85,8 @@ class SpeakerService(Service):
         # still gets the play_uri call.
         self._users_svc: Any = None
         self._event_bus_provider: Any = None
+        # Optional access-control provider for role-aware filtering.
+        self._access_control: AccessControlProvider | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -92,7 +94,7 @@ class SpeakerService(Service):
             capabilities=frozenset({"speaker_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
-                {"configuration", "text_to_speech", "users", "event_bus"}
+                {"configuration", "text_to_speech", "users", "event_bus", "access_control"}
             ),
             toggleable=True,
             toggle_description="Speaker playback and control",
@@ -153,7 +155,15 @@ class SpeakerService(Service):
                 continue
             for s in result:
                 merged.append(replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name))
-        return merged
+        from gilbert.interfaces.context import get_current_user
+
+        user = get_current_user()
+        if self._is_admin(user):
+            return merged
+        return [
+            s for s in merged
+            if s.backend_name != "browser" or s.speaker_id == f"browser:{user.user_id}"
+        ]
 
     async def list_speaker_groups(self) -> list["SpeakerGroup"]:
         """Return groups across all loaded backends that support grouping.
@@ -241,6 +251,10 @@ class SpeakerService(Service):
         if isinstance(users_svc, UserPrefReader):
             self._users_svc = users_svc
 
+        acl_svc = resolver.get_capability("access_control")
+        if isinstance(acl_svc, AccessControlProvider):
+            self._access_control = acl_svc
+
         # Initialize all configured backends.
         await self._reinit_backends(section.get("backends", {}))
         self._resolve_primary_backend(primary=section.get("primary_backend", ""))
@@ -288,6 +302,19 @@ class SpeakerService(Service):
         if isinstance(self._storage_svc, StorageProvider):
             return self._storage_svc.backend
         raise TypeError("Expected StorageProvider for entity_storage")
+
+    def _is_admin(self, user_ctx: UserContext) -> bool:
+        """Resolve whether the user has admin-level access.
+
+        Uses ``AccessControlProvider`` if available, otherwise falls
+        back to checking for ``"admin"`` in the user's roles. SYSTEM
+        counts as admin.
+        """
+        if user_ctx.user_id == UserContext.SYSTEM.user_id:
+            return True
+        if self._access_control is not None:
+            return self._access_control.get_effective_level(user_ctx) <= 0
+        return "admin" in user_ctx.roles
 
     def _apply_config(self, section: dict[str, Any]) -> None:
         """Apply tunable config values."""
