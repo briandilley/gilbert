@@ -43,6 +43,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # layer's can_see_speaker_browser_event filter narrows delivery
     # to the specific recipient by matching event.data["user_id"].
     "speaker.browser.": 100,
+    # Read-aloud preference changes are user-level events; the WS
+    # layer's can_see_chat_read_aloud_event filter narrows delivery
+    # to the specific recipient by matching event.data["user_id"].
+    "chat.read_aloud.": 100,
     # auth.user.roles.changed fires on role mutation. The WS layer
     # restricts delivery to admins + the affected user themselves.
     "auth.": 100,

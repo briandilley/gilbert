@@ -158,6 +158,15 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_chat_read_aloud_event(self, event: Event) -> bool:
+        """Deliver chat.read_aloud.* events only to the matching user's
+        own connections (so other tabs of that user stay in sync without
+        leaking the preference to other users in a shared room)."""
+        if not str(event.event_type).startswith("chat.read_aloud."):
+            return True  # not our event type — let other filters decide
+        target_user_id = (event.data or {}).get("user_id", "")
+        return bool(target_user_id) and target_user_id == self.user_id
+
     def can_see_chat_event(self, event: Event) -> bool:
         """Content-level filter for chat events (membership + visible_to)."""
         if not event.event_type.startswith("chat."):
@@ -393,6 +402,8 @@ class WsConnectionManager:
             if not conn.can_see_notification_event(event):
                 continue
             if not conn.can_see_speaker_browser_event(event):
+                continue
+            if not conn.can_see_chat_read_aloud_event(event):
                 continue
             conn.send_event(event)
 

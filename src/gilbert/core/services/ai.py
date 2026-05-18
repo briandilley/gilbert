@@ -5503,6 +5503,8 @@ class AIService(Service):
             "slash.commands.list": self._ws_slash_commands_list,
             "chat.models.list": self._ws_models_list,
             "ai.profiles.list": self._ws_profiles_list,
+            "chat.read_aloud.get": self._ws_chat_read_aloud_get,
+            "chat.read_aloud.set": self._ws_chat_read_aloud_set,
         }
 
     async def _ws_slash_commands_list(
@@ -5886,6 +5888,109 @@ class AIService(Service):
             "ref": frame.get("id"),
             "conversation_id": conv_id,
             "title": title,
+        }
+
+    async def _ws_chat_read_aloud_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return the per-(user, conv) read-aloud preference."""
+        from gilbert.core.chat import check_conversation_access
+
+        conv_id = frame.get("conversation_id")
+        if not conv_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        conv = await self._storage.get(_COLLECTION, conv_id)
+        if not conv:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        denied = check_conversation_access(conv, conn.user_ctx)
+        if denied:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": denied,
+                "code": 403,
+            }
+        enabled = await self.get_speech_pref(conn.user_ctx.user_id, conv_id)
+        return {
+            "type": "chat.read_aloud.get.result",
+            "ref": frame.get("id"),
+            "conversation_id": conv_id,
+            "enabled": enabled,
+        }
+
+    async def _ws_chat_read_aloud_set(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Persist the per-(user, conv) read-aloud preference and broadcast
+        a per-user ``chat.read_aloud.changed`` event for other tabs."""
+        from gilbert.core.chat import check_conversation_access, publish_event
+
+        conv_id = frame.get("conversation_id")
+        enabled = bool(frame.get("enabled", False))
+        if not conv_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        conv = await self._storage.get(_COLLECTION, conv_id)
+        if not conv:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        denied = check_conversation_access(conv, conn.user_ctx, require_member=True)
+        if denied:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": denied,
+                "code": 403,
+            }
+        await self.set_speech_pref(conn.user_ctx.user_id, conv_id, enabled)
+        gilbert = conn.manager.gilbert if hasattr(conn, "manager") else None
+        if gilbert is not None:
+            await publish_event(
+                gilbert,
+                "chat.read_aloud.changed",
+                {
+                    "user_id": conn.user_ctx.user_id,
+                    "conversation_id": conv_id,
+                    "enabled": enabled,
+                },
+            )
+        return {
+            "type": "chat.read_aloud.set.result",
+            "ref": frame.get("id"),
+            "conversation_id": conv_id,
+            "enabled": enabled,
         }
 
     async def _ws_form_submit(
