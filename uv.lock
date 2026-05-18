@@ -29,6 +29,7 @@ members = [
     "gilbert-plugin-openai",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-porcupine",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
     "gilbert-plugin-sonos",
@@ -1020,6 +1021,7 @@ dependencies = [
     { name = "gilbert-plugin-openai" },
     { name = "gilbert-plugin-openai-compatible" },
     { name = "gilbert-plugin-openrouter" },
+    { name = "gilbert-plugin-porcupine" },
     { name = "gilbert-plugin-qwen" },
     { name = "gilbert-plugin-slack" },
     { name = "gilbert-plugin-sonos" },
@@ -1089,6 +1091,7 @@ requires-dist = [
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
     { name = "gilbert-plugin-openai-compatible", virtual = "std-plugins/openai-compatible" },
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
+    { name = "gilbert-plugin-porcupine", virtual = "std-plugins/porcupine" },
     { name = "gilbert-plugin-qwen", virtual = "std-plugins/qwen" },
     { name = "gilbert-plugin-slack", virtual = "std-plugins/slack" },
     { name = "gilbert-plugin-sonos", virtual = "std-plugins/sonos" },
@@ -1272,6 +1275,17 @@ source = { virtual = "std-plugins/openai-compatible" }
 name = "gilbert-plugin-openrouter"
 version = "1.0.0"
 source = { virtual = "std-plugins/openrouter" }
+
+[[package]]
+name = "gilbert-plugin-porcupine"
+version = "1.0.0"
+source = { virtual = "std-plugins/porcupine" }
+dependencies = [
+    { name = "pvporcupine" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pvporcupine", specifier = ">=3.0" }]
 
 [[package]]
 name = "gilbert-plugin-qwen"
@@ -2754,6 +2768,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9b/ca/25afc144934014700c52e05103c2421997482d561f3101ff352e1292fb81/protobuf-6.33.6-cp39-abi3-manylinux2014_s390x.whl", hash = "sha256:c96c37eec15086b79762ed265d59ab204dabc53056e3443e702d2681f4b39ce3", size = 339381, upload-time = "2026-03-18T19:04:54.616Z" },
     { url = "https://files.pythonhosted.org/packages/16/92/d1e32e3e0d894fe00b15ce28ad4944ab692713f2e7f0a99787405e43533a/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593", size = 323436, upload-time = "2026-03-18T19:04:55.768Z" },
     { url = "https://files.pythonhosted.org/packages/c4/72/02445137af02769918a93807b2b7890047c32bfb9f90371cbc12688819eb/protobuf-6.33.6-py3-none-any.whl", hash = "sha256:77179e006c476e69bf8e8ce866640091ec42e1beb80b213c3900006ecfba6901", size = 170656, upload-time = "2026-03-18T19:04:59.826Z" },
+]
+
+[[package]]
+name = "pvporcupine"
+version = "4.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/41/e3f9f931b4dcf2288ce132015e62372a0395e7ae70789d5b7335bc893f21/pvporcupine-4.0.2.tar.gz", hash = "sha256:922e64bba176f7a8536c660ee5933a8de80ad9116c4d886d5db85d054a8ac3d2", size = 3642087, upload-time = "2026-02-13T06:41:59.526Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/88/72d5f210e6b2da2cc82bb7691883b03d9015cb556bca9f02138a127a97f5/pvporcupine-4.0.2-py3-none-any.whl", hash = "sha256:6bf5863469a45789e8150dd94779ba6051e8d3d860b486d72497cc6ecc7bafab", size = 3658714, upload-time = "2026-02-13T06:41:56.746Z" },
 ]
 
 [[package]]

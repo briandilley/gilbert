@@ -50,6 +50,7 @@ dependencies = [
     "gilbert-plugin-openai",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-porcupine",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
     "gilbert-plugin-sonos",
@@ -81,6 +82,7 @@ gilbert-plugin-ollama = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
+gilbert-plugin-porcupine = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
 gilbert-plugin-slack = { workspace = true }
 gilbert-plugin-sonos = { workspace = true }
