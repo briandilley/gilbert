@@ -40,6 +40,36 @@ from gilbert.interfaces.transcription import (
 logger = logging.getLogger(__name__)
 
 
+def _event_to_json(ev: Any) -> dict[str, Any]:
+    """Encode a TranscriptionEvent or WakeEvent for the wire."""
+    from gilbert.interfaces.transcription import (
+        FinalTranscript,
+        PartialTranscript,
+        SpeechEnded,
+        SpeechStarted,
+        TranscriptionError,
+        WakeEvent,
+    )
+
+    if isinstance(ev, PartialTranscript):
+        return {"type": "partial", "text": ev.text, "speaker_label": ev.speaker_label,
+                "start_seconds": ev.start_seconds}
+    if isinstance(ev, FinalTranscript):
+        return {"type": "final", "text": ev.text, "start_seconds": ev.start_seconds,
+                "end_seconds": ev.end_seconds, "speaker_label": ev.speaker_label,
+                "confidence": ev.confidence}
+    if isinstance(ev, SpeechStarted):
+        return {"type": "speech_started", "at_seconds": ev.at_seconds}
+    if isinstance(ev, SpeechEnded):
+        return {"type": "speech_ended", "at_seconds": ev.at_seconds}
+    if isinstance(ev, TranscriptionError):
+        return {"type": "error", "message": ev.message, "recoverable": ev.recoverable}
+    if isinstance(ev, WakeEvent):
+        return {"type": "wake", "keyword": ev.keyword, "at_seconds": ev.at_seconds,
+                "confidence": ev.confidence}
+    return {"type": "unknown"}
+
+
 @dataclass
 class _ActiveSession:
     """Per-WS-connection transcription session.
@@ -444,8 +474,47 @@ class TranscriptionService(Service):
             logger.exception("error closing primitive for session %s", session_id)
 
     async def _handle_send_chunk(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
-        # Filled in in Task 10.
-        return {"ok": False, "error": "not yet implemented"}
+        import base64
+
+        sid = frame.get("session_id")
+        b64 = frame.get("audio_b64")
+        if not isinstance(sid, str) or not isinstance(b64, str):
+            return {"ok": False, "error": "missing session_id or audio_b64"}
+        rec = self._sessions.get(sid)
+        if rec is None or rec.conn_id != conn.connection_id:
+            return {"ok": False, "error": "unknown session"}
+        try:
+            chunk = base64.b64decode(b64)
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "invalid base64"}
+
+        # Lazy-start the pump on first chunk. Spawn under a copied
+        # context so logging / trace context follow the task.
+        if rec.pump_task is None or rec.pump_task.done():
+            import contextvars
+
+            ctx = contextvars.copy_context()
+            rec.pump_task = asyncio.create_task(
+                self._pump_events(conn, rec),
+                name=f"transcription-pump-{sid}",
+                context=ctx,
+            )
+        await rec.primitive.send(chunk)
+        return {"ok": True}
+
+    async def _pump_events(self, conn: Any, rec: _ActiveSession) -> None:
+        """Drain the primitive's event stream and push server-initiated frames."""
+        try:
+            async for ev in rec.primitive.events():
+                conn.enqueue({
+                    "type": "transcription.event",
+                    "session_id": rec.session_id,
+                    "event": _event_to_json(ev),
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("transcription pump error for session %s", rec.session_id)
 
     # --- Lifecycle ------------------------------------------------
 
