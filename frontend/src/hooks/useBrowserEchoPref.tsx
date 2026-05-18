@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useWebSocket } from "./useWebSocket";
+import type { SpeakerSystemInfo } from "@/types/speaker";
 
 /**
  * Per-user preference toggle for "also play speaker output in my browser tab."
@@ -29,6 +30,7 @@ export function useBrowserEchoPref(): {
   const [enabled, setEnabledState] = useState(false);
   const [ready, setReady] = useState(false);
   const [primaryBackend, setPrimaryBackend] = useState<string>("");
+  const [activeBackends, setActiveBackends] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,14 +49,21 @@ export function useBrowserEchoPref(): {
             key: "speaker.browser_echo",
             default: false,
           } as Record<string, unknown>),
-          rpc<{ enabled?: boolean; backend?: string }>({
+          rpc<SpeakerSystemInfo>({
             type: "speaker.info",
           } as Record<string, unknown>),
         ]);
         if (cancelled) return;
         setEnabledState(prefReply?.value === true);
         setPrimaryBackend(
-          typeof infoReply?.backend === "string" ? infoReply.backend : "",
+          typeof infoReply?.primary_backend === "string"
+            ? infoReply.primary_backend
+            : "",
+        );
+        setActiveBackends(
+          Array.isArray(infoReply?.active_backends)
+            ? infoReply.active_backends
+            : [],
         );
       } catch (err) {
         // Connection blip / unauthenticated session — leave the toggle
@@ -93,11 +102,17 @@ export function useBrowserEchoPref(): {
     [enabled, rpc],
   );
 
+  // The echo toggle is redundant when browser is the *only* active
+  // backend — flipping it would be a no-op because the service-side
+  // gate short-circuits to avoid double-play.
+  const browserOnlyActive =
+    primaryBackend === "browser" && activeBackends.length === 1;
+
   return {
     enabled,
     ready,
     primaryBackend,
-    redundantWithPrimary: primaryBackend === "browser",
+    redundantWithPrimary: browserOnlyActive,
     setEnabled,
   };
 }

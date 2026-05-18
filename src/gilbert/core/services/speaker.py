@@ -1315,13 +1315,13 @@ class SpeakerService(Service):
     async def _ws_speaker_info(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        """Report whether the service is enabled and which backend is primary.
+        """Report the speaker subsystem state to the SPA.
 
         Lets the SPA reason about the speaker subsystem without poking
         at the settings RPC (which is admin-only and heavier). The
         Browser Echo toggle reads this to disable itself when the
-        primary backend is already ``browser`` — flipping the echo
-        toggle in that config would be a no-op (the gate in
+        primary backend is ``browser`` and it is the only active backend
+        — in that config the echo toggle is a no-op (the gate in
         ``_browser_echo_should_fire`` short-circuits to avoid
         double-play), so the UI shouldn't pretend otherwise.
 
@@ -1330,8 +1330,13 @@ class SpeakerService(Service):
         return {
             "type": "gilbert.result",
             "ref": frame.get("id"),
-            "enabled": self._enabled,
-            "backend": self._backend_name if self._enabled else "",
+            "enabled": bool(self._enabled and self._backends),
+            "primary_backend": self._primary_backend if self._enabled else "",
+            "active_backends": sorted(self._backends) if self._enabled else [],
+            "startup_failures": [
+                {"name": name, "error": err}
+                for name, err in self._startup_failures.items()
+            ],
         }
 
     # --- ToolProvider protocol ---

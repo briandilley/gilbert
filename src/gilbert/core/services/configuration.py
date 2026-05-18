@@ -510,7 +510,23 @@ class ConfigurationService(Service):
             svc = self._resolver.get_capability("speaker_control")
             if isinstance(svc, CachedSpeakerLister):
                 try:
-                    return [s.name for s in svc.cached_speakers]
+                    speakers = svc.cached_speakers
+                    # Count how many speakers share the same display name so
+                    # we can add a backend disambiguation suffix for collisions.
+                    name_counts: dict[str, int] = {}
+                    for s in speakers:
+                        name_counts[s.name] = name_counts.get(s.name, 0) + 1
+                    return [
+                        {
+                            "value": s.speaker_id,
+                            "label": (
+                                f"{s.name} · {s.backend_name}"
+                                if name_counts[s.name] > 1
+                                else s.name
+                            ),
+                        }
+                        for s in speakers
+                    ]
                 except Exception:
                     logger.debug("speakers dynamic choices failed", exc_info=True)
         elif source == "speakers.enabled_backends":

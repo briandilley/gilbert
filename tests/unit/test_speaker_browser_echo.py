@@ -291,26 +291,30 @@ async def test_stop_echo_silent_when_primary_is_browser(svc: SpeakerService) -> 
 async def test_speaker_info_reports_backend_when_enabled(
     svc: SpeakerService,
 ) -> None:
+    from unittest.mock import MagicMock
     svc._enabled = True
-    svc._backend_name = "sonos"
+    svc._primary_backend = "sonos"
+    svc._backends = {"sonos": MagicMock()}
     reply = await svc._ws_speaker_info(None, {"id": "1"})
     assert reply["type"] == "gilbert.result"
     assert reply["enabled"] is True
-    assert reply["backend"] == "sonos"
+    assert reply["primary_backend"] == "sonos"
+    assert "sonos" in reply["active_backends"]
 
 
 @pytest.mark.asyncio
 async def test_speaker_info_blank_backend_when_disabled(
     svc: SpeakerService,
 ) -> None:
-    # When the service is toggled off the backend name is meaningless —
-    # report empty so the SPA doesn't gate UI on a stale value.
+    # When the service is toggled off the backend fields are empty so
+    # the SPA doesn't gate UI on stale values.
     svc._enabled = False
-    svc._backend_name = "sonos"  # would be set from prior boot
+    svc._primary_backend = "sonos"  # would be set from prior boot
     reply = await svc._ws_speaker_info(None, {"id": "1"})
     assert reply["type"] == "gilbert.result"
     assert reply["enabled"] is False
-    assert reply["backend"] == ""
+    assert reply["primary_backend"] == ""
+    assert reply["active_backends"] == []
 
 
 @pytest.mark.asyncio
@@ -318,11 +322,30 @@ async def test_speaker_info_reports_browser_primary(
     svc: SpeakerService,
 ) -> None:
     # This is the case the SPA cares about — it disables the echo
-    # toggle when the response says ``backend == "browser"``.
+    # toggle when primary_backend == "browser" and it is the only
+    # active backend.
+    from unittest.mock import MagicMock
     svc._enabled = True
-    svc._backend_name = "browser"
+    svc._primary_backend = "browser"
+    svc._backends = {"browser": MagicMock()}
     reply = await svc._ws_speaker_info(None, {"id": "1"})
-    assert reply["backend"] == "browser"
+    assert reply["primary_backend"] == "browser"
+    assert reply["active_backends"] == ["browser"]
+
+
+@pytest.mark.asyncio
+async def test_speaker_info_multi_backend_active_backends_sorted(
+    svc: SpeakerService,
+) -> None:
+    # With two backends loaded both appear in active_backends (sorted).
+    from unittest.mock import MagicMock
+    svc._enabled = True
+    svc._primary_backend = "sonos"
+    svc._backends = {"sonos": MagicMock(), "browser": MagicMock()}
+    reply = await svc._ws_speaker_info(None, {"id": "1"})
+    assert reply["enabled"] is True
+    assert reply["primary_backend"] == "sonos"
+    assert reply["active_backends"] == ["browser", "sonos"]
 
 
 def test_speaker_service_advertises_ws_handlers_capability() -> None:
