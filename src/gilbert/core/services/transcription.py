@@ -193,6 +193,11 @@ class TranscriptionService(Service):
                         description=f"Enable the {name!r} {role} backend.",
                         default=(role == "batch" and name == "local_whisper"),
                         restart_required=True,
+                        # ``backend_param=True`` keeps this toggle visually
+                        # grouped with its sibling ``settings.*`` fields in
+                        # the Settings UI, instead of floating up into the
+                        # generic "service params" section.
+                        backend_param=True,
                     )
                 )
                 for bp in cls.backend_config_params():
