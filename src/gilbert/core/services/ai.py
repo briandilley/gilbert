@@ -5828,6 +5828,13 @@ class AIService(Service):
                         conv_id,
                     )
 
+        # Read-aloud hook — fire and forget. Never delay the chat reply.
+        if response_text and conv_id:
+            if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
+                asyncio.create_task(
+                    self._speak_response(conn.user_ctx, conv_id, response_text)
+                )
+
         return {
             "type": "chat.message.send.result",
             "ref": frame.get("id"),
@@ -6126,6 +6133,13 @@ class AIService(Service):
                         "ui_blocks": ui_blocks,
                         "attachments": _serialize_attachments_for_wire(reply_attachments),
                     },
+                )
+
+        # Read-aloud hook — fire and forget.
+        if response_text and conv_id:
+            if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
+                asyncio.create_task(
+                    self._speak_response(conn.user_ctx, conv_id, response_text)
                 )
 
         return {
