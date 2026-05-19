@@ -1,4 +1,11 @@
-import { Volume2Icon, VolumeXIcon, PlayIcon, XIcon } from "lucide-react";
+import {
+  Volume2Icon,
+  VolumeXIcon,
+  PlayIcon,
+  PauseIcon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { useBrowserSpeaker } from "@/hooks/useBrowserSpeaker";
 import { Button } from "@/components/ui/button";
@@ -18,8 +25,19 @@ import { cn } from "@/lib/utils";
  * have a /ui/popover wrapper.
  */
 export function BrowserSpeakerControl() {
-  const { enabled, setEnabled, history, isPlaying, replay, clearHistory } =
-    useBrowserSpeaker();
+  const {
+    enabled,
+    setEnabled,
+    history,
+    currentItem,
+    isPlaying,
+    isPaused,
+    replay,
+    clearHistory,
+    pause,
+    resume,
+    stop,
+  } = useBrowserSpeaker();
 
   const Icon = enabled ? Volume2Icon : VolumeXIcon;
 
@@ -75,6 +93,53 @@ export function BrowserSpeakerControl() {
                 onCheckedChange={setEnabled}
               />
             </div>
+
+            {/* Now-Playing row — only when a clip / stream is loaded.
+                Streams have no native ``ended`` event, so this is the
+                only way to release the connection. */}
+            {currentItem && (
+              <div className="flex items-center gap-2 p-3 border-b border-border">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    {isPlaying ? "Playing" : isPaused ? "Paused" : "Stopped"}
+                  </div>
+                  <div className="text-sm truncate">
+                    {currentItem.title || "Audio clip"}
+                  </div>
+                </div>
+                {isPlaying ? (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={pause}
+                    aria-label="Pause"
+                    title="Pause"
+                  >
+                    <PauseIcon className="size-3.5" />
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={resume}
+                    disabled={!isPaused}
+                    aria-label="Resume"
+                    title="Resume"
+                  >
+                    <PlayIcon className="size-3.5" />
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={stop}
+                  aria-label="Stop"
+                  title="Stop"
+                >
+                  <SquareIcon className="size-3.5" />
+                </Button>
+              </div>
+            )}
 
             {/* History list */}
             <div className="max-h-64 overflow-y-auto">

@@ -28,10 +28,25 @@ interface BrowserSpeakerStore {
   enabled: boolean;
   history: PlayItem[];
   lastPlayed: PlayItem | null;
+  /** Item currently loaded into the <audio> element. Stays set while
+   *  paused so the popover Now-Playing controls can resume it; cleared
+   *  by ``stop()`` and naturally-ended one-shot clips. Long-running
+   *  streams have no ``ended`` event so they only clear on stop. */
+  currentItem: PlayItem | null;
   isPlaying: boolean;
+  /** True when the <audio> element has a source loaded but is
+   *  paused — i.e. resume() will pick up where it left off. */
+  isPaused: boolean;
   setEnabled: (v: boolean) => void;
   replay: (id: string) => void;
   clearHistory: () => void;
+  pause: () => void;
+  resume: () => void;
+  /** Stop playback AND clear the audio source so the Now-Playing
+   *  controls disappear. For internet radio streams this is the only
+   *  way to actually release the connection — Pause keeps the stream
+   *  buffering on most browsers. */
+  stop: () => void;
 }
 
 const BrowserSpeakerContext = createContext<BrowserSpeakerStore | null>(null);
@@ -57,10 +72,16 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
   const [enabled, setEnabledState] = useState<boolean>(readPersistedEnabled);
   const [history, setHistory] = useState<PlayItem[]>([]);
   const [lastPlayed, setLastPlayed] = useState<PlayItem | null>(null);
+  const [currentItem, setCurrentItem] = useState<PlayItem | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const { connected, rpc, subscribe } = useWebSocket();
 
-  // Singleton <audio> element kept across renders.
+  // Singleton <audio> element kept across renders. The ``play`` /
+  // ``pause`` / ``ended`` listeners keep ``isPlaying`` / ``isPaused``
+  // in sync no matter who triggers the state change — the SPA via
+  // pause/resume/stop, the backend via ``speaker.browser.play`` events,
+  // or the user pressing the OS-level media key.
   const audioRef = useRef<HTMLAudioElement | null>(null);
   if (audioRef.current === null && typeof document !== "undefined") {
     const el = document.createElement("audio");
@@ -68,8 +89,22 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
     el.style.display = "none";
     document.body.appendChild(el);
     audioRef.current = el;
-    el.addEventListener("ended", () => setIsPlaying(false));
-    el.addEventListener("pause", () => setIsPlaying(false));
+    el.addEventListener("play", () => {
+      setIsPlaying(true);
+      setIsPaused(false);
+    });
+    el.addEventListener("pause", () => {
+      setIsPlaying(false);
+      // Distinguish "ended" from "user-paused": ``ended`` fires
+      // ``pause`` too, but with ``el.ended === true``. For
+      // long-running streams ``ended`` never fires, so a manual pause
+      // here means we can resume from the current buffer position.
+      setIsPaused(!el.ended && !!el.src);
+    });
+    el.addEventListener("ended", () => {
+      setIsPlaying(false);
+      setIsPaused(false);
+    });
   }
 
   // Activation sync — fire activate/deactivate to the server based on
@@ -128,8 +163,13 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
         if (!el.paused) el.pause();
         el.src = url;
         el.volume = Math.max(0, Math.min(1, item.volume / 100));
+        setCurrentItem(item);
         setIsPlaying(true);
-        el.play().catch(() => setIsPlaying(false));
+        setIsPaused(false);
+        el.play().catch(() => {
+          setIsPlaying(false);
+          setIsPaused(false);
+        });
       }
     };
     return subscribe("speaker.browser.play", handler);
@@ -139,14 +179,24 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
   // ``stop_speakers`` call hits the user's browser target. Mirror it
   // in the SPA so the <audio> element actually stops — otherwise a
   // long-running stream (e.g. an internet radio station) keeps playing
-  // after the user pressed stop in the UI.
+  // after the user pressed stop in the UI. Also clears the loaded
+  // source so the Now-Playing controls disappear.
   useEffect(() => {
     const handler = () => {
       const el = audioRef.current;
-      if (el && !el.paused) {
+      if (el) {
         el.pause();
+        el.removeAttribute("src");
+        try {
+          el.load();
+        } catch {
+          // load() can throw in obscure browser states; the pause
+          // above is what actually matters for stopping audio.
+        }
       }
       setIsPlaying(false);
+      setIsPaused(false);
+      setCurrentItem(null);
     };
     return subscribe("speaker.browser.stop", handler);
   }, [subscribe]);
@@ -156,7 +206,6 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
     setEnabledState(v);
     if (!v && audioRef.current) {
       audioRef.current.pause();
-      setIsPlaying(false);
     }
   }, []);
 
@@ -168,13 +217,52 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
       if (!item) return;
       el.src = item.url;
       el.volume = Math.max(0, Math.min(1, item.volume / 100));
-      setIsPlaying(true);
-      el.play().catch(() => setIsPlaying(false));
+      setCurrentItem(item);
+      el.play().catch(() => {
+        setIsPlaying(false);
+        setIsPaused(false);
+      });
     },
     [history],
   );
 
   const clearHistory = useCallback(() => setHistory([]), []);
+
+  const pause = useCallback(() => {
+    const el = audioRef.current;
+    if (el && !el.paused) {
+      el.pause();
+    }
+  }, []);
+
+  const resume = useCallback(() => {
+    const el = audioRef.current;
+    if (!el || !el.src || !el.paused) return;
+    el.play().catch(() => {
+      setIsPlaying(false);
+      setIsPaused(false);
+    });
+  }, []);
+
+  const stop = useCallback(() => {
+    const el = audioRef.current;
+    if (el) {
+      el.pause();
+      // Streams keep the underlying connection open until the source
+      // is unset — pausing alone isn't enough to fully release a
+      // long-running radio stream. Clearing src + load() is the
+      // documented way to drop the network handle.
+      el.removeAttribute("src");
+      try {
+        el.load();
+      } catch {
+        // See speaker.browser.stop handler — load() may throw.
+      }
+    }
+    setIsPlaying(false);
+    setIsPaused(false);
+    setCurrentItem(null);
+  }, []);
 
   // Cleanup the singleton audio element on unmount.
   useEffect(() => {
@@ -193,12 +281,30 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
       enabled,
       history,
       lastPlayed,
+      currentItem,
       isPlaying,
+      isPaused,
       setEnabled,
       replay,
       clearHistory,
+      pause,
+      resume,
+      stop,
     }),
-    [enabled, history, lastPlayed, isPlaying, setEnabled, replay, clearHistory],
+    [
+      enabled,
+      history,
+      lastPlayed,
+      currentItem,
+      isPlaying,
+      isPaused,
+      setEnabled,
+      replay,
+      clearHistory,
+      pause,
+      resume,
+      stop,
+    ],
   );
 
   return (
