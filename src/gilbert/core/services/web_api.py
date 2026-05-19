@@ -65,13 +65,18 @@ def _merge_plugin_nav(gilbert: Any, nav_groups: list[dict[str, Any]]) -> None:
         for r in routes:
             if not r.add_to_nav:
                 continue
-            item = {
+            item: dict[str, Any] = {
                 "label": r.label or r.path,
                 "description": r.description,
                 "url": r.path,
                 "icon": r.icon,
                 "required_role": r.required_role,
             }
+            if r.requires_capability:
+                # ``_visible`` reads this and hides the nav item when
+                # the underlying service is missing / disabled, so a
+                # toggled-off plugin doesn't render dead nav entries.
+                item["requires_capability"] = r.requires_capability
             _append(r.nav_parent_group, item)
 
         try:
@@ -577,7 +582,8 @@ class WebApiService(Service):
         gilbert = conn.manager.gilbert
         if gilbert is None:
             return {"type": "ui.routes.list.result", "ref": frame.get("id"), "routes": []}
-        acl = gilbert.service_manager.get_by_capability("access_control")
+        sm = gilbert.service_manager
+        acl = sm.get_by_capability("access_control")
         caller_level = getattr(conn, "user_level", 200)
 
         def _level_for(role: str) -> int:
@@ -587,6 +593,18 @@ class WebApiService(Service):
                 except Exception:
                     pass
             return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+
+        def _capability_live(cap: str) -> bool:
+            # Mirrors the nav-visibility check in ``_ws_dashboard_get``:
+            # a route's capability is only "live" when a service
+            # advertises it AND that service is enabled. Disabled
+            # toggleable services keep their capability declared but
+            # report ``svc.enabled == False`` — the route should
+            # disappear with them.
+            if not cap:
+                return True
+            svc = sm.get_by_capability(cap)
+            return svc is not None and svc.enabled
 
         out: list[dict[str, Any]] = []
         for entry in gilbert.list_loaded_plugins():
@@ -599,6 +617,8 @@ class WebApiService(Service):
                 continue
             for r in routes:
                 if caller_level > _level_for(r.required_role):
+                    continue
+                if not _capability_live(r.requires_capability):
                     continue
                 out.append(
                     {
