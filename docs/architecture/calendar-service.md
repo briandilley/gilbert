@@ -224,6 +224,11 @@ backend in the WS handler with an unsaved config blob" pattern is
 explicitly avoided; that's the exact anti-pattern
 `memory-backend-pattern.md` warns against.
 
+Operator setup instructions for the Google Calendar service-account flow live in
+`docs/how-to/google-calendar-setup.md`. Use that guide for personal Gmail
+shared-calendar setup, Workspace domain-wide delegation setup, and common
+Google API troubleshooting.
+
 ### Shared confirm/preview helper
 
 `src/gilbert/core/services/_ui_blocks.py` was extracted as part of
@@ -295,4 +300,3 @@ explicit parameter; tool dispatch builds it from injected `_user_id`
 - [UI Blocks](memory-ui-blocks.md) — `ToolOutput` / `UIBlock` mechanics
 - [Multi-User Isolation](memory-multi-user-isolation.md) — ContextVar discipline
 - [Backend Pattern](memory-backend-pattern.md) — registry + side-effect imports
-
