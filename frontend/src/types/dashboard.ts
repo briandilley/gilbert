@@ -31,4 +31,7 @@ export interface NavGroup {
 export interface DashboardResponse {
   cards: DashboardCard[];
   nav: NavGroup[];
+  /** True when the server's speaker service has the ``browser`` backend
+   *  loaded — gates the TopBar's BrowserSpeakerControl icon. */
+  browser_speaker_available?: boolean;
 }

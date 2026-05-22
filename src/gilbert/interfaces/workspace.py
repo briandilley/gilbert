@@ -80,6 +80,24 @@ class WorkspaceProvider(Protocol):
         """Build a system prompt fragment describing the conversation's files."""
         ...
 
+    async def member_workspace_roots(
+        self,
+        caller_user_id: str,
+        conversation_id: str,
+    ) -> list[Path]:
+        """Workspace roots of *other* members in a shared conversation.
+
+        Used by file lookups to widen their search to attachments
+        uploaded by other members of a shared room. Returns ``[]``
+        for personal conversations, unknown convs, or callers who
+        can't access the conv — best-effort, never raises.
+
+        Implementations should gate this on the same access check
+        used by chat reads (``check_conversation_access``) so the
+        broader search inside the conv doesn't broaden access to it.
+        """
+        ...
+
     def resolve_file_path(
         self,
         user_id: str,

@@ -1,7 +1,7 @@
 """Media library interface — ABC, dataclasses, capability protocol, and errors.
 
-The ``MediaLibraryBackend`` ABC is the universal backend pattern (see
-``memory-backend-pattern.md``): an ``__init_subclass__`` registry, a
+The ``MediaLibraryBackend`` ABC is the universal backend pattern: an
+``__init_subclass__`` registry, a
 ``backend_name`` identifier, a ``backend_config_params()`` classmethod
 for the Settings UI, and ``initialize()`` / ``close()`` lifecycle.
 
@@ -211,8 +211,8 @@ class MediaPlayCommand:
 class MediaSearchFilters:
     """Optional filters to narrow a library search.
 
-    ``limit`` is service-side capped at 50 — see
-    ``MediaLibraryService._fanout`` and ``memory-media-library-service.md``.
+    ``limit`` is service-side capped at 50 by
+    ``MediaLibraryService._fanout``.
     """
 
     kinds: tuple[MediaKind, ...] = field(default_factory=tuple)

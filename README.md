@@ -2,7 +2,7 @@
 
 An AI-powered assistant for home and business automation. Gilbert combines a modular, interface-driven architecture with an agentic AI core — giving it the ability to control speakers, greet people at the door, manage email, spin up a radio DJ, expose its tools over MCP, and much more, all orchestrated through natural conversation or automated event-driven workflows.
 
-Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local documents); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
+Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, local Whisper speech-to-text, MCP transports); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
 
 Gilbert is a **multi-user system from the ground up** — every piece of state (mailboxes, chat history, documents, MCP servers, scheduled jobs) is owned by a specific user, shared via roles and per-collection ACLs, and gated by a role-based access control layer that consistently applies across the web UI, chat, tools, events, and the MCP endpoint.
 
@@ -13,9 +13,9 @@ Gilbert is a **multi-user system from the ground up** — every piece of state (
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (Python package and project manager)
 - Git (with submodule support — any recent version)
-- Node.js + npm (only if you want to rebuild the frontend; prebuilt assets ship under `src/gilbert/web/spa/`)
+- Node.js + npm — `gilbert.sh start` rebuilds the frontend SPA on every launch (the compiled bundle under `src/gilbert/web/spa/` is gitignored, so a fresh clone has to build it).
 
-Some plugins have additional OS-level prerequisites — e.g. the `tesseract` plugin needs the Tesseract binary (`apt install tesseract-ocr` or `brew install tesseract`). Check [`std-plugins/README.md`](std-plugins/README.md) for per-plugin requirements.
+Some plugins have additional OS-level prerequisites — e.g. the `tesseract` plugin needs the Tesseract binary (`apt install tesseract-ocr`, `brew install tesseract`, or `pacman -S tesseract tesseract-data-eng` on Arch — note that Arch ships language data as a separate package). Check [`std-plugins/README.md`](std-plugins/README.md) for per-plugin requirements.
 
 ### Clone and Install
 
@@ -45,12 +45,16 @@ If you need to override bootstrap values for this specific installation, create 
 mkdir -p .gilbert
 cat > .gilbert/config.yaml <<'EOF'
 # Only include values you're changing. Deep-merged on top of gilbert.yaml.
+auth:
+  root_password: "pick-a-strong-password"
 web:
   port: 9000
 EOF
 ```
 
 The `.gilbert/` directory is gitignored — your API keys, database, and logs stay local. Runtime config (AI backend selection, TTS API keys, plugin settings, etc.) is managed through the Settings UI, not this file.
+
+**Set a root password before the first boot.** On first run Gilbert seeds non-bootstrap YAML values into entity storage and from then on the database is the source of truth — so editing `.gilbert/config.yaml` after the first start has no effect on already-seeded keys. If you boot without `auth.root_password` set, the bootstrapped `root` user is created with no usable password and nobody can log in (local visitors get the `everyone` role, which can't reach Settings). To recover, stop Gilbert (`./gilbert.sh stop`), delete `.gilbert/gilbert.db*`, add `auth.root_password` to `.gilbert/config.yaml`, and start again. The admin username is `root`.
 
 At minimum, before Gilbert is useful, open the Settings UI and configure:
 
@@ -72,7 +76,7 @@ At minimum, before Gilbert is useful, open the Settings UI and configure:
 
 `gilbert.sh start` runs Gilbert under a supervisor loop that distinguishes normal stops from "please restart me" exits — when a runtime-installed plugin needs `uv sync` to pick up new Python deps, it sets an internal flag, Gilbert exits with code `75` (`EX_TEMPFAIL`), and the supervisor loop re-syncs and relaunches automatically. Ctrl+C and `./gilbert.sh stop` propagate cleanly and do **not** trigger a restart.
 
-On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000` — log in with the local admin account (bootstrapped automatically on first boot) and head to **Security → Users** to add more accounts.
+On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000` — log in as `root` with the password you set under `auth.root_password` in `.gilbert/config.yaml` (see [Configure](#configure)), then head to **Security → Users** to add more accounts.
 
 ## Multi-User & Access Control
 
@@ -104,10 +108,10 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Music and speaker control** — the `sonos` plugin discovers Sonos speakers on the LAN, handles playback/volume/grouping, and uses Spotify's Web API for browse/search. The Music service exposes search, queue, station ("play more like this"), and loop/repeat tools — capabilities are gated per-backend so swappable backends only surface what they actually support.
 - **Video library + casting** — the `media_library` service aggregates Plex and Jellyfin via a multi-backend ABC (`MediaLibraryBackend`). The `plex` and `jellyfin` plugins each register a backend; the service fans library queries out across both, merges results, and dispatches playback to whichever server owns the target client. AI tools (`/media search`, `/media recent`, `/media on-deck`, `/media now`, `/media play <title> on <client>`, `/media pause` / `/media resume` / `/media stop` / `/media seek`, `/media recommend`) cover the common cases. Per-user identity mapping persists Gilbert↔Plex-Home and Gilbert↔Jellyfin-user pairs so resume / on-deck reflect the calling user's library, never an admin-token leak. `play_on` for a SHOW resolves to the user's next-unwatched / on-deck episode before dispatch — no silently playing the pilot. Visual UIBlock disambiguation when a search matches multiple high-confidence items, state-aware Play / Resume / Watch-again buttons.
 - **Text-to-speech** — the `elevenlabs` plugin provides high-quality synthesized voices for announcements, greetings, and any AI-generated spoken output.
+- **Speech-to-text** — the bundled `local_whisper` backend (faster-whisper, no API key) transcribes audio files and browser-mic streams. Extensible via the multi-backend aggregator: the `openai`, `groq`, and `elevenlabs` plugins add batch transcription backends; the `deepgram` and `elevenlabs` plugins add streaming backends; the `porcupine` and `openwakeword` plugins add wake-word detection backends.
 - **Email inbox** — multi-mailbox, multi-user. Every mailbox is owned by a user and can be shared with individual users or roles for full read/send access. Messages land in a per-mailbox persisted store; outbound drafts queue through a shared outbox with crash-resilient delayed sends. The `google` plugin's Gmail backend is the reference implementation — add more by implementing `EmailBackend`. Incoming mail can also be handed off to an AI chat loop via the Inbox AI Chat service.
 - **Calendar** — multi-account, multi-user. Every calendar account is owned by a user and can be shared with individual users or roles. The Calendar service runs one backend instance per `poll_enabled` account, caches events for fast `get_schedule` / `next_event` / `find_free_time`, and emits `calendar.event.upcoming` notifications. Eight AI tools (`list_calendar_accounts`, `get_schedule`, `next_event`, `get_event`, `find_free_time`, `create_event`, `update_event`, `delete_event`) handle every common use case; the three mutating tools default to a preview/confirm `UIBlock` flow so the AI can never silently fire real invite emails. The `google` plugin's Google Calendar backend is the reference implementation.
 - **RSS / news feeds + daily briefing** — multi-feed, multi-user. Every feed subscription is owned by a user and can be shared with individuals or roles. The Feeds service runs one backend instance per `poll_enabled` feed (cold-start jitter, source-suggested cadence honored, conditional-GET `etag` / `If-Modified-Since`, body-size cap, graceful give-up at 20 consecutive failures), scores each item against a configurable AI prompt on a bounded async worker pool, optionally ingests article bodies into the knowledge base for vector search (with robots.txt + paywall + SSRF guards and a per-user-per-day budget), and exposes eight AI tools (`news_briefing`, `search_feeds`, `summarize_feed`, `subscribe_feed`, `unsubscribe_feed`, `list_feeds`, `read_feed_item`, `recommend_knowledge_ingestion`). The `subscribe_feed` / `unsubscribe_feed` tools route through a Confirm/Cancel UI block so the AI can't subscribe you to a hallucinated URL. The built-in `RssAtomFeedBackend` (using `feedparser`) parses any RSS 2.0 / Atom 1.0 source — provider-specific backends (Reddit, HackerNews, podcasts) slot in as plugins. The companion `feed_briefing` service fans out a daily presence-fallback briefing event so the greeting service can splice today's top stories into the morning arrival announcement.
-- **Tasks / todos** — multi-list, multi-user. Every task list is owned by a user and can be shared with individuals or roles. The Tasks service runs one backend instance per list (the local backend is the source of truth for vendor-free lists; external backends like Google Tasks poll on a per-list schedule with `updatedMin` deltas), persists tasks in a single cross-backend `tasks` collection so `due_today` / `overdue` aggregate across every list a user can see, and uses **local-first reconciliation** for writes — every mutation lands in storage immediately with `sync_status=pending_push`, the upstream push happens inline, and a recurring `tasks-sync-tick` retries pending rows. Ten AI tools (`task_lists`, `add_task`, `get_task`, `list_tasks`, `complete_task`, `update_task`, `cancel_task`, `delete_task`, `tasks_due`, `summarize_today`) cover every common use case; `delete_task` defaults to a soft-delete with UIBlock confirm (recoverable until `retention_days` elapses), and `add_task` returns a UIBlock select when the user has multiple lists with no default. Inbox-AI gains `add_task` for free — the AI lifts action items out of incoming email and uses the `Message-Id` as the idempotency key so re-deliveries don't double-add. Per-user time zones (via `UserContext.tz`) drive day-boundary math so a Pacific user gets *their* "today," not the host's. The `google` plugin's Google Tasks backend ships in v1; Todoist and CalDAV are sketched in the spec for v1.1 and slot in without core changes.
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
 - **Weather** — the Weather service exposes `current_weather`, `forecast`, `weather_alerts`, and `geocode_location` AI tools (plus slash-only `/weather set_home` and `/weather set_units`). The default `open-meteo` plugin needs no API key and covers global current + hourly + daily forecasts. The interface accommodates NWS (US severe-weather alerts) and OpenWeatherMap as future plugins without breaking changes.
@@ -126,7 +130,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 
 ### Interface-First Design
 
-Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface. All vendor-specific implementations live in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) submodule; core ships only with vendor-free backends (local auth, local filesystem documents).
+Every component in Gilbert is defined as a Python ABC (abstract base class) with one or more concrete implementations. The core never depends on a specific integration — it depends on the interface. All vendor-specific implementations live in the [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) submodule; core ships only with vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, local Whisper speech-to-text, MCP transports).
 
 ```
 Interface (core)     →  Implementation (plugin)
@@ -144,7 +148,15 @@ AIBackend            →  anthropic plugin → AnthropicAI (Claude)
                         bedrock plugin   → BedrockAI (AWS Bedrock Converse API)
 VisionBackend        →  anthropic plugin → AnthropicVision
 TTSBackend           →  elevenlabs plugin → ElevenLabsTTS
-SpeakerBackend       →  sonos plugin → SonosSpeaker
+BatchTranscriptionBackend → core (local_whisper / faster-whisper, no API key)
+                        openai plugin    → OpenAIWhisperBackend (whisper-1 / gpt-4o-transcribe)
+                        groq plugin      → GroqWhisperBackend (whisper-large-v3 family)
+                        elevenlabs plugin → ElevenLabsScribeBackend (scribe_v1, diarization)
+StreamingTranscriptionBackend → elevenlabs plugin → ElevenLabsScribeLiveBackend (WebSocket)
+                        deepgram plugin  → DeepgramBackend (Nova-3 WebSocket)
+WakeWordBackend      →  porcupine plugin → PorcupineBackend (Picovoice, custom .ppn)
+                        openwakeword plugin → OpenWakeWordBackend (local ONNX, no API key)
+SpeakerBackend       →  core (LocalSpeaker, BrowserSpeaker) + sonos plugin → SonosSpeaker
 MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
 PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
 DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend
@@ -253,16 +265,21 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 |---|---|
 | **anthropic** | Claude AI and Vision backends (default for chat and image understanding) |
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
-| **elevenlabs** | High-quality TTS for announcements and greetings |
+| **deepgram** | Deepgram Nova streaming speech-to-text backend |
+| **elevenlabs** | High-quality TTS + Scribe batch and streaming speech-to-text backends |
 | **frigate** | Frigate NVR object-detection events via MQTT, plus snapshot/clip retrieval over HTTP |
-| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar |
+| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar, Google Tasks |
+| **groq** | Groq LPU chat backend + Groq Whisper batch speech-to-text backend |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **jellyfin** | Jellyfin media library + casting — `MediaLibraryBackend` parity with Plex |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
+| **ntfy / pushover / discord-webhook / telegram** | External notification fan-out backends |
 | **open-meteo** | Weather backend (no API key) — current, hourly, and daily forecasts |
-| **openai** | OpenAI GPT chat backend (configure alongside or instead of anthropic) |
+| **openai** | OpenAI GPT chat backend + Whisper batch speech-to-text backend |
 | **openai-compatible** | Vendor-neutral Chat Completions backend for vLLM, LM Studio, corporate proxies, and other endpoints without a dedicated plugin |
+| **openwakeword** | Local wake-word detection (ONNX models, no API key required) |
 | **plex** | Plex Media Server library + casting — search, recently-added, on-deck, episode resolution, playback dispatch via the `media_library` service |
+| **porcupine** | Picovoice Porcupine wake-word detection (built-in and custom keywords) |
 | **slack** | Socket Mode bot bridging Slack DMs/mentions to the AI service |
 | **sonos** | Sonos speaker control and Sonos-linked music service access |
 | **tavily** | Web search backend with AI-generated summaries |

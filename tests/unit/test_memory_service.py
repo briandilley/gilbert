@@ -84,7 +84,7 @@ def _set_user(user_id: str = "brian@example.com") -> UserContext:
         display_name="Brian",
         roles=frozenset({"user"}),
     )
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     set_current_user(user)
     return user
@@ -410,7 +410,7 @@ class TestToolMemoryAction:
         # it for this call. This mirrors the real chat flow, where the
         # WS handler does not populate the contextvar before dispatching
         # tool calls.
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(UserContext.SYSTEM)
 
@@ -441,7 +441,7 @@ class TestToolMemoryAction:
         self,
         ai_service_with_memory: AIService,
     ) -> None:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(UserContext.SYSTEM)
 
@@ -471,7 +471,7 @@ class TestToolMemoryAction:
             )
             assert "remember" in result.lower()
         finally:
-            from gilbert.core.context import set_current_user
+            from gilbert.interfaces.context import set_current_user
 
             set_current_user(UserContext.SYSTEM)
 

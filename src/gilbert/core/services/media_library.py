@@ -21,10 +21,8 @@ recently-added feed).
 
 Per-client locks (``dict[(backend_name, client_id), asyncio.Lock]``)
 serialize ``play_item`` for the same TV but let unrelated TVs run in
-parallel — see ``memory-multi-user-isolation.md`` for the per-target
-lock pattern. A single global lock would serialize every play across
-every TV across every user, which is the explicit Appendix C
-anti-pattern.
+parallel. A single global lock would serialize every play across every
+TV across every user, which is the explicit Appendix C anti-pattern.
 """
 
 from __future__ import annotations
@@ -42,7 +40,6 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from gilbert.core.context import set_current_user
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
@@ -59,6 +56,7 @@ from gilbert.interfaces.configuration import (
     ConfigParam,
     ConfigurationReader,
 )
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.media_library import (
     BackendHealth,

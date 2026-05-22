@@ -822,6 +822,8 @@ class CalendarService(Service):
             settings = dict(account.backend_config)
             if account.email_address and "email_address" not in settings:
                 settings["email_address"] = account.email_address
+            if account.calendar_id and "calendar_id" not in settings:
+                settings["calendar_id"] = account.calendar_id
             await probe.initialize(settings)
             try:
                 calendars = await probe.list_calendars()
@@ -853,6 +855,8 @@ class CalendarService(Service):
         settings = dict(account.backend_config)
         if account.email_address and "email_address" not in settings:
             settings["email_address"] = account.email_address
+        if account.calendar_id and "calendar_id" not in settings:
+            settings["calendar_id"] = account.calendar_id
         await probe.initialize(settings)
         try:
             return await probe.list_calendars()

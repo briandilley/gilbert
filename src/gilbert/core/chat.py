@@ -12,6 +12,34 @@ from gilbert.interfaces.events import Event, EventBusProvider
 
 _GILBERT_MENTION = re.compile(r"\bgilbert\b", re.IGNORECASE)
 
+# Pseudo-user id reserved for Gilbert (the AI) in @-mention markup.
+# Gilbert isn't a row in the user table — assistant messages carry an
+# empty ``author_id`` — but the mention picker surfaces him as a chip
+# alongside humans so the syntax is symmetric. Treat this id as a
+# "yes, the AI was addressed" hint, not a routable user_id.
+GILBERT_MENTION_USER_ID = "gilbert"
+
+# Markdown-link-shaped mention syntax stored in message content:
+#     @[Display Name](user_id)
+# The display name is purely cosmetic — the SPA shows whatever is in
+# the brackets — and the user_id is the stable identifier the picker
+# resolved to at insert time. A Marked.js extension on the SPA side
+# parses this into a styled chip. Plain ``@gilbert`` (the legacy
+# bare-name match) still triggers the AI but isn't a structured mention.
+_MENTION_RE = re.compile(r"@\[([^\]\n]+)\]\(([A-Za-z0-9._:-]+)\)")
+
+# Bare-name mention pattern for post-processing AI replies. The SPA's
+# picker writes structured tags directly, but Gilbert composes plain
+# prose like ``@Root`` — we rewrite those to ``@[Root](root)`` on the
+# way out so the chip + notification machinery treats them the same
+# as user-initiated mentions.
+#
+# ``(?<![\w@])`` rejects in-word ``@`` so an email address like
+# ``alice@example.com`` doesn't accidentally trigger; also rejects
+# ``@@Name`` and the second ``@`` of a typo. Capture group 2 is the
+# bare display name; matched case-insensitively against room members.
+_BARE_MENTION_RE = re.compile(r"(?<![\w@])@(\w[\w.\-]*)")
+
 
 def check_conversation_access(
     data: dict[str, Any],
@@ -44,8 +72,121 @@ def check_conversation_access(
     return None
 
 
-def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
-    """Build a lightweight conversation summary for the sidebar."""
+def extract_mentions(content: str) -> list[str]:
+    """Return user ids @-mentioned in ``content``, in document order.
+
+    Deduplicates while preserving order so the sidebar / notification
+    layers see one entry per addressed user even if a message mentions
+    them twice. The pseudo-id ``gilbert`` (see ``GILBERT_MENTION_USER_ID``)
+    is included as-is — callers that don't care about AI mentions
+    should filter it out.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in _MENTION_RE.finditer(content or ""):
+        uid = match.group(2)
+        if uid and uid not in seen:
+            seen.add(uid)
+            result.append(uid)
+    return result
+
+
+def filter_mentions_to_members(
+    content: str, member_user_ids: set[str]
+) -> tuple[list[str], bool]:
+    """Validate extracted mentions against a room's member list.
+
+    Returns ``(valid_user_ids, mentions_gilbert_via_tag)``. Mentions
+    that point at non-members are silently dropped — a user can't
+    @-mention someone who isn't in the room. The Gilbert pseudo-id
+    is always accepted (he's not in any room's member list but the
+    SPA picker should still surface him).
+    """
+    valid: list[str] = []
+    mentions_g = False
+    for uid in extract_mentions(content):
+        if uid == GILBERT_MENTION_USER_ID:
+            mentions_g = True
+            continue
+        if uid in member_user_ids:
+            valid.append(uid)
+    return valid, mentions_g
+
+
+def resolve_bare_mentions_to_structured(
+    content: str,
+    members: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """Rewrite bare ``@Name`` to ``@[Name](user_id)`` for known members.
+
+    The mention picker on the SPA writes structured tags directly,
+    but the AI's reply text is free-form prose — it'll happily write
+    ``@Root`` as plain words. This helper closes the loop: scan an
+    AI reply for bare ``@Name`` tokens, match them case-insensitively
+    against the room's members + ``Gilbert``, and replace each with
+    the structured tag using the member's canonical display name.
+
+    Returns ``(rewritten_content, list_of_resolved_user_ids)``.
+
+    Already-structured tags (``@[..](..)``) are left alone — the
+    regex doesn't cross over them because ``@[`` isn't matched by
+    the bare-mention pattern. Names that don't resolve to a member
+    pass through untouched as plain text — we deliberately don't
+    invent users.
+    """
+    if not content or not members:
+        # ``Gilbert`` is allowed even with an empty member list since
+        # he's not a real member; fall through to the rewrite below.
+        if not content:
+            return content, []
+
+    # Build a lookup: lowercased-name → canonical {user_id, display_name}.
+    by_lower: dict[str, dict[str, str]] = {}
+    for m in members:
+        name = str(m.get("display_name") or "").strip()
+        uid = str(m.get("user_id") or "").strip()
+        if not name or not uid:
+            continue
+        by_lower[name.lower()] = {"user_id": uid, "display_name": name}
+    # Always allow ``@Gilbert`` regardless of who's in the room.
+    by_lower.setdefault(
+        "gilbert", {"user_id": GILBERT_MENTION_USER_ID, "display_name": "Gilbert"}
+    )
+
+    resolved_ids: list[str] = []
+    seen: set[str] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        raw_name = match.group(1)
+        key = raw_name.lower()
+        target = by_lower.get(key)
+        if target is None:
+            return match.group(0)  # no resolution — leave plain
+        if target["user_id"] not in seen:
+            seen.add(target["user_id"])
+            resolved_ids.append(target["user_id"])
+        return f"@[{target['display_name']}]({target['user_id']})"
+
+    rewritten = _BARE_MENTION_RE.sub(_sub, content)
+    return rewritten, resolved_ids
+
+
+def conv_summary(
+    c: dict[str, Any],
+    *,
+    shared: bool,
+    viewer_user_id: str = "",
+) -> dict[str, Any]:
+    """Build a lightweight conversation summary for the sidebar.
+
+    When ``viewer_user_id`` is provided the result includes
+    ``unread_mentions_count`` — the number of messages newer than that
+    viewer's ``last_read_mention_index`` cursor that mention them.
+    Cursor lives on the member entry (set by
+    ``chat.conversation.mark_mentions_read``). When the viewer isn't
+    a member, or no cursor exists yet, the count starts from message
+    index 0 — i.e. every unread mention counts.
+    """
     messages = c.get("messages", [])
     preview = ""
     for m in messages:
@@ -76,16 +217,104 @@ def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
         summary["visibility"] = c.get("visibility", "public")
         summary["is_member"] = c.get("_is_member", True)
         summary["is_invited"] = c.get("_is_invited", False)
+
+    # Per-viewer unread mention count. Index-based cursor (not
+    # timestamp) because messages don't carry per-row created_at
+    # timestamps today — the index of the message in ``messages[]``
+    # is the source of truth for "newer than what I've seen."
+    if viewer_user_id:
+        cursor = -1
+        for m in c.get("members", []):
+            if m.get("user_id") == viewer_user_id:
+                raw = m.get("last_read_mention_index")
+                cursor = int(raw) if isinstance(raw, int) else -1
+                break
+        unread = 0
+        for idx, msg in enumerate(messages):
+            if idx <= cursor:
+                continue
+            mentioned = msg.get("mentioned_user_ids") or []
+            if viewer_user_id in mentioned and msg.get("author_id") != viewer_user_id:
+                unread += 1
+        summary["unread_mentions_count"] = unread
     return summary
 
 
 def mentions_gilbert(message: str) -> bool:
-    """Check if a message addresses Gilbert by name."""
-    return bool(_GILBERT_MENTION.search(message))
+    """Check if a message addresses Gilbert.
+
+    Triggers on either the legacy bare-name regex (``\\bgilbert\\b``) or
+    the structured ``@[Gilbert](gilbert)`` mention syntax. Used by the
+    AI-chat path in shared rooms to decide whether to actually invoke
+    the AI on a message or just persist it — bare-name detection stays
+    so users can keep typing ``gilbert, what about...`` naturally.
+    """
+    if _GILBERT_MENTION.search(message):
+        return True
+    return GILBERT_MENTION_USER_ID in extract_mentions(message)
 
 
-def build_room_context(data: dict[str, Any], user: UserContext) -> str:
-    """Build a system prompt for shared room conversations."""
+_RE_FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
+_RE_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_RE_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_RE_INLINE_CODE = re.compile(r"`([^`]+)`")
+_RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+_RE_LIST_ITEM = re.compile(r"^\s*[-*+]\s+(.+)$", re.MULTILINE)
+_RE_ORDERED_ITEM = re.compile(r"^\s*\d+\.\s+(.+)$", re.MULTILINE)
+_RE_EMPHASIS = re.compile(r"(\*\*|__|\*|_)(.+?)\1")
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_BLANK_RUN = re.compile(r"\n\s*\n+")
+
+
+def strip_markdown_for_speech(text: str) -> str:
+    """Strip markdown structure so the text reads naturally when spoken.
+
+    Drops code blocks (un-speakable), drops link URLs (keeps anchor text),
+    drops images, strips emphasis markers, periodizes headings and list
+    items so TTS pauses between them, and collapses blank-line runs into
+    a single sentence break. Regex-based — no markdown library dependency.
+
+    Used by ``AIService._speak_response`` to prepare chat replies for TTS.
+    """
+    if not text:
+        return ""
+    out = _RE_FENCED_CODE.sub(" ", text)
+    out = _RE_IMAGE.sub(" ", out)
+    out = _RE_LINK.sub(r"\1", out)
+    out = _RE_INLINE_CODE.sub(r"\1", out)
+    out = _RE_HEADING.sub(r"\1. ", out)
+    out = _RE_LIST_ITEM.sub(r"\1.", out)
+    out = _RE_ORDERED_ITEM.sub(r"\1.", out)
+    out = _RE_EMPHASIS.sub(r"\2", out)
+    out = _RE_HTML_TAG.sub(" ", out)
+    out = _RE_BLANK_RUN.sub(". ", out)
+    # Collapse any residual runs of whitespace to single spaces.
+    out = re.sub(r"[ \t]+", " ", out)
+    # Trim and collapse stray ". ." into a single ".".
+    out = re.sub(r"\.\s*\.+", ".", out)
+    return out.strip()
+
+
+def build_room_context(
+    data: dict[str, Any],
+    user: UserContext,
+    template: str,
+) -> str:
+    """Render the configured room-context system prompt.
+
+    The full prompt is owned by ``AIService`` as the
+    ``room_context_prompt`` ``ConfigParam`` (``ai_prompt=True``);
+    callers must read ``self._room_context_prompt`` and pass it in
+    via ``template``. We only do the two runtime substitutions:
+
+    - ``{room_title}`` — the shared room's title.
+    - ``{members}``    — indented bullet list of members with role
+      (owner / member) and a marker on the current speaker.
+
+    ``str.replace`` instead of ``str.format`` so admin-edited
+    templates with stray braces don't blow up — unknown placeholders
+    pass through as literal text.
+    """
     title = data.get("title", "Shared Room")
     members = data.get("members", [])
     owner_id = data.get("user_id", "")
@@ -98,18 +327,7 @@ def build_room_context(data: dict[str, Any], user: UserContext) -> str:
 
     members_str = "\n".join(member_lines) if member_lines else "  (no members)"
 
-    return (
-        f'You are Gilbert, an AI assistant in a shared chat room called "{title}".\n'
-        f"Multiple users are in this room. Messages from users are prefixed with their name "
-        f"in brackets, e.g. [Alice]: hello.\n\n"
-        f"Current members:\n{members_str}\n\n"
-        f"IMPORTANT: Stay quiet unless:\n"
-        f"- Someone addresses you directly (mentions Gilbert, asks you something, etc.)\n"
-        f"- A tool or service is making you interact with the room\n"
-        f"- You are responding to a tool call\n"
-        f"If no one is talking to you, respond with just an empty string.\n"
-        f"When you do respond, be concise and helpful."
-    )
+    return template.replace("{room_title}", title).replace("{members}", members_str)
 
 
 async def publish_event(gilbert: Any, event_type: str, data: dict[str, Any]) -> None:

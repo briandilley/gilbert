@@ -68,7 +68,7 @@ _DEFAULT_ALLOWED_PATHS: tuple[str, ...] = (
     "README.md",
     "CLAUDE.md",
     "gilbert.sh",
-    ".claude/memory",
+    "docs/architecture",
 )
 
 _DEFAULT_MAX_FILE_BYTES = 200_000  # 200 KB — enough for the largest service file

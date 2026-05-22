@@ -287,9 +287,14 @@ class _FakeSpeakerProvider:
         self.announce_calls: list[dict[str, Any]] = []
 
     @property
-    def backend(self) -> Any:
-        # SpeakerProvider protocol requires this; tests don't use it.
+    def backends(self) -> dict[str, Any]:
+        return {}
+
+    def get_backend(self, name: str) -> Any:
         return None
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        return {}
 
     async def announce(
         self,
@@ -1530,4 +1535,3 @@ class TestGreetingWeatherHintTemplateConfig:
         assert "weather_hint_template" in by_key
         assert by_key["weather_hint_template"].ai_prompt is True
         assert by_key["weather_hint_template"].multiline is True
-

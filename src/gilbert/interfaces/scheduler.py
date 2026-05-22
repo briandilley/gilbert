@@ -303,8 +303,15 @@ class SchedulerProvider(Protocol):
         """Register a job. System jobs are not user-editable."""
         ...
 
-    def remove_job(self, name: str, requester_id: str = "") -> None:
-        """Remove a job."""
+    def remove_job(
+        self, name: str, requester_id: str = "", *, force: bool = False
+    ) -> None:
+        """Remove a job.
+
+        ``force=True`` bypasses the system-job protection so the
+        service that owns a system job can replace it (e.g. heartbeat
+        re-arm). External callers never pass ``force``.
+        """
         ...
 
     def enable_job(self, name: str) -> None:

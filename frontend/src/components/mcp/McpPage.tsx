@@ -8,6 +8,7 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   PlayIcon,
   SquareIcon,
@@ -27,12 +28,12 @@ import type { McpServer, McpServerDraft } from "@/types/mcp";
 
 function scopeBadgeVariant(
   scope: McpServer["scope"],
-): "default" | "secondary" | "outline" {
+): "neutral" | "outline" | "active" {
   switch (scope) {
     case "public":
-      return "default";
+      return "active";
     case "shared":
-      return "secondary";
+      return "neutral";
     default:
       return "outline";
   }
@@ -147,7 +148,12 @@ export function McpPage() {
   };
 
   if (isLoading) {
-    return <LoadingSpinner text="Loading MCP servers..." className="p-8" />;
+    return (
+      <div>
+        <PageHeader eyebrow="MCP" title="Servers" />
+        <LoadingSpinner text="Loading MCP servers..." className="p-8" />
+      </div>
+    );
   }
 
   const rows = servers ?? [];
@@ -157,54 +163,56 @@ export function McpPage() {
   );
 
   return (
-    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold">MCP Servers</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Federate tools from external Model Context Protocol servers
-            into Gilbert's AI. Private servers are visible only to you;
-            shared and public servers are managed by admins.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            <RefreshCcwIcon className="size-4 mr-1" />
-            Refresh
-          </Button>
-          <Button size="sm" onClick={openNew}>
-            <PlusIcon className="size-4 mr-1" />
-            Add Server
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="MCP"
+        title="Servers"
+        description="Federate tools from external Model Context Protocol servers into Gilbert's AI. Private servers are visible only to you; shared and public servers are managed by admins."
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              <RefreshCcwIcon />
+              Refresh
+            </Button>
+            <Button size="sm" onClick={openNew}>
+              <PlusIcon />
+              Add server
+            </Button>
+          </>
+        }
+      />
 
-      {rows.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            <p>No MCP servers configured.</p>
-            <p className="text-sm mt-2">
-              Click <strong>Add Server</strong> to connect your first one.
+      <div className="mx-auto max-w-5xl px-4 py-4 sm:px-6 sm:py-6">
+        {rows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              No MCP servers
             </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <>
-          <ServerSection
-            title="My servers"
-            servers={mine}
-            emptyHint="You haven't created any MCP servers yet."
-            canEdit={() => true}
-            onEdit={openEdit}
-            onStart={(s) => startMutation.mutate(s.id)}
-            onStop={(s) => stopMutation.mutate(s.id)}
-            onDelete={handleDelete}
-            onSignIn={(s) => signInMutation.mutate(s.id)}
-            expanded={expanded}
-            onToggleExpanded={toggleExpanded}
-          />
-          {shared.length > 0 && (
-            <div className="mt-8">
+            <p className="max-w-md text-sm text-muted-foreground">
+              Add a server to federate its tools into the AI. Servers can
+              be private (only you), shared with a role or user, or public.
+            </p>
+            <Button size="sm" onClick={openNew}>
+              <PlusIcon />
+              Add server
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <ServerSection
+              title="My servers"
+              servers={mine}
+              emptyHint="You haven't created any MCP servers yet."
+              canEdit={() => true}
+              onEdit={openEdit}
+              onStart={(s) => startMutation.mutate(s.id)}
+              onStop={(s) => stopMutation.mutate(s.id)}
+              onDelete={handleDelete}
+              onSignIn={(s) => signInMutation.mutate(s.id)}
+              expanded={expanded}
+              onToggleExpanded={toggleExpanded}
+            />
+            {shared.length > 0 && (
               <ServerSection
                 title={isAdmin ? "Shared & public" : "Available to you"}
                 servers={shared}
@@ -218,10 +226,10 @@ export function McpPage() {
                 expanded={expanded}
                 onToggleExpanded={toggleExpanded}
               />
-            </div>
-          )}
-        </>
-      )}
+            )}
+          </div>
+        )}
+      </div>
 
       <McpServerDialog
         open={dialogOpen}
@@ -263,7 +271,7 @@ function ServerSection({
   if (servers.length === 0 && !emptyHint) return null;
   return (
     <div>
-      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+      <h2 className="font-mono text-[11px] uppercase tracking-[0.08em] font-medium text-muted-foreground mb-2">
         {title}
       </h2>
       {servers.length === 0 ? (
@@ -343,7 +351,7 @@ function ServerRow({
               <Badge variant={scopeBadgeVariant(server.scope)}>
                 {server.scope}
               </Badge>
-              <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+              <Badge variant={statusToVariant(status.tone)} dot>{status.label}</Badge>
             </div>
             {server.scope === "shared" && (
               <div className="mt-1 text-xs text-muted-foreground">
@@ -430,21 +438,10 @@ function ServerRow({
   );
 }
 
-interface StatusBadgeProps {
-  tone: "ok" | "warn" | "idle";
-  children: React.ReactNode;
-}
-
-function StatusBadge({ tone, children }: StatusBadgeProps) {
-  const classes =
-    tone === "ok"
-      ? "border-green-500/40 text-green-700 dark:text-green-400"
-      : tone === "warn"
-      ? "border-destructive/40 text-destructive"
-      : "text-muted-foreground";
-  return (
-    <Badge variant="outline" className={classes}>
-      {children}
-    </Badge>
-  );
+/** Map the McpStatus tone strings onto the design-system Badge
+ *  state variants. The dot prop carries the semantic color. */
+function statusToVariant(tone: "ok" | "warn" | "idle"): "success" | "error" | "off" {
+  if (tone === "ok") return "success";
+  if (tone === "warn") return "error";
+  return "off";
 }

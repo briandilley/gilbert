@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
@@ -2391,7 +2391,7 @@ class TasksService(Service):
 
     async def summarize_today(self, user_ctx: UserContext) -> str:
         """Build the daily task summary. Single source for AI tool + greeting."""
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         # Reads via search_tasks use get_current_user(); set it here so
         # the greeting service's direct call sees the right identity.
@@ -3104,7 +3104,7 @@ class TasksService(Service):
     async def _tool_get_task(self, arguments: dict[str, Any]) -> str:
         # Set context so get_task's visibility check sees this user.
         user_ctx = self._resolve_user_ctx_from_args(arguments)
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(user_ctx)
         task_id = str(arguments.get("task_id") or "")
@@ -3121,7 +3121,7 @@ class TasksService(Service):
 
     async def _tool_list_tasks(self, arguments: dict[str, Any]) -> str:
         user_ctx = self._resolve_user_ctx_from_args(arguments)
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(user_ctx)
         status_raw = str(arguments.get("status") or "open").lower()
@@ -3273,7 +3273,7 @@ class TasksService(Service):
 
     async def _tool_tasks_due(self, arguments: dict[str, Any]) -> str:
         user_ctx = self._resolve_user_ctx_from_args(arguments)
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(user_ctx)
         window = str(arguments.get("window") or "today").lower().strip()
@@ -3605,7 +3605,7 @@ class TasksService(Service):
     async def _ws_tasks_list(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(conn.user_ctx)
         status_raw = str(frame.get("status") or "open").lower()
@@ -3661,7 +3661,7 @@ class TasksService(Service):
     async def _ws_tasks_get(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(conn.user_ctx)
         task_id = str(frame.get("task_id") or "")
@@ -3826,7 +3826,7 @@ class TasksService(Service):
     async def _ws_due_today(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(conn.user_ctx)
         results = await self.due_today(
@@ -3851,7 +3851,7 @@ class TasksService(Service):
     async def _ws_due_window(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(conn.user_ctx)
         window = str(frame.get("window") or "today")
@@ -3879,7 +3879,7 @@ class TasksService(Service):
     async def _ws_overdue(
         self, conn: Any, frame: dict[str, Any]
     ) -> dict[str, Any]:
-        from gilbert.core.context import set_current_user
+        from gilbert.interfaces.context import set_current_user
 
         set_current_user(conn.user_ctx)
         results = await self.overdue(

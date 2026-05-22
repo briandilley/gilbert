@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.media_library import (
     MediaLibraryService,
@@ -31,6 +30,7 @@ from gilbert.interfaces.ai import (
     TokenUsage,
 )
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.events import Event, EventBus
 from gilbert.interfaces.media_library import (
     ContinueWatchingEntry,
@@ -45,6 +45,7 @@ from gilbert.interfaces.media_library import (
 )
 from gilbert.interfaces.scheduler import Schedule
 from gilbert.interfaces.storage import StorageBackend
+from gilbert.interfaces.users import NameMatch
 from gilbert.storage.sqlite import SQLiteStorage
 from tests.unit._fakes.media_library import FakeMediaLibraryBackend
 
@@ -210,6 +211,25 @@ class _StubUsersService:
 
     async def list_users(self) -> list[dict[str, Any]]:
         return list(self._users)
+
+    async def resolve_user_id_by_name(self, name: str) -> NameMatch | None:
+        needle = name.strip().lower()
+        if not needle:
+            return None
+        matches: list[str] = []
+        for user in self._users:
+            user_id = str(user.get("_id") or "")
+            display_name = str(user.get("display_name") or "")
+            email = str(user.get("email") or "")
+            if needle in {
+                user_id.lower(),
+                display_name.lower(),
+                email.lower(),
+            }:
+                matches.append(user_id)
+        if len(matches) != 1:
+            return None
+        return NameMatch(user_id=matches[0], confidence=1.0)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────

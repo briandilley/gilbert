@@ -93,7 +93,7 @@ class _McpAsgiEndpoint:
             await _send_json(send, 503, {"error": "MCP server is not enabled"})
             return
 
-        from gilbert.core.context import _current_user
+        from gilbert.interfaces.context import _current_user
         from gilbert.core.services.mcp_server_http import (
             authenticate_mcp_request,
             reset_current_client,

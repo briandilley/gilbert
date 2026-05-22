@@ -58,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { timeAgo } from "@/lib/timeAgo";
 import type {
   Agent,
@@ -152,9 +153,16 @@ export function WarRoomPage() {
 
   if (summaryQuery.isPending) {
     return (
-      <div className="p-6">
-        <BackLink />
-        <div className="mt-4">
+      <div>
+        <PageHeader
+          eyebrow={
+            <Link to="/goals" className="hover:text-foreground transition-colors">
+              WORK / GOALS
+            </Link>
+          }
+          title="Loading goal…"
+        />
+        <div className="px-6 py-6">
           <LoadingSpinner text="Loading goal…" />
         </div>
       </div>
@@ -165,11 +173,18 @@ export function WarRoomPage() {
     const err = summaryQuery.error;
     const isNotFound = err instanceof ApiError && err.status === 404;
     return (
-      <div className="p-6">
-        <BackLink />
+      <div>
+        <PageHeader
+          eyebrow={
+            <Link to="/goals" className="hover:text-foreground transition-colors">
+              WORK / GOALS
+            </Link>
+          }
+          title="Goal unavailable"
+        />
         <div
           role="alert"
-          className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="mx-6 mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {isNotFound ? (
             <>
@@ -194,78 +209,86 @@ export function WarRoomPage() {
   const goal = summary.goal;
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-7xl mx-auto">
-      <BackLink />
-
-      {/* Header card */}
-      <Card>
-        <CardContent>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-lg font-semibold truncate">{goal.name}</h1>
-                <GoalStatusPill status={goal.status} />
-              </div>
-              {goal.description && (
-                <p className="mt-1 text-sm text-muted-foreground whitespace-pre-wrap">
-                  {goal.description}
-                </p>
-              )}
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>
-                  Cost: ${goal.lifetime_cost_usd.toFixed(2)}
-                  {goal.cost_cap_usd != null && (
-                    <> / ${goal.cost_cap_usd.toFixed(2)}</>
-                  )}
-                </span>
-                <span>Created {timeAgo(goal.created_at)}</span>
-                {goal.completed_at && (
-                  <span>Completed {timeAgo(goal.completed_at)}</span>
+    <div>
+      <PageHeader
+        eyebrow={
+          <span className="space-x-1.5">
+            <Link to="/goals" className="hover:text-foreground transition-colors">
+              WORK / GOALS
+            </Link>
+            <span className="text-muted-foreground/60">/</span>
+            <GoalStatusPill status={goal.status} />
+          </span>
+        }
+        title={goal.name}
+        description={
+          <>
+            {goal.description && (
+              <p className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                {goal.description}
+              </p>
+            )}
+            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
+              <span>
+                cost ${goal.lifetime_cost_usd.toFixed(2)}
+                {goal.cost_cap_usd != null && (
+                  <> / ${goal.cost_cap_usd.toFixed(2)}</>
                 )}
-              </div>
+              </span>
+              <span className="text-muted-foreground/50">·</span>
+              <span>created {timeAgo(goal.created_at)}</span>
+              {goal.completed_at && (
+                <>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span>completed {timeAgo(goal.completed_at)}</span>
+                </>
+              )}
             </div>
-            <div className="flex flex-wrap gap-2">
-              <StatusSelector
-                goalId={goal._id}
-                status={goal.status}
-                onError={setActionError}
-              />
-              <Button
-                variant="outline"
-                onClick={() => setHandoffOpen(true)}
-                disabled={summary.assignees.length < 2}
-                title={
-                  summary.assignees.length < 2
-                    ? "Need at least two assignees to hand off"
-                    : undefined
-                }
-              >
-                Handoff
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => setConfirmDeleteOpen(true)}
-                disabled={deleteGoal.isPending}
-              >
-                Delete
-              </Button>
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <AssigneesStrip goalId={goal._id} />
-          </div>
-
-          {actionError && (
-            <div
-              role="alert"
-              className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          </>
+        }
+        actions={
+          <>
+            <StatusSelector
+              goalId={goal._id}
+              status={goal.status}
+              onError={setActionError}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setHandoffOpen(true)}
+              disabled={summary.assignees.length < 2}
+              title={
+                summary.assignees.length < 2
+                  ? "Need at least two assignees to hand off"
+                  : undefined
+              }
             >
-              {actionError}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              Handoff
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmDeleteOpen(true)}
+              disabled={deleteGoal.isPending}
+            >
+              Delete
+            </Button>
+          </>
+        }
+      />
+
+      <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
+        <AssigneesStrip goalId={goal._id} />
+
+        {actionError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {actionError}
+          </div>
+        )}
 
       {/* Body: posts + right rail */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_18rem]">
@@ -359,18 +382,8 @@ export function WarRoomPage() {
         </DialogContent>
       </Dialog>
 
+      </div>
     </div>
-  );
-}
-
-function BackLink() {
-  return (
-    <Link
-      to="/goals"
-      className="text-sm text-muted-foreground hover:text-foreground hover:underline"
-    >
-      ← Goals
-    </Link>
   );
 }
 

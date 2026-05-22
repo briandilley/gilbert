@@ -187,7 +187,7 @@ class CameraEventService(Service):
                     "camera.backend.disconnected",
                     # ``camera.<label>.detected.<camera>`` is dynamic and
                     # cannot be enumerated up front; it's documented in
-                    # ``memory-camera-service.md``.
+                    # ``docs/architecture/camera-service.md``.
                 }
             ),
             toggleable=True,

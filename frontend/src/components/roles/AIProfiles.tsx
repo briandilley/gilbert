@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -101,19 +102,22 @@ export function AIProfiles() {
     });
   }
 
-  if (isLoading) return <LoadingSpinner text="Loading profiles..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">AI Profiles</h1>
-      <div className="flex justify-end mb-4">
-        <Button size="sm" onClick={openNew}>
-          <PlusIcon className="size-4 mr-1" />
-          New Profile
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="AI profiles"
+        description="Named bundles of AI-backend + tool-set + system prompt. Services request a profile by name; the resolver picks a concrete backend at call time."
+        actions={
+          <Button size="sm" onClick={openNew}>
+            <PlusIcon />
+            New profile
+          </Button>
+        }
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading && <LoadingSpinner text="Loading profiles..." className="p-4" />}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {data?.profiles.map((profile) => (
           <Card key={profile.name}>
             <CardHeader className="pb-2">
@@ -333,6 +337,7 @@ export function AIProfiles() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+      </div>
+    </div>
   );
 }

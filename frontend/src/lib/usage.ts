@@ -37,6 +37,8 @@ export function summarizeUsage(
     cache_creation_tokens?: number;
     cache_read_tokens?: number;
     cost_usd?: number;
+    backend?: string;
+    model?: string;
   } | null | undefined,
   opts: { includeCache?: boolean } = {},
 ): string {
@@ -51,5 +53,7 @@ export function summarizeUsage(
   if ((usage.cost_usd ?? 0) > 0) {
     parts.push(formatCost(usage.cost_usd ?? 0));
   }
+  const provider = [usage.backend, usage.model].filter(Boolean).join(" · ");
+  if (provider) parts.push(provider);
   return parts.join(" · ");
 }

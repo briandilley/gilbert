@@ -47,13 +47,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from gilbert.core.context import get_current_user
 from gilbert.core.services._ui_blocks import confirm_or_execute
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
     ConfigParam,
 )
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.feeds import (
     BriefingHeadline,
@@ -3727,4 +3727,3 @@ def _briefing_tool_output(cached: dict[str, Any]) -> ToolOutput:
 def _check_protocol() -> None:
     svc: FeedsProvider = FeedsService()
     _ = svc
-

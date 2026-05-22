@@ -46,6 +46,9 @@ class _FakeUsersService:
     async def list_users(self) -> list[dict[str, Any]]:
         return list(self._users.values())
 
+    async def resolve_user_id_by_name(self, name: str) -> Any:
+        return None  # Unused in MCP server tests.
+
     @property
     def backend(self) -> Any:
         return self._backend
