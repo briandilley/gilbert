@@ -1,5 +1,6 @@
 """Service manager — registration, dependency resolution, and lifecycle management."""
 
+import asyncio
 import logging
 
 from gilbert.interfaces.events import Event, EventBus
@@ -35,7 +36,19 @@ class ServiceManager(ServiceResolver):
         )
 
     async def start_all(self) -> None:
-        """Resolve dependencies and start all services in topological order."""
+        """Resolve dependencies and start all services in topological order.
+
+        Services are grouped into waves by their declared ``requires`` —
+        a service joins the current wave when every capability it
+        requires has already been published by an earlier wave. Within
+        a wave the starts run concurrently via ``asyncio.gather``: a
+        slow network-bound start (a backend doing a telnet handshake,
+        an HTTP probe, a model load) no longer blocks every later
+        independent service. Inter-wave ordering still respects the
+        dependency graph because the next wave only forms once the
+        current wave's ``capabilities`` have all been added to
+        ``started_caps``.
+        """
         remaining = dict(self._registered)
         started_caps: set[str] = set()
 
@@ -59,23 +72,42 @@ class ServiceManager(ServiceResolver):
                     self._failed.add(name)
                 break
 
+            # Snapshot the wave so dict mutation during gather is safe.
+            wave: list[tuple[str, Service, ServiceInfo]] = []
             for name in ready:
                 svc = remaining.pop(name)
-                info = svc.service_info()
-                try:
-                    await svc.start(self)
-                    self._started.append(name)
+                wave.append((name, svc, svc.service_info()))
+
+            await asyncio.gather(*(self._start_one(name, svc, info) for name, svc, info in wave))
+
+            # Augment capabilities once the wave settles. Services in the
+            # wave can't depend on each other (they entered the wave
+            # together because their requires were already met), so it's
+            # safe to defer the cap-set update until the wave completes.
+            for name, _svc, info in wave:
+                if name in self._started:
                     started_caps |= info.capabilities
-                    logger.info("Service started: %s", name)
-                    await self._publish_event("service.started", name, info)
-                except Exception:
-                    logger.exception("Service %s failed to start", name)
-                    self._failed.add(name)
-                    await self._publish_event("service.failed", name, info)
 
         total = len(self._started)
         failed = len(self._failed)
         logger.info("Service startup complete: %d started, %d failed", total, failed)
+
+    async def _start_one(
+        self,
+        name: str,
+        svc: "Service",
+        info: "ServiceInfo",
+    ) -> None:
+        """Start a single service; record success/failure; publish event."""
+        try:
+            await svc.start(self)
+            self._started.append(name)
+            logger.info("Service started: %s", name)
+            await self._publish_event("service.started", name, info)
+        except Exception:
+            logger.exception("Service %s failed to start", name)
+            self._failed.add(name)
+            await self._publish_event("service.failed", name, info)
 
     async def stop_all(self) -> None:
         """Stop all started services in reverse order."""
@@ -183,8 +215,14 @@ class ServiceManager(ServiceResolver):
             for cap in new_info.capabilities:
                 self._capabilities.setdefault(cap, []).append(name)
 
-        # Start the (new or existing) service
+        # Start the (new or existing) service. Reset ``_enabled`` first so
+        # services whose ``start()`` early-returns on a disabled config don't
+        # carry over a stale ``True`` from the previous run — otherwise
+        # ``svc.enabled`` would keep reporting the service as on and UI gating
+        # (nav, capability checks) would never hide it.
         svc = self._registered[name]
+        if hasattr(svc, "_enabled"):
+            svc._enabled = False
         try:
             await svc.start(self)
             if name not in self._started:

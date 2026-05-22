@@ -6,12 +6,15 @@ import { useEventBus } from "@/hooks/useEventBus";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useWsApi } from "@/hooks/useWsApi";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { cn } from "@/lib/utils";
 import type { Notification as AppNotification } from "@/types/notifications";
 
+// Urgency → semantic foreground. Functional only (info / normal / urgent).
 const URGENCY_COLOR: Record<string, string> = {
   info: "text-muted-foreground",
-  normal: "text-blue-500",
-  urgent: "text-red-500",
+  normal: "text-info",
+  urgent: "text-destructive",
 };
 
 function timeAgo(iso: string): string {
@@ -71,93 +74,113 @@ export function NotificationsPage() {
   };
 
   return (
-    <div className="container mx-auto py-6 max-w-3xl">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-semibold">Notifications</h1>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => navigate("/account/notifications")}
-          >
-            Delivery routes
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleMarkAllRead}
-            disabled={unread === 0}
-          >
-            <CheckIcon className="size-4 mr-1" />
-            Mark all read ({unread})
-          </Button>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <div className="text-center text-muted-foreground py-8">Loading…</div>
-      ) : items.length === 0 ? (
-        <div className="text-center text-muted-foreground py-8">
-          No notifications.
-        </div>
-      ) : (
-        <div className="rounded-md border divide-y">
-          {items.map((n) => (
-            <div
-              key={n.id}
-              className={`flex items-start gap-3 px-4 py-3 hover:bg-accent/50 ${
-                n.read ? "opacity-60" : ""
-              }`}
+    <div>
+      <PageHeader
+        eyebrow="ALERTS"
+        title="Notifications"
+        description={
+          unread === 0
+            ? "Up to date."
+            : `${unread} unread.`
+        }
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/account/notifications")}
             >
-              <BellIcon
-                className={`size-4 mt-1 shrink-0 ${
-                  URGENCY_COLOR[n.urgency] ?? URGENCY_COLOR.normal
-                }`}
-              />
-              <button
-                type="button"
-                onClick={() => handleClick(n)}
-                className="flex-1 text-left min-w-0"
+              Delivery routes
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleMarkAllRead}
+              disabled={unread === 0}
+            >
+              <CheckIcon />
+              Mark all read
+            </Button>
+          </div>
+        }
+      />
+
+      <div className="mx-auto max-w-3xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <div className="text-center text-xs text-muted-foreground py-8">
+            Loading…
+          </div>
+        ) : items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border py-16 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              No notifications
+            </p>
+            <p className="text-sm text-muted-foreground">
+              You're caught up.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-md border border-border divide-y divide-border">
+            {items.map((n) => (
+              <div
+                key={n.id}
+                className={cn(
+                  "flex items-start gap-3 px-3 py-2.5 transition-colors",
+                  "hover:bg-foreground/[0.025]",
+                  n.read && "opacity-60",
+                )}
               >
-                <div className="text-sm break-words">{n.message}</div>
-                <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
-                  <span>{n.source}</span>
-                  <span>·</span>
-                  <span>{n.urgency}</span>
-                  <span>·</span>
-                  <span>{timeAgo(n.created_at)}</span>
-                  {n.read && n.read_at ? (
-                    <>
-                      <span>·</span>
-                      <span>read {timeAgo(n.read_at)}</span>
-                    </>
+                <BellIcon
+                  className={cn(
+                    "size-3.5 mt-1 shrink-0",
+                    URGENCY_COLOR[n.urgency] ?? URGENCY_COLOR.normal,
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={() => handleClick(n)}
+                  className="flex-1 text-left min-w-0"
+                >
+                  <div className="text-sm break-words">{n.message}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5 flex-wrap font-mono">
+                    <span>{n.source}</span>
+                    <span className="text-muted-foreground/50">·</span>
+                    <span>{n.urgency}</span>
+                    <span className="text-muted-foreground/50">·</span>
+                    <span>{timeAgo(n.created_at)}</span>
+                    {n.read && n.read_at ? (
+                      <>
+                        <span className="text-muted-foreground/50">·</span>
+                        <span>read {timeAgo(n.read_at)}</span>
+                      </>
+                    ) : null}
+                  </div>
+                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!n.read ? (
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      onClick={() => handleMarkRead(n)}
+                      title="Mark as read"
+                    >
+                      <CheckIcon />
+                    </Button>
                   ) : null}
-                </div>
-              </button>
-              <div className="flex items-center gap-1 shrink-0">
-                {!n.read ? (
                   <Button
                     variant="ghost"
-                    size="icon-sm"
-                    onClick={() => handleMarkRead(n)}
-                    title="Mark as read"
+                    size="icon-xs"
+                    onClick={() => handleDelete(n)}
+                    title="Delete"
                   >
-                    <CheckIcon className="size-4" />
+                    <Trash2Icon />
                   </Button>
-                ) : null}
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => handleDelete(n)}
-                  title="Delete"
-                >
-                  <Trash2Icon className="size-4" />
-                </Button>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

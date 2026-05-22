@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { FolderIcon, FolderOpenIcon, FileTextIcon, ChevronRightIcon } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function DocumentsPage() {
   const api = useWsApi();
@@ -40,35 +41,37 @@ export function DocumentsPage() {
     setSearching(false);
   }
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center p-12">
-        <LoadingSpinner text="Loading sources..." />
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6 max-w-4xl mx-auto">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-xl sm:text-2xl font-semibold">Documents</h1>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2 sm:shrink-0">
-          {/* Toolbar slot — plugins drop 'Import from <source>' or
-              'Sync now' buttons here. */}
-          <PluginPanelSlot slot="documents.toolbar" />
-          <form onSubmit={handleSearch} className="flex gap-2">
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search documents..."
-              className="flex-1 sm:w-64 sm:flex-none"
-            />
-            <Button type="submit" disabled={isSearching}>
-              Search
-            </Button>
-          </form>
-        </div>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="KNOWLEDGE"
+        title="Documents"
+        description="Indexed knowledge sources Gilbert's AI can search. Each source is a backend (local filesystem, Google Drive, …) registered via the knowledge service."
+        actions={
+          <>
+            {/* Toolbar slot — plugins drop 'Import from <source>' or
+                'Sync now' buttons here. */}
+            <PluginPanelSlot slot="documents.toolbar" />
+            <form onSubmit={handleSearch} className="flex gap-1.5">
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search documents…"
+                className="w-56"
+              />
+              <Button type="submit" size="sm" disabled={isSearching}>
+                Search
+              </Button>
+            </form>
+          </>
+        }
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
+        {isLoading && (
+          <div className="flex items-center justify-center p-8">
+            <LoadingSpinner text="Loading sources..." />
+          </div>
+        )}
 
       {searching && searchResults ? (
         <Card>
@@ -121,6 +124,7 @@ export function DocumentsPage() {
           </Card>
         ))
       )}
+      </div>
     </div>
   );
 }

@@ -136,6 +136,14 @@ class Message:
     author_name: str = ""
     visible_to: list[str] | None = None
     attachments: list[FileAttachment] = field(default_factory=list)
+    # User ids @-mentioned in ``content``. Mentions are stored inline
+    # in the markdown as ``@[Display Name](user_id)`` tags; this is
+    # the resolved + validated list extracted at send time so room
+    # members can be notified, sidebar dots can light up, and history
+    # replay doesn't have to re-parse every message. The pseudo-id
+    # ``gilbert`` represents the AI assistant — clients render it as
+    # a chip but the backend treats it as a hint, not a user_id.
+    mentioned_user_ids: list[str] = field(default_factory=list)
     # True when the user cancelled this turn mid-flight via
     # ``chat.message.cancel``. Only meaningful on ASSISTANT rows — the
     # frontend surfaces it as a subtle icon on the turn bubble so it's

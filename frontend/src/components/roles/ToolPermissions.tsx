@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/utils";
 
 interface Tool {
@@ -61,27 +62,35 @@ export function ToolPermissions() {
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [data?.tools]);
 
-  if (isLoading) return <LoadingSpinner text="Loading tools..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Tools</h1>
-      <div className="space-y-2">
-        {groups.map(([provider, tools]) => (
-          <ProviderGroup
-            key={provider}
-            provider={provider}
-            tools={tools}
-            roleNames={data?.role_names ?? []}
-            overrideCount={tools.filter((t) => t.has_override).length}
-            onSet={(toolName, role) =>
-              setMutation.mutate({ toolName, role })
-            }
-            onClear={(toolName) => clearMutation.mutate(toolName)}
-          />
-        ))}
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Tools"
+        description="Minimum role required to invoke each AI tool. Defaults are declared by the tool's provider; explicit overrides take precedence."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading tools..." className="p-4" />
+        ) : (
+          <div className="space-y-2">
+            {groups.map(([provider, tools]) => (
+              <ProviderGroup
+                key={provider}
+                provider={provider}
+                tools={tools}
+                roleNames={data?.role_names ?? []}
+                overrideCount={tools.filter((t) => t.has_override).length}
+                onSet={(toolName, role) =>
+                  setMutation.mutate({ toolName, role })
+                }
+                onClear={(toolName) => clearMutation.mutate(toolName)}
+              />
+            ))}
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
 
@@ -110,40 +119,40 @@ function ProviderGroup({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-accent transition-colors text-left"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-foreground/[0.025] transition-colors text-left"
       >
         <ChevronRightIcon
-          className={cn("size-4 transition-transform shrink-0", open && "rotate-90")}
+          className={cn("size-3.5 transition-transform shrink-0 text-muted-foreground", open && "rotate-90")}
         />
         <span className="font-medium">{provider}</span>
-        <span className="text-xs text-muted-foreground">
+        <span className="font-mono text-[11px] text-muted-foreground">
           {tools.length} tool{tools.length === 1 ? "" : "s"}
         </span>
         {overrideCount > 0 && (
-          <Badge variant="secondary" className="text-xs ml-auto">
+          <Badge variant="active" className="ml-auto">
             {overrideCount} override{overrideCount === 1 ? "" : "s"}
           </Badge>
         )}
       </button>
       {open && (
-        <div className="overflow-x-auto border-t">
+        <div className="overflow-x-auto border-t border-border">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b">
-                <th className="px-3 py-2 text-left font-medium">Tool</th>
-                <th className="hidden md:table-cell px-3 py-2 text-left font-medium">
+              <tr className="border-b border-border">
+                <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Tool</th>
+                <th className="hidden md:table-cell px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
                   Default
                 </th>
-                <th className="px-3 py-2 text-left font-medium">Override</th>
+                <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Override</th>
                 <th className="px-3 py-2 w-16"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-border">
               {tools.map((tool) => (
-                <tr key={tool.tool_name} className="border-b last:border-b-0">
-                  <td className="px-3 py-2 break-words">{tool.tool_name}</td>
+                <tr key={tool.tool_name} className="hover:bg-foreground/[0.025] transition-colors">
+                  <td className="px-3 py-2 break-words font-mono text-xs">{tool.tool_name}</td>
                   <td className="hidden md:table-cell px-3 py-2">
-                    <Badge variant="secondary" className="text-xs">
+                    <Badge variant="neutral">
                       {tool.default_role}
                     </Badge>
                   </td>

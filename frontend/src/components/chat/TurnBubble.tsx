@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
+import { MentionText } from "@/components/chat/MentionText";
 import type {
   ChatRound,
   ChatRoundTool,
@@ -11,7 +12,6 @@ import type {
 import { isReferenceAttachment } from "@/types/chat";
 import { cn } from "@/lib/utils";
 import { summarizeUsage } from "@/lib/usage";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useWsApi } from "@/hooks/useWsApi";
 import {
   AlertTriangleIcon,
@@ -57,64 +57,46 @@ export function TurnBubble({
     userContent = userContent.replace(/^\[.*?\]:\s*/, "");
   }
 
-  const userInitials = (
-    isShared && turn.user_message.author_name && !userIsOwn
-      ? turn.user_message.author_name
-      : "You"
-  )
-    .charAt(0)
-    .toUpperCase();
-
   const hasFinal =
     turn.final_content.length > 0 || turn.final_attachments.length > 0;
   const hasRounds = turn.rounds.length > 0;
 
-  return (
-    <div className="space-y-2">
-      {/* User message — right-aligned bubble, mirrors the old layout. */}
-      <div className="flex flex-row-reverse gap-2.5 max-w-3xl mx-auto">
-        <Avatar className="size-7 shrink-0 mt-0.5">
-          <AvatarFallback className="text-[11px]">
-            {userInitials}
-          </AvatarFallback>
-        </Avatar>
-        <div className="flex flex-col gap-0.5 min-w-0 items-end">
-          <span className="text-[11px] text-muted-foreground px-0.5">
-            {userAuthorLabel}
-          </span>
-          {turn.user_message.attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 max-w-full justify-end">
-              {turn.user_message.attachments.map((att, idx) => (
-                <AttachmentChip key={idx} attachment={att} index={idx} />
-              ))}
-            </div>
-          )}
-          {userContent && (
-            <div className="rounded-2xl px-3.5 py-2 text-sm leading-relaxed bg-primary text-primary-foreground rounded-tr-sm">
-              <p className="whitespace-pre-wrap break-words">{userContent}</p>
-            </div>
-          )}
-        </div>
-      </div>
+  const hasAssistantContent =
+    hasRounds || hasFinal || turn.incomplete || turn.interrupted || turn.streaming;
 
-      {/* Assistant side — thinking card + final answer. */}
-      {(hasRounds || hasFinal || turn.incomplete || turn.interrupted || turn.streaming) && (
-        <div className="flex flex-row gap-2.5 max-w-3xl mx-auto">
-          <Avatar className="size-7 shrink-0 mt-0.5">
-            <AvatarFallback className="text-[11px] bg-primary text-primary-foreground">
-              G
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex flex-col gap-1.5 min-w-0 items-start flex-1">
-            <span className="text-[11px] text-muted-foreground px-0.5 flex items-center gap-1">
-              Gilbert
+  return (
+    <div className="space-y-4">
+      {/* User turn — rail-row, left-aligned. The right-aligned bubble
+          pattern is gone; the chat reads as a transcript / work log
+          now, not as a peer conversation. */}
+      <TurnRail
+        toneClass="bg-foreground/30"
+        author={userAuthorLabel}
+        authorClass="text-foreground"
+      >
+        {turn.user_message.attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {turn.user_message.attachments.map((att, idx) => (
+              <AttachmentChip key={idx} attachment={att} index={idx} />
+            ))}
+          </div>
+        )}
+        {userContent && (
+          <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+            <MentionText content={userContent} />
+          </p>
+        )}
+      </TurnRail>
+
+      {/* Assistant turn — signal-color rail, same vocabulary. */}
+      {hasAssistantContent && (
+        <TurnRail
+          toneClass="bg-(--signal)"
+          author="Gilbert"
+          authorClass="text-(--signal)"
+          authorMeta={
+            <>
               {turn.interrupted && (
-                // Subtle stop indicator — a small filled square, the
-                // universal "stopped" glyph. Tooltip spells it out for
-                // a11y. Shown inline next to the "Gilbert" label so
-                // it's visible whether or not the thinking card is
-                // expanded and regardless of whether any final answer
-                // was reached.
                 <span
                   title="You interrupted this turn"
                   aria-label="Interrupted"
@@ -124,28 +106,63 @@ export function TurnBubble({
                 </span>
               )}
               <TurnUsageChip turn={turn} />
-            </span>
+            </>
+          }
+        >
+          {(hasRounds || (turn.streaming && !hasFinal)) && (
+            <ThinkingCard turn={turn} />
+          )}
 
-            {(hasRounds || (turn.streaming && !hasFinal)) && (
-              <ThinkingCard turn={turn} />
-            )}
+          {hasFinal && <FinalAnswer turn={turn} />}
 
-            {hasFinal && (
-              <FinalAnswer turn={turn} />
-            )}
-
-            {!hasFinal && turn.incomplete && !turn.interrupted && (
-              <div className="flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-                <AlertTriangleIcon className="size-3.5 shrink-0" />
-                <span>
-                  Gilbert didn't reach a final answer (loop limit or error).
-                  Try retrying the message.
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
+          {!hasFinal && turn.incomplete && !turn.interrupted && (
+            <div className="mt-2 flex items-center gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+              <AlertTriangleIcon className="size-3.5 shrink-0" />
+              <span>
+                Gilbert didn't reach a final answer (loop limit or error).
+                Try retrying the message.
+              </span>
+            </div>
+          )}
+        </TurnRail>
       )}
+    </div>
+  );
+}
+
+/**
+ * Single rail-row for one side of a turn. 2px colored bar on the
+ * left, indented body, author + optional meta in the header line.
+ * Used identically for user and assistant — the design treats them
+ * as the same kind of thing now.
+ */
+function TurnRail({
+  toneClass,
+  author,
+  authorClass,
+  authorMeta,
+  children,
+}: {
+  toneClass: string;
+  author: string;
+  authorClass?: string;
+  authorMeta?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative max-w-3xl mx-auto pl-4">
+      <span
+        aria-hidden
+        className={cn(
+          "absolute left-0 top-1 bottom-1 w-[2px] rounded-r-full",
+          toneClass,
+        )}
+      />
+      <div className="text-[11px] mb-1 flex items-center gap-1.5">
+        <span className={cn("font-medium", authorClass)}>{author}</span>
+        {authorMeta}
+      </div>
+      {children}
     </div>
   );
 }
@@ -198,15 +215,15 @@ function ThinkingCard({ turn }: { turn: ChatTurn }) {
   return (
     <div
       className={cn(
-        "w-full max-w-2xl rounded-lg border bg-muted/30",
-        isLive && "border-dashed border-muted-foreground/40",
+        "w-full max-w-2xl rounded-md border border-border bg-card/40 my-2",
+        isLive && "border-dashed border-(--signal)/40",
       )}
     >
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
         className={cn(
-          "w-full flex items-start gap-1.5 px-3 py-1.5 text-left hover:bg-muted/40 transition-colors",
+          "w-full flex items-start gap-1.5 px-3 py-1.5 text-left hover:bg-foreground/[0.025] transition-colors",
           isLive && "animate-pulse",
         )}
       >
@@ -342,20 +359,29 @@ function ToolEntry({ tool }: { tool: ChatRoundTool }) {
     Object.keys(tool.arguments).length > 0;
   const hasResult = tool.result !== undefined && tool.result !== "";
 
+  // Mono-rail: a 2px vertical bar on the left + indented mono content.
+  // Status color rides on the rail; the content stays neutral so a
+  // wall of running/done indicators doesn't shout.
+  const railClass = tool.is_error
+    ? "bg-destructive/70"
+    : status === "running"
+      ? "bg-(--signal)/70"
+      : "bg-foreground/20";
+
   return (
-    <div
-      className={cn(
-        "rounded-md border bg-background/60 text-[11px] overflow-hidden",
-        tool.is_error && "border-destructive/40",
-      )}
-    >
+    <div className={cn("relative pl-3", tool.is_error && "text-destructive")}>
+      <span
+        aria-hidden
+        className={cn(
+          "absolute left-0 top-1 bottom-1 w-[2px] rounded-r-full",
+          railClass,
+        )}
+      />
       <button
         type="button"
         onClick={() => setOpen(!open)}
         className={cn(
-          "w-full flex items-center gap-1.5 px-2 py-1 text-left hover:bg-muted/60 transition-colors",
-          open && "border-b",
-          tool.is_error && "bg-destructive/10",
+          "w-full flex items-center gap-1.5 py-0.5 text-left text-[11px] hover:text-foreground transition-colors",
         )}
       >
         <ChevronRightIcon
@@ -365,23 +391,23 @@ function ToolEntry({ tool }: { tool: ChatRoundTool }) {
           )}
         />
         {status === "running" ? (
-          <LoaderIcon className="size-3 shrink-0 animate-spin text-blue-500" />
+          <LoaderIcon className="size-3 shrink-0 animate-spin text-(--signal)" />
         ) : tool.is_error ? (
           <XIcon className="size-3 shrink-0 text-destructive" />
         ) : (
-          <CheckIcon className="size-3 shrink-0 text-green-500" />
+          <CheckIcon className="size-3 shrink-0 text-success" />
         )}
         <span className="font-mono font-medium text-foreground truncate">
           {tool.tool_name || "(unknown)"}
         </span>
         {tool.is_error && (
-          <span className="ml-auto text-destructive font-medium uppercase tracking-wide text-[10px]">
+          <span className="ml-auto text-destructive font-medium font-mono uppercase tracking-[0.06em] text-[10px]">
             error
           </span>
         )}
       </button>
       {open && (
-        <div className="divide-y">
+        <div className="mt-0.5 ml-4 space-y-0.5">
           {hasArgs && (
             <CollapsibleSection
               label="arguments"
@@ -406,7 +432,7 @@ function ToolEntry({ tool }: { tool: ChatRoundTool }) {
             </CollapsibleSection>
           )}
           {!hasArgs && !hasResult && (
-            <div className="px-2 py-1.5 text-[11px] text-muted-foreground italic">
+            <div className="py-1 text-[11px] text-muted-foreground italic">
               No arguments or result.
             </div>
           )}
@@ -463,7 +489,7 @@ function CollapsibleSection({
 
 function FinalAnswer({ turn }: { turn: ChatTurn }) {
   return (
-    <div className="space-y-1.5 max-w-2xl">
+    <div className="space-y-2 mt-2">
       {turn.final_attachments.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {turn.final_attachments.map((att, idx) => (
@@ -472,14 +498,12 @@ function FinalAnswer({ turn }: { turn: ChatTurn }) {
         </div>
       )}
       {turn.final_content && (
-        // ``group relative`` + absolutely-positioned copy button: the
-        // button only fades in on hover so the bubble stays clean at
-        // rest. We copy the raw Markdown (``turn.final_content``)
-        // rather than the rendered DOM text — that way pasting back
-        // into any Markdown surface round-trips losslessly.
-        <div className="group relative rounded-2xl px-3.5 py-2 text-sm leading-relaxed bg-muted rounded-tl-sm">
+        // No bubble around the answer — it's prose, render it as
+        // prose. Hover-reveal copy button stays for round-tripping
+        // the raw Markdown.
+        <div className="group relative text-sm leading-relaxed">
           <MarkdownContent content={turn.final_content} />
-          <div className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          <div className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
             <CopyButton
               getText={() => turn.final_content}
               label="Copy response"
@@ -525,6 +549,10 @@ function sumTurnUsage(turn: ChatTurn) {
   let cost = 0;
   let count = 0;
   let saw = false;
+  // Track the latest round's provider/model — the chip labels the
+  // totals with whatever produced the answer (final_usage round wins).
+  let backend = "";
+  let model = "";
   for (const r of turn.rounds) {
     if (!r.usage) continue;
     saw = true;
@@ -534,6 +562,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cacheR += r.usage.cache_read_tokens;
     cost += r.usage.cost_usd;
     count += 1;
+    if (r.usage.backend) backend = r.usage.backend;
+    if (r.usage.model) model = r.usage.model;
   }
   if (turn.final_usage) {
     saw = true;
@@ -543,6 +573,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cacheR += turn.final_usage.cache_read_tokens;
     cost += turn.final_usage.cost_usd;
     count += 1;
+    if (turn.final_usage.backend) backend = turn.final_usage.backend;
+    if (turn.final_usage.model) model = turn.final_usage.model;
   }
   if (!saw) return null;
   return {
@@ -552,6 +584,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cache_read_tokens: cacheR,
     cost_usd: cost,
     rounds: count,
+    backend: backend || undefined,
+    model: model || undefined,
   };
 }
 

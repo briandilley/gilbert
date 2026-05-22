@@ -244,6 +244,20 @@ async def test_remove_system_job_raises(service: SchedulerService) -> None:
         service.remove_job("sys")
 
 
+async def test_remove_system_job_with_force_succeeds(
+    service: SchedulerService,
+) -> None:
+    """``force=True`` lets the owning service replace its own system job
+    (e.g. AgentService re-arming an agent heartbeat after a config change).
+    External callers never pass ``force``.
+    """
+    service.add_job("sys", Schedule.every(60), AsyncMock(), system=True)
+    service.remove_job("sys", force=True)
+    assert service.get_job("sys") is None
+    # Re-adding under the same name now works — this is the re-arm path.
+    service.add_job("sys", Schedule.every(120), AsyncMock(), system=True)
+
+
 async def test_list_jobs(service: SchedulerService) -> None:
     service.add_job("j1", Schedule.every(60), AsyncMock(), system=True)
     service.add_job("j2", Schedule.every(60), AsyncMock(), system=False)

@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
@@ -2106,4 +2106,3 @@ __all__ = [
     "_render_alerts_summary",
     "_today_iso",
 ]
-

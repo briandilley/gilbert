@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -119,61 +120,75 @@ export function McpClientsPage() {
   };
 
   if (isLoading) {
-    return <LoadingSpinner text="Loading MCP clients..." className="p-8" />;
+    return (
+      <div>
+        <PageHeader eyebrow="MCP" title="Clients" />
+        <LoadingSpinner text="Loading MCP clients..." className="p-8" />
+      </div>
+    );
   }
 
   const rows = clients ?? [];
 
   return (
-    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold">MCP Clients</h1>
-          <p className="text-sm text-muted-foreground mt-1">
+    <div>
+      <PageHeader
+        eyebrow="MCP"
+        title="Clients"
+        description={
+          <>
             Bearer tokens for external MCP-aware agents (Claude Desktop,
             Cursor, etc.) that connect <em>to</em> Gilbert's{" "}
             <code>/api/mcp</code> endpoint. Each client acts as the
             owner user's identity and sees tools filtered by the
             selected AI profile.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            <RefreshCcwIcon className="size-4 mr-1" />
-            Refresh
-          </Button>
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <PlusIcon className="size-4 mr-1" />
-            Add Client
-          </Button>
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              <RefreshCcwIcon />
+              Refresh
+            </Button>
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <PlusIcon />
+              Add client
+            </Button>
+          </>
+        }
+      />
 
-      {rows.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            <p>No MCP clients registered.</p>
-            <p className="text-sm mt-2">
-              Click <strong>Add Client</strong> to issue the first
-              bearer token.
+      <div className="mx-auto max-w-5xl px-4 py-4 sm:px-6 sm:py-6">
+        {rows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              No MCP clients
             </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((client) => (
-            <ClientRow
-              key={client.id}
-              client={client}
-              onDelete={handleDelete}
-              onRotate={handleRotate}
-              onToggle={(c) =>
-                toggleMutation.mutate({ id: c.id, active: !c.active })
-              }
-            />
-          ))}
-        </div>
-      )}
+            <p className="max-w-md text-sm text-muted-foreground">
+              Add a client to issue a bearer token for an external MCP
+              agent.
+            </p>
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <PlusIcon />
+              Add client
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {rows.map((client) => (
+              <ClientRow
+                key={client.id}
+                client={client}
+                onDelete={handleDelete}
+                onRotate={handleRotate}
+                onToggle={(c) =>
+                  toggleMutation.mutate({ id: c.id, active: !c.active })
+                }
+              />
+            ))}
+          </div>
+        )}
+      </div>
 
       <CreateClientDialog
         open={createOpen}
@@ -400,7 +415,12 @@ function CreateClientDialog({
               }}
             >
               <SelectTrigger id="mcp-client-owner">
-                <SelectValue placeholder="Pick the identity this client acts as" />
+                <SelectValue placeholder="Pick the identity this client acts as">
+                  {(v: string | null) => {
+                    const u = (users ?? []).find((x) => x.user_id === v);
+                    return u ? u.display_name || u.user_id : "Pick the identity this client acts as";
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {(users ?? []).map((u) => (

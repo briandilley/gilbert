@@ -308,7 +308,9 @@ async def download_chat_file(
     ``skills.workspace.download`` behavior so old attachments
     persisted before per-conversation workspaces still resolve.
     """
-    _, workspace_svc = await _authorize_conversation(request, conversation_id, user)
+    _, workspace_svc = await _authorize_conversation(
+        request, conversation_id, user
+    )
 
     # Sanitize the requested path to block traversal. ``path:path``
     # matches anything including slashes, but we only want a single
@@ -318,31 +320,57 @@ async def download_chat_file(
         raise HTTPException(status_code=400, detail="invalid path")
 
     safe_name = _sanitize_filename(path)
-    upload_dir = workspace_svc.get_upload_dir(user.user_id, conversation_id)
-    full = upload_dir / safe_name
 
-    if not full.is_file():
-        # Fall back to the legacy chat-uploads skill workspace for
-        # attachments persisted before the workspace refactor.
-        legacy = Path(".gilbert/skill-workspaces/users") / user.user_id / "conversations" / conversation_id / "chat-uploads" / safe_name
-        if legacy.is_file():
-            full = legacy
-        else:
-            # Try legacy per-user workspace
-            legacy2 = Path(".gilbert/skill-workspaces") / user.user_id / "chat-uploads" / safe_name
-            if legacy2.is_file():
-                full = legacy2
-            else:
-                raise HTTPException(status_code=404, detail="file not found")
+    # Caller's own workspace is searched first (cheap, the common
+    # case), then the per-user legacy paths kept for attachments
+    # persisted before the workspace refactor. ``accepted_roots``
+    # doubles as the allowlist for the resolve-and-check below —
+    # every candidate must be inside one of these even if symlinks
+    # would otherwise let it escape.
+    own_root = workspace_svc.get_workspace_root(user.user_id, conversation_id)
+    legacy_conv = (
+        Path(".gilbert/skill-workspaces/users")
+        / user.user_id
+        / "conversations"
+        / conversation_id
+        / "chat-uploads"
+    )
+    legacy_user = (
+        Path(".gilbert/skill-workspaces") / user.user_id / "chat-uploads"
+    )
+    accepted_roots: list[Path] = [own_root, legacy_conv, legacy_user]
+    candidates: list[Path] = [
+        own_root / "uploads" / safe_name,
+        legacy_conv / safe_name,
+        legacy_user / safe_name,
+    ]
 
-    # Resolve the real path and make sure it's still inside a
-    # workspace root — belt and suspenders against symlink tricks.
+    # Shared-room fallback — delegated to ``WorkspaceService.member_workspace_roots``
+    # so the access-gating + member-walk lives in one place (the WS
+    # RPC ``_ws_workspace_download`` calls the same helper). Returns
+    # ``[]`` for personal conversations, leaving the candidate set
+    # unchanged for the common case.
+    member_roots = await workspace_svc.member_workspace_roots(
+        user.user_id, conversation_id
+    )
+    for other_root in member_roots:
+        accepted_roots.append(other_root)
+        candidates.append(other_root / "uploads" / safe_name)
+
+    full: Path | None = None
+    for candidate in candidates:
+        if candidate.is_file():
+            full = candidate
+            break
+    if full is None:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    # Resolve the real path and make sure it's still inside one of
+    # the workspace roots we just enumerated — belt and suspenders
+    # against symlink tricks.
     resolved = full.resolve()
-    workspace_root = workspace_svc.get_workspace_root(user.user_id, conversation_id).resolve()
-    legacy_root = Path(".gilbert/skill-workspaces").resolve()
-    if not (
-        str(resolved).startswith(str(workspace_root))
-        or str(resolved).startswith(str(legacy_root))
+    if not any(
+        str(resolved).startswith(str(root.resolve())) for root in accepted_roots
     ):
         raise HTTPException(status_code=400, detail="path escapes workspace")
 
