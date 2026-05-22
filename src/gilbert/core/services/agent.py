@@ -1696,8 +1696,12 @@ class AgentService(Service):
             await self._on_heartbeat_fired(a.id)
 
         try:
-            self._scheduler.remove_job(job_name)
-        except Exception:
+            # ``force=True`` because the heartbeat is a system job and
+            # ``remove_job`` would otherwise refuse to remove it,
+            # leaving the old registration in place and making the
+            # subsequent ``add_job`` raise "already registered".
+            self._scheduler.remove_job(job_name, force=True)
+        except KeyError:
             pass
         self._scheduler.add_job(
             name=job_name,
@@ -1711,8 +1715,11 @@ class AgentService(Service):
         if self._scheduler is None:
             return
         try:
-            self._scheduler.remove_job(f"heartbeat_{agent_id}")
-        except Exception:
+            # ``force=True`` because heartbeats are system jobs; without
+            # it ``remove_job`` would silently refuse and the job would
+            # keep firing on a deleted/disabled agent.
+            self._scheduler.remove_job(f"heartbeat_{agent_id}", force=True)
+        except KeyError:
             pass
 
     async def _on_heartbeat_fired(self, agent_id: str) -> None:
@@ -2210,7 +2217,7 @@ class AgentService(Service):
             if target_goal_id:
                 goal = await self.get_goal(target_goal_id)
                 if goal and goal.war_room_conversation_id:
-                    from gilbert.core.context import _workspace_conversation_id
+                    from gilbert.interfaces.context import _workspace_conversation_id
                     ws_token = _workspace_conversation_id.set(
                         goal.war_room_conversation_id
                     )
@@ -2231,7 +2238,7 @@ class AgentService(Service):
                 _active_agent_id.reset(agent_token)
                 _active_delegation_chain.reset(chain_token)
                 if ws_token is not None:
-                    from gilbert.core.context import _workspace_conversation_id
+                    from gilbert.interfaces.context import _workspace_conversation_id
                     _workspace_conversation_id.reset(ws_token)
 
             # ChatTurnResult uses `response_text`; map to run.final_message_text.

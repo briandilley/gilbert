@@ -132,7 +132,7 @@ def _make_svc(ai_svc: _FakeAIService | None = None) -> MCPService:
     svc._acl_svc = FakeACL()
     caps: dict[str, Any] = {}
     if ai_svc is not None:
-        caps["ai"] = ai_svc
+        caps["ai_chat"] = ai_svc
     svc._resolver = _FakeResolver(caps)  # type: ignore[assignment]
     return svc
 

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { PlusIcon, SparklesIcon, TargetIcon } from "lucide-react";
+import { PlusIcon, SparklesIcon } from "lucide-react";
 import { useAgents } from "@/api/agents";
 import { useCreateGoal, useGoals } from "@/api/goals";
 import { useEventBus } from "@/hooks/useEventBus";
@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Textarea } from "@/components/ui/textarea";
 import { AuthorPromptDialog } from "@/components/settings/AuthorPromptDialog";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { GoalKanban } from "./GoalKanban";
 
 export function GoalsListPage() {
@@ -37,38 +38,55 @@ export function GoalsListPage() {
   useEventBus("goal.status.changed", invalidate);
   useEventBus("goal.assignment.changed", invalidate);
 
+  const count = goals?.length ?? 0;
+
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <TargetIcon className="size-5 text-muted-foreground" />
-          <h1 className="text-xl sm:text-2xl font-semibold">Goals</h1>
-        </div>
-        <Button onClick={() => setDialogOpen(true)}>
-          <PlusIcon /> New goal
-        </Button>
+    <div>
+      <PageHeader
+        eyebrow="WORK"
+        title="Goals"
+        description={
+          isPending
+            ? "Loading…"
+            : `${count} goal${count === 1 ? "" : "s"}.`
+        }
+        actions={
+          <Button size="sm" onClick={() => setDialogOpen(true)}>
+            <PlusIcon /> New goal
+          </Button>
+        }
+      />
+      <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
+        {isPending && <LoadingSpinner text="Loading goals…" />}
+
+        {isError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            Failed to load goals.
+          </div>
+        )}
+
+        {!isPending && !isError && goals && goals.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              No goals
+            </p>
+            <p className="max-w-md text-sm text-muted-foreground">
+              Goals are scoped pieces of work an agent (or a team)
+              owns end-to-end. Create one to get started.
+            </p>
+            <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <PlusIcon /> New goal
+            </Button>
+          </div>
+        )}
+
+        {!isPending && !isError && goals && goals.length > 0 && (
+          <GoalKanban goals={goals} />
+        )}
       </div>
-
-      {isPending && <LoadingSpinner text="Loading goals…" />}
-
-      {isError && (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          Failed to load goals.
-        </div>
-      )}
-
-      {!isPending && !isError && goals && goals.length === 0 && (
-        <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
-          No goals yet — click "New goal" to create one.
-        </div>
-      )}
-
-      {!isPending && !isError && goals && goals.length > 0 && (
-        <GoalKanban goals={goals} />
-      )}
 
       <NewGoalDialog
         open={dialogOpen}

@@ -90,6 +90,85 @@ class _FakeAISampling:
         )
 
 
+class _FakeAIChat:
+    """Concrete AIProvider stub for the enhanced ``/greet`` path.
+
+    Tools-enabled greeting uses ``ai_svc.chat(...)``; this fake records
+    the call and returns a canned ``ChatTurnResult``.
+    """
+
+    def __init__(self, content: str = "") -> None:
+        self._content = content
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat(
+        self,
+        user_message: str,
+        conversation_id: str | None = None,
+        user_ctx: Any = None,
+        system_prompt: str | None = None,
+        ai_call: str | None = None,
+        attachments: Any = None,
+        model: str = "",
+        backend_override: str = "",
+        ai_profile: str = "",
+        max_tool_rounds: int | None = None,
+        between_rounds_callback: Any = None,
+        mid_round_interrupt: Any = None,
+    ) -> Any:
+        from gilbert.interfaces.ai import ChatTurnResult
+
+        self.calls.append(
+            {
+                "user_message": user_message,
+                "conversation_id": conversation_id,
+                "user_ctx": user_ctx,
+                "system_prompt": system_prompt,
+                "ai_call": ai_call,
+                "ai_profile": ai_profile,
+            },
+        )
+        return ChatTurnResult(
+            response_text=self._content,
+            conversation_id="conv_test",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+        )
+
+
+class _FakeUsersService:
+    """Concrete UserManagementProvider stub.
+
+    Backed by a configurable in-memory dict so a test can dial up
+    matches at any priority level (full display, first name, email
+    local) and any confidence outcome.
+    """
+
+    def __init__(self, match: Any = None) -> None:
+        # ``match`` may be a ``NameMatch`` or ``None``. Tests usually
+        # set this directly; the inner ``list_users`` returns an empty
+        # list because nothing else in the greeting path calls it.
+        self.match = match
+        self.calls: list[str] = []
+
+    @property
+    def allow_user_creation(self) -> bool:
+        return False
+
+    @property
+    def backend(self) -> Any:
+        return None
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        return []
+
+    async def resolve_user_id_by_name(self, name: str) -> Any:
+        self.calls.append(name)
+        return self.match
+
+
 class FakeEventBusSvc:
     def __init__(self) -> None:
         self.bus = FakeEventBus()
@@ -290,3 +369,167 @@ class TestGreetingService:
         await greeting_service._greet_already_present()
 
         mock_presence.who_is_here.assert_not_called()
+
+
+class TestEnhancedGreetTool:
+    """Coverage for the manual ``/greet`` path:
+
+    1. Resolves the input to a user_id via the user service.
+    2. Pulls recent greetings when the match is strong enough.
+    3. Runs the AI through ``chat()`` (tools enabled) with the
+       configurable enhanced_greeting_prompt template.
+    4. Marks the resolved user greeted today.
+    5. Falls back to greeting-by-name-only when match is below
+       threshold or absent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_high_confidence_marks_and_uses_history(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        from gilbert.interfaces.ai import AIProvider
+        from gilbert.interfaces.users import NameMatch, UserManagementProvider
+
+        await greeting_service.start(resolver)
+
+        ai = _FakeAIChat(content="Welcome back, Brian.")
+        assert isinstance(ai, AIProvider)
+        resolver.caps["ai_chat"] = ai
+
+        users = _FakeUsersService(match=NameMatch(user_id="usr_brian", confidence=1.0))
+        assert isinstance(users, UserManagementProvider)
+        resolver.caps["users"] = users
+
+        result = await greeting_service.execute_tool("greet", {"name": "Brian"})
+
+        assert "Brian" in result
+        assert ai.calls and ai.calls[0]["ai_call"] == "greeting"
+        assert ai.calls[0]["ai_profile"] == greeting_service._ai_profile
+        # Marked greeted — record exists for resolved user_id.
+        assert await greeting_service._has_been_greeted_today("usr_brian")
+        # Recent-greetings log seeded with this message.
+        recent = await greeting_service._get_recent_greetings("usr_brian")
+        assert "Welcome back, Brian." in recent
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_below_threshold_does_not_mark(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """Weak email-local match (confidence 0.6, below the 0.7 floor)
+        is treated as 'unknown person' — greet by name only, don't
+        smear someone else's greeting history."""
+        from gilbert.interfaces.users import NameMatch
+
+        await greeting_service.start(resolver)
+        ai = _FakeAIChat(content="Morning.")
+        resolver.caps["ai_chat"] = ai
+        users = _FakeUsersService(match=NameMatch(user_id="usr_someone", confidence=0.6))
+        resolver.caps["users"] = users
+
+        await greeting_service.execute_tool("greet", {"name": "ghost"})
+
+        # No "greeted today" record written for the weakly-matched user.
+        assert await greeting_service._has_been_greeted_today("usr_someone") is False
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_no_match_still_greets_by_name(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """No user matched at all → greet the raw name, no bookkeeping."""
+        await greeting_service.start(resolver)
+        ai = _FakeAIChat(content="Hey, you.")
+        resolver.caps["ai_chat"] = ai
+        users = _FakeUsersService(match=None)
+        resolver.caps["users"] = users
+
+        result = await greeting_service.execute_tool("greet", {"name": "Stranger"})
+
+        assert "Stranger" in result
+        assert ai.calls  # AI was still called.
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_empty_name_returns_error(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        result = await greeting_service.execute_tool("greet", {"name": ""})
+        assert "I need a name" in result
+
+    @pytest.mark.asyncio
+    async def test_enhanced_path_uses_chat_not_complete_one_shot(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """Regression: the enhanced path must route through chat() so
+        the configured profile's tools are available. complete_one_shot
+        with tools_override=[] is for the auto-arrival path only."""
+        await greeting_service.start(resolver)
+        ai = _FakeAIChat(content="Hi.")
+        resolver.caps["ai_chat"] = ai
+        # Also wire the sampling provider — the enhanced path must NOT use it.
+        sampler = _FakeAISampling(content="WRONG")
+        # Both interfaces resolve via the same "ai_chat" key in
+        # production. The fake here is _FakeAIChat (the one isinstance-
+        # narrowed to AIProvider); the sampler stays unwired so we can
+        # assert the enhanced path didn't accidentally fall through to
+        # complete_one_shot.
+
+        await greeting_service.execute_tool("greet", {"name": "Brian"})
+
+        assert ai.calls, "enhanced path must call chat()"
+        assert not sampler.calls, "enhanced path must NOT call complete_one_shot"
+
+    @pytest.mark.asyncio
+    async def test_enhanced_prompt_template_filled_from_settings(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """A user-edited enhanced_greeting_prompt is what reaches the AI."""
+        await greeting_service.start(resolver)
+        ai = _FakeAIChat(content="ok")
+        resolver.caps["ai_chat"] = ai
+
+        await greeting_service.on_config_changed(
+            {"enhanced_greeting_prompt": "Custom prompt for {name}.{style_instruction}{avoid_section}"},
+        )
+
+        await greeting_service.execute_tool("greet", {"name": "Brian"})
+
+        assert ai.calls
+        assert ai.calls[0]["user_message"] == "Custom prompt for Brian."
+
+    @pytest.mark.asyncio
+    async def test_enhanced_prompt_clearing_restores_default(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """Setting the prompt to '' explicitly resets to the bundled default."""
+        from gilbert.core.services.greeting import _DEFAULT_ENHANCED_GREETING_PROMPT
+
+        await greeting_service.start(resolver)
+        await greeting_service.on_config_changed(
+            {"enhanced_greeting_prompt": "Custom."},
+        )
+        assert greeting_service._enhanced_greeting_prompt == "Custom."
+        await greeting_service.on_config_changed({"enhanced_greeting_prompt": ""})
+        assert greeting_service._enhanced_greeting_prompt == _DEFAULT_ENHANCED_GREETING_PROMPT
+
+    @pytest.mark.asyncio
+    async def test_enhanced_prompt_bad_template_falls_back_to_default(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """A user-saved template with an undefined placeholder must not
+        break /greet — fall back to the bundled default for this call,
+        keep the broken template around so the user can fix it."""
+        await greeting_service.start(resolver)
+        ai = _FakeAIChat(content="ok")
+        resolver.caps["ai_chat"] = ai
+
+        await greeting_service.on_config_changed(
+            {"enhanced_greeting_prompt": "Hello {nope_unknown_key}."},
+        )
+
+        await greeting_service.execute_tool("greet", {"name": "Brian"})
+
+        # Call landed — implies the fallback rendered successfully.
+        assert ai.calls
+        assert "Brian" in ai.calls[0]["user_message"]
+        # The broken template is still saved (we don't auto-repair).
+        assert greeting_service._enhanced_greeting_prompt == "Hello {nope_unknown_key}."

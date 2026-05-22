@@ -262,7 +262,12 @@ function AddAssigneeDialog({
               onValueChange={(v) => setAgentId(v ?? "")}
             >
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select an agent…" />
+                <SelectValue placeholder="Select an agent…">
+                  {(v: string | null) => {
+                    const a = candidates.find((c) => c._id === v);
+                    return a ? a.name : "Select an agent…";
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {candidates.map((a) => (

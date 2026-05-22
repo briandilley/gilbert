@@ -32,10 +32,12 @@ dependencies = [
     # means a plain ``uv sync`` resolves every plugin's deps into the
     # shared venv, so users don't have to remember ``--all-packages``.
     "gilbert-plugin-american-standard",
+    "gilbert-plugin-andon-fm",
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
     "gilbert-plugin-elevenlabs",
@@ -50,8 +52,10 @@ dependencies = [
     "gilbert-plugin-ollama",
     "gilbert-plugin-open-meteo",
     "gilbert-plugin-openai",
+    "gilbert-plugin-openwakeword",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-porcupine",
     "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
@@ -62,14 +66,17 @@ dependencies = [
     "gilbert-plugin-unifi",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
+    "faster-whisper>=1.2.1",
 ]
 
 [tool.uv.sources]
 gilbert-plugin-american-standard = { workspace = true }
+gilbert-plugin-andon-fm = { workspace = true }
 gilbert-plugin-anthropic = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }
 gilbert-plugin-browser = { workspace = true }
+gilbert-plugin-deepgram = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
 gilbert-plugin-discord-webhook = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
@@ -85,8 +92,10 @@ gilbert-plugin-ollama = { workspace = true }
 gilbert-plugin-open-meteo = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
+gilbert-plugin-openwakeword = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
 gilbert-plugin-pushover = { workspace = true }
+gilbert-plugin-porcupine = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
 gilbert-plugin-slack = { workspace = true }
 gilbert-plugin-sonos = { workspace = true }
@@ -126,6 +135,10 @@ members = [
     "local-plugins/*",
     "installed-plugins/*",
 ]
+exclude = [
+    "std-plugins/docs",
+    "local-plugins/docs",
+]
 
 # Force an older ``onnxruntime`` across the workspace. ``chromadb``
 # lists ``onnxruntime`` as a hard dep with no version bound, and uv
@@ -133,9 +146,16 @@ members = [
 # wheels — leaving Intel Mac users unable to sync. 1.20.x is the last
 # series with Intel macOS wheels and is compatible with the chromadb
 # releases we use.
+#
+# tflite-runtime: ``openwakeword`` lists it as a Linux dep, but the
+# published wheels only cover Python 3.8–3.11. Override to a
+# marker that excludes Python 3.12+ so uv can resolve the workspace
+# on modern Pythons. openWakeWord falls back to onnxruntime (already in
+# the workspace) on Python 3.12+.
 [tool.uv]
 override-dependencies = [
     "onnxruntime<1.21",
+    "tflite-runtime>=2.8.0; sys_platform == 'linux' and python_version < '3.12'",
 ]
 
 [tool.pytest.ini_options]

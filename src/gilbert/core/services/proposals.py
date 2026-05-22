@@ -201,8 +201,8 @@ CRITICAL RULES:
 
      a. A "Project context" header re-stating that this is the Gilbert
         codebase (Python 3.12+, uv, layered architecture, plugin system),
-        and that the implementer should read /CLAUDE.md and
-        .claude/memory/MEMORIES.md before starting.
+        and that the implementer should read /CLAUDE.md and skim
+        docs/architecture/ for any subsystem the proposal touches.
      b. The motivation paragraph — why this is being built, with the
         evidence summarized.
      c. An architecture section naming where the new code lives (which

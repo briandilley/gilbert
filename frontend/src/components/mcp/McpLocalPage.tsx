@@ -24,6 +24,7 @@ import {
   type LocalMcpServer,
 } from "@/hooks/useMcpBridge";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 const SLUG_RE = /^[a-z][a-z0-9-]*$/;
 
@@ -173,68 +174,67 @@ export function McpLocalPage() {
   }, [drafts, servers]);
 
   return (
-    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
-      <div className="flex items-start justify-between mb-6 gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Local MCP Servers</h1>
-          <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-            MCP servers running on <strong>your</strong> machine, bridged
-            through this browser tab. Tools are only available to you, only
-            while this tab is open. The URL you enter never leaves your
-            browser — Gilbert forwards MCP requests over the WebSocket and
-            your browser proxies them to the local URL.
-          </p>
-        </div>
-        <div className="flex gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={reAnnounce}
-            disabled={!connected || announcing || servers.length === 0}
-          >
-            <RefreshCcwIcon className="size-4 mr-1" />
-            Re-announce
-          </Button>
-          <Button size="sm" onClick={addRow}>
-            <PlusIcon className="size-4 mr-1" />
-            Add Server
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="MCP"
+        title="Local servers"
+        description="MCP servers running on your machine, bridged through this browser tab. Tools are only available to you, only while this tab is open. The URL you enter never leaves your browser — Gilbert forwards MCP requests over the WebSocket and your browser proxies them to the local URL."
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={reAnnounce}
+              disabled={!connected || announcing || servers.length === 0}
+            >
+              <RefreshCcwIcon />
+              Re-announce
+            </Button>
+            <Button size="sm" onClick={addRow}>
+              <PlusIcon />
+              Add server
+            </Button>
+          </>
+        }
+      />
 
-      <Card className="mb-4 border-sky-200 bg-sky-50 dark:border-sky-900 dark:bg-sky-950/40">
-        <CardContent className="py-4 flex gap-3 text-sm">
-          <InfoIcon className="size-4 shrink-0 mt-0.5 text-sky-600 dark:text-sky-400" />
-          <div className="space-y-1">
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {/* CORS instructions inset — uses ``info`` tone via a hairline
+            + signal-color icon, not a colored fill. */}
+        <div className="mb-4 flex gap-3 rounded-md border border-border bg-subtle/40 p-3 text-sm">
+          <InfoIcon className="size-4 shrink-0 mt-0.5 text-info" />
+          <div className="space-y-1 min-w-0">
             <p>
-              Your local MCP server must respond with CORS headers so this
-              page can reach it. For most SDKs that means:
+              Your local MCP server must respond with CORS headers so
+              this page can reach it. For most SDKs that means:
             </p>
-            <pre className="text-xs bg-sky-100 dark:bg-sky-900/40 rounded px-2 py-1 overflow-x-auto">
+            <pre className="text-xs bg-foreground/[0.04] rounded-sm border border-border px-2 py-1 overflow-x-auto font-mono">
 {`Access-Control-Allow-Origin: ${window.location.origin}
 Access-Control-Allow-Methods: POST, OPTIONS
 Access-Control-Allow-Headers: content-type
 Access-Control-Allow-Private-Network: true`}
             </pre>
-            <p className="text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               The last header is only required in Chromium browsers when
               reaching a private-network address (including{" "}
               <code>localhost</code>) from an HTTPS Gilbert.
             </p>
           </div>
-        </CardContent>
-      </Card>
+        </div>
 
       {drafts.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            <p>No local MCP servers configured.</p>
-            <p className="text-sm mt-2">
-              Click <strong>Add Server</strong> to bridge a local MCP server
-              through this tab.
-            </p>
-          </CardContent>
-        </Card>
+        <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+          <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+            No local MCP servers
+          </p>
+          <p className="max-w-md text-sm text-muted-foreground">
+            Add a server to bridge a local MCP service through this tab.
+          </p>
+          <Button size="sm" onClick={addRow}>
+            <PlusIcon />
+            Add server
+          </Button>
+        </div>
       ) : (
         <div className="space-y-3">
           {drafts.map((draft) => {
@@ -339,6 +339,7 @@ Access-Control-Allow-Private-Network: true`}
             {announcing ? "Announcing…" : "Save & announce"}
           </Button>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -25,6 +25,8 @@ from gilbert.interfaces.tts import AudioFormat, SynthesisResult
 class StubSpeakerBackend(SpeakerBackend):
     """In-memory speaker backend for testing."""
 
+    backend_name: str = "stub"
+
     def __init__(self, *, grouping: bool = True) -> None:
         self.initialized = False
         self.closed = False
@@ -239,7 +241,7 @@ def resolver(storage_service: StorageService) -> ServiceResolver:
 @pytest.fixture
 def service(stub_backend: StubSpeakerBackend) -> SpeakerService:
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
     return svc
 
@@ -263,7 +265,7 @@ async def test_start_disabled_without_config(resolver: ServiceResolver) -> None:
     svc = SpeakerService()
     await svc.start(resolver)
     assert not svc._enabled
-    assert svc._backend is None
+    assert not svc._backends
 
 
 async def test_start_initializes_backend(
@@ -271,9 +273,9 @@ async def test_start_initializes_backend(
 ) -> None:
     """When the backend is set and enabled, initialization works correctly."""
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
-    await svc._backend.initialize({})
+    await stub_backend.initialize({})
     assert stub_backend.initialized
 
 
@@ -316,7 +318,7 @@ def test_get_tools_with_grouping(service: SpeakerService) -> None:
 def test_get_tools_without_grouping() -> None:
     backend = StubSpeakerBackend(grouping=False)
     svc = SpeakerService()
-    svc._backend = backend
+    svc._backends = {backend.backend_name: backend}
     svc._enabled = True
     tools = svc.get_tools()
     names = [t.name for t in tools]
@@ -483,10 +485,10 @@ async def test_play_queue_on_speakers_noop_when_already_playing(
 
 async def test_set_and_resolve_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-2", "Living Room Speaker")
+    await service.set_alias("stub:uid-2", "Living Room Speaker")
 
     sid = await service.resolve_speaker_name("Living Room Speaker")
-    assert sid == "uid-2"
+    assert sid == "stub:uid-2"
 
 
 async def test_alias_collision_with_speaker_name(
@@ -494,16 +496,16 @@ async def test_alias_collision_with_speaker_name(
 ) -> None:
     await service.start(resolver)
     with pytest.raises(ValueError, match="collides with existing speaker name"):
-        await service.set_alias("uid-1", "Speaker 2")
+        await service.set_alias("stub:uid-1", "Speaker 2")
 
 
 async def test_alias_collision_with_other_alias(
     service: SpeakerService, resolver: ServiceResolver
 ) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-1", "Kitchen")
+    await service.set_alias("stub:uid-1", "Kitchen")
     with pytest.raises(ValueError, match="already assigned"):
-        await service.set_alias("uid-2", "Kitchen")
+        await service.set_alias("stub:uid-2", "Kitchen")
 
 
 async def test_resolve_name_prefers_exact_case_match(
@@ -539,8 +541,8 @@ async def test_resolve_name_prefers_exact_case_match(
     )
     await service.start(resolver)
 
-    assert await service.resolve_speaker_name("Garage") == "uid-garage-lower"
-    assert await service.resolve_speaker_name("GARAGE") == "uid-garage-upper"
+    assert await service.resolve_speaker_name("Garage") == "stub:uid-garage-lower"
+    assert await service.resolve_speaker_name("GARAGE") == "stub:uid-garage-upper"
 
 
 async def test_resolve_name_raises_on_ambiguous_case(
@@ -581,7 +583,7 @@ async def test_resolve_name_raises_on_ambiguous_case(
 
 async def test_remove_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-2", "Bedroom")
+    await service.set_alias("stub:uid-2", "Bedroom")
     await service.remove_alias("Bedroom")
 
     sid = await service.resolve_speaker_name("Bedroom")
@@ -592,7 +594,7 @@ async def test_alias_in_play_command(
     service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
 ) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-3", "Office")
+    await service.set_alias("stub:uid-3", "Office")
 
     await service.execute_tool(
         "play_audio",
@@ -618,12 +620,12 @@ async def test_tool_set_alias(service: SpeakerService, resolver: ServiceResolver
     assert parsed["status"] == "ok"
 
     sid = await service.resolve_speaker_name("Front Porch")
-    assert sid == "uid-1"
+    assert sid == "stub:uid-1"
 
 
 async def test_tool_remove_alias(service: SpeakerService, resolver: ServiceResolver) -> None:
     await service.start(resolver)
-    await service.set_alias("uid-1", "Garage")
+    await service.set_alias("stub:uid-1", "Garage")
     result = await service.execute_tool("remove_speaker_alias", {"alias": "Garage"})
     parsed = json.loads(result)
     assert parsed["status"] == "ok"
@@ -733,7 +735,7 @@ async def test_announce_with_tts(
     mock_resolver.require_capability.side_effect = require_cap
 
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(mock_resolver)
 
@@ -806,7 +808,7 @@ async def test_get_now_playing_falls_back_to_playing_speaker(
 ) -> None:
     """With nothing last-used, a speaker that's currently playing wins."""
     svc = SpeakerService()
-    svc._backend = stub_backend
+    svc._backends = {stub_backend.backend_name: stub_backend}
     svc._enabled = True
     await svc.start(resolver)
 
@@ -937,7 +939,7 @@ async def _make_speaker_service_with_tts(
     mock_resolver.require_capability.side_effect = require_cap
 
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(mock_resolver)
     return service
@@ -1064,7 +1066,7 @@ async def test_get_speaker_locks_reuses_and_sorts(
     ``asyncio.Lock`` instance, and the returned list is always sorted
     by ID regardless of input order."""
     service = SpeakerService()
-    service._backend = stub_backend
+    service._backends = {stub_backend.backend_name: stub_backend}
     service._enabled = True
     await service.start(resolver)
 
@@ -1077,3 +1079,280 @@ async def test_get_speaker_locks_reuses_and_sorts(
     third = await service._get_speaker_locks(["uid-1", "uid-1", "uid-1"])
     assert len(third) == 1
     assert third[0] is service._speaker_locks["uid-1"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3+4: SpeakerProvider protocol — backends / get_backend / resolve_names
+# ---------------------------------------------------------------------------
+
+
+class FakeSpeakerBackend(SpeakerBackend):
+    """Minimal backend for testing the new SpeakerProvider protocol shape."""
+
+    backend_name: str = "fake"
+    supports_repeat: bool = False
+
+    def __init__(self) -> None:
+        self.initialized = False
+        self.closed = False
+        self._speakers: list[SpeakerInfo] = [
+            SpeakerInfo(
+                speaker_id="uid-1",
+                name="FakeSpeaker1",
+                ip_address="",
+            ),
+        ]
+
+    async def initialize(self, config: dict[str, object]) -> None:
+        self.initialized = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        return list(self._speakers)
+
+    async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
+        for s in self._speakers:
+            if s.speaker_id == speaker_id:
+                return s
+        return None
+
+    async def play_uri(self, request: PlayRequest) -> None:
+        pass
+
+    async def stop(self, speaker_ids: list[str] | None = None) -> None:
+        pass
+
+    async def get_volume(self, speaker_id: str) -> int:
+        return 50
+
+    async def set_volume(self, speaker_id: str, volume: int) -> None:
+        pass
+
+    async def get_playback_state(self, speaker_id: str) -> PlaybackState:
+        return PlaybackState.STOPPED
+
+
+@pytest.fixture
+def speaker_service_with_fake_backend() -> SpeakerService:
+    """SpeakerService wired with a FakeSpeakerBackend (backend_name='fake')."""
+    svc = SpeakerService()
+    fake = FakeSpeakerBackend()
+    svc._backends = {fake.backend_name: fake}
+    svc._enabled = True
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_backends_mapping_exposes_loaded_backend(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    assert "fake" in svc.backends
+    assert svc.backends["fake"] is svc._backends["fake"]
+
+
+@pytest.mark.asyncio
+async def test_get_backend_returns_loaded_or_none(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    assert svc.get_backend("fake") is svc._backends["fake"]
+    assert svc.get_backend("nonexistent") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_names_maps_display_names_to_namespaced_ids(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    result = await svc.resolve_names(["FakeSpeaker1"])
+    assert result == {"FakeSpeaker1": "fake:uid-1"}
+
+
+@pytest.mark.asyncio
+async def test_list_speakers_returns_namespaced_ids(
+    speaker_service_with_fake_backend: SpeakerService,
+) -> None:
+    svc = speaker_service_with_fake_backend
+    speakers = await svc.list_speakers()
+    assert speakers, "expected at least one speaker from the fake backend"
+    for s in speakers:
+        assert ":" in s.speaker_id, f"id {s.speaker_id!r} not namespaced"
+        assert s.backend_name, f"backend_name not stamped on {s}"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Dispatch boundary fixes — tool methods must strip/namespace correctly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_group_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Backend.group_speakers must receive bare native IDs, not namespaced.
+
+    This test guards against the bug where tool methods passed namespaced
+    IDs (from resolve_speaker_names) directly to the backend without
+    stripping the ``<backend>:`` prefix first. The backend always works
+    with bare native IDs.
+    """
+    await service.start(resolver)
+    captured: dict[str, list[str]] = {}
+
+    async def capture_group(ids: list[str]) -> SpeakerGroup:
+        captured["ids"] = list(ids)
+        return SpeakerGroup(
+            group_id="g1",
+            name="Captured Group",
+            coordinator_id=ids[0],
+            member_ids=list(ids),
+        )
+
+    stub_backend.group_speakers = capture_group  # type: ignore[method-assign]
+
+    await service.execute_tool(
+        "group_speakers", {"speakers": ["Speaker 1", "Speaker 2"]}
+    )
+    assert captured["ids"] == ["uid-1", "uid-2"], (
+        f"Backend.group_speakers must receive bare native ids, got {captured['ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_ungroup_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Backend.ungroup_speakers must receive bare native IDs, not namespaced.
+
+    This test guards against the bug where tool methods passed namespaced
+    IDs (from resolve_speaker_names) directly to the backend without
+    stripping the ``<backend>:`` prefix first.
+    """
+    await service.start(resolver)
+    captured: dict[str, list[str]] = {}
+
+    async def capture_ungroup(ids: list[str]) -> None:
+        captured["ids"] = list(ids)
+
+    stub_backend.ungroup_speakers = capture_ungroup  # type: ignore[method-assign]
+
+    await service.execute_tool("ungroup_speakers", {"speakers": ["Speaker 1"]})
+    assert captured["ids"] == ["uid-1"], (
+        f"Backend.ungroup_speakers must receive bare native ids, got {captured['ids']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 6: _route_id / _route_ids helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_route_id_splits_and_returns_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    backend, native = service._route_id("stub:uid-1")
+    assert backend is service._backends["stub"]
+    assert native == "uid-1"
+
+
+@pytest.mark.asyncio
+async def test_route_id_raises_for_unknown_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    with pytest.raises(KeyError, match="nope"):
+        service._route_id("nope:xyz")
+
+
+@pytest.mark.asyncio
+async def test_route_ids_groups_by_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    grouped = service._route_ids(["stub:a", "stub:b"])
+    assert grouped == {"stub": ["a", "b"]}
+
+
+@pytest.mark.asyncio
+async def test_route_ids_raises_for_unknown_backend(service: SpeakerService, resolver: ServiceResolver) -> None:
+    await service.start(resolver)
+    with pytest.raises(KeyError, match="ghost"):
+        service._route_ids(["stub:a", "ghost:b"])
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Multi-speaker dispatch routes via _route_ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Confirm namespaced ids are stripped before reaching the backend."""
+    await service.start(resolver)
+    captured: dict = {}
+
+    async def capture_play(request: PlayRequest) -> None:
+        captured["ids"] = list(request.speaker_ids)
+
+    stub_backend.play_uri = capture_play  # type: ignore[method-assign]
+
+    await service.play_on_speakers(uri="http://example.com/x.mp3", speaker_names=["Speaker 1", "Speaker 2"])
+    assert captured["ids"] == ["uid-1", "uid-2"], (
+        f"Backend.play_uri must receive native ids, got {captured['ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    await service.start(resolver)
+    captured: dict = {}
+
+    async def capture_stop(ids: list[str]) -> None:
+        captured["ids"] = list(ids)
+
+    stub_backend.stop = capture_stop  # type: ignore[method-assign]
+
+    await service.stop_speakers(speaker_names=["Speaker 1", "Speaker 2"])
+    assert captured["ids"] == ["uid-1", "uid-2"]
+
+
+@pytest.mark.asyncio
+async def test_tool_list_groups_returns_namespaced_ids(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """list_speaker_groups tool must return namespaced IDs per the service contract.
+
+    This test guards against the bug where the tool method called the backend
+    directly instead of going through list_speaker_groups(), which applies
+    the ``<backend>:`` namespace prefix. Without the prefix, callers get bare
+    IDs that don't match the namespaced IDs from list_speakers().
+    """
+    await service.start(resolver)
+
+    async def fake_list_groups() -> list[SpeakerGroup]:
+        return [
+            SpeakerGroup(
+                group_id="g1",
+                name="Group1",
+                coordinator_id="uid-1",
+                member_ids=["uid-1", "uid-2"],
+            )
+        ]
+
+    stub_backend.list_groups = fake_list_groups  # type: ignore[method-assign]
+
+    result = await service.execute_tool("list_speaker_groups", {})
+    parsed = json.loads(result)
+    assert len(parsed) == 1
+    group = parsed[0]
+    # All IDs must be namespaced: "stub:uid-N"
+    assert group["coordinator_id"].startswith("stub:"), (
+        f"list_speaker_groups tool must return namespaced coordinator_id, got {group['coordinator_id']}"
+    )
+    for mid in group["member_ids"]:
+        assert mid.startswith("stub:"), (
+            f"list_speaker_groups tool must return namespaced member_ids, got {mid}"
+        )

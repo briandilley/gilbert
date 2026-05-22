@@ -5,6 +5,7 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Select,
   SelectContent,
@@ -37,32 +38,35 @@ export function EventVisibility() {
       queryClient.invalidateQueries({ queryKey: ["event-visibility"] }),
   });
 
-  if (isLoading) return <LoadingSpinner text="Loading event rules..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Events</h1>
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Events"
+        description="Which events each role can see via WebSocket. Longest prefix match wins."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading event rules..." className="p-4" />
+        ) : (
       <Card>
-      <CardContent className="p-0">
-        <p className="px-3 py-2 text-xs text-muted-foreground border-b">
-          Controls which events each role can see via WebSocket. Longest prefix match wins.
-        </p>
+      <CardContent className="px-0 py-0">
         <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b">
-              <th className="px-3 py-2 text-left font-medium">Event Prefix</th>
-              <th className="px-3 py-2 text-left font-medium">Min Role</th>
+            <tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Event prefix</th>
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Min role</th>
               <th className="px-3 py-2 w-16"></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-border">
             {data?.rules.map((rule) => (
-              <tr key={rule.event_prefix} className="border-b">
+              <tr key={rule.event_prefix} className="hover:bg-foreground/[0.025] transition-colors">
                 <td className="px-3 py-2">
-                  <code className="text-xs">{rule.event_prefix}</code>
+                  <code className="font-mono text-xs">{rule.event_prefix}</code>
                   {rule.source === "override" && (
-                    <Badge variant="outline" className="text-[10px] ml-2">override</Badge>
+                    <Badge variant="outline" className="ml-2">override</Badge>
                   )}
                 </td>
                 <td className="px-3 py-2">
@@ -101,6 +105,8 @@ export function EventVisibility() {
         </div>
       </CardContent>
     </Card>
-    </>
+        )}
+      </div>
+    </div>
   );
 }

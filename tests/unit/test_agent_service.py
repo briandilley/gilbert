@@ -163,6 +163,24 @@ async def test_update_agent_patches_display_name(
     assert updated.name == "b1"  # slug unchanged
 
 
+async def test_set_agent_avatar_does_not_blow_up_armed_heartbeat(
+    started_agent_service: Any,
+) -> None:
+    """Regression: avatar update on a heartbeat-armed agent must succeed.
+
+    Before the fix, ``_arm_heartbeat``'s ``remove_job`` swallowed the
+    "Cannot remove system job" rejection, then ``add_job`` raised
+    "Job '…' already registered" — bubbling up to the avatar upload
+    route as a 500.
+    """
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="hb")
+    # Default heartbeat_enabled=True + status=ENABLED → heartbeat is armed.
+    await svc.set_agent_avatar(a.id, filename="avatar.png")
+    # And a second avatar swap must also succeed.
+    await svc.set_agent_avatar(a.id, filename="avatar2.png")
+
+
 async def test_delete_agent_removes_row(started_agent_service: Any) -> None:
     svc = started_agent_service
     a = await svc.create_agent(owner_user_id="usr_1", name="x")
