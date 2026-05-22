@@ -5,6 +5,8 @@ import contextlib
 import json
 import logging
 import uuid
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from gilbert.core.output import cleanup_old_files, get_output_dir
@@ -12,7 +14,7 @@ from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
 )
-from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
     ConfigActionResult,
@@ -20,12 +22,16 @@ from gilbert.interfaces.configuration import (
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import (
+    BrowserSpeakerProtocol,
     LoopMode,
     NowPlaying,
     PlaybackState,
     PlayRequest,
     SpeakerBackend,
+    SpeakerGroup,
     SpeakerInfo,
+    split_speaker_id,
+    to_browser_url,
 )
 from gilbert.interfaces.tools import (
     ToolDefinition,
@@ -38,13 +44,25 @@ logger = logging.getLogger(__name__)
 # Entity collection for speaker aliases
 _ALIAS_COLLECTION = "speaker_aliases"
 
+# Magic aliases that resolve to the caller's own browser
+_MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
+
+# Periodic speaker-cache refresh. Backends like Sonos use async
+# zeroconf discovery that finishes after ``initialize()`` returns;
+# this keeps ``cached_speakers`` close to live so settings-page
+# dropdowns and other sync consumers see the actual set without
+# a manual restart.
+_REFRESH_CACHE_JOB = "speaker.refresh_cached_speakers"
+_REFRESH_CACHE_INTERVAL_SECONDS = 30
+
 
 class SpeakerService(Service):
     """Exposes a SpeakerBackend as a service with speaker control and announce capabilities."""
 
     def __init__(self) -> None:
-        self._backend: SpeakerBackend | None = None
+        self._backends: dict[str, SpeakerBackend] = {}
         self._backend_name: str = "sonos"
+        self._primary_backend: str = ""
         self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._output_ttl_seconds: int = 3600
@@ -65,25 +83,157 @@ class SpeakerService(Service):
         self._speaker_locks: dict[str, asyncio.Lock] = {}
         self._speaker_locks_guard = asyncio.Lock()
         self._speaker_cache: list[SpeakerInfo] = []
+        # Backend startup failures keyed by backend name. Populated by
+        # ``_reinit_backends`` when a backend raises during initialization.
+        self._startup_failures: dict[str, str] = {}
+        # Wired in start() for the per-user browser-echo fan-out.
+        # Optional — if missing the fan-out silently no-ops.
+        self._event_bus_provider: Any = None
+        # Optional access-control provider for role-aware filtering.
+        self._access_control: AccessControlProvider | None = None
+        # Optional scheduler — used for the periodic cache refresh
+        # job. ``None`` when scheduler isn't loaded; cache then only
+        # refreshes at start / on browser activate / deactivate.
+        self._scheduler: Any = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="speaker",
-            capabilities=frozenset({"speaker_control", "ai_tools"}),
+            capabilities=frozenset({"speaker_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
-            optional=frozenset({"configuration", "text_to_speech"}),
+            optional=frozenset(
+                {
+                    "configuration",
+                    "text_to_speech",
+                    "event_bus",
+                    "access_control",
+                    "scheduler",
+                }
+            ),
             toggleable=True,
             toggle_description="Speaker playback and control",
         )
 
     @property
-    def backend(self) -> SpeakerBackend | None:
-        return self._backend
+    def backends(self) -> Mapping[str, SpeakerBackend]:
+        """Mapping of currently-loaded backends, keyed by ``backend_name``."""
+        return self._backends
+
+    def get_backend(self, name: str) -> SpeakerBackend | None:
+        """Return a loaded backend by name, or ``None`` if not loaded."""
+        return self.backends.get(name)
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        """Map speaker display names to namespaced speaker ids.
+
+        Returns ``{name: "<backend>:<native>"}`` for each name that
+        matches a known speaker or magic alias. Names that don't match
+        are omitted (callers decide whether that's an error).
+
+        Delegates to ``resolve_speaker_name`` for each entry so that
+        magic aliases (``"my browser"``, ``"for me"``, etc.) and
+        persisted aliases in storage resolve uniformly.
+        """
+        out: dict[str, str] = {}
+        for name in names:
+            sid = await self.resolve_speaker_name(name)
+            if sid is not None:
+                out[name] = sid
+        return out
 
     @property
     def cached_speakers(self) -> list[SpeakerInfo]:
         """Last-known speaker list (populated after start)."""
         return list(self._speaker_cache)
+
+    async def _list_speakers_unfiltered(self) -> list[SpeakerInfo]:
+        """System-wide union of every backend's speakers.
+
+        Internal helper — bypasses the caller-visibility filter that
+        ``list_speakers`` applies. Used by the cache refresh path so
+        ``cached_speakers`` doesn't lock in whatever user happened to
+        trigger the refresh, and by any caller that genuinely wants
+        the unfiltered view.
+        """
+        if not self._backends:
+            return []
+        items = list(self._backends.items())
+        results = await asyncio.gather(
+            *(b.list_speakers() for _, b in items),
+            return_exceptions=True,
+        )
+        merged: list[SpeakerInfo] = []
+        for (name, _), result in zip(items, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "speaker backend '%s' list_speakers failed: %s",
+                    name,
+                    result,
+                )
+                continue
+            for s in result:
+                merged.append(
+                    replace(
+                        s,
+                        speaker_id=f"{name}:{s.speaker_id}",
+                        backend_name=name,
+                    )
+                )
+        return merged
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        """Return speakers across all loaded backends.
+
+        Each ``SpeakerInfo.speaker_id`` is namespaced as
+        ``<backend>:<native>`` and ``backend_name`` is stamped.
+        Non-admin callers see every non-browser speaker plus their own
+        browser-tab entry; admins see every speaker on every backend.
+        """
+        merged = await self._list_speakers_unfiltered()
+        from gilbert.interfaces.context import get_current_user
+
+        user = get_current_user()
+        if self._is_admin(user):
+            return merged
+        return [
+            s for s in merged
+            if s.backend_name != "browser" or s.speaker_id == f"browser:{user.user_id}"
+        ]
+
+    async def list_speaker_groups(self) -> list[SpeakerGroup]:
+        """Return groups across all loaded backends that support grouping.
+
+        ``coordinator_id`` and every entry in ``member_ids`` are
+        namespaced as ``<backend>:<native>`` to match what
+        ``list_speakers()`` returns. Backends that don't support grouping
+        are skipped. If a grouping-capable backend's ``list_groups`` raises,
+        the failure is logged and that backend's slice is omitted.
+        """
+
+        if not self._backends:
+            return []
+        grouping = [(name, b) for name, b in self._backends.items() if b.supports_grouping]
+        if not grouping:
+            return []
+        results = await asyncio.gather(
+            *(b.list_groups() for _, b in grouping),
+            return_exceptions=True,
+        )
+        merged: list[SpeakerGroup] = []
+        for (name, _), result in zip(grouping, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("speaker backend '%s' list_groups failed: %s", name, result)
+                continue
+            for g in result:
+                merged.append(
+                    replace(
+                        g,
+                        coordinator_id=f"{name}:{g.coordinator_id}",
+                        member_ids=[f"{name}:{m}" for m in g.member_ids],
+                        backend_name=name,
+                    )
+                )
+        return merged
 
     async def start(self, resolver: ServiceResolver) -> None:
         # Store resolver references for runtime use
@@ -113,20 +263,26 @@ class SpeakerService(Service):
         self._enabled = True
         self._apply_config(section)
 
-        # Side-effect import so the bundled local backend registers.
-        # Third-party backends (Sonos, …) register themselves via plugins.
+        # Side-effect imports so the bundled vendor-free backends
+        # register. Third-party backends (Sonos, …) register via plugins.
+        import gilbert.integrations.browser_speaker  # noqa: F401
         import gilbert.integrations.local_speaker  # noqa: F401
 
-        backend_name = section.get("backend", "sonos")
-        self._backend_name = backend_name
-        backends = SpeakerBackend.registered_backends()
-        backend_cls = backends.get(backend_name)
-        if backend_cls is None:
-            raise ValueError(f"Unknown speaker backend: {backend_name}")
-        self._backend = backend_cls()
+        # Stash the event-bus provider before _reinit_backends so any
+        # EventBusAwareSpeakerBackend initialized there can be wired.
+        from gilbert.interfaces.events import EventBusProvider
 
-        init_config: dict[str, object] = dict(self._config)
-        await self._backend.initialize(init_config)
+        bus_svc = resolver.get_capability("event_bus")
+        if isinstance(bus_svc, EventBusProvider):
+            self._event_bus_provider = bus_svc
+
+        acl_svc = resolver.get_capability("access_control")
+        if isinstance(acl_svc, AccessControlProvider):
+            self._access_control = acl_svc
+
+        # Initialize all configured backends.
+        await self._reinit_backends(section.get("backends", {}))
+        self._resolve_primary_backend(primary=section.get("primary_backend", ""))
 
         # Ensure alias index
         from gilbert.interfaces.storage import IndexDefinition
@@ -140,19 +296,51 @@ class SpeakerService(Service):
             )
         )
 
-        # Populate speaker cache for dynamic choices
-        try:
-            self._speaker_cache = await self._backend.list_speakers()
-        except Exception:
-            logger.debug("Could not cache speakers on start")
+        # Periodic cache refresh — backends like Sonos use async
+        # zeroconf discovery that finishes after ``initialize()``
+        # returns, so the cache populated by ``_reinit_backends``
+        # above is empty of Sonos until discovery settles. A short
+        # interval here keeps ``choices_from="speakers"`` dropdowns
+        # in Settings honest without forcing every read to do a live
+        # fan-out.
+        from gilbert.interfaces.scheduler import (
+            Schedule,
+            SchedulerProvider,
+        )
+
+        scheduler = resolver.get_capability("scheduler")
+        if isinstance(scheduler, SchedulerProvider):
+            self._scheduler = scheduler
+            scheduler.add_job(
+                name=_REFRESH_CACHE_JOB,
+                schedule=Schedule.every(_REFRESH_CACHE_INTERVAL_SECONDS),
+                callback=self._refresh_cached_speakers,
+                system=True,
+            )
 
         logger.info("Speaker service started")
 
-    def _require_backend(self) -> SpeakerBackend:
-        """Return the backend or raise if the service is not enabled."""
-        if self._backend is None:
+    def _require_single_backend(self) -> SpeakerBackend:
+        """Return a single loaded backend, or raise if none are loaded.
+
+        When exactly one backend is loaded it is returned directly.
+        When more than one is loaded the first by sorted name is returned
+        and a warning is logged — callers that haven't been updated yet to
+        use per-backend routing fall back gracefully. This is a transitional
+        helper; Task 11 audits and removes most callers.
+        """
+        if not self._backends:
             raise RuntimeError("Speaker service is not enabled")
-        return self._backend
+        if len(self._backends) > 1:
+            first_name = sorted(self._backends)[0]
+            logger.warning(
+                "_require_single_backend called with %d backends loaded; "
+                "picking %r. Caller should be updated to route per-backend.",
+                len(self._backends),
+                first_name,
+            )
+            return self._backends[first_name]
+        return next(iter(self._backends.values()))
 
     def _get_storage_backend(self) -> Any:
         """Get the storage backend from the storage service."""
@@ -161,6 +349,39 @@ class SpeakerService(Service):
         if isinstance(self._storage_svc, StorageProvider):
             return self._storage_svc.backend
         raise TypeError("Expected StorageProvider for entity_storage")
+
+    def _is_admin(self, user_ctx: UserContext) -> bool:
+        """Resolve whether the user has admin-level access.
+
+        Uses ``AccessControlProvider`` if available, otherwise falls
+        back to checking for ``"admin"`` in the user's roles. SYSTEM
+        counts as admin.
+        """
+        if user_ctx.user_id == UserContext.SYSTEM.user_id:
+            return True
+        if self._access_control is not None:
+            return self._access_control.get_effective_level(user_ctx) <= 0
+        return "admin" in user_ctx.roles
+
+    def _check_browser_target_permissions(self, target_ids: list[str]) -> None:
+        """Reject cross-user browser targets unless the caller is admin.
+
+        No-op if no ``browser:*`` IDs are in the target list. Admins
+        (and the SYSTEM user) bypass the check entirely.
+        """
+        from gilbert.interfaces.context import get_current_user
+
+        user = get_current_user()
+        if self._is_admin(user):
+            return
+        for sid in target_ids:
+            if sid.startswith("browser:"):
+                _, target_user = split_speaker_id(sid)
+                if target_user != user.user_id:
+                    raise PermissionError(
+                        f"You can only target your own browser; "
+                        f"{sid!r} belongs to another user."
+                    )
 
     def _apply_config(self, section: dict[str, Any]) -> None:
         """Apply tunable config values."""
@@ -171,6 +392,99 @@ class SpeakerService(Service):
         spk = section.get("default_announce_speakers")
         if isinstance(spk, list):
             self._default_announce_speakers = spk
+
+    def _resolve_primary_backend(self, *, primary: str) -> None:
+        """Set ``self._primary_backend`` from the configured value.
+
+        Falls back to the alphabetically-first loaded backend when the
+        configured value is empty or points at a backend that isn't loaded.
+        Logs a one-time WARN on fallback.
+        """
+        if primary and primary in self._backends:
+            self._primary_backend = primary
+            return
+        candidates = sorted(self._backends)
+        if not candidates:
+            self._primary_backend = ""
+            return
+        chosen = candidates[0]
+        if primary:
+            logger.warning(
+                "speaker.primary_backend=%r is not loaded; falling back to %r",
+                primary,
+                chosen,
+            )
+        else:
+            logger.warning(
+                "speaker.primary_backend not set; defaulting to %r",
+                chosen,
+            )
+        self._primary_backend = chosen
+
+    async def _refresh_cached_speakers(self) -> None:
+        """Refresh the cached speaker list from all loaded backends.
+
+        Stores the *unfiltered* system-wide view — the cache is shared
+        across all callers, so locking in one user's filtered view
+        would hide other users' browsers and break admin reads.
+        Consumers that need per-user filtering apply it on read.
+
+        Swallows any exceptions so a backend that fails discovery on
+        startup doesn't prevent other backends from being cached.
+        """
+        try:
+            self._speaker_cache = await self._list_speakers_unfiltered()
+        except Exception:
+            logger.debug("Could not refresh speaker cache", exc_info=True)
+
+    async def _reinit_backends(self, backends_config: dict[str, Any]) -> None:
+        """Reinitialize backends from config, closing any that changed.
+
+        Backends with ``enabled=False`` in their config section are skipped
+        entirely. A backend whose name doesn't appear in ``backends_config``
+        at all is treated as not configured and dropped.
+        """
+        from gilbert.interfaces.speaker import EventBusAwareSpeakerBackend
+
+        if not isinstance(backends_config, dict):
+            return
+        for name, cls in SpeakerBackend.registered_backends().items():
+            if name not in backends_config:
+                old = self._backends.pop(name, None)
+                if old is not None:
+                    await old.close()
+                    logger.info("speaker backend '%s' removed (no config section)", name)
+                self._startup_failures.pop(name, None)
+                continue
+            cfg = backends_config.get(name, {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            enabled = cfg.get("enabled", True) is True
+            old = self._backends.get(name)
+            if not enabled:
+                if old is not None:
+                    await old.close()
+                    self._backends.pop(name, None)
+                    logger.info("speaker backend '%s' disabled, closed", name)
+                self._startup_failures.pop(name, None)
+                continue
+            try:
+                inst = cls()
+                # Wire event bus if backend wants it (e.g. BrowserSpeakerBackend
+                # needs it to publish speaker.browser.* frames).
+                if isinstance(inst, EventBusAwareSpeakerBackend) and self._event_bus_provider is not None:
+                    inst.set_event_bus_provider(self._event_bus_provider)
+                await inst.initialize(cfg)
+                if old is not None:
+                    await old.close()
+                self._backends[name] = inst
+                self._startup_failures.pop(name, None)
+                logger.info("speaker backend '%s' (re)initialized", name)
+            except Exception as exc:
+                self._startup_failures[name] = str(exc)
+                if old is None:
+                    logger.warning("speaker backend '%s' failed to start: %s", name, exc)
+        await self._refresh_cached_speakers()
 
     # --- Configurable protocol ---
 
@@ -183,20 +497,13 @@ class SpeakerService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
-        # Side-effect import so the bundled local backend shows up in
-        # the ``backend`` choices dropdown even before the service starts.
+        # Side-effect imports so bundled backends register before we
+        # iterate ``SpeakerBackend.registered_backends()``.
+        import gilbert.integrations.browser_speaker  # noqa: F401
         import gilbert.integrations.local_speaker  # noqa: F401
         from gilbert.interfaces.speaker import SpeakerBackend
 
-        params = [
-            ConfigParam(
-                key="backend",
-                type=ToolParameterType.STRING,
-                description="Speaker backend type.",
-                default="sonos",
-                restart_required=True,
-                choices=tuple(SpeakerBackend.registered_backends().keys()),
-            ),
+        params: list[ConfigParam] = [
             ConfigParam(
                 key="default_announce_volume",
                 type=ToolParameterType.INTEGER,
@@ -209,40 +516,59 @@ class SpeakerService(Service):
                 default=[],
                 choices_from="speakers",
             ),
+            ConfigParam(
+                key="primary_backend",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Receives bare announce()/play() calls without explicit "
+                    "speaker targets. Defaults to the first alphabetically-ordered "
+                    "enabled backend when unset."
+                ),
+                default="",
+                choices_from="speakers.enabled_backends",
+            ),
         ]
-        # Use live backend instance if available, otherwise fall back to registry class
-        if self._backend is not None:
-            backend_params = self._backend.backend_config_params()
-        else:
-            backends = SpeakerBackend.registered_backends()
-            backend_cls = backends.get(self._backend_name)
-            backend_params = backend_cls.backend_config_params() if backend_cls else []
-        for bp in backend_params:
+        # Per-backend sections (mirrors AIService.config_params pattern)
+        for name, cls in sorted(SpeakerBackend.registered_backends().items()):
             params.append(
                 ConfigParam(
-                    key=f"settings.{bp.key}",
-                    type=bp.type,
-                    description=bp.description,
-                    default=bp.default,
-                    restart_required=bp.restart_required,
-                    sensitive=bp.sensitive,
-                    choices=bp.choices,
-                    multiline=bp.multiline,
+                    key=f"backends.{name}.enabled",
+                    type=ToolParameterType.BOOLEAN,
+                    description=f"Enable the '{name}' speaker backend.",
+                    default=False,
+                    restart_required=True,
                     backend_param=True,
-                    ai_prompt=bp.ai_prompt,
                 )
             )
+            for bp in cls.backend_config_params():
+                params.append(
+                    ConfigParam(
+                        key=f"backends.{name}.{bp.key}",
+                        type=bp.type,
+                        description=f"[{name}] {bp.description}",
+                        default=bp.default,
+                        restart_required=bp.restart_required,
+                        sensitive=bp.sensitive,
+                        choices=bp.choices,
+                        choices_from=bp.choices_from,
+                        multiline=bp.multiline,
+                        backend_param=True,
+                        ai_prompt=bp.ai_prompt,
+                    )
+                )
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
+        await self._reinit_backends(config.get("backends", {}))
+        self._resolve_primary_backend(primary=config.get("primary_backend", ""))
 
     # --- ConfigActionProvider ---
 
     def config_actions(self) -> list[ConfigAction]:
         return all_backend_actions(
             registry=SpeakerBackend.registered_backends(),
-            current_backend=self._backend,
+            current_backend=self._backends.get(self._backend_name),
         )
 
     async def invoke_config_action(
@@ -250,19 +576,27 @@ class SpeakerService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(self._backend, key, payload)
+        return await invoke_backend_action(self._backends.get(self._backend_name), key, payload)
 
     async def stop(self) -> None:
-        if self._backend is not None:
-            await self._backend.close()
+        if self._scheduler is not None:
+            try:
+                self._scheduler.remove_job(_REFRESH_CACHE_JOB, force=True)
+            except Exception:
+                logger.debug(
+                    "Failed to remove speaker cache refresh job",
+                    exc_info=True,
+                )
+            self._scheduler = None
+        for backend in list(self._backends.values()):
+            await backend.close()
 
     # --- Alias management ---
 
     async def set_alias(self, speaker_id: str, alias: str) -> None:
         """Assign an alias name to a speaker. Raises ValueError on collision."""
-        backend = self._require_backend()
-        # Check the alias doesn't collide with an existing speaker name
-        speakers = await backend.list_speakers()
+        # Check the alias doesn't collide with an existing speaker name across all backends
+        speakers = await self.list_speakers()
         for s in speakers:
             if s.name.lower() == alias.lower():
                 raise ValueError(f"Alias '{alias}' collides with existing speaker name '{s.name}'")
@@ -318,9 +652,24 @@ class SpeakerService(Service):
         only when no exact match exists and exactly one speaker
         matches case-insensitively — ambiguous case-insensitive
         matches raise to force the caller to use the exact casing.
+
+        Returns namespaced IDs (``<backend>:<native>``) consistent with
+        ``list_speakers()`` so callers can feed the result to
+        ``_route_id`` without a separate namespace-stamping step.
         """
-        backend = self._require_backend()
-        speakers = await backend.list_speakers()
+        # Magic aliases — resolve to the caller's own browser regardless of
+        # whether they're actually active. Downstream dispatch is a silent
+        # no-op for inactive browser targets, which is the right behavior.
+        if name.strip().lower() in _MY_BROWSER_ALIASES:
+            from gilbert.interfaces.context import get_current_user
+
+            user = get_current_user()
+            if user and user.user_id:
+                return f"browser:{user.user_id}"
+            return None
+
+        self._require_single_backend()  # raise if no backend configured
+        speakers = await self.list_speakers()  # namespaced via service
 
         # 1) Exact case-sensitive name match — wins unambiguously
         # even when other speakers share the lowercased spelling.
@@ -351,7 +700,27 @@ class SpeakerService(Service):
         )
         if results:
             sid = results[0].get("speaker_id")
-            return str(sid) if sid is not None else None
+            if sid is not None:
+                sid_str = str(sid)
+                if ":" in sid_str:
+                    return sid_str
+                # Legacy bare id — try to namespace it in-memory by scanning
+                # all loaded backends.  This covers installs that haven't run
+                # the 0001 migration yet, or where the migration couldn't
+                # identify the backend at migration time.
+                for backend_name, backend in self._backends.items():
+                    try:
+                        speakers = await backend.list_speakers()
+                    except Exception:
+                        continue
+                    if any(s.speaker_id == sid_str for s in speakers):
+                        return f"{backend_name}:{sid_str}"
+                # Cannot namespace — return as-is; _route_id will raise
+                # KeyError/ValueError later, which is the correct behaviour
+                # (surfaces the un-migrated data clearly rather than silently
+                # routing to the wrong backend).
+                return sid_str
+            return None
 
         return None
 
@@ -365,7 +734,33 @@ class SpeakerService(Service):
             ids.append(sid)
         return ids
 
-    def _audio_url(self, file_path: str) -> str:
+    def _route_id(self, speaker_id: str) -> tuple[SpeakerBackend, str]:
+        """Split a namespaced speaker id and return ``(backend, native_id)``.
+
+        Raises ``KeyError`` if the prefix names a backend that isn't loaded.
+        Raises ``ValueError`` (via ``split_speaker_id``) if the id isn't
+        namespaced.
+        """
+        backend_name, native_id = split_speaker_id(speaker_id)
+        backend = self.backends.get(backend_name)
+        if backend is None:
+            raise KeyError(f"speaker backend {backend_name!r} not loaded")
+        return backend, native_id
+
+    def _route_ids(self, speaker_ids: list[str]) -> dict[str, list[str]]:
+        """Group namespaced speaker ids by backend, returning ``{backend_name: [native_id, ...]}``.
+
+        Raises ``KeyError`` if any id names a backend that isn't loaded.
+        """
+        grouped: dict[str, list[str]] = {}
+        for sid in speaker_ids:
+            backend_name, native_id = split_speaker_id(sid)
+            if backend_name not in self.backends:
+                raise KeyError(f"speaker backend {backend_name!r} not loaded")
+            grouped.setdefault(backend_name, []).append(native_id)
+        return grouped
+
+    def audio_url(self, file_path: str) -> str:
         """Build an HTTP URL for an output file so speakers can fetch it.
 
         Speakers need to access audio over HTTP — they can't read local files.
@@ -397,6 +792,117 @@ class SpeakerService(Service):
         except OSError:
             return "127.0.0.1"
 
+    # ── Browser-echo fan-out ─────────────────────────────────────────
+
+    async def _maybe_echo_to_browser(
+        self,
+        *,
+        uri: str,
+        volume: int | None,
+        title: str,
+        announce: bool,
+        kind: str = "",
+        position_seconds: float | None,
+        explicit_target_ids: list[str],
+    ) -> None:
+        """Mirror a primary play_uri to the caller's browser tab.
+
+        Fires after the primary backend's ``play_uri`` when:
+        - the caller has an active browser registration,
+        - the primary backend isn't ``browser`` (would double-play),
+        - the caller's own browser is NOT already in the explicit target set (would double-play),
+        - the event bus is wired.
+
+        Any error here is logged + swallowed: the primary play already
+        succeeded and a glitchy secondary path shouldn't surface as
+        user-visible failure.
+        """
+        if not await self._browser_echo_should_fire():
+            return
+        # Skip if the caller's own browser is in the explicit target set.
+        from gilbert.interfaces.context import get_current_user
+        user = get_current_user()
+        if user and user.user_id:
+            caller_browser_id = f"browser:{user.user_id}"
+            if caller_browser_id in explicit_target_ids:
+                return
+        try:
+            from gilbert.interfaces.context import (
+                get_current_conversation_id,
+                get_current_user,
+            )
+            from gilbert.interfaces.events import Event
+
+            user = get_current_user()
+            effective_volume = volume if volume is not None else 80
+            effective_volume = max(0, min(100, int(effective_volume)))
+            await self._event_bus_provider.bus.publish(
+                Event(
+                    event_type="speaker.browser.play",
+                    data={
+                        "user_id": user.user_id,
+                        "conversation_id": get_current_conversation_id() or "",
+                        "url": to_browser_url(uri),
+                        "title": title,
+                        "volume": effective_volume,
+                        "announce": announce,
+                        "kind": kind,
+                        "position_seconds": position_seconds,
+                    },
+                    source="speaker.echo",
+                )
+            )
+        except Exception:
+            logger.debug("Browser-echo fan-out failed", exc_info=True)
+
+    async def _maybe_echo_stop_to_browser(self) -> None:
+        """Mirror a primary stop to the caller's browser tab.
+
+        Same gating as the play variant. Browser-side handler pauses
+        the auto-play element; per-clip ``<audio controls>`` history
+        is left intact so the user can replay.
+        """
+        if not await self._browser_echo_should_fire():
+            return
+        try:
+            from gilbert.interfaces.context import get_current_user
+            from gilbert.interfaces.events import Event
+
+            user = get_current_user()
+            await self._event_bus_provider.bus.publish(
+                Event(
+                    event_type="speaker.browser.stop",
+                    data={"user_id": user.user_id},
+                    source="speaker.echo",
+                )
+            )
+        except Exception:
+            logger.debug("Browser-echo stop fan-out failed", exc_info=True)
+
+    async def _browser_echo_should_fire(self) -> bool:
+        """Gate for fan-out to the caller's browser.
+
+        Fires when ALL of:
+        - the event bus is wired
+        - the primary backend isn't ``browser`` (would double-play)
+        - the caller is a real user with an active browser registration
+        """
+        if self._event_bus_provider is None:
+            return False
+        # Avoid double-play when the primary backend IS the browser —
+        # the backend's own publish covers the user already.
+        if self._primary_backend == "browser":
+            return False
+        from gilbert.interfaces.context import get_current_user
+
+        user = get_current_user()
+        if not user or not user.user_id or user.user_id == "system":
+            return False
+        browser = self._backends.get("browser")
+        if browser is None or not isinstance(browser, BrowserSpeakerProtocol):
+            return False
+        return bool(browser._active_connections.get(user.user_id))
+
     async def _resolve_target_ids(
         self,
         speaker_names: list[str] | None,
@@ -413,9 +919,9 @@ class SpeakerService(Service):
             return ids
         if self._last_speaker_ids:
             return list(self._last_speaker_ids)
-        # Fall back to all speakers
-        backend = self._require_backend()
-        speakers = await backend.list_speakers()
+        # Fall back to all speakers — use service-level list_speakers() so
+        # the returned IDs are consistently namespaced.
+        speakers = await self.list_speakers()
         return [s.speaker_id for s in speakers]
 
     async def prepare_speakers(self, speaker_ids: list[str]) -> None:
@@ -426,15 +932,63 @@ class SpeakerService(Service):
         - Already correct: returns immediately.
 
         Backends that don't support grouping are skipped.
+        Groups that span multiple backends are not supported — callers
+        should ensure all speaker_ids belong to the same backend when
+        grouping is required.
         """
-        backend = self._require_backend()
-        if not backend.supports_grouping or not speaker_ids:
+        if not speaker_ids:
             return
+        self._check_browser_target_permissions(speaker_ids)
+        grouped = self._route_ids(speaker_ids)
+        coros: list[Any] = []
+        for backend_name, native_ids in grouped.items():
+            b = self._backends[backend_name]
+            if not b.supports_grouping:
+                continue
+            if len(native_ids) == 1:
+                coros.append(b.ungroup_speakers(native_ids))
+            else:
+                coros.append(b.group_speakers(native_ids))
+        if coros:
+            await asyncio.gather(*coros)
 
-        if len(speaker_ids) == 1:
-            await backend.ungroup_speakers(speaker_ids)
-        else:
-            await backend.group_speakers(speaker_ids)
+    async def group_speakers(self, speaker_ids: list[str]) -> None:
+        """Group the given speakers. All must be on the same backend.
+
+        Raises ``ValueError`` if speakers span multiple backends.
+        """
+        if not speaker_ids:
+            return
+        grouped = self._route_ids(speaker_ids)
+        if len(grouped) > 1:
+            names = ", ".join(speaker_ids[:3])
+            backends_named = ", ".join(sorted(grouped))
+            raise ValueError(
+                f"Cannot group speakers across backends — {names} live on "
+                f"different audio systems ({backends_named}) and can't be synchronized."
+            )
+        [(backend_name, native_ids)] = grouped.items()
+        backend = self._backends[backend_name]
+        await backend.group_speakers(native_ids)
+
+    async def ungroup_speakers(self, speaker_ids: list[str]) -> None:
+        """Remove speakers from their groups. All must be on the same backend.
+
+        Raises ``ValueError`` if speakers span multiple backends.
+        """
+        if not speaker_ids:
+            return
+        grouped = self._route_ids(speaker_ids)
+        if len(grouped) > 1:
+            names = ", ".join(speaker_ids[:3])
+            backends_named = ", ".join(sorted(grouped))
+            raise ValueError(
+                f"Cannot ungroup speakers across backends — {names} live on "
+                f"different audio systems ({backends_named})."
+            )
+        [(backend_name, native_ids)] = grouped.items()
+        backend = self._backends[backend_name]
+        await backend.ungroup_speakers(native_ids)
 
     # --- Playback ---
 
@@ -442,11 +996,13 @@ class SpeakerService(Service):
         self,
         uri: str,
         speaker_names: list[str] | None = None,
+        speaker_ids: list[str] | None = None,
         volume: int | None = None,
         title: str = "",
         position_seconds: float | None = None,
         didl_meta: str = "",
         announce: bool = False,
+        kind: str = "",
     ) -> None:
         """Play a URI on the specified speakers.
 
@@ -457,8 +1013,16 @@ class SpeakerService(Service):
         a short-overlay path (e.g. Sonos ``audio_clip``) that ducks the
         current music, plays the clip, and auto-restores — no
         snapshot/restore ritual required.
+
+        ``speaker_ids`` accepts pre-resolved namespaced IDs (e.g.
+        ``browser:alice``) and bypasses name resolution. Provide either
+        ``speaker_names`` or ``speaker_ids``, not both.
         """
-        target_ids = await self._resolve_target_ids(speaker_names)
+        if speaker_ids is not None:
+            target_ids = speaker_ids
+        else:
+            target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
 
         # Skip topology changes for announce clips — audio_clip is a
         # per-player overlay that doesn't need grouping, and reshuffling
@@ -468,16 +1032,40 @@ class SpeakerService(Service):
         if not announce:
             await self.prepare_speakers(target_ids)
 
-        await self._require_backend().play_uri(
-            PlayRequest(
-                uri=uri,
-                speaker_ids=target_ids,
-                volume=volume,
-                title=title,
-                position_seconds=position_seconds,
-                didl_meta=didl_meta,
-                announce=announce,
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            backend = self.backends[backend_name]
+            coros.append(
+                backend.play_uri(
+                    PlayRequest(
+                        uri=uri,
+                        speaker_ids=native_ids,
+                        volume=volume,
+                        title=title,
+                        position_seconds=position_seconds,
+                        didl_meta=didl_meta,
+                        announce=announce,
+                        kind=kind,
+                    )
+                )
             )
+        await asyncio.gather(*coros)
+
+        # Optional second hop: fan the same playback out to the calling
+        # user's connected browser tab if they've opted in. Runs after
+        # the primary backend so a slow Sonos response doesn't delay the
+        # browser. Failure to fan out is logged and swallowed — the
+        # primary play already succeeded and the user shouldn't see an
+        # error toast just because their secondary path glitched.
+        await self._maybe_echo_to_browser(
+            uri=uri,
+            volume=volume,
+            title=title,
+            announce=announce,
+            kind=kind,
+            position_seconds=position_seconds,
+            explicit_target_ids=target_ids,
         )
 
     async def enqueue_on_speakers(
@@ -495,15 +1083,23 @@ class SpeakerService(Service):
         flag before invoking this.
         """
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         await self.prepare_speakers(target_ids)
-        await self._require_backend().enqueue_uri(
-            PlayRequest(
-                uri=uri,
-                speaker_ids=target_ids,
-                title=title,
-                didl_meta=didl_meta,
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            backend = self.backends[backend_name]
+            coros.append(
+                backend.enqueue_uri(
+                    PlayRequest(
+                        uri=uri,
+                        speaker_ids=native_ids,
+                        title=title,
+                        didl_meta=didl_meta,
+                    )
+                )
             )
-        )
+        await asyncio.gather(*coros)
 
     async def play_queue_on_speakers(
         self,
@@ -522,21 +1118,28 @@ class SpeakerService(Service):
         losing the listener's position mid-song. Returns ``True`` when
         a Play was actually issued.
         """
-        backend = self._require_backend()
+        self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         await self.prepare_speakers(target_ids)
 
         # Check playback state on the coordinator (first target). All
         # group members share transport state, so any one is enough.
         if target_ids:
             try:
-                state = await backend.get_playback_state(target_ids[0])
+                routed_backend, native = self._route_id(target_ids[0])
+                state = await routed_backend.get_playback_state(native)
             except Exception:
                 state = PlaybackState.STOPPED
             if state == PlaybackState.PLAYING:
                 return False
 
-        await backend.play_queue(target_ids)
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.play_queue(native_ids))
+        await asyncio.gather(*coros)
         return True
 
     async def set_repeat_on_speakers(
@@ -554,9 +1157,15 @@ class SpeakerService(Service):
         absence of support surfaces as a UI error rather than an
         exception.
         """
-        backend = self._require_backend()
+        self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.set_repeat(mode, target_ids)
+        self._check_browser_target_permissions(target_ids)
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.set_repeat(mode, native_ids))
+        await asyncio.gather(*coros)
 
     async def stop_speakers(
         self,
@@ -564,7 +1173,14 @@ class SpeakerService(Service):
     ) -> None:
         """Stop playback on the specified speakers."""
         target_ids = await self._resolve_target_ids(speaker_names)
-        await self._require_backend().stop(target_ids)
+        self._check_browser_target_permissions(target_ids)
+        grouped = self._route_ids(target_ids)
+        coros = []
+        for backend_name, native_ids in grouped.items():
+            b = self.backends[backend_name]
+            coros.append(b.stop(native_ids))
+        await asyncio.gather(*coros)
+        await self._maybe_echo_stop_to_browser()
 
     async def get_now_playing(
         self,
@@ -582,23 +1198,32 @@ class SpeakerService(Service):
 
         Returns a ``NowPlaying`` with ``state=STOPPED`` if no speakers exist.
         """
-        backend = self._require_backend()
+        if not self._backends:
+            raise RuntimeError("Speaker service is not enabled")
         if speaker_name:
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
                 raise KeyError(f"Unknown speaker or alias: {speaker_name!r}")
-            return await backend.get_now_playing(sid)
+            self._check_browser_target_permissions([sid])
+            routed_backend, native = self._route_id(sid)
+            return await routed_backend.get_now_playing(native)
 
         if self._last_speaker_ids:
-            return await backend.get_now_playing(self._last_speaker_ids[0])
+            self._check_browser_target_permissions([self._last_speaker_ids[0]])
+            routed_backend, native = self._route_id(self._last_speaker_ids[0])
+            return await routed_backend.get_now_playing(native)
 
-        speakers = await backend.list_speakers()
+        speakers = await self.list_speakers()
         if not speakers:
             return NowPlaying(state=PlaybackState.STOPPED)
         for s in speakers:
             if s.state == PlaybackState.PLAYING:
-                return await backend.get_now_playing(s.speaker_id)
-        return await backend.get_now_playing(speakers[0].speaker_id)
+                self._check_browser_target_permissions([s.speaker_id])
+                routed_backend, native = self._route_id(s.speaker_id)
+                return await routed_backend.get_now_playing(native)
+        self._check_browser_target_permissions([speakers[0].speaker_id])
+        routed_backend, native = self._route_id(speakers[0].speaker_id)
+        return await routed_backend.get_now_playing(native)
 
     # --- Announce ---
 
@@ -630,6 +1255,7 @@ class SpeakerService(Service):
         # means no speakers to announce on — let _announce_inner handle
         # the degenerate case without acquiring any locks.
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         if not target_ids:
             return await self._announce_inner(
                 text, speaker_names, volume, target_ids=target_ids, context=context
@@ -683,8 +1309,6 @@ class SpeakerService(Service):
         if not isinstance(self._tts_svc, TTSProvider):
             raise TypeError("Expected TTSService for text_to_speech capability")
 
-        backend = self._require_backend()
-
         # Generate TTS audio
         request = SynthesisRequest(
             text=text,
@@ -710,14 +1334,17 @@ class SpeakerService(Service):
         # Sonos backends that implement snapshot/restore still work.
         if target_ids is None:
             target_ids = await self._resolve_target_ids(speaker_names)
-        await backend.snapshot(target_ids)
+        grouped = self._route_ids(target_ids)
+        await asyncio.gather(
+            *(self._backends[bname].snapshot(nids) for bname, nids in grouped.items())
+        )
 
         # Play on speakers — topology handled by play_on_speakers.
         # ``announce=True`` tells backends that support it (Sonos) to
         # route through a short-overlay clip path so the listener
         # doesn't hear music stop completely, and the previous track
         # resumes automatically when the clip ends.
-        audio_url = self._audio_url(str(file_path.resolve()))
+        audio_url = self.audio_url(str(file_path.resolve()))
         await self.play_on_speakers(
             uri=audio_url,
             speaker_names=speaker_names,
@@ -740,7 +1367,9 @@ class SpeakerService(Service):
         # Restore previous playback state (no-op on aiosonos; kept for
         # non-Sonos backends that still need the manual restore).
         try:
-            await backend.restore(target_ids)
+            await asyncio.gather(
+                *(self._backends[bname].restore(nids) for bname, nids in grouped.items())
+            )
         except Exception:
             logger.debug("Failed to restore playback after announcement")
 
@@ -811,7 +1440,8 @@ class SpeakerService(Service):
 
         while elapsed < timeout:
             try:
-                state = await self._require_backend().get_playback_state(target_id)
+                routed_backend, native = self._route_id(target_id)
+                state = await routed_backend.get_playback_state(native)
                 if state not in (PlaybackState.PLAYING, PlaybackState.TRANSITIONING):
                     return
             except Exception:
@@ -819,6 +1449,82 @@ class SpeakerService(Service):
 
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
+
+    # --- WsHandlerProvider protocol ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "speaker.info": self._ws_speaker_info,
+            "browser_speaker.activate": self._ws_browser_speaker_activate,
+            "browser_speaker.deactivate": self._ws_browser_speaker_deactivate,
+        }
+
+    async def _ws_browser_speaker_activate(
+        self, conn: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Register the auth'd connection as an active browser-speaker."""
+        backend = self._backends.get("browser")
+        if backend is None or not isinstance(backend, BrowserSpeakerProtocol):
+            return {"status": "error", "error": "browser speaker backend not loaded"}
+        conn_id = conn.connection_id
+        user_id = conn.user_id or ""
+        if not user_id:
+            # Refuse anonymous activations — the backend keys speakers
+            # by user_id and the visibility filter in ``list_speakers``
+            # checks ``browser:<user_id>``. Registering under "" would
+            # create a phantom speaker no real user can see or target
+            # and would mask the underlying race (typically: the SPA
+            # fired activate before auth finished). The SPA retries on
+            # state change, so returning an error here lets the next
+            # ``user``-bound attempt land cleanly.
+            return {
+                "status": "error",
+                "error": "browser speaker requires an authenticated connection",
+            }
+        display_name = conn.display_name
+        backend.activate(conn_id=conn_id, user_id=user_id, display_name=display_name)
+        # Ensure registration vanishes when the WS drops, even if the
+        # client never sends an explicit deactivate (tab closed).
+        conn.add_close_callback(lambda: backend.deactivate(conn_id=conn_id))
+        await self._refresh_cached_speakers()
+        return {"status": "ok"}
+
+    async def _ws_browser_speaker_deactivate(
+        self, conn: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._backends.get("browser")
+        if backend is None or not isinstance(backend, BrowserSpeakerProtocol):
+            return {"status": "error", "error": "browser speaker backend not loaded"}
+        backend.deactivate(conn_id=conn.connection_id)
+        await self._refresh_cached_speakers()
+        return {"status": "ok"}
+
+    async def _ws_speaker_info(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Report the speaker subsystem state to the SPA.
+
+        Lets the SPA reason about the speaker subsystem without poking
+        at the settings RPC (which is admin-only and heavier). The
+        Browser Echo toggle reads this to disable itself when the
+        primary backend is ``browser`` and it is the only active backend
+        — in that config the echo toggle is a no-op (the gate in
+        ``_browser_echo_should_fire`` short-circuits to avoid
+        double-play), so the UI shouldn't pretend otherwise.
+
+        Public — any authenticated connection can read.
+        """
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "enabled": bool(self._enabled and self._backends),
+            "primary_backend": self._primary_backend if self._enabled else "",
+            "active_backends": sorted(self._backends) if self._enabled else [],
+            "startup_failures": [
+                {"name": name, "error": err}
+                for name, err in self._startup_failures.items()
+            ],
+        }
 
     # --- ToolProvider protocol ---
 
@@ -852,7 +1558,8 @@ class SpeakerService(Service):
                     "``uploads/``, ``outputs/``, or ``scratch/``), first call "
                     "``share_workspace_file`` to mint an HTTP URL for it, then "
                     "pass that URL's ``url`` field here as ``uri``. Passing a "
-                    "raw path like ``uploads/song.mp3`` will fail."
+                    "raw path like ``uploads/song.mp3`` will fail. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -890,7 +1597,10 @@ class SpeakerService(Service):
                 slash_group="speaker",
                 slash_command="stop",
                 slash_help="Stop playback: /speaker stop [speakers]",
-                description="Stop playback on speakers.",
+                description=(
+                    "Stop playback on speakers. "
+                    'Pass "my browser", "my speaker", or "for me" to stop the caller\'s own browser tab.'
+                ),
                 parameters=[
                     ToolParameter(
                         name="speakers",
@@ -906,7 +1616,10 @@ class SpeakerService(Service):
                 slash_group="speaker",
                 slash_command="volume",
                 slash_help="Set speaker volume: /speaker volume <speaker> <0-100>",
-                description="Set volume on a speaker.",
+                description=(
+                    "Set volume on a speaker. "
+                    'Pass "my browser", "my speaker", or "for me" to set the caller\'s own browser tab volume.'
+                ),
                 parameters=[
                     ToolParameter(
                         name="speaker",
@@ -984,7 +1697,8 @@ class SpeakerService(Service):
                     "This is the primary tool for speaking text out loud — it handles everything: "
                     "generates audio via TTS, groups speakers if needed, sets volume, and plays. "
                     "If no speakers specified, uses last-used speakers or all. "
-                    "Use this instead of 'speak' when you want audio played on speakers."
+                    "Use this instead of 'speak' when you want audio played on speakers. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -1026,8 +1740,8 @@ class SpeakerService(Service):
             ),
         ]
 
-        # Add grouping tools if the backend supports it
-        if self._backend is not None and self._backend.supports_grouping:
+        # Add grouping tools if any loaded backend supports it
+        if self._backends and any(b.supports_grouping for b in self._backends.values()):
             tools.extend(
                 [
                     ToolDefinition(
@@ -1101,7 +1815,7 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown tool: {name}")
 
     async def _tool_list_speakers(self) -> str:
-        speakers = await self._require_backend().list_speakers()
+        speakers = await self.list_speakers()
 
         # Enrich with aliases
         storage = self._get_storage_backend()
@@ -1138,17 +1852,25 @@ class SpeakerService(Service):
         volume: int | None = arguments.get("volume")
         position: float | None = arguments.get("position_seconds")
 
-        await self.play_on_speakers(
-            uri=uri,
-            speaker_names=speaker_names or None,
-            volume=volume,
-            position_seconds=position,
-        )
+        try:
+            await self.play_on_speakers(
+                uri=uri,
+                speaker_names=speaker_names or None,
+                volume=volume,
+                position_seconds=position,
+            )
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
+        except ValueError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         return json.dumps({"status": "playing", "uri": uri})
 
     async def _tool_stop_audio(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments.get("speakers", [])
-        await self.stop_speakers(speaker_names or None)
+        try:
+            await self.stop_speakers(speaker_names or None)
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         return json.dumps({"status": "stopped"})
 
     async def _tool_set_volume(self, arguments: dict[str, Any]) -> str:
@@ -1157,7 +1879,12 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        await self._require_backend().set_volume(sid, volume)
+        try:
+            self._check_browser_target_permissions([sid])
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
+        backend, native = self._route_id(sid)
+        await backend.set_volume(native, volume)
         return json.dumps({"status": "ok", "speaker": name, "volume": volume})
 
     async def _tool_get_volume(self, arguments: dict[str, Any]) -> str:
@@ -1165,7 +1892,12 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
-        volume = await self._require_backend().get_volume(sid)
+        try:
+            self._check_browser_target_permissions([sid])
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
+        backend, native = self._route_id(sid)
+        volume = await backend.get_volume(native)
         return json.dumps({"speaker": name, "volume": volume})
 
     async def _tool_set_alias(self, arguments: dict[str, Any]) -> str:
@@ -1201,6 +1933,8 @@ class SpeakerService(Service):
                 volume=volume,
                 context=context,
             )
+        except PermissionError as e:
+            return json.dumps({"status": "error", "error": str(e)})
         except RuntimeError as e:
             return json.dumps({"error": str(e)})
 
@@ -1213,7 +1947,7 @@ class SpeakerService(Service):
         )
 
     async def _tool_list_groups(self) -> str:
-        groups = await self._require_backend().list_groups()
+        groups = await self.list_speaker_groups()
         return json.dumps(
             [
                 {
@@ -1231,21 +1965,32 @@ class SpeakerService(Service):
         speaker_ids = await self.resolve_speaker_names(speaker_names)
 
         try:
-            group = await self._require_backend().group_speakers(speaker_ids)
+            await self.group_speakers(speaker_ids)
+            # Fetch the group info for the response
+            groups = await self.list_speaker_groups()
+            # Find the group containing the first speaker (simplistic but works)
+            target_group = None
+            if groups:
+                target_group = groups[0]  # Most recently formed group
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
-        return json.dumps(
-            {
-                "status": "grouped",
-                "group_id": group.group_id,
-                "name": group.name,
-                "member_ids": group.member_ids,
-            }
-        )
+        if target_group:
+            return json.dumps(
+                {
+                    "status": "grouped",
+                    "group_id": target_group.group_id,
+                    "name": target_group.name,
+                    "member_ids": target_group.member_ids,
+                }
+            )
+        return json.dumps({"status": "grouped"})
 
     async def _tool_ungroup_speakers(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments["speakers"]
         speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._require_backend().ungroup_speakers(speaker_ids)
+        try:
+            await self.ungroup_speakers(speaker_ids)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         return json.dumps({"status": "ungrouped"})

@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.configuration import (
     ConfigAction,
     ConfigActionResult,

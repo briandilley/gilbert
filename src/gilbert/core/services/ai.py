@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gilbert.core.context import (
+from gilbert.interfaces.context import (
     get_current_conversation_id,
     get_current_user,
     set_current_conversation_id,
@@ -76,8 +76,39 @@ ai_logger = logging.getLogger("gilbert.ai")
 _COLLECTION = "ai_conversations"
 _PROFILES_COLLECTION = "ai_profiles"
 _ASSIGNMENTS_COLLECTION = "ai_profile_assignments"
+_CHAT_SPEECH_COLLECTION = "chat_speech_prefs"
 _COMPRESSION_STATE_KEY = "compression"
 _COMPRESSION_CONFIG_KEY = "compression_config"
+
+
+class _GilbertAuthor:
+    """Synthetic 'author' for notifications fired on Gilbert's behalf.
+
+    The notify-dispatch helper reads ``display_name`` and ``user_id``
+    off the author to populate the notification body + ``source_ref``.
+    When Gilbert himself @-mentions a human (in his reply text), we
+    want the recipient's toast to say "Gilbert mentioned you" rather
+    than the user who triggered the AI turn. This stand-in carries
+    the right strings without touching the real ``UserContext`` shape.
+    """
+
+    user_id = "gilbert"
+    display_name = "Gilbert"
+
+_ROOM_CONTEXT_PROMPT_DEFAULT = """\
+You are Gilbert, an AI assistant in a shared chat room called "{room_title}".
+Multiple users are in this room. Messages from users are prefixed with their name in brackets, e.g. [Alice]: hello.
+
+Current members:
+{members}
+
+IMPORTANT: Stay quiet unless:
+- Someone addresses you directly (mentions Gilbert, asks you something, etc.)
+- A tool or service is making you interact with the room
+- You are responding to a tool call
+If no one is talking to you, respond with just an empty string.
+When you do respond, be concise and helpful.\
+"""
 
 _COMPRESSION_SYSTEM_PROMPT = """\
 You are a conversation summarizer. Produce a concise, factual summary of the \
@@ -166,6 +197,11 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
     totals = _empty_round_usage()
     totals["rounds"] = 0
     saw_any = False
+    # Track the most recent (backend, model) seen so the per-turn chip
+    # in the chat UI can label the totals with the provider that
+    # produced the answer. The final_usage round wins when present.
+    last_backend = ""
+    last_model = ""
     for rnd in turn.get("rounds", []) or []:
         usage = rnd.get("usage")
         if not isinstance(usage, dict):
@@ -179,6 +215,10 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
         totals["cache_read_tokens"] += int(usage.get("cache_read_tokens", 0) or 0)
         totals["cost_usd"] += float(usage.get("cost_usd", 0.0) or 0.0)
         totals["rounds"] += 1
+        if usage.get("backend"):
+            last_backend = str(usage["backend"])
+        if usage.get("model"):
+            last_model = str(usage["model"])
     final = turn.get("final_usage")
     if isinstance(final, dict):
         saw_any = True
@@ -190,9 +230,17 @@ def _sum_turn_usage(turn: dict[str, Any]) -> dict[str, Any] | None:
         totals["cache_read_tokens"] += int(final.get("cache_read_tokens", 0) or 0)
         totals["cost_usd"] += float(final.get("cost_usd", 0.0) or 0.0)
         totals["rounds"] += 1
+        if final.get("backend"):
+            last_backend = str(final["backend"])
+        if final.get("model"):
+            last_model = str(final["model"])
     if not saw_any:
         return None
     totals["cost_usd"] = round(totals["cost_usd"], 6)
+    if last_backend:
+        totals["backend"] = last_backend
+    if last_model:
+        totals["model"] = last_model
     return totals
 
 
@@ -1173,11 +1221,12 @@ class AIService(Service):
         self._compression_keep_recent: int = 20
         self._compression_summary_max_tokens: int = 1500
         self._compression_prompt: str = _COMPRESSION_SYSTEM_PROMPT
+        self._room_context_prompt: str = _ROOM_CONTEXT_PROMPT_DEFAULT
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
         # NOTE: the active conversation id lives in a ContextVar (see
-        # gilbert.core.context.{get,set}_current_conversation_id), not
+        # gilbert.interfaces.context.{get,set}_current_conversation_id), not
         # on the AIService instance. The service is a singleton shared
         # across users; an instance attribute would race when two
         # conversations overlap (two users, two tabs, shared rooms),
@@ -1188,6 +1237,7 @@ class AIService(Service):
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
         self._default_profile: str = _DEFAULT_PROFILE
         self._chat_profile: str = "standard"
+        self._chat_speech_voice: str = ""
         # Internal helpers (initialized in start())
         self._soul: _SoulHelper | None = None
         self._identity: _IdentityHelper | None = None
@@ -1209,7 +1259,9 @@ class AIService(Service):
                 }
             ),
             requires=frozenset({"entity_storage"}),
-            optional=frozenset({"ai_tools", "configuration", "access_control"}),
+            optional=frozenset(
+                {"ai_tools", "configuration", "access_control", "notifications", "users"}
+            ),
             events=frozenset({"chat.conversation.renamed"}),
             toggleable=True,
             toggle_description="AI chat and tool execution",
@@ -1310,8 +1362,13 @@ class AIService(Service):
             str(section.get("compression_prompt", "") or "")
             or _COMPRESSION_SYSTEM_PROMPT
         )
+        self._room_context_prompt = (
+            str(section.get("room_context_prompt", "") or "")
+            or _ROOM_CONTEXT_PROMPT_DEFAULT
+        )
         self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
         self._chat_profile = section.get("chat_profile", self._chat_profile)
+        self._chat_speech_voice = section.get("chat_speech_voice", "")
         # Persona config flows through a separate path (see
         # ``_apply_persona_config``) because the helpers must exist before
         # we can push the values into them. ``start()`` calls both.
@@ -1396,6 +1453,17 @@ class AIService(Service):
                 description="AI profile for web and Slack chat.",
                 default="standard",
                 choices_from="ai_profiles",
+            ),
+            ConfigParam(
+                key="chat_speech_voice",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Voice id (or empty) used when reading chat replies aloud to "
+                    "users who have per-chat read-aloud enabled. Empty means use "
+                    "the TTS service's default voice. Not user-configurable per "
+                    "chat in v1."
+                ),
+                default="",
             ),
             ConfigParam(
                 key="persona.soul",
@@ -1497,6 +1565,23 @@ class AIService(Service):
                     "default."
                 ),
                 default=_COMPRESSION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="room_context_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt the AI sees in shared chat rooms. "
+                    "Drives whether Gilbert chimes in unprompted, how it "
+                    "addresses multiple users, etc. Two placeholders are "
+                    "substituted at send time: ``{room_title}`` (the "
+                    "shared room's title) and ``{members}`` (an indented "
+                    "bullet list of members with roles, marking the "
+                    "current speaker). Leave blank to use the bundled "
+                    "default."
+                ),
+                default=_ROOM_CONTEXT_PROMPT_DEFAULT,
                 multiline=True,
                 ai_prompt=True,
             ),
@@ -3431,7 +3516,7 @@ class AIService(Service):
         # name is the family marker; other ``_conversation_id``
         # consumers (knowledge, attachments, etc.) don't have that
         # substring and keep their normal conv.
-        from gilbert.core.context import get_workspace_conversation_id
+        from gilbert.interfaces.context import get_workspace_conversation_id
         ws_conv = get_workspace_conversation_id()
         if ws_conv and "workspace" in tc.tool_name:
             arguments["_conversation_id"] = ws_conv
@@ -3457,7 +3542,7 @@ class AIService(Service):
         # .set() persists in the running context just like it did before
         # this refactor, preserving the historical behavior.
         if user_ctx is not None:
-            from gilbert.core.context import set_current_user
+            from gilbert.interfaces.context import set_current_user
 
             set_current_user(user_ctx)
 
@@ -3820,7 +3905,7 @@ class AIService(Service):
         # Propagate caller identity through the async context so
         # tools can resolve it via core.context.get_current_user().
         if user_ctx is not None:
-            from gilbert.core.context import set_current_user
+            from gilbert.interfaces.context import set_current_user
 
             set_current_user(user_ctx)
 
@@ -4145,6 +4230,174 @@ class AIService(Service):
             return []
         return [self._deserialize_message(m) for m in data.get("messages", [])]
 
+    async def _stamp_mentions_on_last_user_message(
+        self,
+        conv_id: str,
+        author_id: str,
+        mentioned_user_ids: list[str],
+    ) -> None:
+        """Attach a mention list to the most recently-persisted user row.
+
+        Used by the AI-chat path on the send handler: ``chat()`` builds
+        and saves the user's Message internally without knowing about
+        mentions, so we run this after it returns to retroactively
+        record who was @-mentioned. Find-by-author keeps us robust to
+        future cases where assistant tool-results land between the
+        user message and ``chat()``'s return.
+        """
+        if self._storage is None or not mentioned_user_ids:
+            return
+        data = await self._storage.get(_COLLECTION, conv_id)
+        if not data:
+            return
+        messages: list[dict[str, Any]] = data.get("messages", [])
+        for idx in range(len(messages) - 1, -1, -1):
+            row = messages[idx]
+            if row.get("role") == "user" and row.get("author_id", "") == author_id:
+                row["mentioned_user_ids"] = list(mentioned_user_ids)
+                break
+        else:
+            return
+        data["messages"] = messages
+        await self._storage.put(_COLLECTION, conv_id, data)
+
+    async def _postprocess_assistant_mentions(
+        self,
+        conv_id: str,
+        conv_data: dict[str, Any],
+        *,
+        author: Any,
+        response_text: str,
+    ) -> str:
+        """Rewrite bare ``@Name`` in Gilbert's reply to structured tags.
+
+        ``chat()`` persists the assistant message before returning; we
+        load the just-saved row, run the rewrite, and re-persist if
+        anything changed. We also stamp ``mentioned_user_ids`` on the
+        row and fire notifications for the humans Gilbert mentioned —
+        a Gilbert-said-your-name is no less a ping than a human one.
+
+        Returns the rewritten ``response_text`` so the WS reply to
+        the sender carries the chip-friendly form right away (without
+        it the user who triggered the AI would see plain ``@Root``
+        until the next history reload).
+        """
+        if self._storage is None or not response_text:
+            return response_text
+        from gilbert.core.chat import (
+            extract_mentions,
+            resolve_bare_mentions_to_structured,
+        )
+
+        members = conv_data.get("members", []) or []
+        rewritten, resolved_ids = resolve_bare_mentions_to_structured(
+            response_text, members
+        )
+        if rewritten == response_text and not resolved_ids:
+            return response_text
+
+        # Update the persisted assistant row. Walk backwards so
+        # intervening tool-result rows from a multi-round turn don't
+        # confuse the find-by-author check.
+        data = await self._storage.get(_COLLECTION, conv_id)
+        if data is None:
+            return rewritten
+        messages: list[dict[str, Any]] = data.get("messages", [])
+        for idx in range(len(messages) - 1, -1, -1):
+            row = messages[idx]
+            if row.get("role") != "assistant":
+                continue
+            if not row.get("content"):
+                continue
+            row["content"] = rewritten
+            # Strip the Gilbert pseudo-id — humans get notified, not
+            # the AI mentioning itself.
+            row["mentioned_user_ids"] = [
+                uid for uid in resolved_ids if uid != "gilbert"
+            ]
+            break
+        else:
+            return rewritten
+        data["messages"] = messages
+        await self._storage.put(_COLLECTION, conv_id, data)
+
+        # Notify the humans Gilbert mentioned. Same filtering rules
+        # as the user-message path: exclude self and the pseudo-id.
+        author_id = getattr(author, "user_id", "")
+        notify_ids = [
+            uid
+            for uid in resolved_ids
+            if uid != "gilbert" and uid != author_id
+        ]
+        # We re-extract from the rewritten content to be tolerant of
+        # any structured tags the AI happened to produce on its own.
+        already_structured = set(extract_mentions(rewritten))
+        notify_ids = [uid for uid in notify_ids if uid in already_structured]
+        if notify_ids:
+            await self._notify_mentioned_users(
+                conv_data,
+                # The mention came from Gilbert. Synthesise a
+                # minimal "author" object so the notification body
+                # reads "Gilbert mentioned you in <room>: ..." rather
+                # than the human who triggered the turn.
+                _GilbertAuthor(),
+                notify_ids,
+                rewritten,
+            )
+        return rewritten
+
+    async def _notify_mentioned_users(
+        self,
+        conv_data: dict[str, Any],
+        author: Any,
+        mentioned_user_ids: list[str],
+        raw_message: str,
+    ) -> None:
+        """Fire a ``notification.received`` for each @-mentioned user.
+
+        Best-effort — a notify_user exception (storage glitch, event
+        bus down) is logged at debug and swallowed; the message itself
+        is already persisted. ``source_ref`` carries the conversation
+        id so the SPA can deep-link from the bell / OS notification.
+        """
+        if self._resolver is None or not mentioned_user_ids:
+            return
+        notifications_svc = self._resolver.get_capability("notifications")
+        if notifications_svc is None:
+            return
+        notify_fn = getattr(notifications_svc, "notify_user", None)
+        if notify_fn is None:
+            return
+        conv_id = conv_data.get("_id", "")
+        title = conv_data.get("title") or "Shared Room"
+        author_name = getattr(author, "display_name", "") or "Someone"
+        # Strip the @[...]() syntax for the notification body — keep
+        # the prose readable on a system-level toast where the user
+        # can't see the rendered chip.
+        from gilbert.core.chat import _MENTION_RE
+
+        snippet = _MENTION_RE.sub(lambda m: "@" + m.group(1), raw_message).strip()
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        body = f"{author_name} mentioned you in {title}: {snippet}"
+        for uid in mentioned_user_ids:
+            try:
+                await notify_fn(
+                    user_id=uid,
+                    message=body,
+                    source="chat.mention",
+                    source_ref={
+                        "conversation_id": conv_id,
+                        "author_id": getattr(author, "user_id", ""),
+                        "author_name": author_name,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "chat.mention notification dispatch failed for %s", uid,
+                    exc_info=True,
+                )
+
     @staticmethod
     def _serialize_message(msg: Message) -> dict[str, Any]:
         d: dict[str, Any] = {"role": msg.role.value, "content": msg.content}
@@ -4207,6 +4460,8 @@ class AIService(Service):
             d["interrupted"] = True
         if msg.usage:
             d["usage"] = msg.usage
+        if msg.mentioned_user_ids:
+            d["mentioned_user_ids"] = list(msg.mentioned_user_ids)
         return d
 
     @staticmethod
@@ -4279,6 +4534,11 @@ class AIService(Service):
             attachments=attachments,
             interrupted=bool(data.get("interrupted", False)),
             usage=usage,
+            mentioned_user_ids=[
+                str(uid)
+                for uid in (data.get("mentioned_user_ids") or [])
+                if uid
+            ],
         )
 
     # --- Conversation State ---
@@ -4338,6 +4598,41 @@ class AIService(Service):
         state[key] = value
         data["state"] = state
         await self._storage.put(_COLLECTION, cid, data)
+
+    async def get_speech_pref(self, user_id: str, conversation_id: str) -> bool:
+        """Return True if user has read-aloud enabled for the conversation.
+
+        Defaults to False for unknown (user, conv) pairs.
+        """
+        if not self._storage or not user_id or not conversation_id:
+            return False
+        record = await self._storage.get(
+            _CHAT_SPEECH_COLLECTION, f"{user_id}:{conversation_id}"
+        )
+        if not record:
+            return False
+        return bool(record.get("enabled"))
+
+    async def set_speech_pref(
+        self, user_id: str, conversation_id: str, enabled: bool
+    ) -> None:
+        """Upsert the read-aloud preference for (user, conversation).
+
+        Caller is responsible for verifying conversation access — this
+        method does NOT check membership. RBAC lives in the WS handler.
+        """
+        if not self._storage:
+            return
+        await self._storage.put(
+            _CHAT_SPEECH_COLLECTION,
+            f"{user_id}:{conversation_id}",
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "enabled": bool(enabled),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
 
     async def clear_conversation_state(
         self,
@@ -5385,6 +5680,14 @@ class AIService(Service):
                 )
 
         turn_totals["cost_usd"] = round(turn_totals["cost_usd"] + cost, 6)
+        # Stamp the latest round's provider/model onto the running turn
+        # totals too — the per-turn chip in the chat UI reads these from
+        # ``turn_usage``. Turns that mix backends mid-flight (rare — only
+        # happens if the user swaps profiles between rounds) will show
+        # the final round's values, which matches what the answer was
+        # produced by.
+        turn_totals["backend"] = backend_name
+        turn_totals["model"] = response.model
 
         return {
             "input_tokens": usage.input_tokens,
@@ -5392,6 +5695,8 @@ class AIService(Service):
             "cache_creation_tokens": usage.cache_creation_tokens,
             "cache_read_tokens": usage.cache_read_tokens,
             "cost_usd": round(cost, 6),
+            "backend": backend_name,
+            "model": response.model,
         }
 
     def _resolve_usage_recorder(self) -> UsageRecorder | None:
@@ -5433,6 +5738,62 @@ class AIService(Service):
             and b.get("exclude_user") != user_id
         ]
 
+    async def _speak_response(
+        self,
+        user: UserContext,
+        conversation_id: str,
+        response_text: str,
+    ) -> None:
+        """Fire-and-forget: synth the chat reply via TTS and play it in
+        the user's active browser tab.
+
+        Safe to call from a chat-turn handler; any failure is logged and
+        swallowed so a TTS hiccup never breaks the chat reply itself.
+        """
+        import uuid
+
+        from gilbert.core.chat import strip_markdown_for_speech
+        from gilbert.core.output import cleanup_old_files, get_output_dir
+        from gilbert.interfaces.tts import SynthesisRequest
+
+        try:
+            plain = strip_markdown_for_speech(response_text).strip()
+            if not plain:
+                return
+            if self._resolver is None:
+                return
+            tts_svc = self._resolver.get_capability("text_to_speech")
+            speaker_svc = self._resolver.get_capability("speaker_control")
+            if tts_svc is None or speaker_svc is None:
+                return
+            speakers = await speaker_svc.list_speakers()  # type: ignore[attr-defined]
+            target_id = f"browser:{user.user_id}"
+            if not any(s.speaker_id == target_id for s in speakers):
+                return
+            voice_id = getattr(self, "_chat_speech_voice", "") or ""
+            result = await tts_svc.synthesize(  # type: ignore[attr-defined]
+                SynthesisRequest(text=plain, voice_id=voice_id)
+            )
+            output_dir = get_output_dir("speaker")
+            cleanup_old_files(output_dir, 3600)
+            file_path = output_dir / f"chat-speech-{uuid.uuid4()}.mp3"
+            file_path.write_bytes(result.audio)
+            audio_url = speaker_svc.audio_url(str(file_path.resolve()))  # type: ignore[attr-defined]
+            await speaker_svc.play_on_speakers(  # type: ignore[attr-defined]
+                uri=audio_url,
+                speaker_ids=[target_id],
+                title="Gilbert",
+                announce=False,
+                kind="chat_speech",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "chat read-aloud: speak_response failed for user=%s conv=%s",
+                user.user_id,
+                conversation_id,
+                exc_info=True,
+            )
+
     def get_ws_handlers(self) -> dict[str, Any]:
         return {
             "chat.message.send": self._ws_chat_send,
@@ -5443,6 +5804,7 @@ class AIService(Service):
             "chat.conversation.create": self._ws_conversation_create,
             "chat.conversation.rename": self._ws_conversation_rename,
             "chat.conversation.delete": self._ws_conversation_delete,
+            "chat.conversation.mark_mentions_read": self._ws_mark_mentions_read,
             "chat.room.create": self._ws_room_create,
             "chat.room.join": self._ws_room_join,
             "chat.room.leave": self._ws_room_leave,
@@ -5454,6 +5816,8 @@ class AIService(Service):
             "slash.commands.list": self._ws_slash_commands_list,
             "chat.models.list": self._ws_models_list,
             "ai.profiles.list": self._ws_profiles_list,
+            "chat.read_aloud.get": self._ws_chat_read_aloud_get,
+            "chat.read_aloud.set": self._ws_chat_read_aloud_set,
         }
 
     async def _ws_slash_commands_list(
@@ -5597,15 +5961,55 @@ class AIService(Service):
         reply_turn_usage: dict[str, Any] | None = None
         try:
             if is_shared:
-                from gilbert.core.chat import build_room_context, mentions_gilbert, publish_event
+                from gilbert.core.chat import (
+                    build_room_context,
+                    filter_mentions_to_members,
+                    mentions_gilbert,
+                    publish_event,
+                    resolve_bare_mentions_to_structured,
+                )
 
                 # ``is_shared`` was set from ``conv_data.get("shared")``
                 # so we know conv_data is a dict at this point.
                 assert conv_data is not None
                 assert conversation_id is not None
 
+                # Rewrite bare ``@Name`` to ``@[Name](user_id)`` against
+                # the room's member list. The mention picker on the SPA
+                # inserts the visible ``@Name`` form to avoid surfacing
+                # raw user_ids in the chat input — the structured form
+                # is reconstituted server-side here so persistence,
+                # notifications, chip rendering, and the
+                # mentions-gilbert detector all see the durable form
+                # exactly as if the user had typed it. Already-
+                # structured tags (e.g. forwarded from elsewhere) pass
+                # through untouched because the regex doesn't match
+                # ``@[``. This is the same helper that rewrites Gilbert's
+                # own AI replies in ``_postprocess_assistant_mentions``.
+                room_members_list = conv_data.get("members", []) or []
+                message, _ = resolve_bare_mentions_to_structured(
+                    message, room_members_list
+                )
+
                 addressed = mentions_gilbert(message) or is_slash_command
                 tagged_message = f"[{conn.user_ctx.display_name}]: {message}"
+
+                # Validate mentions against the room's member list.
+                # Bad-id mentions are silently dropped (no error path —
+                # a stale picker shouldn't fail the whole send), and
+                # the user's own id is filtered so self-mention isn't
+                # a real mention for notification purposes.
+                room_member_ids = {
+                    str(m.get("user_id", ""))
+                    for m in room_members_list
+                    if m.get("user_id")
+                }
+                mentioned_ids, mentions_gilbert_tag = filter_mentions_to_members(
+                    message, room_member_ids
+                )
+                mentioned_ids = [
+                    uid for uid in mentioned_ids if uid != conn.user_ctx.user_id
+                ]
 
                 response_text = ""
                 ui_blocks: list[dict[str, Any]] = []
@@ -5622,7 +6026,11 @@ class AIService(Service):
                         user_message=chat_message,
                         conversation_id=conversation_id,
                         user_ctx=conn.user_ctx,
-                        system_prompt=build_room_context(conv_data, conn.user_ctx),
+                        system_prompt=build_room_context(
+                            conv_data,
+                            conn.user_ctx,
+                            self._room_context_prompt,
+                        ),
                         ai_profile=self._chat_profile,
                         attachments=attachments,
                         model=frame_model,
@@ -5648,9 +6056,46 @@ class AIService(Service):
                             author_id=conn.user_ctx.user_id,
                             author_name=conn.user_ctx.display_name,
                             attachments=list(attachments),
+                            mentioned_user_ids=list(mentioned_ids),
                         )
                     )
                     await self._save_conversation(conv_id, messages, user_ctx=conn.user_ctx)
+
+                # When the AI path persisted the user message, stamp
+                # the resolved mention list onto it post-hoc so the
+                # ``chat()`` plumbing doesn't have to grow a new arg.
+                # No-op when there were no valid mentions.
+                if addressed and mentioned_ids:
+                    await self._stamp_mentions_on_last_user_message(
+                        conv_id, conn.user_ctx.user_id, mentioned_ids
+                    )
+
+                # Rewrite bare ``@Name`` in Gilbert's reply to the
+                # structured tag form so the SPA renders chips and
+                # mentioned humans get notified. The AI writes prose,
+                # not markup — this closes that gap deterministically
+                # rather than relying on prompt-following.
+                if addressed and response_text:
+                    response_text = await self._postprocess_assistant_mentions(
+                        conv_id,
+                        conv_data,
+                        author=conn.user_ctx,
+                        response_text=response_text,
+                    )
+
+                # Fan-out notifications to mentioned users. Best-effort
+                # — a notify_user failure shouldn't fail the send.
+                # Self-mentions were already filtered out of
+                # ``mentioned_ids``; Gilbert mentions don't notify
+                # anyone (the existing addressed-path handles those
+                # by invoking the AI).
+                if mentioned_ids:
+                    await self._notify_mentioned_users(
+                        conv_data,
+                        conn.user_ctx,
+                        mentioned_ids,
+                        message,
+                    )
 
                 # Broadcast to room members
                 gilbert = conn.manager.gilbert
@@ -5721,6 +6166,17 @@ class AIService(Service):
                         {"backend": "", "model": ""},
                         conv_id,
                     )
+
+        # Read-aloud hook — fire and forget. Never delay the chat reply.
+        # Copy the request's contextvars (current_user, current_conversation_id)
+        # so the detached task's RBAC checks see the real caller, not the
+        # default anonymous context.
+        if response_text and conv_id:
+            if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
+                asyncio.create_task(
+                    self._speak_response(conn.user_ctx, conv_id, response_text),
+                    context=contextvars.copy_context(),
+                )
 
         return {
             "type": "chat.message.send.result",
@@ -5839,6 +6295,109 @@ class AIService(Service):
             "title": title,
         }
 
+    async def _ws_chat_read_aloud_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return the per-(user, conv) read-aloud preference."""
+        from gilbert.core.chat import check_conversation_access
+
+        conv_id = frame.get("conversation_id")
+        if not conv_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        conv = await self._storage.get(_COLLECTION, conv_id)
+        if not conv:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        denied = check_conversation_access(conv, conn.user_ctx)
+        if denied:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": denied,
+                "code": 403,
+            }
+        enabled = await self.get_speech_pref(conn.user_ctx.user_id, conv_id)
+        return {
+            "type": "chat.read_aloud.get.result",
+            "ref": frame.get("id"),
+            "conversation_id": conv_id,
+            "enabled": enabled,
+        }
+
+    async def _ws_chat_read_aloud_set(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Persist the per-(user, conv) read-aloud preference and broadcast
+        a per-user ``chat.read_aloud.changed`` event for other tabs."""
+        from gilbert.core.chat import check_conversation_access, publish_event
+
+        conv_id = frame.get("conversation_id")
+        enabled = bool(frame.get("enabled", False))
+        if not conv_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        conv = await self._storage.get(_COLLECTION, conv_id)
+        if not conv:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        denied = check_conversation_access(conv, conn.user_ctx, require_member=True)
+        if denied:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": denied,
+                "code": 403,
+            }
+        await self.set_speech_pref(conn.user_ctx.user_id, conv_id, enabled)
+        gilbert = conn.manager.gilbert if hasattr(conn, "manager") else None
+        if gilbert is not None:
+            await publish_event(
+                gilbert,
+                "chat.read_aloud.changed",
+                {
+                    "user_id": conn.user_ctx.user_id,
+                    "conversation_id": conv_id,
+                    "enabled": enabled,
+                },
+            )
+        return {
+            "type": "chat.read_aloud.set.result",
+            "ref": frame.get("id"),
+            "conversation_id": conv_id,
+            "enabled": enabled,
+        }
+
     async def _ws_form_submit(
         self, conn: WsConnectionBase, frame: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -5881,7 +6440,11 @@ class AIService(Service):
             if is_shared and conv_data:
                 from gilbert.core.chat import build_room_context
 
-                system_prompt = build_room_context(conv_data, conn.user_ctx)
+                system_prompt = build_room_context(
+                    conv_data,
+                    conn.user_ctx,
+                    self._room_context_prompt,
+                )
 
             turn_result = await self.chat(
                 user_message=form_message,
@@ -5917,6 +6480,15 @@ class AIService(Service):
                         "ui_blocks": ui_blocks,
                         "attachments": _serialize_attachments_for_wire(reply_attachments),
                     },
+                )
+
+        # Read-aloud hook — fire and forget; copy contextvars so the detached
+        # task's RBAC checks see the real caller.
+        if response_text and conv_id:
+            if await self.get_speech_pref(conn.user_ctx.user_id, conv_id):
+                asyncio.create_task(
+                    self._speak_response(conn.user_ctx, conv_id, response_text),
+                    context=contextvars.copy_context(),
                 )
 
         return {
@@ -6331,13 +6903,70 @@ class AIService(Service):
         personal = await self.list_conversations(user_id=conn.user_id, limit=30)
         shared = await self.list_shared_conversations(user_id=conn.user_id, limit=30)
 
-        conversations = [conv_summary(c, shared=True) for c in shared]
-        conversations += [conv_summary(c, shared=False) for c in personal]
+        conversations = [
+            conv_summary(c, shared=True, viewer_user_id=conn.user_id) for c in shared
+        ]
+        conversations += [
+            conv_summary(c, shared=False, viewer_user_id=conn.user_id) for c in personal
+        ]
 
         return {
             "type": "chat.conversation.list.result",
             "ref": frame.get("id"),
             "conversations": conversations,
+        }
+
+    async def _ws_mark_mentions_read(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Reset the caller's unread-mentions cursor for a conversation.
+
+        Stores ``last_read_mention_index`` on the caller's member entry,
+        set to the index of the most-recent message at the time of
+        the call. ``conv_summary`` reads this cursor when computing
+        ``unread_mentions_count`` for the sidebar. Self-only — the
+        cursor for a different user can't be moved from a frame.
+        """
+        conversation_id = (frame.get("conversation_id") or "").strip()
+        if not conversation_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id is required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        data = await self._storage.get(_COLLECTION, conversation_id)
+        if data is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        members = data.get("members") or []
+        last_index = len(data.get("messages") or []) - 1
+        updated = False
+        for m in members:
+            if m.get("user_id") == conn.user_id:
+                if m.get("last_read_mention_index") != last_index:
+                    m["last_read_mention_index"] = last_index
+                    updated = True
+                break
+        if updated:
+            data["members"] = members
+            await self._storage.put(_COLLECTION, conversation_id, data)
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "conversation_id": conversation_id,
+            "last_read_mention_index": last_index,
         }
 
     async def _ws_conversation_rename(

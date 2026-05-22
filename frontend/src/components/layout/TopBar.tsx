@@ -30,6 +30,7 @@ import {
 import { MenuIcon } from "lucide-react";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { BrowserSpeakerControl } from "./BrowserSpeakerControl";
 import { cn } from "@/lib/utils";
 import { groupIconFor, GROUP_COLORS } from "./nav-shared";
 import type { NavGroup, NavItem } from "@/types/dashboard";
@@ -68,6 +69,7 @@ export function TopBar() {
     enabled: connected && !!user,
   });
   const groups: NavGroup[] = data?.nav ?? [];
+  const browserSpeakerAvailable = data?.browser_speaker_available ?? false;
 
   const initials =
     user?.display_name
@@ -139,6 +141,8 @@ export function TopBar() {
 
         {/* Plugins can drop widgets next to the bell. */}
         <PluginPanelSlot slot="header.widgets" />
+
+        {browserSpeakerAvailable && <BrowserSpeakerControl />}
 
         <NotificationBell />
 

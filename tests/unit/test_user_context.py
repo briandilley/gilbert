@@ -2,7 +2,7 @@
 
 import pytest
 
-from gilbert.core.context import get_current_user, set_current_user
+from gilbert.interfaces.context import get_current_user, set_current_user
 from gilbert.interfaces.auth import AuthInfo, UserContext
 
 # --- UserContext ---

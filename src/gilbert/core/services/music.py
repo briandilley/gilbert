@@ -40,7 +40,13 @@ from gilbert.interfaces.music import (
     Playable,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState, SpeakerProvider
+from gilbert.interfaces.speaker import (
+    LoopMode,
+    NowPlaying,
+    PlaybackState,
+    SpeakerProvider,
+    split_speaker_id,
+)
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -376,6 +382,34 @@ class MusicService(Service):
 
     # --- Core operations ---
 
+    async def _validate_compatible_speakers(
+        self, speaker_names: list[str] | None
+    ) -> dict[str, str]:
+        """Resolve names → namespaced ids; reject targets the music backend can't drive.
+
+        Returns the resolved mapping ``{name: namespaced_id}`` for downstream
+        use; raises ``MusicSearchUnavailableError`` if any target is on an
+        incompatible speaker backend. Empty / None inputs return an empty dict.
+        """
+        if not speaker_names:
+            return {}
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None or self._backend is None:
+            return {}
+        resolved = await speaker_svc.resolve_names(speaker_names)
+        compat = self._backend.compatible_speaker_backends()
+        if compat == frozenset({"*"}):
+            return resolved
+        for name, sid in resolved.items():
+            backend_name, _ = split_speaker_id(sid)
+            if backend_name not in compat:
+                raise MusicSearchUnavailableError(
+                    f"music backend {self._backend.backend_name!r} can't play to "
+                    f"speaker {name!r} ({backend_name} backend) — "
+                    f"try a speaker on one of: {sorted(compat)}"
+                )
+        return resolved
+
     def _require_backend(self) -> MusicBackend:
         if self._backend is None:
             raise RuntimeError("Music service is not enabled")
@@ -411,6 +445,7 @@ class MusicService(Service):
         sites — AI tools, slash commands, UI buttons — represent user
         intent.
         """
+        await self._validate_compatible_speakers(speaker_names)
         speaker_svc = self._get_speaker_svc()
         if speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
@@ -461,7 +496,12 @@ class MusicService(Service):
         speaker_svc = self._get_speaker_svc()
         if not isinstance(speaker_svc, SpeakerProvider):
             return False
-        return bool(speaker_svc.backend.supports_repeat)
+        compat = self._backend.compatible_speaker_backends()
+        return any(
+            b.supports_repeat
+            for name, b in speaker_svc.backends.items()
+            if compat == frozenset({"*"}) or name in compat
+        )
 
     async def start_station(
         self,
@@ -479,6 +519,7 @@ class MusicService(Service):
         queue. Returns the ``Playable`` for the first track. Raises
         ``RuntimeError`` if the backend doesn't support stations.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_stations:
             raise RuntimeError(
                 "Music backend does not support stations"
@@ -558,6 +599,7 @@ class MusicService(Service):
         action taken) and ``True`` when a Play was actually issued.
         Raises ``RuntimeError`` if the backend doesn't expose a queue.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_queue:
             raise RuntimeError(
                 "Music backend does not support queue operations"
@@ -595,6 +637,7 @@ class MusicService(Service):
         ``kind="queue_add"`` so subscribers can distinguish a queue
         append from a fresh play.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_queue:
             raise RuntimeError(
                 "Music backend does not support queue operations"
@@ -717,7 +760,8 @@ class MusicService(Service):
                     "already-built queue use ``play_queue``. "
                     "By default searches favorites first, then playlists, "
                     "then runs a fresh search. Set ``source`` to restrict "
-                    "the lookup."
+                    "the lookup. "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -780,7 +824,8 @@ class MusicService(Service):
                     "this one item and starts it. Takes the full item "
                     "as a JSON payload so the speaker backend can resolve "
                     "it without a second search round-trip. Sibling of "
-                    "``queue_item`` (which appends instead of replacing)."
+                    "``queue_item`` (which appends instead of replacing). "
+                    'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
                 parameters=[
                     ToolParameter(
@@ -829,7 +874,8 @@ class MusicService(Service):
                         "this'. For immediate playback that replaces the "
                         "queue use ``play_music`` instead. Searches "
                         "favorites first, then playlists, then a fresh "
-                        "search. Set ``source`` to restrict the lookup."
+                        "search. Set ``source`` to restrict the lookup. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -877,7 +923,8 @@ class MusicService(Service):
                         "music is already playing: in that case it's a "
                         "no-op (returns ``already_playing``) so the "
                         "current track doesn't restart from the "
-                        "beginning of the queue."
+                        "beginning of the queue. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -901,7 +948,8 @@ class MusicService(Service):
                         "without interrupting playback. Takes the full "
                         "item as a JSON payload produced by a prior "
                         "search result. Sibling of ``play_item`` (which "
-                        "replaces the queue instead of appending)."
+                        "replaces the queue instead of appending). "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -944,7 +992,8 @@ class MusicService(Service):
                         "Use when the user wants ongoing music in a "
                         "vibe rather than a specific item — phrases like "
                         "'play some indie rock', 'something like Wilco', "
-                        "'a station based on this song'."
+                        "'a station based on this song'. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(
@@ -987,7 +1036,8 @@ class MusicService(Service):
                         "``off`` plays through and stops, ``track`` "
                         "repeats the current song, ``all`` repeats the "
                         "whole queue. Use for 'play this on loop', "
-                        "'repeat this song', 'put it on repeat'."
+                        "'repeat this song', 'put it on repeat'. "
+                        'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                     ),
                     parameters=[
                         ToolParameter(

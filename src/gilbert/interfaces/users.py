@@ -187,6 +187,36 @@ class UserBackend(ABC):
 
 
 @runtime_checkable
+class UserPrefReader(Protocol):
+    """Read + write per-user preference values.
+
+    Preferences live in the ``metadata`` dict on the user document
+    (the generic per-user-settings escape hatch in ``UserService``).
+    Consumers go through this protocol rather than poking at the
+    storage shape directly so the storage layout can change without
+    breaking every caller.
+
+    Keys are flat strings — namespace by prefix if needed (e.g.
+    ``"ui.theme"``). Values are JSON-serializable
+    primitives; a service that wants structured prefs should put
+    them under a single key as a dict.
+    """
+
+    async def get_user_pref(
+        self, user_id: str, key: str, default: object = None
+    ) -> object:
+        """Return the user's value for ``key`` or ``default`` if unset."""
+        ...
+
+    async def set_user_pref(self, user_id: str, key: str, value: object) -> None:
+        """Persist a pref value on the user's metadata.
+
+        Raises ``KeyError`` if the user doesn't exist.
+        """
+        ...
+
+
+@runtime_checkable
 class UserManagementProvider(Protocol):
     """Protocol for services providing user management capabilities.
 

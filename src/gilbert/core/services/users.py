@@ -526,7 +526,99 @@ class UserService(Service):
             "users.user.create": self._ws_user_create,
             "users.user.delete": self._ws_user_delete,
             "users.user.reset_password": self._ws_user_reset_password,
+            "users.prefs.get": self._ws_user_prefs_get,
+            "users.prefs.set": self._ws_user_prefs_set,
         }
+
+    # --- UserPrefReader protocol ---
+
+    async def get_user_pref(
+        self, user_id: str, key: str, default: object = None
+    ) -> object:
+        user = await self.backend.get_user(user_id)
+        if user is None:
+            return default
+        metadata = user.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            return default
+        return metadata.get(key, default)
+
+    async def set_user_pref(self, user_id: str, key: str, value: object) -> None:
+        user = await self.backend.get_user(user_id)
+        if user is None:
+            raise KeyError(f"User {user_id!r} not found")
+        existing = user.get("metadata") or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, key: value}
+        await self.backend.update_user(user_id, {"metadata": merged})
+
+    async def _ws_user_prefs_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read one of the caller's own preferences.
+
+        Self-only — uses the connection's authenticated ``user_id``
+        rather than trusting a frame field. Admins query other users
+        via the existing ``users.user.*`` admin RPCs, not here.
+        """
+        user_id = getattr(conn, "user_id", "") or ""
+        if not user_id or user_id == "system":
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Authenticated user required",
+                "code": 401,
+            }
+        key = (frame.get("key") or "").strip()
+        if not key:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "key is required",
+                "code": 400,
+            }
+        default = frame.get("default")
+        value = await self.get_user_pref(user_id, key, default)
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "value": value,
+        }
+
+    async def _ws_user_prefs_set(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one of the caller's own preferences. Self-only."""
+        user_id = getattr(conn, "user_id", "") or ""
+        if not user_id or user_id == "system":
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Authenticated user required",
+                "code": 401,
+            }
+        key = (frame.get("key") or "").strip()
+        if not key:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "key is required",
+                "code": 400,
+            }
+        # ``value`` is intentionally permissive — services validate
+        # their own pref shapes when they read.
+        value = frame.get("value")
+        try:
+            await self.set_user_pref(user_id, key, value)
+        except KeyError as exc:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": str(exc),
+                "code": 404,
+            }
+        return {"type": "gilbert.result", "ref": frame.get("id"), "ok": True}
 
     async def _ws_user_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         if not self._allow_user_creation:

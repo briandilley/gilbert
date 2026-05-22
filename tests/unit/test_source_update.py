@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gilbert.core.context import set_current_user
+from gilbert.interfaces.context import set_current_user
 from gilbert.core.services.source_update import SourceUpdateService, _GitError
 from gilbert.interfaces.auth import UserContext
 

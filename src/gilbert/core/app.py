@@ -29,6 +29,7 @@ from gilbert.core.services import (
     SpeakerService,
     StorageService,
     ThermostatService,
+    TranscriptionService,
     TTSService,
     UserService,
 )
@@ -206,6 +207,7 @@ class Gilbert:
         # 8. Register all optional services (they self-manage enabled/disabled)
         self.service_manager.register(TTSService())
         self.service_manager.register(SpeakerService())
+        self.service_manager.register(TranscriptionService())
         self.service_manager.register(MusicService())
         self.service_manager.register(LightsService())
         self.service_manager.register(ShadesService())

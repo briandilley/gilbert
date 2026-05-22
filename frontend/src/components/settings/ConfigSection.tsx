@@ -65,13 +65,32 @@ function backendGroups(
   const seen = new Set<string>();
   for (const p of params) {
     const parts = p.key.split(".");
-    const isNested = parts[0] === "backends" && parts.length >= 3;
-    const groupKey = isNested ? `${parts[0]}.${parts[1]}` : parts[0];
-    const groupLabel = isNested ? parts[1] : groupKey;
+    // Two key layouts we group on:
+    //   ``backends.<name>.<...>``           — single-role aggregator
+    //                                         (e.g. tts, speaker)
+    //   ``<role>.backends.<name>.<...>``    — multi-role aggregator
+    //                                         (e.g. transcription, where
+    //                                         <role> ∈ {batch, streaming,
+    //                                         wake_word})
+    let isNested = false;
+    let groupKey = parts[0];
+    let groupLabel = parts[0];
+    if (parts[0] === "backends" && parts.length >= 3) {
+      isNested = true;
+      groupKey = `${parts[0]}.${parts[1]}`;
+      groupLabel = parts[1];
+    } else if (parts.length >= 4 && parts[1] === "backends") {
+      isNested = true;
+      groupKey = `${parts[0]}.${parts[1]}.${parts[2]}`;
+      // Show "<role> · <backend>" so users can tell which role this
+      // backend slot belongs to when one provider implements multiple
+      // roles (e.g. ElevenLabs Scribe is both batch and streaming).
+      groupLabel = `${humanize(parts[0])} · ${humanize(parts[2])}`;
+    }
     if (seen.has(groupKey)) continue;
     seen.add(groupKey);
     groups.push({
-      label: humanize(groupLabel),
+      label: isNested && groupLabel.includes(" · ") ? groupLabel : humanize(groupLabel),
       params: params.filter(
         (q) => q.key === groupKey || q.key.startsWith(`${groupKey}.`),
       ),

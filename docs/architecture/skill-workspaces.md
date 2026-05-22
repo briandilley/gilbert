@@ -57,6 +57,19 @@ Added to `interfaces/attachments.py`. Reference-mode attachments now carry three
 
 `skills.workspace.download` accepts an optional `conversation_id` frame field. The frontend's `downloadSkillWorkspaceFile(skillName, path, conversationId?)` reads `attachment.workspace_conv` and passes it. The handler tries the conv-scoped workspace first and falls back to legacy. Path-traversal check fires for both candidates.
 
+### Shared-room cross-member fallback
+
+Workspaces are per-user-per-conv on disk (`users/<uid>/conversations/<cid>/`), so an upload Dylan dropped into a shared room with Root lives under Dylan's path — Root opening the same attachment can't find it under his own workspace root and the lookup 404s.
+
+`WorkspaceService.member_workspace_roots(caller_user_id, conv_id) -> list[Path]` widens the search by returning the workspace roots of *other* members for shared conversations (empty list otherwise). Both call sites use it:
+
+- `_ws_workspace_download` (general workspace files via the `skills.workspace.download` WS RPC) appends member roots to its candidate list after the per-user and legacy entries.
+- The HTTP route `GET /api/chat/download/{conv_id}/{path}` (chat-uploads only, served by `gilbert/web/routes/chat_uploads.py`) appends `member_root/uploads/<safe_name>` to its candidates and adds each member root to the path-escape allowlist.
+
+The widening is gated on `check_conversation_access(conv_data, caller_ctx)` returning `None` — the same gate the chat-read paths use — so a caller who can't see the conv can't reach its members' workspaces via this code path either. Personal conversations short-circuit to an empty list (no DB read), keeping the common case free.
+
+The protocol method lives on `WorkspaceProvider` (`gilbert.interfaces.workspace`), so route + service share one implementation instead of duplicating the conv-load + member-walk in each layer.
+
 ### Cleanup hook
 
 When `_ws_conversation_delete` removes a personal conversation, `AIService` publishes `chat.conversation.destroyed` with `{conversation_id, owner_id}`. `SkillService.start()` subscribes to that event and calls `_on_conversation_destroyed`, which:

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
+import { MentionText } from "@/components/chat/MentionText";
 import type {
   ChatRound,
   ChatRoundTool,
@@ -82,7 +83,7 @@ export function TurnBubble({
         )}
         {userContent && (
           <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-            {userContent}
+            <MentionText content={userContent} />
           </p>
         )}
       </TurnRail>
@@ -548,6 +549,10 @@ function sumTurnUsage(turn: ChatTurn) {
   let cost = 0;
   let count = 0;
   let saw = false;
+  // Track the latest round's provider/model — the chip labels the
+  // totals with whatever produced the answer (final_usage round wins).
+  let backend = "";
+  let model = "";
   for (const r of turn.rounds) {
     if (!r.usage) continue;
     saw = true;
@@ -557,6 +562,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cacheR += r.usage.cache_read_tokens;
     cost += r.usage.cost_usd;
     count += 1;
+    if (r.usage.backend) backend = r.usage.backend;
+    if (r.usage.model) model = r.usage.model;
   }
   if (turn.final_usage) {
     saw = true;
@@ -566,6 +573,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cacheR += turn.final_usage.cache_read_tokens;
     cost += turn.final_usage.cost_usd;
     count += 1;
+    if (turn.final_usage.backend) backend = turn.final_usage.backend;
+    if (turn.final_usage.model) model = turn.final_usage.model;
   }
   if (!saw) return null;
   return {
@@ -575,6 +584,8 @@ function sumTurnUsage(turn: ChatTurn) {
     cache_read_tokens: cacheR,
     cost_usd: cost,
     rounds: count,
+    backend: backend || undefined,
+    model: model || undefined,
   };
 }
 

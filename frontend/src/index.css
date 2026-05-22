@@ -390,6 +390,26 @@
     font-family: var(--font-mono);
 }
 
+/* @-mention chip — neutral by default, signal-amber when it points
+   at the current viewer. Used in two places: ``MarkdownContent``
+   (assistant prose via the Marked.js extension) and ``MentionText``
+   (user-authored prose via a JSX-level pass). Selector is
+   intentionally NOT scoped under ``.markdown-content`` so both
+   surfaces pick up the same chip styling. */
+.mention {
+    display: inline-block;
+    padding: 0.05em 0.4em;
+    border-radius: 4px;
+    background: var(--muted);
+    color: var(--foreground);
+    font-weight: 500;
+}
+
+.mention-self {
+    background: var(--signal);
+    color: var(--signal-foreground);
+}
+
 .markdown-content pre {
     background: oklch(0.13 0 0);
     color: oklch(0.92 0 0);

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.scheduler import (
