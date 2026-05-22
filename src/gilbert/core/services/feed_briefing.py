@@ -32,9 +32,9 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.core.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.feeds import Feed, FeedsProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -550,4 +550,3 @@ class FeedBriefingService(Service):
             "ref": frame.get("id"),
             "fired": fired,
         }
-

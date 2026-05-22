@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 _READ_FILE_CAP = 1 * 1024 * 1024  # 1 MiB
 _WORKSPACE_FILES_COLLECTION = "workspace_files"
+# Same collection AIService writes to. Used here for the shared-room
+# upload fallback in ``_ws_workspace_download`` — when the caller's
+# own workspace doesn't hold the file, we fetch the conversation
+# document so we can scan the other members' workspaces.
+_CONVERSATIONS_COLLECTION = "ai_conversations"
 _WORKSPACE_SHARES_COLLECTION = "workspace_file_shares"
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
@@ -273,6 +278,67 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         d = self.get_workspace_root(user_id, conversation_id) / "scratch"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    async def member_workspace_roots(
+        self,
+        caller_user_id: str,
+        conversation_id: str,
+    ) -> list[Path]:
+        """Workspace roots of *other* members in a shared conversation.
+
+        Workspaces are per-user-per-conv on disk
+        (``users/<uid>/conversations/<cid>/``), so an upload by Dylan
+        in a shared room with Root lives under Dylan's path — Root
+        opening the same attachment can't find it under his own
+        workspace root. Both the WS RPC (``workspace.download``) and
+        the HTTP chat-download route call this to widen their file
+        search to the rest of the room's members.
+
+        The widening is gated by ``check_conversation_access`` — only
+        members + invited users can see the conversation at all, so
+        scanning their workspaces inside this conversation doesn't
+        broaden access. Returns ``[]`` for personal conversations,
+        unknown convs, storage errors, or callers who can't access
+        the conv (rather than raising — the fallback is best-effort).
+        """
+        if not conversation_id or self._storage is None:
+            return []
+        try:
+            conv_data = await self._storage.get(
+                _CONVERSATIONS_COLLECTION, conversation_id
+            )
+        except Exception:
+            logger.debug(
+                "member_workspace_roots: storage read failed for %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return []
+        if not conv_data or not conv_data.get("shared"):
+            return []
+        from gilbert.core.chat import check_conversation_access
+        from gilbert.interfaces.auth import UserContext
+
+        # Roles aren't surfaced on the call site (the WS conn and the
+        # HTTP request both only know the user_id by the time this
+        # runs), so build a minimal context. ``check_conversation_access``
+        # only consults user_id + membership, so role-frozenset can
+        # be empty here.
+        caller_ctx = UserContext(
+            user_id=caller_user_id,
+            email="",
+            display_name="",
+            roles=frozenset(),
+        )
+        if check_conversation_access(conv_data, caller_ctx) is not None:
+            return []
+        roots: list[Path] = []
+        for member in conv_data.get("members", []):
+            other_uid = str(member.get("user_id") or "")
+            if not other_uid or other_uid == caller_user_id:
+                continue
+            roots.append(self.get_workspace_root(other_uid, conversation_id))
+        return roots
 
     # Legacy path resolution for old conversations
     def _legacy_workspace_dir(
@@ -2333,6 +2399,15 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         # Legacy per-user workspace
         if skill_name:
             candidates.append(self._legacy_workspace_dir(user_id, skill_name))
+
+        # Shared-room fallback — see ``member_workspace_roots`` for the
+        # access-gating + per-user path rationale. Returns an empty
+        # list for personal convs / non-shared conversations so the
+        # candidate set is unchanged for the common case.
+        if conv_id:
+            candidates.extend(
+                await self.member_workspace_roots(user_id, conv_id)
+            )
 
         target: Path | None = None
         for workspace in candidates:

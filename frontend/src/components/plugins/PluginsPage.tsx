@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PackagePlusIcon, AlertCircleIcon } from "lucide-react";
 import { PluginCard } from "./PluginCard";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function PluginsPage() {
   const queryClient = useQueryClient();
@@ -59,22 +60,19 @@ export function PluginsPage() {
     installMutation.mutate({ url: trimmed, force });
   }
 
-  if (isLoading) {
-    return <LoadingSpinner text="Loading plugins..." className="p-4" />;
-  }
-
   const sorted = [...(plugins ?? [])].sort((a, b) =>
     a.name.localeCompare(b.name),
   );
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl sm:text-2xl font-semibold">Plugins</h1>
-        <span className="text-xs text-muted-foreground">
-          {sorted.length} installed
-        </span>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="EXTENSIONS"
+        title="Plugins"
+        description={`${sorted.length} installed.`}
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-3">
+        {isLoading && <LoadingSpinner text="Loading plugins..." className="p-4" />}
 
       {/* Install form */}
       <Card>
@@ -146,6 +144,7 @@ export function PluginsPage() {
             }
           />
         ))}
+      </div>
       </div>
     </div>
   );

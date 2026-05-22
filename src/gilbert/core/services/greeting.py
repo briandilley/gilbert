@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.ai import AIProvider, AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
@@ -26,6 +26,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.users import UserManagementProvider
 from gilbert.interfaces.weather import (
     LocationNotConfiguredError,
     WeatherProvider,
@@ -37,6 +38,32 @@ logger = logging.getLogger(__name__)
 
 _GREETING_COLLECTION = "greeting_state"
 _CAMERA_MUTES_COLLECTION = "camera_mutes"
+
+# Manual ``/greet`` only uses the resolved user_id when the match
+# confidence clears this bar. Below the threshold we still greet by
+# the raw name, but don't pull recent-greeting history or mark anyone
+# as greeted — those are user-keyed records and we'd rather drop them
+# than attribute them to the wrong person.
+_GREETING_MATCH_CONFIDENCE_THRESHOLD: float = 0.7
+
+# Default template for the manual ``/greet`` AI prompt. The live value
+# is read from ``greeting.enhanced_greeting_prompt`` and cached on
+# ``self._enhanced_greeting_prompt`` so the Settings UI can tune it
+# without a restart. Placeholders are filled with ``.format_map`` —
+# missing ones in a user-edited version render empty, malformed
+# templates fall back to this default at call time.
+_DEFAULT_ENHANCED_GREETING_PROMPT = """\
+Generate a personalized morning greeting for {name}. You're Gilbert, an AI \
+assistant at a business — feel free to use any read-only data-lookup tools \
+available to you (presence, recent activity, project status, time logs, etc.) \
+to gather context that could make the greeting feel personal. Vary your tone \
+across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). Mention \
+their name. 1-2 sentences.
+
+Do NOT call any tool that broadcasts, announces, sends a message, or plays \
+audio — the greeting is delivered separately by the calling code. Reply with \
+ONLY the greeting text — no quotes, no preamble, no commentary on which tools \
+you used.{style_instruction}{avoid_section}"""
 
 _DEFAULT_WEATHER_HINT_TEMPLATE = (
     "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
@@ -90,13 +117,10 @@ class GreetingService(Service):
         self._speakers: list[str] = []
         self._timezone: str = "UTC"
         self._ai_profile: str = "light"
+        self._enhanced_greeting_prompt: str = _DEFAULT_ENHANCED_GREETING_PROMPT
         self._include_weather: bool = True
         self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
         self._weather: WeatherProvider | None = None
-        # Feeds integration — splice the daily news briefing into the
-        # greeting when ``include_briefing=True`` and the user hasn't
-        # already been briefed today. Resolved at use time so feeds
-        # service start-order doesn't matter.
         self._include_briefing: bool = False
         self._briefing_max_seconds: int = 60
         self._feeds: FeedsProvider | None = None
@@ -132,8 +156,6 @@ class GreetingService(Service):
                     "text_to_speech",
                     "presence",
                     "configuration",
-                    # Optional briefing splice — when present, the
-                    # greeting can include the day's top news.
                     "feeds",
                 }
             ),
@@ -187,6 +209,9 @@ class GreetingService(Service):
                 self._style = section.get("style", "")
                 self._speakers = section.get("speakers", [])
                 self._timezone = section.get("timezone", "UTC")
+                self._enhanced_greeting_prompt = (
+                    section.get("enhanced_greeting_prompt") or _DEFAULT_ENHANCED_GREETING_PROMPT
+                )
                 self._include_weather = bool(
                     section.get("include_weather", self._include_weather)
                 )
@@ -203,17 +228,11 @@ class GreetingService(Service):
                 )
 
         # Optional weather provider — if missing or wrong protocol,
-        # we silently degrade to the no-weather greeting. Capability
-        # protocol from ``interfaces/weather.py``; never isinstance-
-        # check against the concrete service class.
+        # degrade to the no-weather greeting.
         weather_svc = resolver.get_capability("weather")
         if isinstance(weather_svc, WeatherProvider):
             self._weather = weather_svc
 
-        # Optional feeds provider — when present and
-        # ``include_briefing=True``, splice the news briefing into the
-        # greeting (degrades silently when absent). Resolution at use
-        # time so the briefing service doesn't have to start before us.
         feeds_svc = resolver.get_capability("feeds")
         if isinstance(feeds_svc, FeedsProvider):
             self._feeds = feeds_svc
@@ -343,6 +362,19 @@ class GreetingService(Service):
                 default=60,
             ),
             ConfigParam(
+                key="enhanced_greeting_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Prompt template for the manual /greet tool (the path that "
+                    "lets the AI use data-lookup tools to personalize the "
+                    "greeting). Placeholders: {name}, {style_instruction}, "
+                    "{avoid_section}."
+                ),
+                default=_DEFAULT_ENHANCED_GREETING_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
                 key="announce_camera_labels",
                 type=ToolParameterType.ARRAY,
                 description=(
@@ -429,6 +461,11 @@ class GreetingService(Service):
             config.get("briefing_max_seconds", self._briefing_max_seconds)
             or self._briefing_max_seconds
         )
+        if "enhanced_greeting_prompt" in config:
+            # Empty string explicitly clears back to the bundled default.
+            self._enhanced_greeting_prompt = (
+                config["enhanced_greeting_prompt"] or _DEFAULT_ENHANCED_GREETING_PROMPT
+            )
         labels = config.get("announce_camera_labels")
         if isinstance(labels, list):
             self._announce_camera_labels = tuple(str(label) for label in labels)
@@ -607,30 +644,20 @@ class GreetingService(Service):
                 )
 
     async def _maybe_briefing_text(self, user_id: str) -> str:
-        """Build the briefing text to splice in, or "" if not applicable.
-
-        Degrades gracefully — feeds capability missing, briefing
-        already fired today, or AI failure all yield "" and the
-        greeting goes out without it. Per spec §13.1 / §16: the
-        ``last_briefed_on`` short-circuit keeps the daily fan-out
-        from re-running once the greeting flow has already fired
-        for this user today.
-        """
+        """Build the briefing text to splice into a greeting, if configured."""
         if not self._include_briefing or self._feeds is None:
             return ""
-        # Today-already-briefed short-circuit. Storage may be unset
-        # in pathological tests — skip silently.
         if self._storage_backend is None:
             return ""
-        state = await self._storage_backend.get(
-            "feed_briefing_state", user_id
-        )
+
+        state = await self._storage_backend.get("feed_briefing_state", user_id)
         today = self._today_str()
         if state and state.get("last_briefed_on") == today:
             return ""
+
         user_ctx = UserContext(
             user_id=user_id,
-            email="",
+            email=f"{user_id}@local",
             display_name=user_id,
             roles=frozenset({"user"}),
         )
@@ -648,7 +675,8 @@ class GreetingService(Service):
                 exc_info=True,
             )
             return ""
-        return result.spoken or ""
+
+        return (getattr(result, "spoken", "") or "").strip()
 
     def _in_greeting_window(self) -> bool:
         """Check if current time is within the greeting window."""
@@ -725,14 +753,7 @@ class GreetingService(Service):
             return datetime.now(UTC).strftime("%Y-%m-%d")
 
     async def _build_weather_blurb(self, user: UserContext | None = None) -> str:
-        """Build a deterministic one-line weather blurb for the prompt.
-
-        Returns ``""`` when the WeatherService is missing, the user has
-        no configured location, or the backend is unavailable. Errors
-        propagate as ``LocationNotConfiguredError`` /
-        ``WeatherUnavailableError`` from ``WeatherProvider``; we catch
-        them by exact type so real bugs still surface.
-        """
+        """Build a deterministic one-line weather blurb for the greeting prompt."""
         if not self._include_weather or self._weather is None:
             return ""
         try:
@@ -742,6 +763,7 @@ class GreetingService(Service):
         except WeatherUnavailableError:
             logger.debug("Weather backend unavailable for greeting; skipping blurb")
             return ""
+
         temp_suffix = "°F" if current.units is WeatherUnits.IMPERIAL else "°C"
         speed_suffix = "mph" if current.units is WeatherUnits.IMPERIAL else "km/h"
         condition_phrase = current.condition.value.replace("_", " ")
@@ -752,6 +774,7 @@ class GreetingService(Service):
         ):
             feels_like_clause = f", feels like {current.feels_like:.0f}{temp_suffix}"
         location_name = current.location.name or "the configured location"
+
         try:
             return self._weather_hint_template.format(
                 location_name=location_name,
@@ -763,9 +786,7 @@ class GreetingService(Service):
                 feels_like_clause=feels_like_clause,
             )
         except (KeyError, IndexError, ValueError):
-            logger.warning(
-                "Greeting weather_hint_template format failed", exc_info=True,
-            )
+            logger.warning("Greeting weather_hint_template format failed", exc_info=True)
             return ""
 
     async def _generate_greeting(self, name: str, recent: list[str] | None = None) -> str:
@@ -869,6 +890,95 @@ class GreetingService(Service):
 
         return f"Good morning, {names_str}!"
 
+    async def _resolve_user_match(self, name: str) -> Any:
+        """Delegate name → user lookup to the user service.
+
+        Returns the ``NameMatch`` (with ``user_id`` + ``confidence``)
+        or ``None`` when the resolver isn't wired, the user service
+        isn't around, or the lookup didn't find a unique match.
+        """
+        if not name or self._resolver is None:
+            return None
+        users_svc = self._resolver.get_capability("users")
+        if not isinstance(users_svc, UserManagementProvider):
+            return None
+        try:
+            return await users_svc.resolve_user_id_by_name(name)
+        except Exception:
+            logger.debug("greet: resolve_user_id_by_name failed", exc_info=True)
+            return None
+
+    async def _generate_greeting_enhanced(
+        self, name: str, recent: list[str] | None = None
+    ) -> str:
+        """Generate a personalized greeting with full tool access.
+
+        Unlike ``_generate_greeting`` (used by the automatic arrival
+        paths, which forces ``tools_override=[]`` so the model can't
+        accidentally call ``announce`` while generating greeting text),
+        this path runs ``ai_svc.chat()`` against the configured
+        ``ai_profile`` with its tools intact. That lets the model
+        consult whatever data-lookup tools the profile exposes —
+        recent activity, time logs, presence, project status, etc. —
+        before writing the greeting.
+
+        The prompt template is the configurable
+        ``greeting.enhanced_greeting_prompt`` setting (falls back to
+        the bundled default if the user clears it or formatting fails);
+        a soft prompt-level guardrail asks the model to stick to
+        read-only data-lookup tools. On any failure we fall back to a
+        plain ``"Good morning, <name>!"``.
+        """
+        if self._resolver is None:
+            return f"Good morning, {name}!"
+        ai_svc = self._resolver.get_capability("ai_chat")
+        if not isinstance(ai_svc, AIProvider):
+            return f"Good morning, {name}!"
+
+        style_instruction = ""
+        if self._style:
+            style_instruction = f"\nStyle: {self._style}."
+
+        avoid_section = ""
+        if recent:
+            avoid_section = (
+                "\n\nRecent greetings — do NOT repeat or closely paraphrase any "
+                "of these. Be completely different in tone, structure, and word "
+                "choice:\n" + "\n".join(f"- {g}" for g in recent[-7:])
+            )
+
+        subs = {
+            "name": name,
+            "style_instruction": style_instruction,
+            "avoid_section": avoid_section,
+        }
+        try:
+            prompt = self._enhanced_greeting_prompt.format_map(subs)
+        except (KeyError, IndexError, ValueError):
+            # User-edited template had a bad placeholder — fall back to
+            # the bundled default so /greet keeps working until they fix
+            # the saved value.
+            logger.warning(
+                "Enhanced greeting prompt failed to format; falling back to default",
+                exc_info=True,
+            )
+            prompt = _DEFAULT_ENHANCED_GREETING_PROMPT.format_map(subs)
+
+        try:
+            result = await ai_svc.chat(
+                user_message=prompt,
+                user_ctx=UserContext.SYSTEM,
+                ai_call="greeting",
+                ai_profile=self._ai_profile,
+            )
+            text = (result.response_text or "").strip()
+            if text and len(text) < 500:
+                return text
+        except Exception:
+            logger.warning("Enhanced AI greeting generation failed", exc_info=True)
+
+        return f"Good morning, {name}!"
+
     # ── ToolProvider Protocol ───────────────────────────────────
 
     @property
@@ -960,9 +1070,28 @@ class GreetingService(Service):
             person_name = str(arguments.get("name", "")).strip()
             if not person_name:
                 return "I need a name to greet."
-            greeting = await self._generate_greeting(person_name)
+
+            # Resolve the input to a user_id when we can. Below the
+            # confidence threshold we still greet by raw name, but do
+            # not read or write user-keyed greeting history.
+            match = await self._resolve_user_match(person_name)
+            user_id: str | None = None
+            display_name = person_name
+            if (
+                match is not None
+                and match.confidence >= _GREETING_MATCH_CONFIDENCE_THRESHOLD
+            ):
+                user_id = match.user_id
+                display_name = await self._get_display_name(user_id)
+
+            recent = await self._get_recent_greetings(user_id) if user_id else []
+            greeting = await self._generate_greeting_enhanced(display_name, recent)
+
+            if user_id:
+                await self._mark_greeted(user_id, greeting)
+
             await self._announce(greeting)
-            return f'Greeted {person_name}: "{greeting}"'
+            return f'Greeted {display_name}: "{greeting}"'
         if name == "mute_camera_alerts":
             return await self._tool_mute_camera_alerts(arguments)
         raise KeyError(f"Unknown tool: {name}")
@@ -1169,8 +1298,6 @@ class GreetingService(Service):
         except Exception:
             logger.warning("Failed to announce greeting", exc_info=True)
 
-
-
 def _parse_until_arg(value: str, tz_name: str) -> int:
     """Parse a mute ``until`` argument into epoch ms.
 
@@ -1223,4 +1350,3 @@ def _parse_until_arg(value: str, tz_name: str) -> int:
     except ValueError:
         # Fall back to default
         return _parse_until_arg("", tz_name)
-

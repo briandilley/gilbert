@@ -31,6 +31,7 @@ import {
 } from "@/api/agents";
 import { useWsApi } from "@/hooks/useWsApi";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -44,6 +45,14 @@ import {
 } from "@/components/ui/select";
 import { AuthorPromptDialog } from "@/components/settings/AuthorPromptDialog";
 import { Sparkles as SparklesIcon } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardEyebrow,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { AgentAvatar } from "./AgentAvatar";
 import { ToolPicker } from "./ToolPicker";
 import type {
@@ -495,20 +504,20 @@ export function AgentEditForm(props: Props) {
 
   // ── Render ──────────────────────────────────────────────────────
 
-  return (
-    <form
-      onSubmit={handleSubmit}
-      className="p-4 sm:p-6 space-y-4 max-w-3xl mx-auto"
-    >
-      <h1 className="text-xl sm:text-2xl font-semibold">
-        {props.mode === "edit" ? "Edit agent" : "New agent"}
-      </h1>
+  // Create mode is its own route at /agents/new; edit mode is embedded
+  // inside AgentDetailPage's Settings tab. In edit mode we skip the
+  // PageHeader (the parent owns it) and run the form body directly.
+  const wrapInCreatePage = props.mode === "create";
+
+  const body = (
+    <>
       {/* ── Identity ────────────────────────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Identity
-        </summary>
-        <section className="space-y-3 px-3 pb-3">
+      <Card>
+        <CardHeader>
+          <CardEyebrow>identity</CardEyebrow>
+          <CardTitle>Identity</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <div className="space-y-1">
             <Label htmlFor="agent-display-name">Name</Label>
             <Input
@@ -652,15 +661,16 @@ export function AgentEditForm(props: Props) {
               </div>
             </div>
           </div>
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Persona ─────────────────────────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Persona
-        </summary>
-        <section className="space-y-3 px-3 pb-3">
+      <Card>
+        <CardHeader>
+          <CardEyebrow>persona</CardEyebrow>
+          <CardTitle>Persona</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <PersonaField
             id="agent-persona"
             label="Persona"
@@ -682,15 +692,16 @@ export function AgentEditForm(props: Props) {
             onChange={(v) => update("procedural_rules", v)}
             authorParamKey="default_procedural_rules"
           />
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Heartbeat ───────────────────────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Heartbeat
-        </summary>
-        <section className="space-y-3 px-3 pb-3">
+      <Card>
+        <CardHeader>
+          <CardEyebrow>heartbeat</CardEyebrow>
+          <CardTitle>Heartbeat</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -750,21 +761,19 @@ export function AgentEditForm(props: Props) {
               rows={4}
             />
           </div>
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Dreaming (Phase 7 — disabled) ────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Dreaming{" "}
-          <span className="text-xs font-normal text-muted-foreground">
-            (Phase 7 — coming soon)
-          </span>
-        </summary>
-        <section
-          className="space-y-3 px-3 pb-3"
-          title="Phase 7 — coming soon"
-        >
+      <Card>
+        <CardHeader>
+          <CardEyebrow>dreaming</CardEyebrow>
+          <CardTitle className="flex items-center gap-2">
+            Dreaming
+            <Badge variant="off">Phase 7 · coming soon</Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3" title="Phase 7 — coming soon">
           <span id="dream-phase-note" className="sr-only">
             Dreaming launches in Phase 7 — these settings are saved but not yet
             active.
@@ -831,15 +840,16 @@ export function AgentEditForm(props: Props) {
               aria-describedby="dream-phase-note"
             />
           </div>
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Profile & cost ──────────────────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Profile & cost
-        </summary>
-        <section className="space-y-3 px-3 pb-3">
+      <Card>
+        <CardHeader>
+          <CardEyebrow>profile</CardEyebrow>
+          <CardTitle>Profile & cost</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <div className="space-y-1">
             <Label htmlFor="agent-profile">AI profile</Label>
             <Select
@@ -918,15 +928,16 @@ export function AgentEditForm(props: Props) {
               </p>
             )}
           </div>
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Tools ───────────────────────────────────────────────── */}
-      <details open className="rounded-md border">
-        <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
-          Tools
-        </summary>
-        <section className="space-y-3 px-3 pb-3">
+      <Card>
+        <CardHeader>
+          <CardEyebrow>tools</CardEyebrow>
+          <CardTitle>Tools</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
           <ToolPicker
             toolsInclude={state.tools_include}
             toolsExclude={state.tools_exclude}
@@ -935,8 +946,8 @@ export function AgentEditForm(props: Props) {
               update("tools_exclude", next.tools_exclude);
             }}
           />
-        </section>
-      </details>
+        </CardContent>
+      </Card>
 
       {/* ── Submission ──────────────────────────────────────────── */}
       {submissionError && (
@@ -950,9 +961,19 @@ export function AgentEditForm(props: Props) {
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-end gap-2 pt-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={handleCancel}
+          disabled={isPending}
+        >
+          Cancel
+        </Button>
         <Button
           type="submit"
+          size="sm"
           disabled={hasErrors || isPending}
         >
           {isPending
@@ -963,15 +984,31 @@ export function AgentEditForm(props: Props) {
               ? "Create agent"
               : "Save changes"}
         </Button>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={handleCancel}
-          disabled={isPending}
-        >
-          Cancel
-        </Button>
       </div>
+    </>
+  );
+
+  if (wrapInCreatePage) {
+    return (
+      <div>
+        <PageHeader
+          eyebrow="AUTONOMOUS / AGENTS"
+          title="New agent"
+          description="Create a durable AI personality with its own memory, tools, and commitments."
+        />
+        <form
+          onSubmit={handleSubmit}
+          className="mx-auto max-w-3xl px-4 py-4 sm:px-6 sm:py-6 space-y-3"
+        >
+          {body}
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      {body}
     </form>
   );
 }

@@ -185,10 +185,21 @@ class FakeScheduler:
 class FakeSpeaker:
     def __init__(self) -> None:
         self.announces: list[dict[str, Any]] = []
+        self._backends: dict[str, Any] = {}
 
     @property
     def backend(self) -> Any:
         return self
+
+    @property
+    def backends(self) -> dict[str, Any]:
+        return self._backends
+
+    def get_backend(self, name: str) -> Any:
+        return self._backends.get(name)
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        return {name: name for name in names}
 
     async def announce(
         self,
@@ -444,4 +455,3 @@ class TestFeedsProviderProtocolMethods:
 
     def test_fake_feeds_provider_isinstance(self) -> None:
         assert isinstance(FakeFeedsProvider(), FeedsProvider)
-

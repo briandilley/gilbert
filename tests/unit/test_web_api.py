@@ -150,6 +150,179 @@ async def test_dashboard_non_admin_does_not_see_restart(
         assert "restart_host" not in actions
 
 
+async def test_media_group_hidden_when_no_plugin_contributes(
+    service: WebApiService,
+) -> None:
+    """The Media nav group is a placeholder for plugin-contributed
+    ``ui_routes(... nav_parent_group="media")`` entries — it has no
+    built-in children. When no plugin populates it, the visibility
+    filter must drop the group entirely, not render it as a dead
+    leaf (``items: []`` would otherwise hit the leaf branch and the
+    nav bar would render an unclickable "Media" entry).
+
+    Regression guard for the ``placeholder_group`` flag in
+    ``web_api.py``."""
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    conn = _make_conn(gilbert, user_level=0)  # admin sees everything else
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-media-empty"})
+
+    assert result is not None
+    keys = {g["key"] for g in result["nav"]}
+    assert "media" not in keys, (
+        "Media group must not appear when no plugin contributes children"
+    )
+
+
+async def test_media_group_appears_when_plugin_contributes(
+    service: WebApiService,
+) -> None:
+    """When a loaded plugin's ``ui_routes()`` adds a child under
+    ``nav_parent_group="media"``, the placeholder group flips into a
+    real navigable group with that child as its single item."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="andon-fm")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/media/andon-fm",
+                    panel_id="andon_fm.page",
+                    label="Andon FM",
+                    icon="radio",
+                    required_role="user",
+                    add_to_nav=True,
+                    nav_parent_group="media",
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-media-full"})
+
+    assert result is not None
+    media = next((g for g in result["nav"] if g["key"] == "media"), None)
+    assert media is not None, "Media group must appear once a plugin contributes"
+    labels = [i["label"] for i in media["items"]]
+    assert "Andon FM" in labels
+    # default url should fall back to the contributed child's path
+    assert media["url"] == "/media/andon-fm"
+
+
+async def test_route_with_requires_capability_hidden_when_service_disabled(
+    service: WebApiService,
+) -> None:
+    """A plugin route declaring ``requires_capability`` must
+    disappear from nav when nothing advertises that capability —
+    e.g. the toggleable service the plugin owns is turned off.
+
+    Pairs with the Andon FM service-toggle wiring: the nav-merge
+    propagates ``requires_capability`` onto the item dict, and
+    ``_visible`` consults the service manager. With no service at
+    all (``get_by_capability`` returns None) the item is filtered
+    out and — because the Media group has no other children — the
+    whole group disappears via the existing placeholder logic."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="andon-fm")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/media/andon-fm",
+                    panel_id="andon_fm.page",
+                    label="Andon FM",
+                    required_role="user",
+                    requires_capability="andon_fm",
+                    add_to_nav=True,
+                    nav_parent_group="media",
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-cap-off"})
+
+    assert result is not None
+    media = next((g for g in result["nav"] if g["key"] == "media"), None)
+    assert media is None, (
+        "Media group must stay hidden when the route's required "
+        "capability isn't live (toggleable service disabled)"
+    )
+
+
+async def test_route_with_requires_capability_visible_when_service_enabled(
+    service: WebApiService,
+) -> None:
+    """Mirror: when a service advertising the required capability
+    IS enabled, the route's nav entry appears."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="andon-fm")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/media/andon-fm",
+                    panel_id="andon_fm.page",
+                    label="Andon FM",
+                    required_role="user",
+                    requires_capability="andon_fm",
+                    add_to_nav=True,
+                    nav_parent_group="media",
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    class _ServiceManagerWithCap:
+        def __init__(self, acl: Any | None) -> None:
+            self._acl = acl
+
+        def get_by_capability(self, cap: str) -> Any | None:
+            if cap == "access_control":
+                return self._acl
+            if cap == "andon_fm":
+                return SimpleNamespace(enabled=True)
+            return None
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.service_manager = _ServiceManagerWithCap(_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-cap-on"})
+
+    assert result is not None
+    media = next((g for g in result["nav"] if g["key"] == "media"), None)
+    assert media is not None
+    assert any(i["label"] == "Andon FM" for i in media["items"])
+
+
 async def test_dashboard_group_default_url_skips_action_only_items(
     service: WebApiService,
 ) -> None:

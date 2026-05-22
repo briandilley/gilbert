@@ -39,7 +39,7 @@ from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.requests import Request
 
-from gilbert.core.context import _current_user
+from gilbert.interfaces.context import _current_user
 from gilbert.core.services.mcp_server import MCPServerClient
 from gilbert.interfaces.ai import AIToolDiscoveryProvider
 from gilbert.interfaces.auth import UserContext

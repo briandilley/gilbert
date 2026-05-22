@@ -105,6 +105,12 @@ export interface ConversationSummary {
   /** When ``kind === "agent"``, the owning Agent's id so the SPA can
    *  link the sidebar entry back to ``/agents/<id>``. */
   agent_id?: string;
+  /** Number of messages newer than this user's
+   *  ``last_read_mention_index`` cursor that @-mention them. Drives
+   *  the dot/count badge on the sidebar entry. Reset via the
+   *  ``chat.conversation.mark_mentions_read`` RPC when the user
+   *  focuses the conversation. */
+  unread_mentions_count?: number;
 }
 
 export interface ConversationMember {
@@ -174,6 +180,12 @@ export interface RoundUsage {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  /** AI backend (provider) name that handled this round — ``anthropic``,
+   *  ``openai``, ``gemini``, etc. Empty when usage was recorded before
+   *  this field shipped. */
+  backend?: string;
+  /** Model ID the backend reported for this round's response. */
+  model?: string;
 }
 
 export interface TurnUsage extends RoundUsage {

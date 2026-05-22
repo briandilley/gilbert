@@ -16,6 +16,7 @@ import {
   RefreshCcwIcon,
 } from "lucide-react";
 import type { Job, Schedule, ScheduledAction } from "@/types/scheduler";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 /** "01:00:30" → "01:00"; empty stays empty. Trims the seconds so the
  *  UI display matches how users enter times (HH:MM) unless seconds
@@ -199,33 +200,39 @@ export function SchedulerPage() {
   const systemCount = (jobs ?? []).filter((j) => j.type === "system").length;
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-semibold">Scheduler</h1>
-          <p className="text-sm text-muted-foreground">
-            {userCount} user {userCount === 1 ? "job" : "jobs"} · {systemCount}{" "}
-            system {systemCount === 1 ? "job" : "jobs"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant={showSystem ? "secondary" : "outline"}
-            size="sm"
-            onClick={() => setShowSystem((v) => !v)}
-          >
-            {showSystem ? "Hide system" : "Show system"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            title="Refresh"
-          >
-            <RefreshCcwIcon className="size-4" />
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="OPERATIONS"
+        title="Scheduler"
+        description={
+          <>
+            <span className="font-mono">{userCount}</span> user{" "}
+            {userCount === 1 ? "job" : "jobs"} ·{" "}
+            <span className="font-mono">{systemCount}</span> system{" "}
+            {systemCount === 1 ? "job" : "jobs"}
+          </>
+        }
+        actions={
+          <>
+            <Button
+              variant={showSystem ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => setShowSystem((v) => !v)}
+            >
+              {showSystem ? "Hide system" : "Show system"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              title="Refresh"
+            >
+              <RefreshCcwIcon />
+            </Button>
+          </>
+        }
+      />
+      <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6 sm:py-6">
 
       {filteredJobs.length === 0 ? (
         <Card>
@@ -276,6 +283,7 @@ export function SchedulerPage() {
           </CardContent>
         </Card>
       )}
+      </div>
     </div>
   );
 }

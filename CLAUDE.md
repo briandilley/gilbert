@@ -15,20 +15,20 @@ AI assistant for home and business automation. Extensible, plugin-driven archite
 
 Everything is designed as an abstract interface (Python ABC) with concrete implementations. This applies at three levels:
 
-- **Data / backend abstractions** — `StorageBackend`, `AIBackend`, `TTSBackend`, `AuthBackend`, `VisionBackend`, `TunnelBackend`, etc. All follow the universal backend pattern (ABC + `__init_subclass__` registry + `backend_config_params()`). Only vendor-free backends live in `src/gilbert/integrations/`; every third-party integration is a std-plugin under `std-plugins/`. See [Backend Pattern](.claude/memory/memory-backend-pattern.md).
+- **Data / backend abstractions** — `StorageBackend`, `AIBackend`, `TTSBackend`, `AuthBackend`, `VisionBackend`, `TunnelBackend`, etc. All follow the universal backend pattern (ABC + `__init_subclass__` registry + `backend_config_params()`). Only vendor-free backends live in `src/gilbert/integrations/`; every third-party integration is a std-plugin under `std-plugins/`.
 - **Service-level protocols** — `Configurable` for runtime config, `ToolProvider` for AI tool registration, `WsHandlerProvider` for WebSocket RPCs.
-- **Capability protocols** — `@runtime_checkable` protocols in `interfaces/` (`ConfigurationReader`, `SchedulerProvider`, `EventBusProvider`, etc.) that consumers `isinstance`-check against to avoid coupling to concrete service classes. See [Capability Protocols](.claude/memory/memory-capability-protocols.md).
+- **Capability protocols** — `@runtime_checkable` protocols in `interfaces/` (`ConfigurationReader`, `SchedulerProvider`, `EventBusProvider`, etc.) that consumers `isinstance`-check against to avoid coupling to concrete service classes.
 
-Plugins are loaded from GitHub URLs, local paths, or plugin directories (`std-plugins/`, `local-plugins/`, `installed-plugins/`). See [Plugin System](.claude/memory/memory-plugin-system.md) for the manifest, uv-workspace layout, runtime install flow, and supervised-restart pattern.
+Plugins are loaded from GitHub URLs, local paths, or plugin directories (`std-plugins/`, `local-plugins/`, `installed-plugins/`).
 
-Configuration is two-tier: `gilbert.yaml` for bootstrap (`storage`, `logging`, `web`) and the `gilbert.config` entity collection for everything else, managed at `/settings`. See [Configuration Service](.claude/memory/memory-configuration-service.md) and [Configuration and Data Directory](.claude/memory/memory-config-and-data-dir.md).
+Configuration is two-tier: `gilbert.yaml` for bootstrap (`storage`, `logging`, `web`) and the `gilbert.config` entity collection for everything else, managed at `/settings`.
 
 ## Key Directories
 
-- `src/gilbert/interfaces/` — ABCs, protocol definitions, shared data types (`acl.py`, `knowledge.py` ext mappings, AI profile dataclass), WS connection protocol.
+- `src/gilbert/interfaces/` — ABCs, protocol definitions, shared data types (`acl.py`, `knowledge.py` ext mappings, AI profile dataclass), WS connection protocol. Key modules include `tools.py` (tool definitions), `transcription.py` (speech-to-text ABCs and protocols), and `tts.py` (text-to-speech ABCs).
 - `src/gilbert/core/` — Application bootstrap, service manager, event bus, logging, config loading, shared business logic (`core/chat.py`).
 - `src/gilbert/core/services/` — Service wrappers that expose components as discoverable services (WS RPC handlers via `WsHandlerProvider`).
-- `src/gilbert/integrations/` — Concrete vendor-free backend implementations (`LocalAuth`, `LocalDocuments`).
+- `src/gilbert/integrations/` — Concrete vendor-free backend implementations (`LocalAuth`, `LocalDocuments`, `LocalSpeakerBackend`, `BrowserSpeakerBackend`, `LocalWhisperBackend` for speech-to-text, and the bundled MCP transports `StdioMCPBackend` / `HttpMCPBackend` / `SseMCPBackend` / `BrowserMCPBackend`).
 - `src/gilbert/storage/` — Storage backend implementations (SQLite).
 - `src/gilbert/plugins/` — Plugin loader.
 - `src/gilbert/web/` — Web server, SPA assets, API routes (thin layer — no business logic).
@@ -65,52 +65,15 @@ app.py          ← composition root, may import anything
 7. **Plugins** — Plugins must only import from `gilbert.interfaces.*` and their own internal modules. No imports from `core/services/`, `integrations/`, `web/`, or `storage/`.
 8. **Tests** — Tests are composition roots for test scenarios and may import concrete classes directly. Test fakes for services should satisfy the relevant `@runtime_checkable Protocol`.
 
-## Agent Memory System
+## Deep-Dive Architecture Docs
 
-Claude AI agents use a file-based memory system at `.claude/memory/` to retain knowledge about Gilbert's services, integrations, and architectural decisions across conversations.
+Non-obvious design rationale, cross-cutting subsystem walkthroughs, and gotchas live in `docs/architecture/`. Read on demand when working in the relevant area (e.g., `speaker-system.md` before touching speaker code, `agent-service.md` before touching the agent loop). Architectural *rules* — enforceable constraints — live in the `validate-architecture` skill, not here.
 
-### How It Works
-
-1. **Index file:** `.claude/memory/MEMORIES.md` contains a flat list of all memories. Each entry is a one-line description with a markdown link. Only the index is loaded into context by default.
-2. **Memory files:** Individual files named `memory-<slug>.md` containing detailed information about a specific topic.
-3. **Loading on demand:** Check the index for a relevant memory; load the file when needed. **Always mention in the terminal when loading a memory** (e.g., "Loading memory: facial-recognition-service").
-
-### Keeping Memories Current
-
-**Not optional.** Memories are how future Claude sessions understand the system.
-
-- **Create** a memory after designing/implementing a new service, integration, or significant component, or after a significant architectural decision (record the decision and rationale).
-- **Update** a memory when its system changes — new fields, renamed classes, changed behavior, new dependencies.
-- **Remove** a memory when its system is deleted. Delete the file and remove it from the index. Stale memories are worse than no memories.
-- **Before every commit**, review memories touched by the changes. Update stale memories, delete obsolete ones, and create new ones for anything significant added. Do not commit code that makes existing memories inaccurate.
-
-### Memory File Format
-
-```markdown
-# <Title>
-
-## Summary
-One or two sentences describing what this is.
-
-## Details
-Detailed information — interfaces involved, key classes, configuration,
-how it connects to the rest of the system, design decisions and rationale,
-gotchas, etc.
-
-## Related
-- Links to related memory files or source paths
-```
-
-### Rules
-
-- Keep the index concise — one line per memory, under 120 characters.
-- Memory file names use `memory-<slug>.md` with kebab-case slugs.
-- Don't dump source files into memories. Capture the *knowledge* — what it is, why it exists, how it fits together.
-- Always keep the index in sync when creating, renaming, or deleting memory files.
+`ls docs/architecture/` to browse. When a doc drifts from the code, fix it in the same change that caused the drift.
 
 ## Privacy
 
-**Never put private or personal information in tracked files.** API keys, credentials, voice IDs, email addresses, and other personal data must only go in gitignored locations (entity storage in `.gilbert/gilbert.db`, `.gilbert/config.yaml`, etc.). This includes `.claude/memory/` files — those are committed. For private data, use the user-scoped memory system instead of the project-scoped one.
+**Never put private or personal information in tracked files.** API keys, credentials, voice IDs, email addresses, and other personal data must only go in gitignored locations (entity storage in `.gilbert/gilbert.db`, `.gilbert/config.yaml`, etc.).
 
 ## Development Guidelines
 
@@ -119,19 +82,22 @@ gotchas, etc.
 - **Interface first.** Define the ABC before writing the implementation. Implementations should be swappable without changing callers.
 - **Type hints everywhere.** All function signatures must have type annotations.
 - **No concrete dependencies in core.** Core code depends on interfaces, never specific implementations. Use dependency injection. See Layer Dependency Rules above.
-- **Use capability protocols, not concrete classes.** When accessing another service's methods, use the `@runtime_checkable Protocol` from `interfaces/`. Never `isinstance`-check against a concrete service class from `core/services/`. See [Capability Protocols](.claude/memory/memory-capability-protocols.md).
-- **Use the backend registry, not direct imports.** Discover backends via `Backend.registered_backends()` after a side-effect import. Never directly import and instantiate a concrete backend class from `integrations/`. See [Backend Pattern](.claude/memory/memory-backend-pattern.md).
+- **Use capability protocols, not concrete classes.** When accessing another service's methods, use the `@runtime_checkable Protocol` from `interfaces/`. Never `isinstance`-check against a concrete service class from `core/services/`.
+- **Use the backend registry, not direct imports.** Discover backends via `Backend.registered_backends()` after a side-effect import. Never directly import and instantiate a concrete backend class from `integrations/`.
 - **Keep business logic out of web routes.** Routes parse requests, call services, and format responses. Authorization, AI prompt construction, backend resolution, and third-party API URL building belong in services or backends.
 - **Shared data lives in `interfaces/`.** If two integrations or two layers need the same constant/mapping/policy data, put it in the appropriate `interfaces/` module.
-- **AI prompts are always configurable.** Every non-trivial string passed to `complete_one_shot(system_prompt=...)` / `chat(system_prompt=...)` / `Message(role=SYSTEM, content=...)` MUST be exposed as a `ConfigParam(multiline=True, ai_prompt=True)` on the owning service, with the bundled string as `default`. Read the active value from `self._foo_prompt` (cached in `on_config_changed`), never from the `_DEFAULT_*` constant. See [AI Prompts Are Always Configurable](.claude/memory/memory-ai-prompts-configurable.md).
-- **Plugins ship their own UI inside their plugin directory.** A plugin contributing SPA components keeps every TS/TSX file under `<plugin>/frontend/` (types, API hooks, components, styles, side-effect register). Core SPA pages declare `<PluginPanelSlot slot="…">` extension points and never import from a plugin's `frontend/`. The plugin's Python `Plugin.ui_panels()` declares `UIPanel(panel_id, slot, required_role)` entries; the matching `<plugin>/frontend/panels.ts` calls `registerPanel(panel_id, Component)`. See [Plugin UI Extensions](.claude/memory/memory-plugin-ui-extensions.md).
-- **Plugin OS deps go through `runtime_dependencies()`.** A plugin that needs binaries / system libraries beyond what `pyproject.toml` can install (Chromium, tesseract, ffmpeg, …) overrides `Plugin.runtime_dependencies()` with `RuntimeDependency` entries. `./gilbert.sh doctor` runs the checks; `--install` runs each `auto_install_cmd` for plugins that opted in. The check should ideally exercise the dep (e.g. actually launch the browser), not just probe a path. See [Plugin runtime_dependencies](.claude/memory/memory-runtime-dependencies.md).
+- **AI prompts are always configurable.** Every non-trivial string passed to `complete_one_shot(system_prompt=...)` / `chat(system_prompt=...)` / `Message(role=SYSTEM, content=...)` MUST be exposed as a `ConfigParam(multiline=True, ai_prompt=True)` on the owning service, with the bundled string as `default`. Read the active value from `self._foo_prompt` (cached in `on_config_changed`), never from the `_DEFAULT_*` constant.
+- **Plugins ship their own UI inside their plugin directory.** A plugin contributing SPA components keeps every TS/TSX file under `<plugin>/frontend/` (types, API hooks, components, styles, side-effect register). Core SPA pages declare `<PluginPanelSlot slot="…">` extension points and never import from a plugin's `frontend/`. The plugin's Python `Plugin.ui_panels()` declares `UIPanel(panel_id, slot, required_role)` entries; the matching `<plugin>/frontend/panels.ts` calls `registerPanel(panel_id, Component)`.
+- **Plugin OS deps go through `runtime_dependencies()`.** A plugin that needs binaries / system libraries beyond what `pyproject.toml` can install (Chromium, tesseract, ffmpeg, …) overrides `Plugin.runtime_dependencies()` with `RuntimeDependency` entries. `./gilbert.sh doctor` runs the checks; `--install` runs each `auto_install_cmd` for plugins that opted in. The check should ideally exercise the dep (e.g. actually launch the browser), not just probe a path.
+- **Migrations must be idempotent.** Core migrations live in `src/gilbert/migrations/NNNN_<slug>.py`; plugin migrations live in `<plugin>/migrations/`. The runner records success after `up()` returns, so a crash mid-run re-executes the script — write it to tolerate partial prior application. Tracking is keyed by `<scope>:<basename>`: **don't rename applied migration files**, or they'll re-run under the new name.
 
-## Architecture Violation Checklist
+## Architecture Rules — `validate-architecture` skill
 
-When the user says "check the rules," "check for violations," "audit the architecture," or similar, run the full checklist in [Architecture Violation Checklist](.claude/memory/memory-architecture-checklist.md) across `src/` and `std-plugins/`, report findings, and fix them — including README freshness. Don't just flag stale docs; fix them.
+The `validate-architecture` skill (`.claude/skills/validate-architecture/SKILL.md`) is the canonical architectural rulebook. It covers layer imports, concrete-class violations, duck-typing / private access, business logic placement, hardcoded AI prompts, multi-user isolation, plugin rules, slash-command requirements, frontend extension rules, AI-backend visibility, and documentation freshness (root `README.md`, `std-plugins/README.md`, `std-plugins/CLAUDE.md`, this file).
 
-Top-level categories covered there: layer import violations, concrete-class violations, duck-typing / private access, business logic in wrong layer, plugin-specific checks, slash command violations, and documentation freshness (root `README.md`, `std-plugins/README.md`, `std-plugins/CLAUDE.md`, this file).
+**Load it before implementing anything new.** Before adding a new service, integration, plugin, web route, AI tool, or any non-trivial feature, invoke the skill so the rules guide the design — not after the fact. Trivial fixes (typo, comment, one-line bug) don't need it.
+
+**Run it as an audit** when the user says "check the rules," "check for violations," "audit the architecture," or similar. Don't just flag stale docs; fix them.
 
 ## Commands
 
