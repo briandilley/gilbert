@@ -328,6 +328,41 @@ async def test_restart_nonexistent_raises(manager: ServiceManager) -> None:
         await manager.restart_service("nonexistent")
 
 
+async def test_restart_resets_enabled_before_start(manager: ServiceManager) -> None:
+    """Restart must clear stale ``_enabled=True`` so a service whose new
+    config disables it (and whose ``start()`` early-returns) reports as
+    disabled afterwards. Regression: toggling a service off in Settings
+    used to leave its nav entry visible because ``_enabled`` carried over.
+    """
+
+    class ToggleableStub(Service):
+        def __init__(self, name: str) -> None:
+            self._name = name
+            self._enabled = False
+            self.config_enabled = True
+
+        def service_info(self) -> ServiceInfo:
+            return ServiceInfo(name=self._name, toggleable=True)
+
+        async def start(self, resolver: ServiceResolver) -> None:
+            if not self.config_enabled:
+                return
+            self._enabled = True
+
+        async def stop(self) -> None:
+            pass
+
+    svc = ToggleableStub("toggleable")
+    manager.register(svc)
+    await manager.start_all()
+    assert svc.enabled is True
+
+    # Simulate Settings toggle: config now says disabled, restart in place.
+    svc.config_enabled = False
+    await manager.restart_service("toggleable")
+    assert svc.enabled is False
+
+
 async def test_register_and_start(manager: ServiceManager) -> None:
     """Register and start a service after initial startup."""
     await manager.start_all()  # Empty start

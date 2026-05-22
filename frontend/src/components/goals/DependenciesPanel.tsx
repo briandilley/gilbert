@@ -317,7 +317,12 @@ function AddDependencyDialog({
               onValueChange={(v) => setSourceGoalId(v ?? "")}
             >
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="Pick a goal…" />
+                <SelectValue placeholder="Pick a goal…">
+                  {(v: string | null) => {
+                    const g = candidates.find((x) => x._id === v);
+                    return g ? g.name : "Pick a goal…";
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {candidates.map((g) => (

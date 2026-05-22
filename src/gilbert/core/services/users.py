@@ -23,7 +23,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
-from gilbert.interfaces.users import ExternalUser, UserBackend, UserProviderBackend
+from gilbert.interfaces.users import ExternalUser, NameMatch, UserBackend, UserProviderBackend
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,7 @@ class UserService(Service):
                     "roles": ["admin"],
                 },
             )
+            self._warn_if_root_unusable(self._root_password_hash)
             return
 
         # Keep the root password in sync with what's in config.
@@ -164,6 +165,21 @@ class UserService(Service):
                 _ROOT_USER_ID,
                 {"password_hash": self._root_password_hash},
             )
+        self._warn_if_root_unusable(existing.get("password_hash", ""))
+
+    @staticmethod
+    def _warn_if_root_unusable(effective_hash: str) -> None:
+        # An empty password_hash makes local login impossible (LocalAuth
+        # rejects empty hashes), so without an external admin identity
+        # provider nobody can reach the Settings UI to fix it. Surface a
+        # loud warning every boot so the trap is obvious in logs.
+        if effective_hash:
+            return
+        logger.warning(
+            "Root user has no password — local login is disabled. "
+            "Set auth.root_password in .gilbert/config.yaml and restart "
+            "(see README → Configure)."
+        )
 
     # ---- Provider discovery ----
 
@@ -318,6 +334,71 @@ class UserService(Service):
         """List users, lazily syncing from providers if stale."""
         await self.sync_if_stale()
         return await self.backend.list_users(limit=limit, offset=offset)
+
+    # Confidence rubric for resolve_user_id_by_name. Documented on the
+    # NameMatch type — pinned here so callers don't have to memorize the
+    # numbers and the resolver stays the single source of truth.
+    _NAME_MATCH_DISPLAY_CONFIDENCE: float = 1.0
+    _NAME_MATCH_FIRST_NAME_CONFIDENCE: float = 0.8
+    _NAME_MATCH_EMAIL_LOCAL_CONFIDENCE: float = 0.7
+
+    async def resolve_user_id_by_name(self, name: str) -> NameMatch | None:
+        """Resolve a free-form name string to a unique user_id + confidence.
+
+        Bucketed by match priority — full display name / username
+        (confidence 1.0), then first-name token (0.8), then email local
+        part (0.7). Returns ``NameMatch`` only when exactly one row
+        matches at the highest non-empty bucket. ``None`` for empty
+        input, no match, or ambiguity (multiple rows at the same
+        priority). Callers can threshold on confidence to ignore
+        weaker matches.
+        """
+        if not name:
+            return None
+        target = name.strip().lower()
+        if not target:
+            return None
+        rows = await self.list_users()
+
+        # Each bucket = (confidence, [user_id...]). Iterated in priority
+        # order; first non-empty bucket with exactly one entry wins.
+        buckets: list[tuple[float, list[str]]] = [
+            (self._NAME_MATCH_DISPLAY_CONFIDENCE, []),
+            (self._NAME_MATCH_FIRST_NAME_CONFIDENCE, []),
+            (self._NAME_MATCH_EMAIL_LOCAL_CONFIDENCE, []),
+        ]
+        for row in rows:
+            uid = str(row.get("_id") or row.get("user_id") or "")
+            if not uid or uid in ("system", "guest", "root"):
+                continue
+            display = str(row.get("display_name") or row.get("username") or "").strip().lower()
+            email = str(row.get("email") or "").strip().lower()
+            if display and display == target:
+                buckets[0][1].append(uid)
+                continue
+            if display:
+                first = display.split()[0]
+                if first == target:
+                    buckets[1][1].append(uid)
+                    continue
+            if email:
+                local = email.split("@", 1)[0]
+                if local == target:
+                    buckets[2][1].append(uid)
+                    continue
+
+        for confidence, ids in buckets:
+            if len(ids) == 1:
+                return NameMatch(user_id=ids[0], confidence=confidence)
+            if len(ids) > 1:
+                logger.info(
+                    "resolve_user_id_by_name: ambiguous %r matched %d users at confidence %.2f",
+                    name,
+                    len(ids),
+                    confidence,
+                )
+                return None
+        return None
 
     async def delete_user(self, user_id: str) -> None:
         if user_id == _ROOT_USER_ID:
@@ -475,7 +556,99 @@ class UserService(Service):
             "users.user.create": self._ws_user_create,
             "users.user.delete": self._ws_user_delete,
             "users.user.reset_password": self._ws_user_reset_password,
+            "users.prefs.get": self._ws_user_prefs_get,
+            "users.prefs.set": self._ws_user_prefs_set,
         }
+
+    # --- UserPrefReader protocol ---
+
+    async def get_user_pref(
+        self, user_id: str, key: str, default: object = None
+    ) -> object:
+        user = await self.backend.get_user(user_id)
+        if user is None:
+            return default
+        metadata = user.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            return default
+        return metadata.get(key, default)
+
+    async def set_user_pref(self, user_id: str, key: str, value: object) -> None:
+        user = await self.backend.get_user(user_id)
+        if user is None:
+            raise KeyError(f"User {user_id!r} not found")
+        existing = user.get("metadata") or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, key: value}
+        await self.backend.update_user(user_id, {"metadata": merged})
+
+    async def _ws_user_prefs_get(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read one of the caller's own preferences.
+
+        Self-only — uses the connection's authenticated ``user_id``
+        rather than trusting a frame field. Admins query other users
+        via the existing ``users.user.*`` admin RPCs, not here.
+        """
+        user_id = getattr(conn, "user_id", "") or ""
+        if not user_id or user_id == "system":
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Authenticated user required",
+                "code": 401,
+            }
+        key = (frame.get("key") or "").strip()
+        if not key:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "key is required",
+                "code": 400,
+            }
+        default = frame.get("default")
+        value = await self.get_user_pref(user_id, key, default)
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "value": value,
+        }
+
+    async def _ws_user_prefs_set(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one of the caller's own preferences. Self-only."""
+        user_id = getattr(conn, "user_id", "") or ""
+        if not user_id or user_id == "system":
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Authenticated user required",
+                "code": 401,
+            }
+        key = (frame.get("key") or "").strip()
+        if not key:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "key is required",
+                "code": 400,
+            }
+        # ``value`` is intentionally permissive — services validate
+        # their own pref shapes when they read.
+        value = frame.get("value")
+        try:
+            await self.set_user_pref(user_id, key, value)
+        except KeyError as exc:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": str(exc),
+                "code": 404,
+            }
+        return {"type": "gilbert.result", "ref": frame.get("id"), "ok": True}
 
     async def _ws_user_create(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         if not self._allow_user_creation:

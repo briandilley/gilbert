@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,53 @@ class Service(ABC):
 
     async def stop(self) -> None:
         """Called during shutdown, in reverse-start order. Override if needed."""
+
+
+def background_warmup(
+    coro: Coroutine[Any, Any, Any],
+    *,
+    name: str,
+    log: logging.Logger | None = None,
+) -> asyncio.Task[Any]:
+    """Spawn a backend warmup coroutine as a fire-and-forget task.
+
+    Many backends do slow network work in ``initialize()`` or ``start()`` —
+    a telnet handshake to a Lutron repeater, an OAuth refresh against a
+    cloud thermostat, a mDNS settle wait for Sonos. Awaiting those calls
+    inline blocks the entire ``ServiceManager.start_all`` wave behind a
+    single laggard. Spawn them through this helper instead: ``start()``
+    returns immediately, the handshake runs concurrently, and any
+    backend method that actually needs the connection serializes through
+    the backend's own per-resource lock (e.g. ``shared_bridge``'s
+    ``asyncio.Lock``).
+
+    The helper:
+    - Names the task for observability (``ps`` / debugger / ``asyncio.all_tasks()``).
+    - Copies the current context (logging/trace ids) into the task.
+    - Swallows exceptions but logs them with the provided logger so a
+      flaky external service can't take the gilbert startup down.
+
+    Usage::
+
+        async def initialize(self, config):
+            self._host = config.get("host", "")
+            if self._host:
+                background_warmup(
+                    self._connect(),
+                    name="lutron-lights-warmup",
+                    log=logger,
+                )
+    """
+    runtime_log = log or logging.getLogger("gilbert.warmup")
+
+    async def _runner() -> None:
+        try:
+            await coro
+        except Exception:
+            runtime_log.exception("background warmup failed: %s", name)
+
+    ctx = contextvars.copy_context()
+    return asyncio.create_task(_runner(), name=name, context=ctx)
 
 
 @runtime_checkable

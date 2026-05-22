@@ -2,12 +2,65 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/jetbrains-mono";
 
 @custom-variant dark (&:is(.dark *));
 
+/* ───────────────────────────────────────────────────────────────────
+   Gilbert design system — "Technical Broadsheet"
+
+   Refined dark admin UI with editorial-grade typography hierarchy.
+   Three load-bearing rules:
+
+   1. MONO CARRIES MEANING. The presence of monospace signals "this
+      is data, not prose" — IDs, paths, durations, version numbers,
+      status pills, keyboard shortcuts. Don't use it decoratively.
+
+   2. HAIRLINES OVER FILLS. Surface separation comes from 1px
+      borders, not background changes. Cards are mostly transparent;
+      borders define them. Schematic, precise, dense-friendly.
+
+   3. ONE ACCENT DOING REAL WORK. A single signal color
+      (--signal — warm amber) carries active state, primary action,
+      focus ring, current-route indicator. Used SPARINGLY — typically
+      one accent visible per screen. Status colors (success/warning
+      /error/info) are functional only, never decorative.
+
+   See `frontend/DESIGN.md` for the full spec.
+   ─────────────────────────────────────────────────────────────── */
+
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    /* Type scale — admin-density. Sizes in px / line-height ratio. */
+    --text-2xs: 0.6875rem;   /* 11px — tiny mono labels, eyebrows */
+    --text-2xs--line-height: 1.35;
+    --text-xs: 0.75rem;      /* 12px — meta, captions, hints */
+    --text-xs--line-height: 1.45;
+    --text-sm: 0.8125rem;    /* 13px — body default */
+    --text-sm--line-height: 1.5;
+    --text-base: 0.875rem;   /* 14px — comfortable body */
+    --text-base--line-height: 1.55;
+    --text-lg: 1rem;         /* 16px — section titles */
+    --text-lg--line-height: 1.4;
+    --text-xl: 1.1875rem;    /* 19px — page titles */
+    --text-xl--line-height: 1.3;
+    --text-2xl: 1.5rem;      /* 24px — rare, top-level */
+    --text-2xl--line-height: 1.25;
+
+    /* Corner radii — sharp by default; consumer-y radii deliberately
+       omitted. ``--radius`` is 6px (1.5x denser than shadcn default). */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 8px;        /* deliberately capped — no rounded-2xl */
+    --radius-2xl: 8px;
+    --radius-3xl: 8px;
+    --radius-4xl: 8px;
+
+    /* Tokens — color (per-mode in :root / .dark below). */
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -24,11 +77,18 @@
     --color-ring: var(--ring);
     --color-input: var(--input);
     --color-border: var(--border);
+    --color-border-strong: var(--border-strong);
     --color-destructive: var(--destructive);
+    --color-warning: var(--warning);
+    --color-success: var(--success);
+    --color-info: var(--info);
+    --color-signal: var(--signal);
+    --color-signal-foreground: var(--signal-foreground);
     --color-accent-foreground: var(--accent-foreground);
     --color-accent: var(--accent);
     --color-muted-foreground: var(--muted-foreground);
     --color-muted: var(--muted);
+    --color-subtle: var(--subtle);
     --color-secondary-foreground: var(--secondary-foreground);
     --color-secondary: var(--secondary);
     --color-primary-foreground: var(--primary-foreground);
@@ -39,296 +99,420 @@
     --color-card: var(--card);
     --color-foreground: var(--foreground);
     --color-background: var(--background);
-    --radius-sm: calc(var(--radius) * 0.6);
-    --radius-md: calc(var(--radius) * 0.8);
-    --radius-lg: var(--radius);
-    --radius-xl: calc(var(--radius) * 1.4);
-    --radius-2xl: calc(var(--radius) * 1.8);
-    --radius-3xl: calc(var(--radius) * 2.2);
-    --radius-4xl: calc(var(--radius) * 2.6);
+
+    /* Motion — short, ease-out, no bounce. */
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 120ms;
+    --duration-base: 180ms;
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
+    /* Light mode — minor presence, used mostly via system preference.
+       Same hierarchy as dark; values mirrored. */
+    --background: oklch(0.99 0 0);
+    --foreground: oklch(0.14 0 0);
     --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
+    --card-foreground: oklch(0.14 0 0);
     --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --popover-foreground: oklch(0.14 0 0);
+    --primary: oklch(0.18 0 0);
+    --primary-foreground: oklch(0.99 0 0);
+    --secondary: oklch(0.96 0 0);
+    --secondary-foreground: oklch(0.18 0 0);
+    --muted: oklch(0.96 0 0);
+    --muted-foreground: oklch(0.50 0 0);
+    --subtle: oklch(0.97 0 0);
+    --accent: oklch(0.94 0 0);
+    --accent-foreground: oklch(0.14 0 0);
+
+    /* Signal — warm amber, our one accent. Carries active/focus/
+       primary semantics. Same hue across light + dark; lightness
+       inverts. */
+    --signal: oklch(0.74 0.16 75);
+    --signal-foreground: oklch(0.18 0 0);
+
+    /* Status — functional only. Used as dot indicators and
+       destructive-state outlines. NEVER as decorative fill. */
+    --destructive: oklch(0.58 0.21 27);
+    --warning: oklch(0.74 0.16 75);
+    --success: oklch(0.66 0.16 145);
+    --info: oklch(0.62 0.12 230);
+
+    --border: oklch(0.91 0 0);
+    --border-strong: oklch(0.84 0 0);
+    --input: oklch(0.91 0 0);
+    --ring: var(--signal);
+    --chart-1: oklch(0.62 0.12 230);
+    --chart-2: oklch(0.66 0.16 145);
+    --chart-3: oklch(0.74 0.16 75);
+    --chart-4: oklch(0.58 0.21 27);
+    --chart-5: oklch(0.55 0.18 305);
+    --radius: 6px;
+    --sidebar: oklch(0.97 0 0);
+    --sidebar-foreground: oklch(0.14 0 0);
+    --sidebar-primary: var(--signal);
+    --sidebar-primary-foreground: var(--signal-foreground);
+    --sidebar-accent: oklch(0.94 0 0);
+    --sidebar-accent-foreground: oklch(0.14 0 0);
+    --sidebar-border: oklch(0.91 0 0);
+    --sidebar-ring: var(--signal);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    /* The canonical mode. Deep near-black canvas, very slight
+       lightening for elevated surfaces. Borders do the work that
+       background-shift would do in lighter UIs.
+
+       Lightness ramp (oklch L):
+         0.10  canvas
+         0.13  panel (subtly elevated)
+         0.16  card (clearly elevated)
+         0.22  hover-bg / muted
+         0.55  muted-foreground
+         0.78  foreground (high-contrast text)
+         0.97  pure foreground (rare; ring contrast, hot states)
+    */
+    --background: oklch(0.10 0 0);
+    --foreground: oklch(0.94 0 0);
+    --card: oklch(0.13 0 0);
+    --card-foreground: oklch(0.94 0 0);
+    --popover: oklch(0.16 0 0);
+    --popover-foreground: oklch(0.94 0 0);
+    --primary: oklch(0.94 0 0);
+    --primary-foreground: oklch(0.13 0 0);
+    --secondary: oklch(0.22 0 0);
+    --secondary-foreground: oklch(0.94 0 0);
+    --muted: oklch(0.18 0 0);
+    --muted-foreground: oklch(0.58 0 0);
+    --subtle: oklch(0.13 0 0);
+    --accent: oklch(0.22 0 0);
+    --accent-foreground: oklch(0.94 0 0);
+
+    --signal: oklch(0.78 0.16 75);
+    --signal-foreground: oklch(0.16 0 0);
+
+    --destructive: oklch(0.66 0.21 22);
+    --warning: oklch(0.78 0.16 75);
+    --success: oklch(0.72 0.16 145);
+    --info: oklch(0.70 0.14 230);
+
+    --border: oklch(1 0 0 / 8%);
+    --border-strong: oklch(1 0 0 / 16%);
+    --input: oklch(1 0 0 / 10%);
+    --ring: var(--signal);
+    --chart-1: oklch(0.70 0.14 230);
+    --chart-2: oklch(0.72 0.16 145);
+    --chart-3: oklch(0.78 0.16 75);
+    --chart-4: oklch(0.66 0.21 22);
+    --chart-5: oklch(0.65 0.18 305);
+    --sidebar: oklch(0.10 0 0);
+    --sidebar-foreground: oklch(0.94 0 0);
+    --sidebar-primary: var(--signal);
+    --sidebar-primary-foreground: var(--signal-foreground);
+    --sidebar-accent: oklch(0.16 0 0);
+    --sidebar-accent-foreground: oklch(0.94 0 0);
+    --sidebar-border: oklch(1 0 0 / 8%);
+    --sidebar-ring: var(--signal);
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
+    * {
+        @apply border-border outline-ring/40;
     }
-  body {
-    @apply bg-background text-foreground;
+
+    html {
+        @apply font-sans;
+        font-feature-settings: "cv11", "ss01", "ss03";
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
     }
-  html {
-    @apply font-sans;
+
+    body {
+        @apply bg-background text-foreground text-sm;
+        font-variant-numeric: tabular-nums;  /* tabular by default in admin
+                                                 — numbers in tables/timestamps
+                                                 line up vertically. */
+    }
+
+    /* Reserved utility — wrap technical content (IDs, paths,
+       durations) in <code> to get mono + tighter tracking, even
+       outside formal code blocks. */
+    code {
+        @apply font-mono text-[0.95em];
+        font-feature-settings: "zero", "ss20";
+    }
+
+    /* Focus rings — use the signal color, hairline visible offset. */
+    :focus-visible {
+        outline: 2px solid var(--signal);
+        outline-offset: 1px;
+        border-radius: var(--radius);
+    }
+
+    /* Selection — signal-tinted, not browser default. */
+    ::selection {
+        background-color: color-mix(in oklch, var(--signal) 35%, transparent);
+        color: var(--foreground);
+    }
+
+    /* Tweak heading line-height for display sizes. */
+    h1, h2, h3, h4, h5, h6 {
+        @apply font-sans;
+        letter-spacing: -0.015em;
     }
 }
 
-/* ── Markdown content styling ─────────────────────────────────────── */
+/* ───────────────────────────────────────────────────────────────────
+   Utility patterns
+
+   These are NOT components — they're styling shortcuts that recur
+   often enough across the app that re-typing them in every file
+   would drift. Components in components/ui/ should be the first
+   resort; reach for these when you're not building a primitive.
+   ─────────────────────────────────────────────────────────────── */
+
+@layer components {
+    /* Eyebrow — small uppercase mono label that prefixes a section
+       or page title. The signature "this is a technical document"
+       gesture. */
+    .eyebrow {
+        @apply font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground;
+        font-weight: 500;
+    }
+
+    /* Hairline rule — horizontal divider. Slightly less prominent
+       than a default border so a stack of them doesn't read as
+       cage-bars. */
+    .hairline {
+        @apply h-px w-full bg-border;
+    }
+
+    /* Tabular numerics, when you need to override the default
+       (charts, currency, rare cases). */
+    .tnum { font-variant-numeric: tabular-nums; }
+    .lnum { font-variant-numeric: lining-nums; }
+}
+
+/* ───────────────────────────────────────────────────────────────────
+   Markdown content styling (untouched — owned by chat)
+   ─────────────────────────────────────────────────────────────── */
 
 .markdown-content {
-  line-height: 1.6;
-  word-break: break-word;
-  overflow-wrap: break-word;
+    line-height: 1.6;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
-.markdown-content p {
-  margin: 0.5em 0;
-}
-
-.markdown-content p:first-child {
-  margin-top: 0;
-}
-
-.markdown-content p:last-child {
-  margin-bottom: 0;
-}
+.markdown-content p { margin: 0.5em 0; }
+.markdown-content p:first-child { margin-top: 0; }
+.markdown-content p:last-child { margin-bottom: 0; }
 
 .markdown-content h1,
 .markdown-content h2,
 .markdown-content h3,
 .markdown-content h4 {
-  font-weight: 600;
-  margin: 1em 0 0.5em;
-  line-height: 1.3;
+    font-weight: 600;
+    margin: 1em 0 0.5em;
+    line-height: 1.3;
 }
 
 .markdown-content h1:first-child,
 .markdown-content h2:first-child,
 .markdown-content h3:first-child {
-  margin-top: 0;
+    margin-top: 0;
 }
 
 .markdown-content h1 { font-size: 1.25em; }
 .markdown-content h2 { font-size: 1.125em; }
 .markdown-content h3 { font-size: 1em; }
 
-.markdown-content strong {
-  font-weight: 600;
-}
+.markdown-content strong { font-weight: 600; }
 
 .markdown-content a {
-  color: oklch(0.6 0.2 260);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.dark .markdown-content a {
-  color: oklch(0.75 0.15 260);
+    color: var(--signal);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1px;
 }
 
 .markdown-content ul,
 .markdown-content ol {
-  margin: 0.5em 0;
-  padding-left: 1.5em;
+    margin: 0.5em 0;
+    padding-left: 1.5em;
 }
 
 .markdown-content ul { list-style-type: disc; }
 .markdown-content ol { list-style-type: decimal; }
-
-.markdown-content li {
-  margin: 0.2em 0;
-}
-
+.markdown-content li { margin: 0.2em 0; }
 .markdown-content li > ul,
-.markdown-content li > ol {
-  margin: 0.1em 0;
-}
+.markdown-content li > ol { margin: 0.1em 0; }
 
 .markdown-content blockquote {
-  border-left: 3px solid var(--border);
-  padding-left: 0.75em;
-  margin: 0.5em 0;
-  color: var(--muted-foreground);
+    border-left: 2px solid var(--border-strong);
+    padding-left: 0.75em;
+    margin: 0.5em 0;
+    color: var(--muted-foreground);
 }
 
 .markdown-content hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 1em 0;
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1em 0;
 }
 
 .markdown-content table {
-  border-collapse: collapse;
-  margin: 0.5em 0;
-  font-size: 0.875em;
-  width: 100%;
-  overflow-x: auto;
-  display: block;
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.875em;
+    width: 100%;
+    overflow-x: auto;
+    display: block;
 }
 
 .markdown-content th,
 .markdown-content td {
-  border: 1px solid var(--border);
-  padding: 0.35em 0.65em;
-  text-align: left;
+    border: 1px solid var(--border);
+    padding: 0.35em 0.65em;
+    text-align: left;
 }
 
 .markdown-content th {
-  font-weight: 600;
-  background: var(--muted);
+    font-weight: 600;
+    background: var(--muted);
 }
 
-/* Inline code */
 .markdown-content code:not(pre code) {
-  background: var(--muted);
-  padding: 0.15em 0.35em;
-  border-radius: 0.25em;
-  font-size: 0.875em;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    background: var(--muted);
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    font-size: 0.875em;
+    font-family: var(--font-mono);
 }
 
-/* Code blocks */
+/* @-mention chip — neutral by default, signal-amber when it points
+   at the current viewer. Used in two places: ``MarkdownContent``
+   (assistant prose via the Marked.js extension) and ``MentionText``
+   (user-authored prose via a JSX-level pass). Selector is
+   intentionally NOT scoped under ``.markdown-content`` so both
+   surfaces pick up the same chip styling. */
+.mention {
+    display: inline-block;
+    padding: 0.05em 0.4em;
+    border-radius: 4px;
+    background: var(--muted);
+    color: var(--foreground);
+    font-weight: 500;
+}
+
+.mention-self {
+    background: var(--signal);
+    color: var(--signal-foreground);
+}
+
 .markdown-content pre {
-  background: oklch(0.18 0 0);
-  color: oklch(0.88 0 0);
-  border-radius: 0.5em;
-  padding: 0.75em 1em;
-  margin: 0.5em 0;
-  overflow-x: auto;
-  font-size: 0.8125em;
-  line-height: 1.5;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    background: oklch(0.13 0 0);
+    color: oklch(0.92 0 0);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75em 1em;
+    margin: 0.5em 0;
+    overflow-x: auto;
+    font-size: 0.8125em;
+    line-height: 1.5;
+    font-family: var(--font-mono);
 }
 
 .markdown-content pre code {
-  background: none;
-  padding: 0;
-  border-radius: 0;
-  font-size: inherit;
-  color: inherit;
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
 }
 
-/* Images in chat */
 .markdown-content img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 0.5em;
-  margin: 0.5em 0;
-  display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    margin: 0.5em 0;
+    display: block;
 }
 
-/* ── highlight.js token colors (dark code blocks) ─────────────────── */
+/* ── highlight.js token colors — recalibrated to the system palette ── */
 
-/* Base style for standalone .hljs blocks (tool-usage previews, etc.).
-   Code blocks inside .markdown-content are styled separately above. */
 .hljs {
-  background: oklch(0.18 0 0);
-  color: oklch(0.88 0 0);
-  display: block;
+    background: oklch(0.13 0 0);
+    color: oklch(0.92 0 0);
+    display: block;
+    font-family: var(--font-mono);
 }
 
 .hljs-comment,
-.hljs-quote { color: oklch(0.55 0 0); font-style: italic; }
+.hljs-quote { color: oklch(0.50 0 0); font-style: italic; }
 
 .hljs-keyword,
 .hljs-selector-tag,
-.hljs-addition { color: oklch(0.75 0.15 330); }
+.hljs-addition { color: oklch(0.72 0.16 145); }
 
 .hljs-string,
 .hljs-doctag,
-.hljs-regexp { color: oklch(0.78 0.12 150); }
+.hljs-regexp { color: oklch(0.78 0.16 75); }
 
 .hljs-number,
 .hljs-literal,
 .hljs-variable,
 .hljs-template-variable,
-.hljs-tag .hljs-attr { color: oklch(0.78 0.15 65); }
+.hljs-tag .hljs-attr { color: oklch(0.66 0.21 22); }
 
 .hljs-title,
 .hljs-section,
 .hljs-name,
 .hljs-type,
 .hljs-selector-class,
-.hljs-selector-id { color: oklch(0.78 0.15 250); }
+.hljs-selector-id { color: oklch(0.70 0.14 230); }
 
 .hljs-built_in,
-.hljs-builtin-name { color: oklch(0.75 0.12 200); }
+.hljs-builtin-name { color: oklch(0.65 0.18 305); }
 
 .hljs-attr,
-.hljs-attribute { color: oklch(0.78 0.12 80); }
+.hljs-attribute { color: oklch(0.78 0.16 75); }
 
-.hljs-meta { color: oklch(0.65 0.1 200); }
+.hljs-meta { color: oklch(0.55 0 0); }
 
-.hljs-deletion { color: oklch(0.7 0.2 25); }
+.hljs-deletion { color: oklch(0.66 0.21 22); }
 
 .hljs-symbol,
 .hljs-bullet,
-.hljs-link { color: oklch(0.75 0.1 180); }
+.hljs-link { color: oklch(0.65 0.18 305); }
 
-/* ── Streaming ghost bubble caret ─────────────────────────────────── */
-/* Blinking caret inside the transient assistant ghost bubble while a
- * turn is streaming. Used by MessageBubble when the ``ghost`` prop is
- * set. */
+/* ── Streaming caret ─────────────────────────────────────────────── */
 @keyframes caret-blink {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0; }
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0; }
 }
 .animate-caret-blink {
-  animation: caret-blink 1s step-end infinite;
+    animation: caret-blink 1s step-end infinite;
+}
+
+/* ── Indeterminate loading bar — the "loading" pattern.
+   Apply to a 2px-tall element at the top of a panel. ─────────────── */
+@keyframes indeterminate-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}
+.indeterminate-bar {
+    position: relative;
+    height: 2px;
+    width: 100%;
+    overflow: hidden;
+    background: transparent;
+}
+.indeterminate-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 33%;
+    background: var(--signal);
+    animation: indeterminate-slide 1.2s var(--ease-out) infinite;
 }

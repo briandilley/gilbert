@@ -6,6 +6,7 @@ import { useAgents } from "@/api/agents";
 import { useEventBus } from "@/hooks/useEventBus";
 import { buttonVariants } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { AgentCard } from "./AgentCard";
 
 export function AgentsListPage() {
@@ -24,39 +25,60 @@ export function AgentsListPage() {
   useEventBus("agent.deleted", invalidate);
   useEventBus("agent.run.completed", invalidate);
 
+  const count = agents?.length ?? 0;
+
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-xl sm:text-2xl font-semibold">Agents</h1>
-        <Link to="/agents/new" className={buttonVariants()}>
-          <PlusIcon /> New agent
-        </Link>
+    <div>
+      <PageHeader
+        eyebrow="AUTONOMOUS"
+        title="Agents"
+        description={
+          isPending
+            ? "Loading…"
+            : `${count} agent${count === 1 ? "" : "s"}.`
+        }
+        actions={
+          <Link to="/agents/new" className={buttonVariants({ size: "sm" })}>
+            <PlusIcon /> New agent
+          </Link>
+        }
+      />
+
+      <div className="mx-auto max-w-5xl px-4 py-4 sm:px-6 sm:py-6 space-y-3">
+        {isPending && <LoadingSpinner text="Loading agents…" />}
+
+        {isError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            Failed to load agents.
+          </div>
+        )}
+
+        {!isPending && !isError && agents && agents.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              No agents
+            </p>
+            <p className="max-w-md text-sm text-muted-foreground">
+              Agents are durable AI personalities with their own
+              memory, tools, and commitments. Create one to get started.
+            </p>
+            <Link to="/agents/new" className={buttonVariants({ size: "sm" })}>
+              <PlusIcon /> New agent
+            </Link>
+          </div>
+        )}
+
+        {!isPending && !isError && agents && agents.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {agents.map((agent) => (
+              <AgentCard key={agent._id} agent={agent} />
+            ))}
+          </div>
+        )}
       </div>
-
-      {isPending && <LoadingSpinner text="Loading agents…" />}
-
-      {isError && (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          Failed to load agents.
-        </div>
-      )}
-
-      {!isPending && !isError && agents && agents.length === 0 && (
-        <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
-          No agents yet — click "New agent" to create one.
-        </div>
-      )}
-
-      {!isPending && !isError && agents && agents.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {agents.map((agent) => (
-            <AgentCard key={agent._id} agent={agent} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

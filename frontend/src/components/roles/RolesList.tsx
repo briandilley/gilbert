@@ -16,6 +16,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { PlusIcon, Trash2Icon } from "lucide-react";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function RolesList() {
   const queryClient = useQueryClient();
@@ -48,68 +49,83 @@ export function RolesList() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["roles"] }),
   });
 
-  if (isLoading) return <LoadingSpinner text="Loading roles..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Roles</h1>
-      <div className="flex justify-end mb-4">
-        <Button size="sm" onClick={() => setShowCreate(true)}>
-          <PlusIcon className="size-4 mr-1" />
-          New Role
-        </Button>
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Roles"
+        description="Named privilege levels that user accounts hold. Each role has a numeric level; checks compare against ``required_role`` declared by the resource."
+        actions={
+          <Button size="sm" onClick={() => setShowCreate(true)}>
+            <PlusIcon />
+            New role
+          </Button>
+        }
+      />
+
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading roles..." className="p-4" />
+        ) : (
+          <Card>
+            <CardContent className="px-0 py-0">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
+                        Role
+                      </th>
+                      <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
+                        Level
+                      </th>
+                      <th className="hidden sm:table-cell px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
+                        Type
+                      </th>
+                      <th className="hidden md:table-cell px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">
+                        Description
+                      </th>
+                      <th className="px-3 py-2 w-16"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {data?.roles.map((role) => (
+                      <tr key={role.name}>
+                        <td className="px-3 py-2 font-medium break-words">
+                          {role.name}
+                        </td>
+                        <td className="px-3 py-2 font-mono">{role.level}</td>
+                        <td className="hidden sm:table-cell px-3 py-2">
+                          <Badge variant={role.builtin ? "neutral" : "outline"}>
+                            {role.builtin ? "built-in" : "custom"}
+                          </Badge>
+                        </td>
+                        <td className="hidden md:table-cell px-3 py-2 text-muted-foreground">
+                          {role.description}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {!role.builtin && (
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="text-destructive"
+                              onClick={() => deleteMutation.mutate(role.name)}
+                            >
+                              <Trash2Icon />
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b">
-                  <th className="px-3 py-2 text-left font-medium">Role</th>
-                  <th className="px-3 py-2 text-left font-medium">Level</th>
-                  <th className="hidden sm:table-cell px-3 py-2 text-left font-medium">Type</th>
-                  <th className="hidden md:table-cell px-3 py-2 text-left font-medium">Description</th>
-                  <th className="px-3 py-2 w-16"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {data?.roles.map((role) => (
-                  <tr key={role.name} className="border-b">
-                    <td className="px-3 py-2 font-medium break-words">{role.name}</td>
-                    <td className="px-3 py-2">{role.level}</td>
-                    <td className="hidden sm:table-cell px-3 py-2">
-                      <Badge
-                        variant={role.builtin ? "secondary" : "outline"}
-                        className="text-xs"
-                      >
-                        {role.builtin ? "Built-in" : "Custom"}
-                      </Badge>
-                    </td>
-                    <td className="hidden md:table-cell px-3 py-2 text-muted-foreground">
-                      {role.description}
-                    </td>
-                    <td className="px-3 py-2">
-                      {!role.builtin && (
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          className="text-destructive"
-                          onClick={() => deleteMutation.mutate(role.name)}
-                        >
-                          <Trash2Icon className="size-3" />
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Create Role modal */}
+    {/* Create Role modal */}
       <Dialog open={showCreate} onOpenChange={setShowCreate}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
@@ -146,10 +162,11 @@ export function RolesList() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCreate(false)}>
+            <Button variant="outline" size="sm" onClick={() => setShowCreate(false)}>
               Cancel
             </Button>
             <Button
+              size="sm"
               onClick={() => createMutation.mutate()}
               disabled={!newName.trim()}
             >
@@ -158,6 +175,6 @@ export function RolesList() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 }

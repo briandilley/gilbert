@@ -2,7 +2,8 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function EntityDetail() {
   const { collection, entityId } = useParams<{
@@ -18,36 +19,45 @@ export function EntityDetail() {
     enabled: !!collection && !!entityId && connected,
   });
 
-  if (isLoading) {
-    return <div className="p-4 sm:p-6 text-muted-foreground">Loading...</div>;
-  }
-
-  if (!data) return null;
-
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-4xl mx-auto">
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Link to="/entities" className="text-muted-foreground hover:text-foreground">
-          Entities
-        </Link>
-        <span className="text-muted-foreground">/</span>
-        <Link
-          to={`/entities/${encodeURIComponent(data.collection)}`}
-          className="text-muted-foreground hover:text-foreground break-all"
-        >
-          {data.collection}
-        </Link>
-        <span className="text-muted-foreground">/</span>
-        <span className="font-medium break-all">{data.entity_id}</span>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow={
+          <span className="space-x-1">
+            <Link to="/entities" className="hover:text-foreground transition-colors">
+              DATA / ENTITIES
+            </Link>
+            <span className="text-muted-foreground/60">/</span>
+            {data && (
+              <Link
+                to={`/entities/${encodeURIComponent(data.collection)}`}
+                className="hover:text-foreground transition-colors"
+              >
+                {data.collection.toUpperCase()}
+              </Link>
+            )}
+          </span>
+        }
+        title={
+          <code className="font-mono text-xl break-all">
+            {data?.entity_id ?? entityId}
+          </code>
+        }
+      />
 
-      <Card>
-        <CardContent className="pt-6">
-          <pre className="text-xs sm:text-sm overflow-x-auto whitespace-pre-wrap break-words">
-            {JSON.stringify(data.entity, null, 2)}
-          </pre>
-        </CardContent>
-      </Card>
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <div className="text-xs text-muted-foreground">Loading…</div>
+        ) : data ? (
+          <Card>
+            <CardContent className="pt-4">
+              <pre className="font-mono text-xs leading-relaxed overflow-x-auto whitespace-pre-wrap break-words">
+                {JSON.stringify(data.entity, null, 2)}
+              </pre>
+            </CardContent>
+          </Card>
+        ) : null}
+      </div>
     </div>
   );
 }

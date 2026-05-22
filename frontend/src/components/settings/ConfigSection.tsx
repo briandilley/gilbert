@@ -1,19 +1,34 @@
 /**
  * ConfigSection — collapsible card for a single service namespace.
  *
- * Separates service-level params from backend-specific params (settings.*).
- * Backend params appear in a clearly labelled section below the backend selector.
+ * Visual structure follows the design-system Card vocabulary. State
+ * lives in SettingsContext so the page-level StatusBar can aggregate
+ * dirty edits across every section and "Save all".
  */
 
-import { useState, useCallback, useMemo } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useWsApi } from "@/hooks/useWsApi";
-import { Card, CardContent } from "@/components/ui/card";
+import { useCallback, useMemo, useState } from "react";
+import {
+  Card,
+  CardContent,
+  CardEyebrow,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { useWsApi } from "@/hooks/useWsApi";
 import { ConfigField } from "./ConfigField";
-import { ChevronDownIcon, ChevronRightIcon, SaveIcon, RotateCcwIcon, ZapIcon, ExternalLinkIcon } from "lucide-react";
+import { useSettingsSection } from "./SettingsContext";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  RotateCcwIcon,
+  SaveIcon,
+  ZapIcon,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 import type {
   ConfigSection as ConfigSectionType,
   ConfigParamMeta,
@@ -23,6 +38,9 @@ import type {
 
 interface ConfigSectionProps {
   section: ConfigSectionType;
+  /** When non-null, force-expand this section if any of its params /
+   *  namespace / description matches. Wired by the page's search box. */
+  searchQuery?: string;
 }
 
 function humanize(key: string): string {
@@ -37,31 +55,45 @@ function backendGroups(
   singleBackendName: string,
   hasBackendSelector: boolean,
 ): { label: string; params: ConfigParamMeta[] }[] {
-  // If the service has a backend selector, all backend params are for that
-  // one backend — show them in a single group.
   if (hasBackendSelector) {
     const label = singleBackendName
-      ? `${humanize(singleBackendName)} Settings`
-      : "Backend Settings";
+      ? `${humanize(singleBackendName)} backend`
+      : "Backend";
     return [{ label, params }];
   }
-
-  // No backend selector = multi-backend service (e.g., AI with
-  // backends.anthropic.*, backends.openai.*).
-  // Group by the second segment when keys start with "backends.",
-  // otherwise by the first segment.
   const groups: { label: string; params: ConfigParamMeta[] }[] = [];
   const seen = new Set<string>();
   for (const p of params) {
     const parts = p.key.split(".");
-    const isNested = parts[0] === "backends" && parts.length >= 3;
-    const groupKey = isNested ? `${parts[0]}.${parts[1]}` : parts[0];
-    const groupLabel = isNested ? parts[1] : groupKey;
+    // Two key layouts we group on:
+    //   ``backends.<name>.<...>``           — single-role aggregator
+    //                                         (e.g. tts, speaker)
+    //   ``<role>.backends.<name>.<...>``    — multi-role aggregator
+    //                                         (e.g. transcription, where
+    //                                         <role> ∈ {batch, streaming,
+    //                                         wake_word})
+    let isNested = false;
+    let groupKey = parts[0];
+    let groupLabel = parts[0];
+    if (parts[0] === "backends" && parts.length >= 3) {
+      isNested = true;
+      groupKey = `${parts[0]}.${parts[1]}`;
+      groupLabel = parts[1];
+    } else if (parts.length >= 4 && parts[1] === "backends") {
+      isNested = true;
+      groupKey = `${parts[0]}.${parts[1]}.${parts[2]}`;
+      // Show "<role> · <backend>" so users can tell which role this
+      // backend slot belongs to when one provider implements multiple
+      // roles (e.g. ElevenLabs Scribe is both batch and streaming).
+      groupLabel = `${humanize(parts[0])} · ${humanize(parts[2])}`;
+    }
     if (seen.has(groupKey)) continue;
     seen.add(groupKey);
     groups.push({
-      label: humanize(groupLabel),
-      params: params.filter((q) => q.key === groupKey || q.key.startsWith(`${groupKey}.`)),
+      label: isNested && groupLabel.includes(" · ") ? groupLabel : humanize(groupLabel),
+      params: params.filter(
+        (q) => q.key === groupKey || q.key.startsWith(`${groupKey}.`),
+      ),
     });
   }
   return groups;
@@ -70,20 +102,34 @@ function backendGroups(
 interface ActionUIState {
   status: "idle" | "running" | "ok" | "error" | "pending";
   message: string;
-  /** When set, the button becomes a "Continue" that invokes this key instead. */
   followup: string;
 }
 
-export function ConfigSection({ section }: ConfigSectionProps) {
-  const queryClient = useQueryClient();
+export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
   const api = useWsApi();
-  const [expanded, setExpanded] = useState(false);
-  const [localValues, setLocalValues] = useState<Record<string, unknown>>({});
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
-  const [actionStates, setActionStates] = useState<Record<string, ActionUIState>>({});
+  const sectionState = useSettingsSection(section.namespace);
+  const localValues = sectionState.dirty;
+  const saveStatus = sectionState.saveStatus;
 
-  // Merge defaults → server values → local edits so fields show their
-  // declared default when no value has been stored yet.
+  const [userExpanded, setUserExpanded] = useState(false);
+  const [actionStates, setActionStates] = useState<Record<string, ActionUIState>>(
+    {},
+  );
+
+  // Auto-expand when search matches this section.
+  const searchMatches = useMemo(() => {
+    if (!searchQuery) return false;
+    const q = searchQuery.toLowerCase();
+    if (section.namespace.toLowerCase().includes(q)) return true;
+    return section.params.some(
+      (p) =>
+        p.key.toLowerCase().includes(q) ||
+        (p.description ?? "").toLowerCase().includes(q),
+    );
+  }, [searchQuery, section.namespace, section.params]);
+  const expanded = userExpanded || searchMatches;
+
+  // Merge defaults → server values → local edits.
   const merged = useMemo(() => {
     const defaults: Record<string, unknown> = {};
     for (const p of section.params) {
@@ -94,38 +140,12 @@ export function ConfigSection({ section }: ConfigSectionProps) {
 
   const hasChanges = Object.keys(localValues).length > 0;
 
-  const handleFieldChange = useCallback((key: string, value: unknown) => {
-    setLocalValues((prev) => ({ ...prev, [key]: value }));
-    setSaveStatus(null);
-  }, []);
-
-  const saveMutation = useMutation({
-    mutationFn: () => api.setConfigSection(section.namespace, localValues),
-    onSuccess: (result) => {
-      setLocalValues({});
-      queryClient.invalidateQueries({ queryKey: ["config"] });
-      const results = result?.results ?? {};
-      const restarted = Object.values(results).some(
-        (r: any) => r?.message?.includes("restarted") || r?.message?.includes("enabled"),
-      );
-      setSaveStatus(restarted ? "Saved — service restarting..." : "Saved");
-      setTimeout(() => setSaveStatus(null), 3000);
+  const handleFieldChange = useCallback(
+    (key: string, value: unknown) => {
+      sectionState.setField(key, value);
     },
-    onError: () => {
-      setSaveStatus("Save failed");
-      setTimeout(() => setSaveStatus(null), 3000);
-    },
-  });
-
-  const resetMutation = useMutation({
-    mutationFn: () => api.resetConfigSection(section.namespace),
-    onSuccess: () => {
-      setLocalValues({});
-      queryClient.invalidateQueries({ queryKey: ["config"] });
-      setSaveStatus("Reset to defaults");
-      setTimeout(() => setSaveStatus(null), 3000);
-    },
-  });
+    [sectionState],
+  );
 
   const runAction = useCallback(
     async (action: ConfigActionMeta, keyOverride?: string) => {
@@ -141,17 +161,11 @@ export function ConfigSection({ section }: ConfigSectionProps) {
         const resp = await api.invokeConfigAction(section.namespace, invokeKey);
         const result: ConfigActionResult = resp.result;
 
-        // If the backend asked us to persist values, push them into
-        // localValues as if the user had typed them. This lets the user
-        // see the new values as pending changes and click Save
-        // explicitly — matching how every other field behaves and
-        // activating the Save button without a manual focus/blur.
         const persistRaw = (result.data ?? {})["persist"];
         if (persistRaw && typeof persistRaw === "object") {
           const persist = persistRaw as Record<string, unknown>;
           if (Object.keys(persist).length > 0) {
-            setLocalValues((prev) => ({ ...prev, ...persist }));
-            setSaveStatus(null);
+            sectionState.setFields(persist);
           }
         }
 
@@ -168,21 +182,21 @@ export function ConfigSection({ section }: ConfigSectionProps) {
           window.open(result.open_url, "_blank", "noopener,noreferrer");
         }
 
-        // Auto-clear ok messages after a few seconds; leave errors/pending up.
-        // Actions that produced `persist` values stay visible longer because
-        // the user still needs to click Save — clearing the "click Save to
-        // store" message too fast is confusing.
         const hasPersist =
-          persistRaw && typeof persistRaw === "object" &&
+          persistRaw &&
+          typeof persistRaw === "object" &&
           Object.keys(persistRaw as Record<string, unknown>).length > 0;
         if (result.status === "ok") {
-          setTimeout(() => {
-            setActionStates((prev) => {
-              const next = { ...prev };
-              if (next[action.key]?.status === "ok") delete next[action.key];
-              return next;
-            });
-          }, hasPersist ? 20000 : 5000);
+          setTimeout(
+            () => {
+              setActionStates((prev) => {
+                const next = { ...prev };
+                if (next[action.key]?.status === "ok") delete next[action.key];
+                return next;
+              });
+            },
+            hasPersist ? 20000 : 5000,
+          );
         }
       } catch (exc) {
         setActionStates((prev) => ({
@@ -195,7 +209,7 @@ export function ConfigSection({ section }: ConfigSectionProps) {
         }));
       }
     },
-    [api, section.namespace],
+    [api, section.namespace, sectionState],
   );
 
   // Split params into groups
@@ -206,18 +220,14 @@ export function ConfigSection({ section }: ConfigSectionProps) {
   );
   const backendSettingsParams = section.params.filter((p) => p.backend_param);
 
-  // Resolve the current backend name for display
   const backendName = String(merged["backend"] ?? "");
 
-  /** Get the nested value for a dot-path key like "settings.api_key".
-   *
-   * Falls back to the param's declared ``default`` when no value has
-   * been persisted yet — without this, newly-added backend params
-   * show as blank fields until the user explicitly saves them, even
-   * though the backend already declares a sensible default. */
+  /** Get the nested value for a dot-path key. Falls back to the
+   *  param's declared default. */
   const getValue = (key: string): unknown => {
     if (key in localValues) return localValues[key];
     const parts = key.split(".");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let cur: any = section.values;
     for (const part of parts) {
       if (cur == null || typeof cur !== "object") {
@@ -233,228 +243,282 @@ export function ConfigSection({ section }: ConfigSectionProps) {
     return cur;
   };
 
+  // ── Status pill ────────────────────────────────────────────────
+  const statusPill = (() => {
+    if (section.started) return <Badge variant="active" dot>running</Badge>;
+    if (section.failed) return <Badge variant="error" dot>failed</Badge>;
+    if (!section.enabled) return <Badge variant="off" dot>off</Badge>;
+    return null;
+  })();
+
+  const sectionEnabled = !enabledParam || merged["enabled"] === true;
+
   return (
-    <Card className="overflow-hidden">
-      {/* Header */}
+    <Card>
       <button
         type="button"
-        className="flex items-center w-full px-4 py-3 text-left hover:bg-muted/50 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => setUserExpanded((v) => !v)}
+        className={cn(
+          "group/header w-full text-left",
+          "transition-colors duration-(--duration-fast) ease-(--ease-out)",
+          "hover:bg-foreground/[0.025]",
+          expanded && "border-b border-border",
+        )}
       >
-        {expanded
-          ? <ChevronDownIcon className="size-4 mr-2 shrink-0 text-muted-foreground" />
-          : <ChevronRightIcon className="size-4 mr-2 shrink-0 text-muted-foreground" />
-        }
-        <span className="font-medium text-sm">{humanize(section.namespace)}</span>
-        <div className="ml-auto flex items-center gap-2">
-          {section.started && (
-            <Badge variant="outline" className="text-[10px] text-green-500 border-green-500/40">running</Badge>
+        <CardHeader className="grid-cols-[auto_1fr_auto] items-center py-3 gap-x-2.5">
+          {expanded ? (
+            <ChevronDownIcon className="size-3.5 text-muted-foreground row-span-2" />
+          ) : (
+            <ChevronRightIcon className="size-3.5 text-muted-foreground row-span-2" />
           )}
-          {section.failed && (
-            <Badge variant="outline" className="text-[10px] text-red-500 border-red-500/40">failed</Badge>
-          )}
-          {!section.started && !section.failed && !section.enabled && (
-            <Badge variant="outline" className="text-[10px] text-muted-foreground">disabled</Badge>
-          )}
-        </div>
+          <div className="min-w-0">
+            <CardEyebrow>{section.namespace}</CardEyebrow>
+            <CardTitle className="mt-1 truncate">
+              {humanize(section.namespace)}
+            </CardTitle>
+          </div>
+          {statusPill ? (
+            <div className="row-span-2 self-center">{statusPill}</div>
+          ) : null}
+        </CardHeader>
       </button>
 
-      {/* Body */}
       {expanded && (
-        <CardContent className="px-4 pb-4 pt-0">
-          <Separator className="mb-4" />
-
-          {/* Enabled toggle */}
+        <CardContent className="py-4 space-y-4">
           {enabledParam && (
-            <div className="mb-4">
-              <ConfigField param={enabledParam} value={merged["enabled"]} onChange={handleFieldChange} />
-            </div>
+            <ConfigField
+              param={enabledParam}
+              value={merged["enabled"]}
+              onChange={handleFieldChange}
+              namespace={section.namespace}
+            />
           )}
 
-          {/* Everything else only visible when enabled (or if no enabled toggle).
-              Wrap in a soft-bordered container when there's an enable toggle so
-              the dependency relationship is visually obvious — the toggle is
-              the "root" and the container visually holds "the stuff it gates."
-              Services without an enable toggle render the body bare since
-              there's no conditional dependency to signal. Inner sections
-              (per-backend groups below) use stronger borders so nested cards
-              still read as distinct. */}
-          {(!enabledParam || merged["enabled"] === true) && (
-            <div
-              className={
-                enabledParam
-                  ? "rounded-md border border-border/40 bg-muted/10 p-4"
-                  : ""
-              }
-            >
-
-          {/* Service-level params */}
-          {serviceParams.length > 0 && (
-            <div className="space-y-4 mb-4">
-              {serviceParams.map((p) => (
-                <ConfigField key={p.key} param={p} value={merged[p.key]} onChange={handleFieldChange} namespace={section.namespace} />
-              ))}
-            </div>
-          )}
-
-          {/* Backend selector — last service-level option, before backend settings */}
-          {backendParam && (
-            <div className="mb-4">
-              <ConfigField param={backendParam} value={merged["backend"]} onChange={handleFieldChange} namespace={section.namespace} />
-            </div>
-          )}
-
-          {/* Backend-specific settings — only shown when a backend is selected */}
-          {backendSettingsParams.length > 0 && (!backendParam || backendName) && (
-            <div className={serviceParams.length > 0 || backendParam ? "mt-4 pt-4 border-t border-dashed" : ""}>
-              {backendGroups(backendSettingsParams, backendName, !!backendParam).map((group) => {
-                // Multi-backend groups collapse unless explicitly enabled.
-                // An unset / ``null`` / ``undefined`` stored value counts as
-                // disabled — otherwise every newly-registered backend would
-                // expand its full config on first render (hiding lesser-used
-                // ones behind a wall of api_key / model / base_url fields)
-                // just because its declared default is ``True``.
-                const enableParam = group.params.find((p) => p.key.endsWith(".enabled"));
-                const isEnabled = enableParam
-                  ? getValue(enableParam.key) === true
-                  : true;
-                const otherParams = enableParam
-                  ? group.params.filter((p) => p !== enableParam)
-                  : group.params;
-
-                return (
-                  <div
-                    key={group.label}
-                    className="mb-4 rounded-md border border-border/60 bg-muted/20 p-4 last:mb-0"
-                  >
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-                      {group.label}
-                    </h4>
-                    {/* Show enable toggle if present */}
-                    {enableParam && (
-                      <div className={isEnabled && otherParams.length > 0 ? "mb-3" : ""}>
-                        <ConfigField param={enableParam} value={getValue(enableParam.key)} onChange={handleFieldChange} namespace={section.namespace} />
-                      </div>
-                    )}
-                    {/* Only show other params if enabled */}
-                    {isEnabled && otherParams.length > 0 && (
-                      <div className="space-y-4">
-                        {otherParams.map((p) => (
-                          <ConfigField key={p.key} param={p} value={getValue(p.key)} onChange={handleFieldChange} namespace={section.namespace} />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-            </div>
-          )}
-
-          {/* Actions — one-click operations declared by the service/backend.
-              Filter by current dropdown backend so switching backends (even
-              unsaved) immediately surfaces the right button set. Actions
-              with an empty ``backend`` field are service-level and always
-              render. */}
-          {(() => {
-            const currentBackendName = String(merged["backend"] ?? "");
-            const visible = (section.actions ?? []).filter((a) =>
-              !a.hidden && (!a.backend || a.backend === currentBackendName),
-            );
-            if (visible.length === 0) return null;
-            const backendChangedUnsaved =
-              backendParam !== undefined &&
-              "backend" in localValues &&
-              localValues["backend"] !== section.values["backend"];
-            return (
-            <div className="mt-6 pt-4 border-t border-dashed">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-                Actions
-              </h4>
-              {backendChangedUnsaved ? (
-                <div className="text-xs text-amber-400 mb-3">
-                  Save to enable actions for the new backend.
+          {sectionEnabled && (
+            <>
+              {serviceParams.length > 0 && (
+                <div className="space-y-4">
+                  {serviceParams.map((p) => (
+                    <ConfigField
+                      key={p.key}
+                      param={p}
+                      value={merged[p.key]}
+                      onChange={handleFieldChange}
+                      namespace={section.namespace}
+                    />
+                  ))}
                 </div>
-              ) : hasChanges ? (
-                <div className="text-xs text-amber-400 mb-3">
-                  Unsaved changes — actions run against the saved
-                  values, not the ones you just edited. Save first to
-                  test the new values.
-                </div>
-              ) : null}
-              <div className="space-y-2">
-                {visible.map((action) => {
-                  const state = actionStates[action.key];
-                  const running = state?.status === "running";
-                  const pending = state?.status === "pending";
-                  const isFollowup = pending && !!state?.followup;
-                  const nextKey = isFollowup ? state.followup : action.key;
-                  const label = isFollowup ? "Continue" : action.label;
+              )}
+
+              {backendParam && (
+                <ConfigField
+                  param={backendParam}
+                  value={merged["backend"]}
+                  onChange={handleFieldChange}
+                  namespace={section.namespace}
+                />
+              )}
+
+              {backendSettingsParams.length > 0 &&
+                (!backendParam || backendName) &&
+                backendGroups(
+                  backendSettingsParams,
+                  backendName,
+                  !!backendParam,
+                ).map((group) => {
+                  const enableParam = group.params.find((p) =>
+                    p.key.endsWith(".enabled"),
+                  );
+                  const isEnabled = enableParam
+                    ? getValue(enableParam.key) === true
+                    : true;
+                  const otherParams = enableParam
+                    ? group.params.filter((p) => p !== enableParam)
+                    : group.params;
 
                   return (
-                    <div key={action.key} className="flex flex-col gap-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={running}
-                          onClick={() => runAction(action, isFollowup ? nextKey : undefined)}
-                        >
-                          {isFollowup
-                            ? <ExternalLinkIcon className="size-3.5 mr-1.5" />
-                            : <ZapIcon className="size-3.5 mr-1.5" />}
-                          {running ? "Running..." : label}
-                        </Button>
-                        {action.description && !state && (
-                          <span className="text-xs text-muted-foreground">{action.description}</span>
+                    <Card key={group.label} size="sm">
+                      <CardHeader className="pb-1">
+                        <CardEyebrow>{group.label.toLowerCase()}</CardEyebrow>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        {enableParam && (
+                          <ConfigField
+                            param={enableParam}
+                            value={getValue(enableParam.key)}
+                            onChange={handleFieldChange}
+                            namespace={section.namespace}
+                          />
                         )}
-                        {state?.message && (
-                          <span
-                            className={
-                              state.status === "error"
-                                ? "text-xs text-red-400"
-                                : state.status === "ok"
-                                ? "text-xs text-green-400"
-                                : state.status === "pending"
-                                ? "text-xs text-amber-400"
-                                : "text-xs text-muted-foreground"
-                            }
-                          >
-                            {state.message}
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                        {isEnabled &&
+                          otherParams.map((p) => (
+                            <ConfigField
+                              key={p.key}
+                              param={p}
+                              value={getValue(p.key)}
+                              onChange={handleFieldChange}
+                              namespace={section.namespace}
+                            />
+                          ))}
+                      </CardContent>
+                    </Card>
                   );
                 })}
-              </div>
-            </div>
-            );
-          })()}
+            </>
+          )}
 
-          {/* Save / Reset bar */}
-          <div className="flex flex-wrap items-center gap-2 mt-6 pt-4 border-t">
-            <Button size="sm" disabled={!hasChanges || saveMutation.isPending} onClick={() => saveMutation.mutate()}>
-              <SaveIcon className="size-3.5 mr-1.5" />
-              {saveMutation.isPending ? "Saving..." : "Save"}
-            </Button>
-            <Button variant="outline" size="sm" disabled={resetMutation.isPending} onClick={() => resetMutation.mutate()}>
-              <RotateCcwIcon className="size-3.5 mr-1.5" />
-              Reset to Defaults
-            </Button>
-            {saveStatus && (
-              <span className={`text-xs ${saveStatus.includes("fail") ? "text-red-400" : "text-green-400"}`}>
-                {saveStatus}
-              </span>
-            )}
-            {hasChanges && !saveStatus && (
-              <span className="text-xs text-amber-400">Unsaved changes</span>
-            )}
-          </div>
+          <ActionsBlock
+            actions={section.actions ?? []}
+            actionStates={actionStates}
+            runAction={runAction}
+            backendName={String(merged["backend"] ?? "")}
+            hasBackendChangeUnsaved={
+              backendParam !== undefined &&
+              "backend" in localValues &&
+              localValues["backend"] !== section.values["backend"]
+            }
+            hasChanges={hasChanges}
+          />
         </CardContent>
       )}
+
+      {expanded && (
+        <CardFooter className="justify-between">
+          <div className="text-xs">
+            {saveStatus ? (
+              <span
+                className={cn(
+                  "font-mono",
+                  saveStatus.ok ? "text-success" : "text-destructive",
+                )}
+              >
+                {saveStatus.message}
+              </span>
+            ) : hasChanges ? (
+              <span className="font-mono text-(--signal)">
+                {Object.keys(localValues).length} unsaved change
+                {Object.keys(localValues).length === 1 ? "" : "s"}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">No changes.</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => sectionState.resetToDefaults()}
+            >
+              <RotateCcwIcon />
+              Reset
+            </Button>
+            <Button
+              size="sm"
+              disabled={!hasChanges}
+              onClick={() => sectionState.save()}
+            >
+              <SaveIcon />
+              Save
+            </Button>
+          </div>
+        </CardFooter>
+      )}
     </Card>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Actions block — extracted for readability. Same behavior.
+// ──────────────────────────────────────────────────────────────────
+
+interface ActionsBlockProps {
+  actions: ConfigActionMeta[];
+  actionStates: Record<string, ActionUIState>;
+  runAction: (action: ConfigActionMeta, keyOverride?: string) => Promise<void>;
+  backendName: string;
+  hasBackendChangeUnsaved: boolean;
+  hasChanges: boolean;
+}
+
+function ActionsBlock({
+  actions,
+  actionStates,
+  runAction,
+  backendName,
+  hasBackendChangeUnsaved,
+  hasChanges,
+}: ActionsBlockProps) {
+  const visible = actions.filter(
+    (a) => !a.hidden && (!a.backend || a.backend === backendName),
+  );
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="pt-1">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+          actions
+        </span>
+      </div>
+
+      {hasBackendChangeUnsaved ? (
+        <p className="mb-2 text-xs text-warning">
+          Save to enable actions for the new backend.
+        </p>
+      ) : hasChanges ? (
+        <p className="mb-2 text-xs text-warning">
+          Unsaved changes — actions run against the saved values, not
+          the ones you just edited. Save first.
+        </p>
+      ) : null}
+
+      <div className="space-y-1">
+        {visible.map((action) => {
+          const state = actionStates[action.key];
+          const running = state?.status === "running";
+          const pending = state?.status === "pending";
+          const isFollowup = pending && !!state?.followup;
+          const nextKey = isFollowup ? state.followup : action.key;
+          const label = isFollowup ? "Continue" : action.label;
+          const statusColor =
+            state?.status === "error"
+              ? "text-destructive"
+              : state?.status === "ok"
+                ? "text-success"
+                : state?.status === "pending"
+                  ? "text-warning"
+                  : "text-muted-foreground";
+
+          return (
+            <div
+              key={action.key}
+              className="flex flex-wrap items-center gap-2"
+            >
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={running}
+                onClick={() =>
+                  runAction(action, isFollowup ? nextKey : undefined)
+                }
+              >
+                {isFollowup ? <ExternalLinkIcon /> : <ZapIcon />}
+                {running ? "Running…" : label}
+              </Button>
+              {action.description && !state && (
+                <span className="text-xs text-muted-foreground">
+                  {action.description}
+                </span>
+              )}
+              {state?.message && (
+                <span className={cn("text-xs font-mono", statusColor)}>
+                  {state.message}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

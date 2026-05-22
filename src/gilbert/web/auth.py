@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import RedirectResponse, Response
 
-from gilbert.core.context import set_current_user
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.auth import GuestPolicy, UserContext
 
 # Paths that bypass authentication when the visitor is unauthenticated.

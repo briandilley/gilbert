@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { ServiceCard } from "./ServiceCard";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function SystemPage() {
   const api = useWsApi();
@@ -12,14 +13,20 @@ export function SystemPage() {
     enabled: connected,
   });
 
-  if (isLoading) {
-    return <div className="p-4 sm:p-6 text-muted-foreground">Loading...</div>;
-  }
+  const count = data?.services.length ?? 0;
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-4xl mx-auto">
-      <h1 className="text-xl sm:text-2xl font-semibold text-center">System Browser</h1>
-      <div className="space-y-3">
+    <div>
+      <PageHeader
+        eyebrow="OPERATIONS"
+        title="System"
+        description={
+          isLoading
+            ? "Loading…"
+            : `${count} service${count === 1 ? "" : "s"} registered.`
+        }
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-3">
         {data?.services.map((svc) => (
           <ServiceCard key={svc.name} service={svc} />
         ))}

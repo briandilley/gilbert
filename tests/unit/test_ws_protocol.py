@@ -165,6 +165,52 @@ class TestChatFiltering:
         assert "conv1" in conn.shared_conv_ids
 
 
+# --- Browser-speaker per-user filter ---
+
+
+class TestBrowserSpeakerFiltering:
+    def _conn(self, user_id: str) -> WsConnection:
+        user = UserContext(
+            user_id=user_id, email="", display_name="User", roles=frozenset({"user"})
+        )
+        manager = MagicMock(spec=WsConnectionManager)
+        return WsConnection(user, 100, manager)
+
+    def test_non_speaker_events_pass(self) -> None:
+        conn = self._conn("user1")
+        event = Event(event_type="chat.message.created", data={"user_id": "user2"})
+        assert conn.can_see_speaker_browser_event(event)
+
+    def test_target_user_receives(self) -> None:
+        conn = self._conn("user1")
+        event = Event(
+            event_type="speaker.browser.play",
+            data={"user_id": "user1", "url": "http://x"},
+        )
+        assert conn.can_see_speaker_browser_event(event)
+
+    def test_other_user_blocked(self) -> None:
+        conn = self._conn("user1")
+        event = Event(
+            event_type="speaker.browser.play",
+            data={"user_id": "user2", "url": "http://x"},
+        )
+        assert not conn.can_see_speaker_browser_event(event)
+
+    def test_stop_event_also_filtered(self) -> None:
+        conn = self._conn("user1")
+        own = Event(event_type="speaker.browser.stop", data={"user_id": "user1"})
+        other = Event(event_type="speaker.browser.stop", data={"user_id": "user2"})
+        assert conn.can_see_speaker_browser_event(own)
+        assert not conn.can_see_speaker_browser_event(other)
+
+    def test_speaker_browser_is_user_level(self) -> None:
+        # speaker.browser.* events sit at user-level (100). Admins (0)
+        # and users (100) get the prefix permission; the per-connection
+        # ``can_see_speaker_browser_event`` then narrows by user_id.
+        assert get_event_visibility_level("speaker.browser.play") == 100
+
+
 # --- Connection manager dispatch ---
 
 

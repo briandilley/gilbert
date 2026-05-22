@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.health import (
     _ACL_COLLECTION,
@@ -25,6 +24,7 @@ from gilbert.core.services.health import (
     HealthService,
 )
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.health import (
     HEALTH_ADMIN_ROLE,
@@ -1252,7 +1252,7 @@ async def test_run_per_user_isolates_set_current_user(
             # of a leak, then read its own context.
             for _ in range(5):
                 await asyncio.sleep(0)
-            from gilbert.core.context import get_current_user as _gcu
+            from gilbert.interfaces.context import get_current_user as _gcu
             ctx = _gcu()
             seen["bob"] = ctx.user_id
 
@@ -1419,4 +1419,3 @@ def test_default_trend_prompt_forbids_clinical_words() -> None:
         assert pattern.search(text), (
             f"Bundled trend prompt no longer FORBIDS {word!r} explicitly"
         )
-

@@ -29,7 +29,6 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gilbert.core.context import get_current_user, set_current_user
 from gilbert.core.services._ui_blocks import confirm_or_execute
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
@@ -63,6 +62,7 @@ from gilbert.interfaces.health import (
     can_read_metrics,
     metric_types_human_summary,
 )
+from gilbert.interfaces.context import get_current_user, set_current_user
 from gilbert.interfaces.notifications import (
     NotificationProvider,
     NotificationUrgency,
@@ -2275,8 +2275,7 @@ class HealthService(Service):
     ) -> None:
         """Run ``work(user_id)`` for each user with bounded concurrency.
 
-        Each task gets its own copy of contextvars (per
-        ``memory-multi-user-isolation.md``) so the per-task
+        Each task gets its own copy of contextvars so the per-task
         ``set_current_user`` doesn't leak to siblings. ``tz_by_user``
         propagates the resolved per-user timezone into the SYSTEM
         identity so downstream code reads ``user_ctx.tz`` instead of
@@ -3400,4 +3399,3 @@ def _build_tool_definitions() -> list[ToolDefinition]:
             required_role="user",
         ),
     ]
-

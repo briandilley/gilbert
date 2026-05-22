@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_user
+from gilbert.interfaces.context import set_current_user
 from gilbert.core.services.mcp import (
     MCPService,
     _ClientEntry,

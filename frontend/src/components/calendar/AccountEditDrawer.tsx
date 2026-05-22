@@ -20,7 +20,7 @@ import {
 import { ConfigField } from "@/components/settings/ConfigField";
 import { useWsApi } from "@/hooks/useWsApi";
 import type { CalendarAccount } from "@/types/calendar";
-import { Trash2Icon, AlertTriangleIcon } from "lucide-react";
+import { Trash2Icon, AlertTriangleIcon, InfoIcon } from "lucide-react";
 
 interface Props {
   /** If null the drawer is in "create" mode. */
@@ -221,12 +221,14 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
               <ConfigField
                 param={p}
                 value={backendConfig[p.key]}
-                onChange={(v) =>
-                  setBackendConfig({ ...backendConfig, [p.key]: v })
+                onChange={(key, value) =>
+                  setBackendConfig({ ...backendConfig, [key]: value })
                 }
               />
             </div>
           ))}
+
+          {backendName === "google_calendar" && <GoogleCalendarSetupGuide />}
 
           <Separator />
 
@@ -361,3 +363,35 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
   );
 }
 
+function GoogleCalendarSetupGuide() {
+  return (
+    <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
+      <div className="mb-2 flex items-center gap-2 font-medium text-foreground">
+        <InfoIcon className="size-4 text-info" />
+        Google Calendar setup
+      </div>
+      <ol className="list-decimal space-y-1.5 pl-5">
+        <li>Enable the Google Calendar API in a Google Cloud project.</li>
+        <li>Create a service account and JSON key. Store the key outside git.</li>
+        <li>
+          For personal Gmail, share the target calendar with the service-account
+          email and grant <span className="font-medium">Make changes to events</span>.
+        </li>
+        <li>
+          Paste the full JSON key into Service Account Json, leave Delegated User
+          blank, and set Calendar to the Google Calendar ID, usually the Gmail
+          address for a primary calendar.
+        </li>
+        <li>
+          For Google Workspace, authorize domain-wide delegation, set Delegated
+          User to the Workspace user, and use <span className="font-mono">primary</span>
+          or an explicit calendar ID.
+        </li>
+      </ol>
+      <p className="mt-2">
+        Full repo guide:{" "}
+        <span className="font-mono">docs/how-to/google-calendar-setup.md</span>
+      </p>
+    </div>
+  );
+}

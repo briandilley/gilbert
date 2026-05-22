@@ -7,6 +7,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MailboxSidebar } from "./MailboxSidebar";
+import { usePageSidebar } from "@/components/layout/PageSidebar";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { MailboxEditor } from "./MailboxEditor";
 import { MessageList } from "./MessageList";
 import { MessageDetailDialog } from "./MessageDetailDialog";
@@ -15,14 +17,6 @@ import type { InboxMailbox, InboxMessage } from "@/types/inbox";
 import { SettingsIcon } from "lucide-react";
 
 /** Multi-mailbox inbox page.
- *
- * Layout:
- *   ┌──────────┬────────────────────────────────┐
- *   │ Sidebar  │ Header (name · email · edit)    │
- *   │ Mine     │ Outbox panel (if active drafts) │
- *   │ Shared   │ Search + message list           │
- *   │ All      │                                 │
- *   └──────────┴────────────────────────────────┘
  *
  * URL state:
  *   ?mbx=<id>     — selected mailbox (persisted so reloads land in the same place)
@@ -52,7 +46,6 @@ export function InboxPage() {
     [user],
   );
 
-  // URL state
   const selectedId = searchParams.get("mbx");
   const selectedMessageId = searchParams.get("msg");
   const sender = searchParams.get("sender") || "";
@@ -68,8 +61,6 @@ export function InboxPage() {
     [searchParams, setSearchParams],
   );
 
-  // ---- Data ----
-
   const { data: mailboxes = [] } = useQuery({
     queryKey: ["inbox-mailboxes"],
     queryFn: api.listMailboxes,
@@ -81,7 +72,7 @@ export function InboxPage() {
     [mailboxes, selectedId],
   );
 
-  // Default-select the first mailbox if nothing is selected and we have any.
+  // Default-select the first mailbox if nothing is selected.
   useEffect(() => {
     if (!selectedId && mailboxes.length > 0) {
       updateParam("mbx", mailboxes[0].id);
@@ -93,8 +84,6 @@ export function InboxPage() {
     queryFn: () => api.inboxStats(selectedId ?? undefined),
     enabled: connected,
   });
-
-  // ---- Event subscriptions ----
 
   useEffect(() => {
     const invalidateMailboxes = () =>
@@ -134,8 +123,6 @@ export function InboxPage() {
     };
   }, [subscribe, queryClient, user?.user_id]);
 
-  // ---- Handlers ----
-
   const handleSelectMailbox = (id: string) => {
     updateParam("mbx", id);
     updateParam("msg", null);
@@ -154,30 +141,85 @@ export function InboxPage() {
     setEditorOpen(true);
   };
 
-  return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col sm:flex-row">
-      <MailboxSidebar
-        mailboxes={mailboxes}
-        selectedId={selectedId}
-        onSelect={handleSelectMailbox}
-        onCreate={() => handleOpenEditor(null)}
-        isAdmin={isAdmin}
-      />
+  // Mailbox list lives in the global SideNav — no second left column
+  // inside the page.
+  usePageSidebar(
+    <MailboxSidebar
+      mailboxes={mailboxes}
+      selectedId={selectedId}
+      onSelect={handleSelectMailbox}
+      onCreate={() => handleOpenEditor(null)}
+      isAdmin={isAdmin}
+    />,
+  );
 
+  // ── Page header — adapts to the selected mailbox ────────────────
+  const pageHeader = (() => {
+    if (mailboxes.length === 0) {
+      return (
+        <PageHeader eyebrow="INBOX" title="Inbox" />
+      );
+    }
+    if (!selectedMailbox) {
+      return (
+        <PageHeader
+          eyebrow="INBOX"
+          title="Inbox"
+          description="Select a mailbox from the sidebar."
+        />
+      );
+    }
+    return (
+      <PageHeader
+        eyebrow="INBOX"
+        title={selectedMailbox.name}
+        description={
+          <span className="flex flex-wrap items-center gap-1.5">
+            <code className="font-mono">{selectedMailbox.email_address}</code>
+            {stats && (
+              <>
+                <span className="text-muted-foreground/50">·</span>
+                <span className="font-mono">
+                  {stats.total} message{stats.total === 1 ? "" : "s"}
+                </span>
+              </>
+            )}
+            {selectedMailbox.access && selectedMailbox.access !== "owner" && (
+              <>
+                <span className="text-muted-foreground/50">·</span>
+                <Badge variant="neutral">
+                  {selectedMailbox.access.replace("_", " ")}
+                </Badge>
+              </>
+            )}
+          </span>
+        }
+        actions={
+          selectedMailbox.can_admin ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleOpenEditor(selectedMailbox)}
+            >
+              <SettingsIcon />
+              Settings
+            </Button>
+          ) : null
+        }
+      />
+    );
+  })();
+
+  return (
+    <div className="flex h-full flex-col">
+      {pageHeader}
       <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
+        <div className="mx-auto max-w-5xl space-y-4 px-4 py-4 sm:px-6 sm:py-6">
           {mailboxes.length === 0 ? (
             <EmptyState onCreate={() => handleOpenEditor(null)} />
-          ) : (
+          ) : selectedMailbox ? (
             <>
-              <MailboxHeader
-                mailbox={selectedMailbox}
-                stats={stats ?? null}
-                onEdit={() => handleOpenEditor(selectedMailbox)}
-              />
-
               <OutboxPanel mailboxId={selectedId} />
-
               <MessageList
                 mailboxId={selectedId}
                 sender={sender}
@@ -188,7 +230,7 @@ export function InboxPage() {
                 onSelectMessage={handleSelectMessage}
               />
             </>
-          )}
+          ) : null}
         </div>
       </main>
 
@@ -207,58 +249,20 @@ export function InboxPage() {
   );
 }
 
-function MailboxHeader({
-  mailbox, stats, onEdit,
-}: {
-  mailbox: InboxMailbox | null;
-  stats: { total: number; inbound: number } | null;
-  onEdit: () => void;
-}) {
-  if (!mailbox) {
-    return (
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold sm:text-2xl">Inbox</h1>
-        <span className="text-xs text-muted-foreground">Select a mailbox</span>
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-3">
-      <h1 className="text-xl font-semibold sm:text-2xl">{mailbox.name}</h1>
-      <span className="text-sm text-muted-foreground">{mailbox.email_address}</span>
-      {stats && (
-        <Badge variant="secondary">{stats.total} messages</Badge>
-      )}
-      {mailbox.access && mailbox.access !== "owner" && (
-        <Badge variant="outline" className="capitalize">
-          {mailbox.access.replace("_", " ")}
-        </Badge>
-      )}
-      {mailbox.can_admin && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto"
-          onClick={onEdit}
-        >
-          <SettingsIcon className="size-3.5 mr-1.5" />
-          Settings
-        </Button>
-      )}
-    </div>
-  );
-}
-
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-4 rounded-lg border border-dashed py-20 text-center">
-      <h2 className="text-lg font-semibold">No mailboxes yet</h2>
+    <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border py-16 text-center">
+      <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+        No mailboxes
+      </p>
       <p className="max-w-md text-sm text-muted-foreground">
         Gilbert's inbox is multi-mailbox — every mailbox is owned by a user and
-        can be shared with others by user or role. Create your first mailbox to
-        start syncing mail.
+        can be shared with others by user or role. Create your first mailbox
+        to start syncing mail.
       </p>
-      <Button onClick={onCreate}>Create mailbox</Button>
+      <Button size="sm" onClick={onCreate}>
+        Create mailbox
+      </Button>
     </div>
   );
 }

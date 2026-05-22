@@ -31,7 +31,7 @@ import gilbert.integrations.mcp_http  # noqa: F401
 # concretes. Each module adds itself to the registry under its
 # ``backend_name`` class attribute.
 import gilbert.integrations.mcp_stdio  # noqa: F401
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.core.services.mcp_oauth import (
     OAuthFlowManager,
     auth_for_stored_tokens,

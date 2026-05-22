@@ -388,8 +388,7 @@ class HealthBackend(ABC):
     ``HealthBackend`` instance serves every user — per-user state
     (OAuth tokens, webhook secrets) lives in the ``health_links``
     collection and is loaded by the backend on demand. The backend MUST
-    NOT cache per-user secrets on ``self`` — see
-    ``memory-multi-user-isolation.md``.
+    NOT cache per-user secrets on ``self``.
     """
 
     _registry: dict[str, type[HealthBackend]] = {}
@@ -827,4 +826,3 @@ __all__ = [
     "can_mutate_metrics",
     "parse_metric_payload",
 ]
-

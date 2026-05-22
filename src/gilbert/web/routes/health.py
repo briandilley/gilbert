@@ -400,7 +400,7 @@ async def list_my_metrics(
     until_dt = datetime.fromisoformat(until) if until else datetime.now(UTC)
     since_dt = datetime.fromisoformat(since) if since else (until_dt - timedelta(days=7))
 
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     set_current_user(user)
     rows = await svc.read_metrics(user.user_id, types, since_dt, until_dt)
@@ -413,7 +413,7 @@ async def my_latest_summary(
     user: UserContext = Depends(require_authenticated),  # noqa: B008
 ) -> dict[str, Any]:
     svc = _health_service(request)
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     set_current_user(user)
     summary = await svc.latest_daily_summary(user.user_id)
@@ -557,4 +557,3 @@ async def my_audit_log(
     svc = _health_service(request)
     items = await svc.list_my_audit_log(user.user_id)
     return {"items": items}
-

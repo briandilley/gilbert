@@ -22,7 +22,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from gilbert.core.context import set_current_user
 from gilbert.core.events import InMemoryEventBus
 from gilbert.core.services.health import (
     _DEFAULT_SUMMARY_PROMPT,
@@ -32,6 +31,7 @@ from gilbert.core.services.health import (
 )
 from gilbert.interfaces.ai import AIResponse, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.health import (
     HealthMetric,
     MetricType,
@@ -216,6 +216,9 @@ async def test_daily_summary_uses_overridden_prompt_not_default_constant(
     assert svc._summary_prompt == sentinel
 
     # Persist data so the AI call actually fires.
+    yesterday_local_midnight = datetime.now(UTC).replace(
+        hour=2, minute=0, second=0, microsecond=0
+    ) - timedelta(days=1)
     await svc.ingest_metrics(
         "alice",
         "_fake_health",
@@ -224,13 +227,13 @@ async def test_daily_summary_uses_overridden_prompt_not_default_constant(
                 id="",
                 user_id="alice",
                 backend="_fake_health",
-                metric_type=MetricType.SLEEP_DURATION,
-                value=24000.0,
-                unit=MetricUnit.SECONDS,
-                recorded_at=datetime.now(UTC) - timedelta(hours=20),
-                ingested_at=datetime.now(UTC),
-                source_event_id="ev-1",
-            )
+                    metric_type=MetricType.SLEEP_DURATION,
+                    value=24000.0,
+                    unit=MetricUnit.SECONDS,
+                    recorded_at=yesterday_local_midnight + timedelta(hours=4),
+                    ingested_at=datetime.now(UTC),
+                    source_event_id="ev-1",
+                )
         ],
     )
     await svc._compute_and_persist_summary("alice")
@@ -381,4 +384,3 @@ async def test_flags_low_sleep_computed_in_code(
         window_end=base,
     )
     assert "low_sleep" in flags
-

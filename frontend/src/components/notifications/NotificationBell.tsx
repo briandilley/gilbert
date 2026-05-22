@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BellIcon, BellRingIcon, XIcon } from "lucide-react";
+import { AtSignIcon, BellIcon, BellRingIcon, XIcon } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
@@ -67,7 +67,7 @@ function timeAgo(iso: string): string {
 
 /**
  * Bell icon with unread badge + dropdown of recent notifications.
- * Mounts in the NavBar's right-side cluster. Subscribes to
+ * Mounts in the TopBar's right-side cluster. Subscribes to
  * ``notification.received`` events for live updates and refetches the
  * list on receipt so urgency-driven UI cues stay in sync with storage.
  */
@@ -77,6 +77,23 @@ interface UrgentToast {
   goalId?: string;
   source: string;
 }
+
+interface MentionToast {
+  id: string;
+  /** Sender's display name. Empty when missing from source_ref. */
+  authorName: string;
+  /** Body text — sender's message snippet, already stripped of the
+   *  ``@[Name](id)`` markup by the backend. */
+  message: string;
+  /** Where to deep-link on click. */
+  conversationId: string;
+}
+
+/** Auto-dismiss window for mention toasts. Shorter than urgent toasts
+ *  (which persist) — a missed mention is recoverable via the sidebar
+ *  badge + bell list; the toast is purely a "look here right now"
+ *  hint while the user is mid-something-else. */
+const MENTION_TOAST_TTL_MS = 8000;
 
 export function NotificationBell() {
   const navigate = useNavigate();
@@ -101,6 +118,24 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [bellPulse, setBellPulse] = useState(false);
   const [urgentToasts, setUrgentToasts] = useState<UrgentToast[]>([]);
+  const [mentionToasts, setMentionToasts] = useState<MentionToast[]>([]);
+
+  // Suppress a mention toast if the user is already viewing that
+  // conversation. URL-based so we don't have to thread active-conv
+  // state through TopBar. ChatPage reads ``?conversation=<id>`` from
+  // the search params (see ChatPage.tsx:444), so match that key.
+  const isViewingConversation = useCallback((convId?: string): boolean => {
+    if (!convId || typeof window === "undefined") return false;
+    if (document.visibilityState !== "visible") return false;
+    const path = window.location.pathname;
+    if (!path.startsWith("/chat")) return false;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("conversation") === convId;
+    } catch {
+      return false;
+    }
+  }, []);
 
   const { data } = useQuery({
     queryKey: ["notifications", "recent"],
@@ -153,12 +188,37 @@ export function NotificationBell() {
         urgency?: string;
         message?: string;
         source?: string;
-        source_ref?: { goal_id?: string } | null;
+        source_ref?: {
+          goal_id?: string;
+          conversation_id?: string;
+          author_name?: string;
+        } | null;
       };
 
       // Bell pulse for any new notification
       setBellPulse(true);
       window.setTimeout(() => setBellPulse(false), 1500);
+
+      // Chat @-mention path: show a green in-app toast naming the
+      // sender. Distinct from the red "urgent" toast — mentions don't
+      // ding or flash the title (peripheral, not interruptive). Suppress
+      // when the user is already viewing that conversation; the chip +
+      // sidebar badge already cover that case.
+      if (data.source === "chat.mention") {
+        const convId = data.source_ref?.conversation_id ?? "";
+        if (!isViewingConversation(convId)) {
+          const toast: MentionToast = {
+            id: data.id || String(Date.now()),
+            authorName: data.source_ref?.author_name ?? "Someone",
+            message: data.message ?? "",
+            conversationId: convId,
+          };
+          setMentionToasts((prev) => {
+            if (prev.some((t) => t.id === toast.id)) return prev;
+            return [...prev, toast].slice(-3);
+          });
+        }
+      }
 
       if (data.urgency === "urgent") {
         // If the user is already on the agent chat for this goal,
@@ -221,6 +281,46 @@ export function NotificationBell() {
   const dismissToast = useCallback((id: string) => {
     setUrgentToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  const dismissMentionToast = useCallback((id: string) => {
+    setMentionToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Auto-dismiss mention toasts after a short TTL. Each toast schedules
+  // its own timer the first time it appears; the cleanup clears
+  // outstanding timers on unmount so a fast nav doesn't leave dangling
+  // setTimeout callbacks holding closures on stale state.
+  useEffect(() => {
+    if (mentionToasts.length === 0) return;
+    const timers = mentionToasts.map((t) =>
+      window.setTimeout(
+        () => dismissMentionToast(t.id),
+        MENTION_TOAST_TTL_MS,
+      ),
+    );
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+    };
+  }, [mentionToasts, dismissMentionToast]);
+
+  const onMentionToastClick = useCallback(
+    async (toast: MentionToast) => {
+      try {
+        await api.markNotificationRead(toast.id);
+        queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      } catch {
+        // Best effort — navigation should still succeed.
+      }
+      if (toast.conversationId) {
+        // ChatPage reads ``?conversation=<id>`` (see
+        // ChatPage.tsx:444) — match that key so the active
+        // conversation actually loads.
+        navigate(`/chat?conversation=${toast.conversationId}`);
+      }
+      dismissMentionToast(toast.id);
+    },
+    [api, queryClient, navigate, dismissMentionToast],
+  );
 
   const onToastClick = useCallback(
     async (toast: UrgentToast) => {
@@ -319,6 +419,51 @@ export function NotificationBell() {
                 type="button"
                 onClick={() => dismissToast(toast.id)}
                 className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 shrink-0"
+                aria-label="Dismiss"
+              >
+                <XIcon className="size-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Chat @-mention toasts — softer green styling, auto-dismiss
+          after a few seconds. Stacked below urgent toasts (which
+          persist until clicked) so a mid-flight mention doesn't push
+          a critical agent alert off-screen. */}
+      {mentionToasts.length > 0 ? (
+        <div
+          className={`fixed right-4 z-50 flex flex-col gap-2 max-w-sm ${
+            urgentToasts.length > 0 ? "top-44" : "top-16"
+          }`}
+        >
+          {mentionToasts.map((toast) => (
+            <div
+              key={toast.id}
+              className="rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/90 shadow-lg p-3 flex items-start gap-2 animate-in slide-in-from-right"
+              role="status"
+            >
+              <AtSignIcon className="size-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+              <button
+                type="button"
+                onClick={() => onMentionToastClick(toast)}
+                className="flex-1 text-left min-w-0"
+              >
+                <div className="text-xs font-medium text-emerald-700 dark:text-emerald-300 mb-0.5">
+                  {toast.authorName} mentioned you
+                </div>
+                <div className="text-sm text-emerald-900 dark:text-emerald-100 break-words">
+                  {toast.message}
+                </div>
+                <div className="text-xs text-emerald-600 dark:text-emerald-400 mt-1">
+                  Click to open
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => dismissMentionToast(toast.id)}
+                className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 shrink-0"
                 aria-label="Dismiss"
               >
                 <XIcon className="size-4" />
