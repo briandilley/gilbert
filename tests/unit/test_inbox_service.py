@@ -1237,6 +1237,15 @@ class TestWorkspaceAttachments:
                 # Phase 5 — protocol stub; not exercised here.
                 return None, "not supported"
 
+            async def member_workspace_roots(
+                self, caller_user_id, conversation_id,
+            ):
+                # Shared-room fallback — irrelevant to the inbox tests
+                # but the WorkspaceProvider protocol now requires it,
+                # and ``isinstance(workspace, WorkspaceProvider)`` is
+                # what gates the lazy lookup we're testing here.
+                return []
+
         # Simulate the start-order race: at start time, the resolver
         # returns None for "workspace" (not started yet). Later, when
         # the AI fires inbox_send, workspace is ready — the lazy lookup
