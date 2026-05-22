@@ -295,8 +295,26 @@ def strip_markdown_for_speech(text: str) -> str:
     return out.strip()
 
 
-def build_room_context(data: dict[str, Any], user: UserContext) -> str:
-    """Build a system prompt for shared room conversations."""
+def build_room_context(
+    data: dict[str, Any],
+    user: UserContext,
+    template: str,
+) -> str:
+    """Render the configured room-context system prompt.
+
+    The full prompt is owned by ``AIService`` as the
+    ``room_context_prompt`` ``ConfigParam`` (``ai_prompt=True``);
+    callers must read ``self._room_context_prompt`` and pass it in
+    via ``template``. We only do the two runtime substitutions:
+
+    - ``{room_title}`` — the shared room's title.
+    - ``{members}``    — indented bullet list of members with role
+      (owner / member) and a marker on the current speaker.
+
+    ``str.replace`` instead of ``str.format`` so admin-edited
+    templates with stray braces don't blow up — unknown placeholders
+    pass through as literal text.
+    """
     title = data.get("title", "Shared Room")
     members = data.get("members", [])
     owner_id = data.get("user_id", "")
@@ -309,18 +327,7 @@ def build_room_context(data: dict[str, Any], user: UserContext) -> str:
 
     members_str = "\n".join(member_lines) if member_lines else "  (no members)"
 
-    return (
-        f'You are Gilbert, an AI assistant in a shared chat room called "{title}".\n'
-        f"Multiple users are in this room. Messages from users are prefixed with their name "
-        f"in brackets, e.g. [Alice]: hello.\n\n"
-        f"Current members:\n{members_str}\n\n"
-        f"IMPORTANT: Stay quiet unless:\n"
-        f"- Someone addresses you directly (mentions Gilbert, asks you something, etc.)\n"
-        f"- A tool or service is making you interact with the room\n"
-        f"- You are responding to a tool call\n"
-        f"If no one is talking to you, respond with just an empty string.\n"
-        f"When you do respond, be concise and helpful."
-    )
+    return template.replace("{room_title}", title).replace("{members}", members_str)
 
 
 async def publish_event(gilbert: Any, event_type: str, data: dict[str, Any]) -> None:

@@ -95,6 +95,21 @@ class _GilbertAuthor:
     user_id = "gilbert"
     display_name = "Gilbert"
 
+_ROOM_CONTEXT_PROMPT_DEFAULT = """\
+You are Gilbert, an AI assistant in a shared chat room called "{room_title}".
+Multiple users are in this room. Messages from users are prefixed with their name in brackets, e.g. [Alice]: hello.
+
+Current members:
+{members}
+
+IMPORTANT: Stay quiet unless:
+- Someone addresses you directly (mentions Gilbert, asks you something, etc.)
+- A tool or service is making you interact with the room
+- You are responding to a tool call
+If no one is talking to you, respond with just an empty string.
+When you do respond, be concise and helpful.\
+"""
+
 _COMPRESSION_SYSTEM_PROMPT = """\
 You are a conversation summarizer. Produce a concise, factual summary of the \
 conversation history provided.
@@ -1206,6 +1221,7 @@ class AIService(Service):
         self._compression_keep_recent: int = 20
         self._compression_summary_max_tokens: int = 1500
         self._compression_prompt: str = _COMPRESSION_SYSTEM_PROMPT
+        self._room_context_prompt: str = _ROOM_CONTEXT_PROMPT_DEFAULT
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
         self._acl_svc: Any | None = None
@@ -1345,6 +1361,10 @@ class AIService(Service):
         self._compression_prompt = (
             str(section.get("compression_prompt", "") or "")
             or _COMPRESSION_SYSTEM_PROMPT
+        )
+        self._room_context_prompt = (
+            str(section.get("room_context_prompt", "") or "")
+            or _ROOM_CONTEXT_PROMPT_DEFAULT
         )
         self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
         self._chat_profile = section.get("chat_profile", self._chat_profile)
@@ -1545,6 +1565,23 @@ class AIService(Service):
                     "default."
                 ),
                 default=_COMPRESSION_SYSTEM_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
+                key="room_context_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt the AI sees in shared chat rooms. "
+                    "Drives whether Gilbert chimes in unprompted, how it "
+                    "addresses multiple users, etc. Two placeholders are "
+                    "substituted at send time: ``{room_title}`` (the "
+                    "shared room's title) and ``{members}`` (an indented "
+                    "bullet list of members with roles, marking the "
+                    "current speaker). Leave blank to use the bundled "
+                    "default."
+                ),
+                default=_ROOM_CONTEXT_PROMPT_DEFAULT,
                 multiline=True,
                 ai_prompt=True,
             ),
@@ -5989,7 +6026,11 @@ class AIService(Service):
                         user_message=chat_message,
                         conversation_id=conversation_id,
                         user_ctx=conn.user_ctx,
-                        system_prompt=build_room_context(conv_data, conn.user_ctx),
+                        system_prompt=build_room_context(
+                            conv_data,
+                            conn.user_ctx,
+                            self._room_context_prompt,
+                        ),
                         ai_profile=self._chat_profile,
                         attachments=attachments,
                         model=frame_model,
@@ -6399,7 +6440,11 @@ class AIService(Service):
             if is_shared and conv_data:
                 from gilbert.core.chat import build_room_context
 
-                system_prompt = build_room_context(conv_data, conn.user_ctx)
+                system_prompt = build_room_context(
+                    conv_data,
+                    conn.user_ctx,
+                    self._room_context_prompt,
+                )
 
             turn_result = await self.chat(
                 user_message=form_message,
