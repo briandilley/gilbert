@@ -2,9 +2,30 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
+
+
+class NameMatch(NamedTuple):
+    """Result of resolving a free-form name to a user.
+
+    ``confidence`` is 0.0–1.0; higher = stronger match. The canonical
+    rubric used by ``UserManagementProvider.resolve_user_id_by_name``:
+
+    - ``1.0`` — exact match against ``display_name`` / ``username``
+      (case-insensitive, trimmed).
+    - ``0.8`` — match against the first token of the display name.
+    - ``0.7`` — match against the email local part (before ``@``).
+
+    Callers pick a threshold appropriate to how much risk they want
+    to accept on a wrong match. Greeting / notification paths might
+    accept ``>= 0.7``; a destructive action (delete, demote, etc.)
+    might insist on ``1.0``.
+    """
+
+    user_id: str
+    confidence: float
 
 
 @dataclass
@@ -166,6 +187,36 @@ class UserBackend(ABC):
 
 
 @runtime_checkable
+class UserPrefReader(Protocol):
+    """Read + write per-user preference values.
+
+    Preferences live in the ``metadata`` dict on the user document
+    (the generic per-user-settings escape hatch in ``UserService``).
+    Consumers go through this protocol rather than poking at the
+    storage shape directly so the storage layout can change without
+    breaking every caller.
+
+    Keys are flat strings — namespace by prefix if needed (e.g.
+    ``"ui.theme"``). Values are JSON-serializable
+    primitives; a service that wants structured prefs should put
+    them under a single key as a dict.
+    """
+
+    async def get_user_pref(
+        self, user_id: str, key: str, default: object = None
+    ) -> object:
+        """Return the user's value for ``key`` or ``default`` if unset."""
+        ...
+
+    async def set_user_pref(self, user_id: str, key: str, value: object) -> None:
+        """Persist a pref value on the user's metadata.
+
+        Raises ``KeyError`` if the user doesn't exist.
+        """
+        ...
+
+
+@runtime_checkable
 class UserManagementProvider(Protocol):
     """Protocol for services providing user management capabilities.
 
@@ -180,6 +231,20 @@ class UserManagementProvider(Protocol):
 
     async def list_users(self) -> list[dict[str, Any]]:
         """List all users."""
+        ...
+
+    async def resolve_user_id_by_name(self, name: str) -> NameMatch | None:
+        """Resolve a free-form name to a unique user_id with confidence.
+
+        Matches the input (case-insensitive, trimmed) in priority order:
+        full ``display_name`` / ``username`` (confidence ``1.0``), then
+        first-name token (``0.8``), then email local part (``0.7``).
+        Returns the ``NameMatch`` only when exactly one user matches at
+        the highest priority level. ``None`` for empty input, no match,
+        or ambiguous match — the caller decides what to do next (ask
+        for clarification, fall back, etc.). Callers can also threshold
+        on the confidence to ignore weaker matches.
+        """
         ...
 
     @property

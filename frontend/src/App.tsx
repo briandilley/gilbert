@@ -30,6 +30,7 @@ import { AgentEditForm } from "@/components/agent/AgentEditForm";
 import { AgentDetailPage } from "@/components/agent/AgentDetailPage";
 import { GoalsListPage } from "@/components/goals/GoalsListPage";
 import { WarRoomPage } from "@/components/goals/WarRoomPage";
+import { PresencePage } from "@/components/presence/PresencePage";
 import { usePluginRouteElements } from "@/components/PluginRoutes";
 
 export default function App() {
@@ -74,6 +75,7 @@ export default function App() {
           <Route path="/agents/:agentId" element={<AgentDetailPage />} />
           <Route path="/goals" element={<GoalsListPage />} />
           <Route path="/goals/:goalId" element={<WarRoomPage />} />
+          <Route path="/presence" element={<PresencePage />} />
           <Route path="/account" element={<AccountPage />} />
           {/* Plugin-contributed routes — looked up server-side and
               rendered with components from the per-plugin registry. */}

@@ -50,7 +50,18 @@ class FakeSpeaker:
         self.calls: list[dict[str, Any]] = []
         self.raise_exc = raise_exc
         self.result = result
-        self.backend = None  # satisfies SpeakerProvider protocol
+
+    # --- SpeakerProvider protocol (new shape) ---
+
+    @property
+    def backends(self) -> dict[str, Any]:
+        return {}
+
+    def get_backend(self, name: str) -> Any:
+        return None
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        return {}
 
     async def announce(
         self,

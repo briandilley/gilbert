@@ -73,6 +73,10 @@ class _FakeWorkspaceProvider:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._files: list[dict[str, Any]] = []
+        # Conversations the ``member_workspace_roots`` stub consults.
+        # Wire this in the fixture so the fake doesn't have to thread
+        # storage through to know what's a shared room.
+        self._convs: dict[str, dict[str, Any]] | None = None
 
     def get_workspace_root(self, user_id: str, conversation_id: str) -> Path:
         d = self._root / "users" / user_id / "conversations" / conversation_id
@@ -93,6 +97,27 @@ class _FakeWorkspaceProvider:
         d = self.get_workspace_root(user_id, conversation_id) / "scratch"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    async def member_workspace_roots(
+        self,
+        caller_user_id: str,
+        conversation_id: str,
+    ) -> list[Path]:
+        # Tests that exercise the shared-room fallback set ``shared``
+        # + ``members`` on the fake conv; mirror the real service's
+        # behaviour by walking members and returning their workspace
+        # roots. The route's auth gate already validated access, so
+        # this stub doesn't re-check.
+        conv = self._convs.get(conversation_id) if self._convs is not None else None
+        if not conv or not conv.get("shared"):
+            return []
+        roots: list[Path] = []
+        for member in conv.get("members", []):
+            other_uid = str(member.get("user_id") or "")
+            if not other_uid or other_uid == caller_user_id:
+                continue
+            roots.append(self.get_workspace_root(other_uid, conversation_id))
+        return roots
 
     async def register_file(self, **kwargs: Any) -> dict[str, Any]:
         return {}
@@ -233,6 +258,11 @@ def app(
     conversations: dict[str, dict[str, Any]],
 ) -> FastAPI:
     storage = _FakeStorageProvider(_FakeStorageBackend(conversations))
+    # The shared-room fallback in the download route queries the
+    # workspace provider's ``member_workspace_roots`` — point the
+    # fake at the same conv map the storage backend sees so the
+    # member walk reflects the test's shared/personal setup.
+    workspace_provider._convs = conversations
     gilbert = _FakeGilbert(storage, workspace_provider)
 
     app = FastAPI()
@@ -473,6 +503,69 @@ def test_download_nonexistent_file_returns_404(app: FastAPI) -> None:
     client = TestClient(app)
     resp = client.get("/api/chat/download/conv-owned/never-uploaded.bin")
     assert resp.status_code == 404
+
+
+def test_download_finds_other_members_upload_in_shared_room(
+    app: FastAPI,
+    conversations: dict[str, dict[str, Any]],
+) -> None:
+    """In a shared room, member A's upload must be downloadable by member B.
+
+    Reported by Root opening a PNG Dylan attached to a shared chat —
+    the chip showed "File no longer available." Root cause: uploads
+    are written under the uploader's per-user-per-conv path, and the
+    download lookup historically only checked under the caller's
+    path. The shared-room fallback walks other members' workspaces.
+    """
+    # Set up: a shared room with both users as members.
+    conversations["conv-room"]["members"] = [
+        {"user_id": _OWNER_USER.user_id, "display_name": "Owner"},
+        {"user_id": _OTHER_USER.user_id, "display_name": "Other"},
+    ]
+
+    # Owner uploads a file.
+    _override_auth(app, _OWNER_USER)
+    client = TestClient(app)
+    payload = b"shared room screenshot bytes"
+    upload = client.post(
+        "/api/chat/upload",
+        data={"conversation_id": "conv-room"},
+        files={"file": ("notifications.png", payload, "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+    unique_name = upload.json()["name"]
+
+    # The other member opens the chip — should get the bytes back,
+    # not 404. Pre-fix this returned 404 "File not found."
+    _override_auth(app, _OTHER_USER)
+    resp = client.get(f"/api/chat/download/conv-room/{unique_name}")
+    assert resp.status_code == 200, resp.text
+    assert resp.content == payload
+
+
+def test_download_does_not_leak_across_unrelated_rooms(
+    app: FastAPI,
+    conversations: dict[str, dict[str, Any]],
+) -> None:
+    """The shared-room fallback must only widen access within the
+    same conversation — never across conversations."""
+    conversations["conv-room"]["members"] = [
+        {"user_id": _OWNER_USER.user_id, "display_name": "Owner"},
+        {"user_id": _OTHER_USER.user_id, "display_name": "Other"},
+    ]
+    # Owner uploads to conv-owned (their private chat).
+    _override_auth(app, _OWNER_USER)
+    client = TestClient(app)
+    client.post(
+        "/api/chat/upload",
+        data={"conversation_id": "conv-owned"},
+        files={"file": ("private.bin", b"private bytes", "application/octet-stream")},
+    )
+
+    # Another user has no access to conv-owned at all — should still 403.
+    _override_auth(app, _OTHER_USER)
+    resp = client.get("/api/chat/download/conv-owned/private.bin")
+    assert resp.status_code == 403
 
 
 # ── Download-all (zip) tests ─────────────────────────────────────────

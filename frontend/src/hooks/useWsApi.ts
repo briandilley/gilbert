@@ -1216,5 +1216,52 @@ export function useWsApi() {
         type: "ui.routes.list",
       }),
 
+    // ── Presence mapping (admin) ──────────────────────────────────
+
+    listPresenceThings: (filter: "all" | "mapped" | "unmapped" = "all") =>
+      rpc<{ things: PresenceThing[] }>({
+        type: "presence.things.list",
+        ...(filter === "all" ? {} : { mapped: filter === "mapped" }),
+      }).then((r) => r.things),
+
+    mapPresenceThing: (backend: string, thingId: string, userId: string) =>
+      rpc<{ thing: PresenceThing }>({
+        type: "presence.things.map",
+        backend,
+        thing_id: thingId,
+        user_id: userId,
+      }).then((r) => r.thing),
+
+    unmapPresenceThing: (backend: string, thingId: string) =>
+      rpc<{ thing: PresenceThing }>({
+        type: "presence.things.unmap",
+        backend,
+        thing_id: thingId,
+      }).then((r) => r.thing),
+
+    relabelPresenceThing: (backend: string, thingId: string, label: string) =>
+      rpc<{ thing: PresenceThing }>({
+        type: "presence.things.relabel",
+        backend,
+        thing_id: thingId,
+        label,
+      }).then((r) => r.thing),
+
+    forcePresencePoll: () =>
+      rpc<{ thing_count: number }>({ type: "presence.poll.now" }).then(
+        (r) => r.thing_count,
+      ),
+
   }), [rpc, rpcWithRef]);
+}
+
+export interface PresenceThing {
+  backend: string;
+  thing_id: string;
+  label: string;
+  kind: string;
+  first_seen: string;
+  last_seen: string;
+  signal_strength: number | null;
+  mapped_user_id: string;
 }

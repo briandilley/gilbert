@@ -1,11 +1,64 @@
 """Speaker system interface — discover, group, and play audio on speakers."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlparse, urlunparse
 
 from gilbert.interfaces.configuration import ConfigParam
+
+
+def to_browser_url(url: str) -> str:
+    """Strip scheme + host from a Gilbert-minted ``/output/`` audio URL.
+
+    ``SpeakerService._audio_url()`` mints absolute URLs targeting the
+    server's LAN IP on a hardcoded ``http://`` scheme — fine for Sonos
+    (physical LAN device, plain HTTP), broken for a browser that loaded
+    Gilbert via HTTPS through a reverse proxy. Symptom in the browser:
+    mixed-content block, or HTTPS-upgrade → TLS handshake against a
+    plaintext port → ``SSL_ERROR_RX_RECORD_TOO_LONG``.
+
+    This helper strips scheme + host from URLs whose path starts with
+    ``/output/`` (the prefix the speaker service uses for transient
+    output files). The SPA then resolves the relative path against
+    ``window.location.origin`` — whatever scheme + host actually got
+    the user to Gilbert.
+
+    External URLs (free-form ``play_audio`` calls pointing at e.g.
+    ``https://podcast.example.com/ep.mp3``) are left absolute —
+    stripping their host would point them at the SPA origin and break
+    them. The ``/output/`` prefix is the heuristic for "ours."
+
+    Lives on ``interfaces/`` so both ``BrowserSpeakerBackend`` (which
+    publishes ``speaker.browser.play`` directly) and ``SpeakerService``
+    (which fans out to a browser echo when a user has opted in) can
+    share one implementation.
+    """
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        return url
+    if not parsed.path.startswith("/output/"):
+        return url
+    return urlunparse(
+        ("", "", parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
+
+
+def split_speaker_id(speaker_id: str) -> tuple[str, str]:
+    """Split a namespaced speaker id ``<backend>:<native>`` into its parts.
+
+    Raises ``ValueError`` if ``speaker_id`` is not namespaced. Callers
+    above the backend boundary should always pass namespaced ids; bare
+    native ids are a sign of legacy / un-migrated data.
+    """
+    if ":" not in speaker_id:
+        raise ValueError(f"speaker_id must be namespaced '<backend>:<native>', got {speaker_id!r}")
+    backend, _, native = speaker_id.partition(":")
+    return backend, native
 
 
 class PlaybackState(StrEnum):
@@ -47,6 +100,7 @@ class SpeakerInfo:
     is_group_coordinator: bool = False
     volume: int = 0
     state: PlaybackState = PlaybackState.STOPPED
+    backend_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +111,7 @@ class SpeakerGroup:
     name: str
     coordinator_id: str
     member_ids: list[str] = field(default_factory=list)
+    backend_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +140,12 @@ class PlayRequest:
     restores playback when finished — no snapshot/restore dance
     required. Other backends can treat this as a hint or ignore it.
     """
+    kind: str = ""
+    """Free-form classifier used by speaker backends that fan out to
+    client UIs (e.g. ``"chat_speech"`` for Gilbert reading a chat reply
+    aloud). Backends with no UI dimension (Sonos, local) ignore it.
+    The browser backend stamps it onto the ``speaker.browser.play``
+    event so the SPA can categorize incoming clips."""
 
 
 @dataclass(frozen=True)
@@ -291,12 +352,63 @@ class SpeakerBackend(ABC):
 
 
 @runtime_checkable
+class BrowserSpeakerProtocol(Protocol):
+    """Protocol for the browser-speaker activation model.
+
+    ``BrowserSpeakerBackend`` (in ``gilbert.integrations.browser_speaker``)
+    implements this; ``SpeakerService`` narrows via ``isinstance`` to
+    call activation methods and read the active-connections map without
+    a concrete-class import (which would violate layer rules).
+    """
+
+    _active_connections: dict[str, dict[str, str]]
+
+    def activate(self, *, conn_id: str, user_id: str, display_name: str) -> None:
+        """Register ``conn_id`` as an active browser-speaker connection for ``user_id``."""
+        ...
+
+    def deactivate(self, *, conn_id: str) -> None:
+        """Remove ``conn_id`` from the active-connections map."""
+        ...
+
+
+@runtime_checkable
+class EventBusAwareSpeakerBackend(Protocol):
+    """Optional protocol for backends that publish playback frames via the event bus.
+
+    The ``browser`` backend implements this so it can push
+    ``speaker.browser.*`` events to a target user's WebSocket
+    connections. The speaker service wires the bus in after
+    construction and before ``initialize`` — mirrors how the TTS
+    service hands ``AICapableTTSBackend`` an ``AISamplingProvider``.
+    """
+
+    def set_event_bus_provider(self, provider: object) -> None:
+        """Receive the active ``EventBusProvider`` (passed as ``object``
+        to avoid a circular import; backends ``isinstance``-check it)."""
+        ...
+
+
+@runtime_checkable
 class SpeakerProvider(Protocol):
     """Protocol for services providing speaker control capabilities."""
 
     @property
-    def backend(self) -> SpeakerBackend:
-        """Access the speaker backend."""
+    def backends(self) -> Mapping[str, "SpeakerBackend"]:
+        """Mapping of currently-loaded backends, keyed by ``backend_name``."""
+        ...
+
+    def get_backend(self, name: str) -> "SpeakerBackend | None":
+        """Return a loaded backend by name, or ``None`` if not loaded."""
+        ...
+
+    async def resolve_names(self, names: list[str]) -> dict[str, str]:
+        """Resolve speaker display names to namespaced ids.
+
+        Returns ``{name: "<backend>:<native>"}``. Names that don't match
+        any known speaker are omitted from the result (callers decide
+        whether that's an error).
+        """
         ...
 
     async def announce(
@@ -330,10 +442,31 @@ class CachedSpeakerLister(Protocol):
     Used by ``ConfigurationService._resolve_dynamic_choices`` to
     populate ``speakers`` dropdowns on settings pages without
     duck-typing the service instance. Cache is refreshed on service
-    start; consumers read it synchronously.
+    start, on backend toggle, and periodically; consumers read it
+    synchronously.
     """
 
     @property
     def cached_speakers(self) -> list[SpeakerInfo]:
         """Return the last-known speaker list from the service cache."""
+        ...
+
+
+@runtime_checkable
+class SpeakerLister(Protocol):
+    """Protocol for live, on-demand speaker enumeration.
+
+    Implemented by ``SpeakerService`` and exposed via the
+    ``speaker_control`` capability. Returns a fresh union of every
+    loaded backend's ``list_speakers()`` output, namespaced and
+    user-filtered the same way the chat ``/speaker list`` tool sees
+    them: non-admin callers see every non-browser speaker plus
+    their own browser-tab entry; admins see everything. Prefer this
+    over ``CachedSpeakerLister.cached_speakers`` when freshness
+    matters more than cost (e.g. a user-triggered picker dialog).
+    """
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        """Return every speaker currently known to every loaded
+        backend, filtered to the caller's visibility."""
         ...

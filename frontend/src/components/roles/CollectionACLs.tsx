@@ -4,6 +4,7 @@ import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Select,
   SelectContent,
@@ -38,27 +39,33 @@ export function CollectionACLs() {
       queryClient.invalidateQueries({ queryKey: ["collection-acls"] }),
   });
 
-  if (isLoading) return <LoadingSpinner text="Loading collections..." className="p-4" />;
-
   return (
-    <>
-      <h1 className="text-xl sm:text-2xl font-semibold text-center mb-4">Collections</h1>
+    <div>
+      <PageHeader
+        eyebrow="SECURITY"
+        title="Collections"
+        description="Per-collection read / write role requirements for the entity store."
+      />
+      <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading ? (
+          <LoadingSpinner text="Loading collections..." className="p-4" />
+        ) : (
       <Card>
-      <CardContent className="p-0">
+      <CardContent className="px-0 py-0">
         <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b">
-              <th className="px-3 py-2 text-left font-medium">Collection</th>
-              <th className="px-3 py-2 text-left font-medium">Read Role</th>
-              <th className="px-3 py-2 text-left font-medium">Write Role</th>
+            <tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Collection</th>
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Read role</th>
+              <th className="px-3 py-2 text-left font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium">Write role</th>
               <th className="px-3 py-2 w-16"></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-border">
             {data?.collections.map((col) => (
-              <tr key={col.collection} className="border-b">
-                <td className="px-3 py-2">{col.collection}</td>
+              <tr key={col.collection} className="hover:bg-foreground/[0.025] transition-colors">
+                <td className="px-3 py-2 font-mono text-xs">{col.collection}</td>
                 <td className="px-3 py-2">
                   <Select
                     value={col.read_role}
@@ -126,6 +133,8 @@ export function CollectionACLs() {
         </div>
       </CardContent>
     </Card>
-    </>
+        )}
+      </div>
+    </div>
   );
 }

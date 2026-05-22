@@ -29,6 +29,7 @@ from gilbert.core.services import (
     SpeakerService,
     StorageService,
     ThermostatService,
+    TranscriptionService,
     TTSService,
     UserService,
 )
@@ -206,6 +207,7 @@ class Gilbert:
         # 8. Register all optional services (they self-manage enabled/disabled)
         self.service_manager.register(TTSService())
         self.service_manager.register(SpeakerService())
+        self.service_manager.register(TranscriptionService())
         self.service_manager.register(MusicService())
         self.service_manager.register(LightsService())
         self.service_manager.register(ShadesService())
@@ -318,6 +320,16 @@ class Gilbert:
         plugin_mgr = PluginManagerService()
         plugin_mgr.bind_gilbert(self)
         self.service_manager.register(plugin_mgr)
+
+        # Source-update service — admin-only "switch to branch X on
+        # origin" button on the settings page; restart is supervised by
+        # gilbert.sh, which reads ``.gilbert/pending-branch.txt`` before
+        # the next launch.
+        from gilbert.core.services.source_update import SourceUpdateService
+
+        source_update = SourceUpdateService()
+        source_update.bind_gilbert(self)
+        self.service_manager.register(source_update)
 
         # MCP client — federates tools from external MCP servers. Registered
         # before AIService so it's visible via ``get_all("ai_tools")``.

@@ -23,6 +23,7 @@ import {
   Loader2Icon,
 } from "lucide-react";
 import type { Proposal, ProposalCycle } from "@/types/proposals";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 /** Status → Tailwind badge variant for the row chip. */
 function statusVariant(
@@ -158,60 +159,53 @@ export function ProposalsPage() {
     },
   });
 
-  if (isLoading) {
-    return <LoadingSpinner text="Loading proposals..." className="p-4" />;
-  }
-
   const proposals = data?.proposals ?? [];
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-semibold flex items-center gap-2">
-            <SparklesIcon className="size-5 text-amber-500" />
-            Proposals
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Self-improvement ideas Gilbert generated based on observed
-            activity. Review the spec, then approve, reject, or archive.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => reflectMutation.mutate()}
-            disabled={reflectMutation.isPending}
-            title="Run a reflection cycle now (turns observations into new proposals)"
-          >
-            <SparklesIcon className="size-4 mr-1.5" />
-            {reflectMutation.isPending ? "Reflecting…" : "Reflect now"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => harvestMutation.mutate()}
-            disabled={harvestMutation.isPending}
-            title="Walk recent conversations and extract observation candidates"
-          >
-            <MessagesSquareIcon className="size-4 mr-1.5" />
-            {harvestMutation.isPending ? "Harvesting…" : "Harvest now"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowCycles((v) => !v)}
-            title="Show recent reflection / harvest runs"
-          >
-            <HistoryIcon className="size-4 mr-1.5" />
-            {showCycles ? "Hide runs" : "Recent runs"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => refetch()} title="Refresh">
-            <RefreshCcwIcon className="size-4" />
-          </Button>
-        </div>
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="REFLECTION"
+        title="Proposals"
+        description="Self-improvement ideas Gilbert generated based on observed activity. Review the spec, then approve, reject, or archive."
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => reflectMutation.mutate()}
+              disabled={reflectMutation.isPending}
+              title="Run a reflection cycle now (turns observations into new proposals)"
+            >
+              <SparklesIcon />
+              {reflectMutation.isPending ? "Reflecting…" : "Reflect now"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => harvestMutation.mutate()}
+              disabled={harvestMutation.isPending}
+              title="Walk recent conversations and extract observation candidates"
+            >
+              <MessagesSquareIcon />
+              {harvestMutation.isPending ? "Harvesting…" : "Harvest now"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowCycles((v) => !v)}
+              title="Show recent reflection / harvest runs"
+            >
+              <HistoryIcon />
+              {showCycles ? "Hide runs" : "Recent runs"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => refetch()} title="Refresh">
+              <RefreshCcwIcon />
+            </Button>
+          </>
+        }
+      />
+      <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6 sm:py-6">
+        {isLoading && <LoadingSpinner text="Loading proposals..." className="p-4" />}
 
       {triggerMessage && (
         <div className="mb-4 rounded border bg-muted/40 px-3 py-2 text-sm">
@@ -271,6 +265,7 @@ export function ProposalsPage() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

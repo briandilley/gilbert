@@ -9,6 +9,9 @@ interface MessageListProps {
   uiBlocks: UIBlock[];
   isShared: boolean;
   currentUserId?: string;
+  /** Active conversation id — used to scope inline browser-speaker
+   *  audio bubbles to the chat they were emitted into. */
+  conversationId?: string;
   onBlockSubmit: (blockId: string, values: Record<string, unknown>) => void;
 }
 
@@ -23,6 +26,7 @@ export function MessageList({
   uiBlocks,
   isShared,
   currentUserId,
+  conversationId,
   onBlockSubmit,
 }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);

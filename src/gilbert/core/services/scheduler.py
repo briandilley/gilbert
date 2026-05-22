@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
-from gilbert.core.context import get_current_user
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.scheduler import (
@@ -369,6 +369,7 @@ class SchedulerService(Service):
         enabled: bool = True,
         owner: str = "",
         action: ScheduledAction | None = None,
+        replace_existing: bool = False,
     ) -> JobInfo:
         """Register a job. System jobs are not user-editable.
 
@@ -376,9 +377,22 @@ class SchedulerService(Service):
         ``action`` carries dispatch metadata (tool call, ai_prompt, or
         event fallback) so ``list_jobs()`` can report what each job
         will do when it fires.
+
+        Pass ``replace_existing=True`` for system jobs registered from
+        a service's ``start()`` so that a service-restart cycle
+        (triggered by a config change) doesn't trip the "already
+        registered" guard. ``stop()`` can't remove system jobs through
+        the public ``remove_job`` API, so idempotent re-registration is
+        the cleanest pattern. Without this flag, set-once behavior is
+        preserved.
         """
         if name in self._jobs:
-            raise ValueError(f"Job '{name}' already registered")
+            if not replace_existing:
+                raise ValueError(f"Job '{name}' already registered")
+            existing = self._jobs[name]
+            if existing.task is not None:
+                existing.task.cancel()
+            del self._jobs[name]
 
         job = _Job(
             name=name,
@@ -403,15 +417,19 @@ class SchedulerService(Service):
         )
         return job.info
 
-    def remove_job(self, name: str, requester_id: str = "") -> None:
-        """Remove a job. System jobs cannot be removed.
+    def remove_job(
+        self, name: str, requester_id: str = "", *, force: bool = False
+    ) -> None:
+        """Remove a job. System jobs cannot be removed by external callers.
 
-        Non-admin users can only remove jobs they own.
+        Non-admin users can only remove jobs they own. The owning
+        service of a system job can pass ``force=True`` to replace it
+        (e.g. AgentService re-arming a heartbeat).
         """
         job = self._jobs.get(name)
         if job is None:
             raise KeyError(f"Job not found: {name}")
-        if job.info.system:
+        if job.info.system and not force:
             raise ValueError(f"Cannot remove system job: {name}")
         # Ownership check: if requester is set and doesn't match owner, deny
         if requester_id and job.info.owner and requester_id != job.info.owner:

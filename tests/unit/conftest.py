@@ -134,9 +134,13 @@ class _FakeSchedulerProvider:
         self.added_jobs.append(name)
         self._jobs[name] = kwargs
 
-    def remove_job(self, name: str, requester_id: str = "") -> None:
+    def remove_job(
+        self, name: str, requester_id: str = "", *, force: bool = False
+    ) -> None:
         if name not in self._jobs:
             raise KeyError(f"Job not found: {name}")
+        if self._jobs[name].get("system") and not force:
+            raise ValueError(f"Cannot remove system job: {name}")
         self.removed_jobs.append(name)
         self._jobs.pop(name, None)
 

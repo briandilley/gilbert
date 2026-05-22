@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.context import set_current_user
 from gilbert.core.services.feeds import (
     _BRIEFING_STATE_COLLECTION,
     _BRIEFINGS_COLLECTION,
@@ -27,6 +26,7 @@ from gilbert.core.services.feeds import (
     _safe_uid,
     _strip_json_fences,
 )
+from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.ai import (
     AIResponse,
     Message,
@@ -1973,4 +1973,3 @@ class TestContentTypeGuard:
         monkeypatch.setattr(svc, "_safe_to_fetch", fake_safe)
         await svc._ingest_item(feed, FeedItem(item_uid="html", title="t", link="https://example.org/news"))
         assert len(knowledge.indexed) == 1
-

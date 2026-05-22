@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -25,12 +26,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, SparklesIcon, PuzzleIcon } from "lucide-react";
+import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, PuzzleIcon, PencilLineIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { cn } from "@/lib/utils";
 import type { ConfigParamMeta } from "@/types/config";
 import { normalizeChoice } from "@/types/config";
-import { AuthorPromptDialog } from "./AuthorPromptDialog";
+import { PromptEditorDialog } from "./PromptEditorDialog";
 
 interface ConfigFieldProps {
   param: ConfigParamMeta;
@@ -51,56 +53,56 @@ function humanize(key: string): string {
 
 export function ConfigField({ param, value, onChange, namespace }: ConfigFieldProps) {
   const [showPassword, setShowPassword] = useState(false);
-  const [authorOpen, setAuthorOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
 
   const handleReset = () => onChange(param.key, param.default);
   const label = humanize(param.key);
 
-  // "Author with AI" is only available for multiline AI-prompt fields and
-  // when the parent provided the namespace (always true in the Settings UI).
-  const canAuthor = param.ai_prompt && param.multiline && !!namespace;
+  // AI-prompt fields render as a compact preview + Edit-prompt button
+  // that opens a full-size dialog. The dialog hosts the textarea AND
+  // the "Author with AI" rewrite flow, so inline-textarea editing for
+  // these fields is gone — they were eating vertical space in dense
+  // forms.
+  const isAiPrompt = param.ai_prompt && param.multiline && !!namespace;
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <Label htmlFor={param.key} className="text-sm font-medium">
+        <Label
+          htmlFor={param.key}
+          className="text-xs font-medium leading-none"
+        >
           {label}
         </Label>
         {param.restart_required && (
-          <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-amber-500 border-amber-500/40">
-            restart
-          </Badge>
-        )}
-        {canAuthor && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto h-6 gap-1 px-2 text-xs"
-            onClick={() => setAuthorOpen(true)}
-            title="Edit this prompt with AI assistance"
-          >
-            <SparklesIcon className="size-3" />
-            Author with AI
-          </Button>
+          <Badge variant="warning">restart-required</Badge>
         )}
         <Button
           variant="ghost"
-          size="sm"
-          className={`h-5 w-5 p-0 opacity-40 hover:opacity-100 ${canAuthor ? "" : "ml-auto"}`}
+          size="icon-xs"
+          className="ml-auto opacity-50 hover:opacity-100"
           onClick={handleReset}
           title="Reset to default"
         >
-          <RotateCcwIcon className="size-3" />
+          <RotateCcwIcon />
         </Button>
       </div>
 
-      <FieldControl
-        param={param}
-        value={value}
-        onChange={onChange}
-        showPassword={showPassword}
-        setShowPassword={setShowPassword}
-      />
+      {isAiPrompt ? (
+        <PromptFieldPreview
+          value={String(value ?? "")}
+          placeholder={param.default ? String(param.default) : ""}
+          onEdit={() => setPromptOpen(true)}
+        />
+      ) : (
+        <FieldControl
+          param={param}
+          value={value}
+          onChange={onChange}
+          showPassword={showPassword}
+          setShowPassword={setShowPassword}
+        />
+      )}
 
       <p className="text-xs text-muted-foreground">{param.description}</p>
 
@@ -108,18 +110,71 @@ export function ConfigField({ param, value, onChange, namespace }: ConfigFieldPr
         <PromptContributors target={param.extensible_target} />
       ) : null}
 
-      {canAuthor && namespace && (
-        <AuthorPromptDialog
-          open={authorOpen}
-          onClose={() => setAuthorOpen(false)}
+      {isAiPrompt && namespace && (
+        <PromptEditorDialog
+          open={promptOpen}
+          onClose={() => setPromptOpen(false)}
           namespace={namespace}
           paramKey={param.key}
           paramLabel={label}
+          description={param.description}
           currentText={String(value ?? "")}
           onApply={(newText) => onChange(param.key, newText)}
         />
       )}
     </div>
+  );
+}
+
+/** Compact preview for AI-prompt fields. Shows line / character
+ *  count + the first line, with an "Edit prompt" trigger that opens
+ *  the full-size editor dialog. */
+function PromptFieldPreview({
+  value,
+  placeholder,
+  onEdit,
+}: {
+  value: string;
+  placeholder: string;
+  onEdit: () => void;
+}) {
+  const text = value || placeholder;
+  const firstLine =
+    text.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  const lineCount = text.split("\n").length;
+  const charCount = text.length;
+  const isPlaceholder = !value && !!placeholder;
+
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      className={cn(
+        "group flex w-full items-center gap-3 rounded-md border border-input bg-transparent",
+        "px-2.5 py-2 text-left",
+        "transition-[border-color,background-color] duration-(--duration-fast) ease-(--ease-out)",
+        "hover:border-border-strong hover:bg-foreground/[0.02]",
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            "font-mono text-xs truncate",
+            isPlaceholder
+              ? "text-muted-foreground/70 italic"
+              : "text-foreground",
+          )}
+        >
+          {firstLine || "(empty)"}
+        </div>
+        <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground">
+          {lineCount} line{lineCount === 1 ? "" : "s"} · {charCount} char
+          {charCount === 1 ? "" : "s"}
+          {isPlaceholder ? " · default" : ""}
+        </div>
+      </div>
+      <PencilLineIcon className="size-3.5 text-muted-foreground shrink-0 transition-colors group-hover:text-foreground" />
+    </button>
   );
 }
 
@@ -207,21 +262,14 @@ function FieldControl({
   showPassword: boolean;
   setShowPassword: (v: boolean) => void;
 }) {
-  // Boolean → toggle switch
+  // Boolean → Switch primitive (uniform across the app).
   if (param.type === "boolean") {
     const checked = value === true || value === "true";
     return (
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${checked ? "bg-primary" : "bg-muted"}`}
-        onClick={() => onChange(param.key, !checked)}
-      >
-        <span
-          className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${checked ? "translate-x-5" : "translate-x-0"}`}
-        />
-      </button>
+      <Switch
+        checked={checked}
+        onCheckedChange={(v: boolean) => onChange(param.key, v)}
+      />
     );
   }
 
@@ -229,13 +277,22 @@ function FieldControl({
   // {value, label} objects for friendly labels (e.g. mailbox dropdown).
   if (param.type === "string" && param.choices && param.choices.length > 0) {
     const options = param.choices.map(normalizeChoice);
+    // base-ui's SelectValue defaults to showing the raw value (e.g.
+    // ``usr_abc123``), which is useless for value-vs-label pairs.
+    // Map the selected value back to its label so the trigger reads
+    // like the user expects.
+    const labelByValue = new Map(options.map((o) => [o.value, o.label]));
     return (
       <Select
         value={String(value ?? "")}
         onValueChange={(v) => onChange(param.key, v ?? "")}
       >
         <SelectTrigger className="w-full">
-          <SelectValue placeholder="Select..." />
+          <SelectValue placeholder="Select...">
+            {(v: string | null) =>
+              v ? (labelByValue.get(v) ?? v) : "Select..."
+            }
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           {options.map((opt) => (
@@ -258,24 +315,28 @@ function FieldControl({
     );
   }
 
-  // String + sensitive → password with reveal toggle
+  // String + sensitive → password with reveal toggle.
+  // The mono Input + signal-color "secret-field" hint marks this as a
+  // technical-content field worth caution.
   if (param.type === "string" && param.sensitive) {
     return (
       <div className="relative">
         <Input
           id={param.key}
+          mono
           type={showPassword ? "text" : "password"}
           value={String(value ?? "")}
           onChange={(e) => onChange(param.key, e.target.value)}
-          className="pr-10 font-mono text-xs"
+          className="pr-8"
         />
         <Button
           variant="ghost"
-          size="sm"
-          className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+          size="icon-xs"
+          className="absolute right-1 top-1/2 -translate-y-1/2"
           onClick={() => setShowPassword(!showPassword)}
+          title={showPassword ? "Hide" : "Reveal"}
         >
-          {showPassword ? <EyeOffIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
+          {showPassword ? <EyeOffIcon /> : <EyeIcon />}
         </Button>
       </div>
     );

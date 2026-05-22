@@ -358,7 +358,7 @@ class WeatherProvider(Protocol):
     identity in without relying on a ContextVar that may not be set.
     Inside ``WeatherService``, a single helper ``_resolve_user(user)``
     is the only place that may fall back to
-    ``gilbert.core.context.get_current_user()`` when ``user is None``.
+    ``gilbert.interfaces.context.get_current_user()`` when ``user is None``.
     """
 
     async def get_current(
@@ -397,4 +397,3 @@ class WeatherProvider(Protocol):
     async def resolve_location(self, user: UserContext | None) -> GeoLocation | None: ...
 
     async def resolve_units(self, user: UserContext | None) -> WeatherUnits: ...
-

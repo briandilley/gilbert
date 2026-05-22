@@ -270,7 +270,7 @@ class InboxProvider(Protocol):
     "default" mailbox.
 
     Read methods (``get_message``, ``get_thread``, ``search_messages``)
-    rely on the current user from ``gilbert.core.context.get_current_user``
+    rely on the current user from ``gilbert.interfaces.context.get_current_user``
     for visibility filtering. Mutating methods take ``user_ctx``
     explicitly so the actor is unambiguous at the call site.
     """

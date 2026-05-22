@@ -1,0 +1,81 @@
+import {
+  MessageSquareIcon,
+  FileTextIcon,
+  InboxIcon,
+  ShieldIcon,
+  SlidersHorizontalIcon,
+  SettingsIcon,
+  DatabaseIcon,
+  MonitorIcon,
+  ClockIcon,
+  PackageIcon,
+  PlugIcon,
+  PlugZapIcon,
+  UsersIcon,
+  UserCheckIcon,
+  WrenchIcon,
+  SparklesIcon,
+  FolderLockIcon,
+  HeadphonesIcon,
+  RadioIcon,
+  RotateCcwIcon,
+  TerminalIcon,
+  BarChart3Icon,
+  RssIcon,
+  type LucideIcon,
+} from "lucide-react";
+
+/** Map of icon names returned by the backend to lucide components. */
+const ICONS: Record<string, LucideIcon> = {
+  "message-square": MessageSquareIcon,
+  "file-text": FileTextIcon,
+  "inbox": InboxIcon,
+  "shield": ShieldIcon,
+  "sliders": SlidersHorizontalIcon,
+  "settings": SettingsIcon,
+  "database": DatabaseIcon,
+  "monitor": MonitorIcon,
+  "clock": ClockIcon,
+  "package": PackageIcon,
+  "plug": PlugIcon,
+  "plug-zap": PlugZapIcon,
+  "users": UsersIcon,
+  "user-check": UserCheckIcon,
+  "wrench": WrenchIcon,
+  "sparkles": SparklesIcon,
+  "folder-lock": FolderLockIcon,
+  "headphones": HeadphonesIcon,
+  "radio": RadioIcon,
+  "rotate-ccw": RotateCcwIcon,
+  "terminal": TerminalIcon,
+  "bar-chart": BarChart3Icon,
+  "rss": RssIcon,
+};
+
+export function groupIconFor(name: string): LucideIcon | undefined {
+  return ICONS[name];
+}
+
+/** Tailwind text color for each top-level group's icon. */
+export const GROUP_COLORS: Record<string, string> = {
+  chat: "text-blue-500",
+  inbox: "text-emerald-500",
+  feeds: "text-orange-500",
+  knowledge: "text-amber-500",
+  media: "text-rose-500",
+  mcp: "text-pink-500",
+  security: "text-violet-500",
+  system: "text-slate-500",
+};
+
+/** Tailwind bg color for the active-accent bar. */
+export const GROUP_ACCENT_BG: Record<string, string> = {
+  chat: "bg-blue-500",
+  inbox: "bg-emerald-500",
+  feeds: "bg-orange-500",
+  knowledge: "bg-amber-500",
+  media: "bg-rose-500",
+  mcp: "bg-pink-500",
+  security: "bg-violet-500",
+  system: "bg-slate-500",
+};

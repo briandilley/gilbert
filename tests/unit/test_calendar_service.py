@@ -54,6 +54,7 @@ class FakeCalendarBackend(CalendarBackend):
 
     backend_name = "fake_calendar"
     display_name = "Fake Calendar"
+    last_initialized_with: dict[str, Any] | None = None
 
     def __init__(self) -> None:
         self.events: dict[str, CalendarEvent] = {}
@@ -78,6 +79,7 @@ class FakeCalendarBackend(CalendarBackend):
 
     async def initialize(self, config: dict[str, Any] | None = None) -> None:
         self.initialized_with = dict(config or {})
+        type(self).last_initialized_with = self.initialized_with
 
     async def close(self) -> None:
         self.closed = True
@@ -773,6 +775,51 @@ async def test_get_account_returns_none_for_unauthorized_user(sqlite_storage: SQ
     account, _ = await _seed_account(svc)
     out = await svc.get_account(account.id, _user_ctx("carol"))
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_probe_calendars_passes_calendar_id_to_backend(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account = _make_account(
+        poll_enabled=False,
+    )
+    account.calendar_id = "shared-calendar@example.com"
+    account.backend_config = {"service_account_json": "{}"}
+    created = await svc.create_account(account, _user_ctx("alice"))
+    FakeCalendarBackend.last_initialized_with = None
+
+    await svc.probe_calendars(created.id, _user_ctx("alice"))
+
+    assert FakeCalendarBackend.last_initialized_with is not None
+    assert (
+        FakeCalendarBackend.last_initialized_with["calendar_id"]
+        == "shared-calendar@example.com"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connection_passes_calendar_id_to_backend(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account = _make_account(
+        poll_enabled=False,
+    )
+    account.calendar_id = "shared-calendar@example.com"
+    account.backend_config = {"service_account_json": "{}"}
+    created = await svc.create_account(account, _user_ctx("alice"))
+    FakeCalendarBackend.last_initialized_with = None
+
+    out = await svc.test_account_connection(created.id, _user_ctx("alice"))
+
+    assert out["ok"] is True
+    assert FakeCalendarBackend.last_initialized_with is not None
+    assert (
+        FakeCalendarBackend.last_initialized_with["calendar_id"]
+        == "shared-calendar@example.com"
+    )
 
 
 @pytest.mark.asyncio

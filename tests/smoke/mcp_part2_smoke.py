@@ -117,7 +117,7 @@ async def verify_bearer_rejected(url: str, wrong_token: str) -> None:
 async def drive_through_service(url: str) -> None:
     """Exercise MCPService with a live HTTP backend: alice sees it,
     bob doesn't, alice can execute_tool through the encoded name."""
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     svc = MCPService()
     svc._enabled = True
