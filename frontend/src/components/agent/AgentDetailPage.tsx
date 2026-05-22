@@ -63,6 +63,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
+import { PageHeader } from "@/components/layout/PageHeader";
 import type { GilbertEvent } from "@/types/events";
 
 const TAB_VALUES = ["chat", "settings", "memory", "commitments", "runs"] as const;
@@ -134,9 +135,16 @@ export function AgentDetailPage() {
 
   if (agentQuery.isPending) {
     return (
-      <div className="p-6">
-        <BackLink />
-        <div className="mt-4">
+      <div>
+        <PageHeader
+          eyebrow={
+            <Link to="/agents" className="hover:text-foreground transition-colors">
+              AUTONOMOUS / AGENTS
+            </Link>
+          }
+          title="Loading agent…"
+        />
+        <div className="px-6 py-6">
           <LoadingSpinner text="Loading agent…" />
         </div>
       </div>
@@ -147,11 +155,18 @@ export function AgentDetailPage() {
     const err = agentQuery.error;
     const isNotFound = err instanceof ApiError && err.status === 404;
     return (
-      <div className="p-6">
-        <BackLink />
+      <div>
+        <PageHeader
+          eyebrow={
+            <Link to="/agents" className="hover:text-foreground transition-colors">
+              AUTONOMOUS / AGENTS
+            </Link>
+          }
+          title="Agent unavailable"
+        />
         <div
           role="alert"
-          className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="mx-6 mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {isNotFound ? (
             <>
@@ -220,93 +235,84 @@ export function AgentDetailPage() {
   // ── Render ───────────────────────────────────────────────────────
 
   return (
-    <div className="p-6 space-y-4">
-      <BackLink />
-
-      {/* Header card */}
-      <div className="rounded-md border bg-card p-4">
-        <div className="flex items-start gap-4">
-          <AgentAvatar agent={agent} size="md" />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-lg font-semibold truncate">
-                {agent.display_name || agent.name}
-              </h1>
-              <code className="text-xs text-muted-foreground font-mono">
-                {agent.name}
-              </code>
-              <Badge
-                className={
-                  isEnabled
-                    ? "bg-green-500/15 text-green-600 dark:text-green-400"
-                    : "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400"
-                }
-                variant="outline"
-              >
-                {agent.status}
-              </Badge>
-            </div>
-            {agent.role_label && (
-              <div className="text-sm text-muted-foreground truncate">
-                {agent.role_label}
-              </div>
-            )}
-          </div>
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                onClick={handleRunNow}
-                disabled={runNow.isPending || !isEnabled}
-                title={
-                  !isEnabled
-                    ? "Enable the agent before running."
-                    : undefined
-                }
-              >
-                {runNow.isPending ? (
-                  <span className="inline-flex items-center gap-2">
-                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                    Running…
-                  </span>
-                ) : (
-                  "Run now"
-                )}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleToggleStatus}
-                disabled={setStatus.isPending}
-              >
-                {setStatus.isPending
-                  ? "Saving…"
-                  : isEnabled
-                    ? "Disable"
-                    : "Enable"}
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={() => setConfirmDeleteOpen(true)}
-                disabled={isDeletePending}
-              >
-                Delete
-              </Button>
-            </div>
+    <div>
+      <PageHeader
+        eyebrow={
+          <span className="space-x-1.5">
+            <Link
+              to="/agents"
+              className="hover:text-foreground transition-colors"
+            >
+              AUTONOMOUS / AGENTS
+            </Link>
+            <span className="text-muted-foreground/60">/</span>
+            <code className="font-mono">{agent.name}</code>
+          </span>
+        }
+        title={
+          <span className="flex items-center gap-3">
+            <AgentAvatar agent={agent} size="md" />
+            <span className="truncate">{agent.display_name || agent.name}</span>
+            <Badge variant={isEnabled ? "active" : "warning"} dot>
+              {agent.status}
+            </Badge>
+          </span>
+        }
+        description={agent.role_label || undefined}
+        actions={
+          <>
+            <Button
+              size="sm"
+              onClick={handleRunNow}
+              disabled={runNow.isPending || !isEnabled}
+              title={!isEnabled ? "Enable the agent before running." : undefined}
+            >
+              {runNow.isPending ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  Running…
+                </span>
+              ) : (
+                "Run now"
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleToggleStatus}
+              disabled={setStatus.isPending}
+            >
+              {setStatus.isPending
+                ? "Saving…"
+                : isEnabled
+                  ? "Disable"
+                  : "Enable"}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setConfirmDeleteOpen(true)}
+              disabled={isDeletePending}
+            >
+              Delete
+            </Button>
             <PluginPanelSlot slot="agent.detail.toolbar" />
-          </div>
-        </div>
+          </>
+        }
+      />
 
+      <div className="px-4 py-4 sm:px-6 sm:py-6 space-y-4">
         {actionError && (
           <div
             role="alert"
-            className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           >
             {actionError}
           </div>
         )}
-      </div>
 
-      {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(String(v))}>
+        {/* Tabs */}
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(String(v))}>
         <TabsList>
           <TabsTrigger value="chat">Chat</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
@@ -317,49 +323,50 @@ export function AgentDetailPage() {
         {/* Plugin-contributed extra tabs go alongside the built-ins. */}
         <PluginPanelSlot slot="agent.detail.settings.tabs" />
 
-        <TabsContent value="chat">
-          {/*
-           * Phase 1B: full chat composer/turn rendering inside this
-           * tab is deferred. We either show a placeholder if the agent
-           * has never run (no ``conversation_id`` yet) or link to the
-           * main chat page for the existing conversation.
-           */}
-          {agent.conversation_id === "" ? (
-            <div className="border rounded-md p-4 text-sm text-muted-foreground">
-              No conversation yet — click "Run now" above to start one.
-            </div>
-          ) : (
-            <div className="border rounded-md p-4 text-sm">
-              <p className="text-muted-foreground">
-                Personal conversation:{" "}
-                <code className="font-mono">{agent.conversation_id}</code>
-              </p>
-              <Link
-                to={`/chat?conversation=${encodeURIComponent(agent.conversation_id)}`}
-                className="text-blue-600 hover:underline"
-              >
-                Open in Chat ↗
-              </Link>
-            </div>
-          )}
-        </TabsContent>
+          <TabsContent value="chat">
+            {/*
+             * Phase 1B: full chat composer/turn rendering inside this
+             * tab is deferred. We either show a placeholder if the agent
+             * has never run (no ``conversation_id`` yet) or link to the
+             * main chat page for the existing conversation.
+             */}
+            {agent.conversation_id === "" ? (
+              <div className="rounded-md border border-border bg-card p-4 text-sm text-muted-foreground">
+                No conversation yet — click "Run now" above to start one.
+              </div>
+            ) : (
+              <div className="rounded-md border border-border bg-card p-4 text-sm space-y-1">
+                <p className="text-muted-foreground">
+                  Personal conversation:{" "}
+                  <code className="font-mono">{agent.conversation_id}</code>
+                </p>
+                <Link
+                  to={`/chat?conversation=${encodeURIComponent(agent.conversation_id)}`}
+                  className="text-(--signal) hover:underline"
+                >
+                  Open in Chat ↗
+                </Link>
+              </div>
+            )}
+          </TabsContent>
 
-        <TabsContent value="settings">
-          <AgentEditForm mode="edit" agent={agent} />
-        </TabsContent>
+          <TabsContent value="settings">
+            <AgentEditForm mode="edit" agent={agent} />
+          </TabsContent>
 
-        <TabsContent value="memory">
-          <MemoryBrowser agentId={agent._id} />
-        </TabsContent>
+          <TabsContent value="memory">
+            <MemoryBrowser agentId={agent._id} />
+          </TabsContent>
 
-        <TabsContent value="commitments">
-          <CommitmentsList agentId={agent._id} />
-        </TabsContent>
+          <TabsContent value="commitments">
+            <CommitmentsList agentId={agent._id} />
+          </TabsContent>
 
-        <TabsContent value="runs">
-          <RunsTable agentId={agent._id} />
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="runs">
+            <RunsTable agentId={agent._id} />
+          </TabsContent>
+        </Tabs>
+      </div>
 
       {/* Delete confirmation */}
       <Dialog
@@ -377,6 +384,7 @@ export function AgentDetailPage() {
           <DialogFooter>
             <Button
               variant="outline"
+              size="sm"
               onClick={() => setConfirmDeleteOpen(false)}
               disabled={isDeletePending}
             >
@@ -384,6 +392,7 @@ export function AgentDetailPage() {
             </Button>
             <Button
               variant="destructive"
+              size="sm"
               onClick={handleDelete}
               disabled={isDeletePending}
             >
@@ -393,16 +402,5 @@ export function AgentDetailPage() {
         </DialogContent>
       </Dialog>
     </div>
-  );
-}
-
-function BackLink() {
-  return (
-    <Link
-      to="/agents"
-      className="text-sm text-muted-foreground hover:text-foreground hover:underline"
-    >
-      ← Agents
-    </Link>
   );
 }

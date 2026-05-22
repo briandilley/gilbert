@@ -15,6 +15,7 @@ from gilbert.core.services.shades import ShadesService
 from gilbert.core.services.speaker import SpeakerService
 from gilbert.core.services.storage import StorageService
 from gilbert.core.services.thermostat import ThermostatService
+from gilbert.core.services.transcription import TranscriptionService
 from gilbert.core.services.tts import TTSService
 from gilbert.core.services.users import UserService
 
@@ -34,6 +35,7 @@ __all__ = [
     "SpeakerService",
     "StorageService",
     "ThermostatService",
+    "TranscriptionService",
     "TTSService",
     "UserService",
 ]

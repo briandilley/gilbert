@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.ai import AIProvider, AISamplingProvider, Message, MessageRole
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
@@ -25,6 +25,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.users import UserManagementProvider
 from gilbert.interfaces.weather import (
     LocationNotConfiguredError,
     WeatherProvider,
@@ -35,6 +36,32 @@ from gilbert.interfaces.weather import (
 logger = logging.getLogger(__name__)
 
 _GREETING_COLLECTION = "greeting_state"
+
+# Manual ``/greet`` only uses the resolved user_id when the match
+# confidence clears this bar. Below the threshold we still greet by
+# the raw name, but don't pull recent-greeting history or mark anyone
+# as greeted — those are user-keyed records and we'd rather drop them
+# than attribute them to the wrong person.
+_GREETING_MATCH_CONFIDENCE_THRESHOLD: float = 0.7
+
+# Default template for the manual ``/greet`` AI prompt. The live value
+# is read from ``greeting.enhanced_greeting_prompt`` and cached on
+# ``self._enhanced_greeting_prompt`` so the Settings UI can tune it
+# without a restart. Placeholders are filled with ``.format_map`` —
+# missing ones in a user-edited version render empty, malformed
+# templates fall back to this default at call time.
+_DEFAULT_ENHANCED_GREETING_PROMPT = """\
+Generate a personalized morning greeting for {name}. You're Gilbert, an AI \
+assistant at a business — feel free to use any read-only data-lookup tools \
+available to you (presence, recent activity, project status, time logs, etc.) \
+to gather context that could make the greeting feel personal. Vary your tone \
+across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). Mention \
+their name. 1-2 sentences.
+
+Do NOT call any tool that broadcasts, announces, sends a message, or plays \
+audio — the greeting is delivered separately by the calling code. Reply with \
+ONLY the greeting text — no quotes, no preamble, no commentary on which tools \
+you used.{style_instruction}{avoid_section}"""
 
 _DEFAULT_WEATHER_HINT_TEMPLATE = (
     "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
@@ -71,6 +98,7 @@ class GreetingService(Service):
         self._speakers: list[str] = []
         self._timezone: str = "UTC"
         self._ai_profile: str = "light"
+        self._enhanced_greeting_prompt: str = _DEFAULT_ENHANCED_GREETING_PROMPT
         self._include_weather: bool = True
         self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
         self._weather: WeatherProvider | None = None
@@ -128,6 +156,9 @@ class GreetingService(Service):
                 self._style = section.get("style", "")
                 self._speakers = section.get("speakers", [])
                 self._timezone = section.get("timezone", "UTC")
+                self._enhanced_greeting_prompt = (
+                    section.get("enhanced_greeting_prompt") or _DEFAULT_ENHANCED_GREETING_PROMPT
+                )
                 self._include_weather = bool(
                     section.get("include_weather", self._include_weather)
                 )
@@ -137,9 +168,7 @@ class GreetingService(Service):
                 ) or _DEFAULT_WEATHER_HINT_TEMPLATE
 
         # Optional weather provider — if missing or wrong protocol,
-        # we silently degrade to the no-weather greeting. Capability
-        # protocol from ``interfaces/weather.py``; never isinstance-
-        # check against the concrete service class.
+        # degrade to the no-weather greeting.
         weather_svc = resolver.get_capability("weather")
         if isinstance(weather_svc, WeatherProvider):
             self._weather = weather_svc
@@ -246,6 +275,19 @@ class GreetingService(Service):
                 multiline=True,
                 ai_prompt=True,
             ),
+            ConfigParam(
+                key="enhanced_greeting_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Prompt template for the manual /greet tool (the path that "
+                    "lets the AI use data-lookup tools to personalize the "
+                    "greeting). Placeholders: {name}, {style_instruction}, "
+                    "{avoid_section}."
+                ),
+                default=_DEFAULT_ENHANCED_GREETING_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -262,6 +304,11 @@ class GreetingService(Service):
             "weather_hint_template",
             self._weather_hint_template,
         ) or _DEFAULT_WEATHER_HINT_TEMPLATE
+        if "enhanced_greeting_prompt" in config:
+            # Empty string explicitly clears back to the bundled default.
+            self._enhanced_greeting_prompt = (
+                config["enhanced_greeting_prompt"] or _DEFAULT_ENHANCED_GREETING_PROMPT
+            )
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -458,14 +505,7 @@ class GreetingService(Service):
             return datetime.now(UTC).strftime("%Y-%m-%d")
 
     async def _build_weather_blurb(self, user: UserContext | None = None) -> str:
-        """Build a deterministic one-line weather blurb for the prompt.
-
-        Returns ``""`` when the WeatherService is missing, the user has
-        no configured location, or the backend is unavailable. Errors
-        propagate as ``LocationNotConfiguredError`` /
-        ``WeatherUnavailableError`` from ``WeatherProvider``; we catch
-        them by exact type so real bugs still surface.
-        """
+        """Build a deterministic one-line weather blurb for the greeting prompt."""
         if not self._include_weather or self._weather is None:
             return ""
         try:
@@ -475,6 +515,7 @@ class GreetingService(Service):
         except WeatherUnavailableError:
             logger.debug("Weather backend unavailable for greeting; skipping blurb")
             return ""
+
         temp_suffix = "°F" if current.units is WeatherUnits.IMPERIAL else "°C"
         speed_suffix = "mph" if current.units is WeatherUnits.IMPERIAL else "km/h"
         condition_phrase = current.condition.value.replace("_", " ")
@@ -485,6 +526,7 @@ class GreetingService(Service):
         ):
             feels_like_clause = f", feels like {current.feels_like:.0f}{temp_suffix}"
         location_name = current.location.name or "the configured location"
+
         try:
             return self._weather_hint_template.format(
                 location_name=location_name,
@@ -496,9 +538,7 @@ class GreetingService(Service):
                 feels_like_clause=feels_like_clause,
             )
         except (KeyError, IndexError, ValueError):
-            logger.warning(
-                "Greeting weather_hint_template format failed", exc_info=True,
-            )
+            logger.warning("Greeting weather_hint_template format failed", exc_info=True)
             return ""
 
     async def _generate_greeting(self, name: str, recent: list[str] | None = None) -> str:
@@ -602,6 +642,95 @@ class GreetingService(Service):
 
         return f"Good morning, {names_str}!"
 
+    async def _resolve_user_match(self, name: str) -> Any:
+        """Delegate name → user lookup to the user service.
+
+        Returns the ``NameMatch`` (with ``user_id`` + ``confidence``)
+        or ``None`` when the resolver isn't wired, the user service
+        isn't around, or the lookup didn't find a unique match.
+        """
+        if not name or self._resolver is None:
+            return None
+        users_svc = self._resolver.get_capability("users")
+        if not isinstance(users_svc, UserManagementProvider):
+            return None
+        try:
+            return await users_svc.resolve_user_id_by_name(name)
+        except Exception:
+            logger.debug("greet: resolve_user_id_by_name failed", exc_info=True)
+            return None
+
+    async def _generate_greeting_enhanced(
+        self, name: str, recent: list[str] | None = None
+    ) -> str:
+        """Generate a personalized greeting with full tool access.
+
+        Unlike ``_generate_greeting`` (used by the automatic arrival
+        paths, which forces ``tools_override=[]`` so the model can't
+        accidentally call ``announce`` while generating greeting text),
+        this path runs ``ai_svc.chat()`` against the configured
+        ``ai_profile`` with its tools intact. That lets the model
+        consult whatever data-lookup tools the profile exposes —
+        recent activity, time logs, presence, project status, etc. —
+        before writing the greeting.
+
+        The prompt template is the configurable
+        ``greeting.enhanced_greeting_prompt`` setting (falls back to
+        the bundled default if the user clears it or formatting fails);
+        a soft prompt-level guardrail asks the model to stick to
+        read-only data-lookup tools. On any failure we fall back to a
+        plain ``"Good morning, <name>!"``.
+        """
+        if self._resolver is None:
+            return f"Good morning, {name}!"
+        ai_svc = self._resolver.get_capability("ai_chat")
+        if not isinstance(ai_svc, AIProvider):
+            return f"Good morning, {name}!"
+
+        style_instruction = ""
+        if self._style:
+            style_instruction = f"\nStyle: {self._style}."
+
+        avoid_section = ""
+        if recent:
+            avoid_section = (
+                "\n\nRecent greetings — do NOT repeat or closely paraphrase any "
+                "of these. Be completely different in tone, structure, and word "
+                "choice:\n" + "\n".join(f"- {g}" for g in recent[-7:])
+            )
+
+        subs = {
+            "name": name,
+            "style_instruction": style_instruction,
+            "avoid_section": avoid_section,
+        }
+        try:
+            prompt = self._enhanced_greeting_prompt.format_map(subs)
+        except (KeyError, IndexError, ValueError):
+            # User-edited template had a bad placeholder — fall back to
+            # the bundled default so /greet keeps working until they fix
+            # the saved value.
+            logger.warning(
+                "Enhanced greeting prompt failed to format; falling back to default",
+                exc_info=True,
+            )
+            prompt = _DEFAULT_ENHANCED_GREETING_PROMPT.format_map(subs)
+
+        try:
+            result = await ai_svc.chat(
+                user_message=prompt,
+                user_ctx=UserContext.SYSTEM,
+                ai_call="greeting",
+                ai_profile=self._ai_profile,
+            )
+            text = (result.response_text or "").strip()
+            if text and len(text) < 500:
+                return text
+        except Exception:
+            logger.warning("Enhanced AI greeting generation failed", exc_info=True)
+
+        return f"Good morning, {name}!"
+
     # ── ToolProvider Protocol ───────────────────────────────────
 
     @property
@@ -639,10 +768,29 @@ class GreetingService(Service):
         if not person_name:
             return "I need a name to greet."
 
-        greeting = await self._generate_greeting(person_name)
+        # Resolve the input to a user_id when we can — that unlocks
+        # recent-greetings deduplication and the "marked greeted today"
+        # bookkeeping. Threshold on confidence so a weak email-local
+        # match for the wrong person doesn't smear their greeting
+        # history. Below threshold, we still greet by name — the AI
+        # just doesn't get history and we don't mark anyone.
+        match = await self._resolve_user_match(person_name)
+        user_id: str | None = None
+        display_name = person_name
+        if match is not None and match.confidence >= _GREETING_MATCH_CONFIDENCE_THRESHOLD:
+            user_id = match.user_id
+            display_name = await self._get_display_name(user_id)
+
+        recent = await self._get_recent_greetings(user_id) if user_id else []
+
+        greeting = await self._generate_greeting_enhanced(display_name, recent)
+
+        if user_id:
+            await self._mark_greeted(user_id, greeting)
+
         await self._announce(greeting)
 
-        return f'Greeted {person_name}: "{greeting}"'
+        return f'Greeted {display_name}: "{greeting}"'
 
     # ── Announce ────────────────────────────────────────────────
 

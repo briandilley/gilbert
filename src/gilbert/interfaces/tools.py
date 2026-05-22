@@ -125,6 +125,26 @@ class ToolResult:
 
 
 @runtime_checkable
+class ToolContextProvider(Protocol):
+    """Optional companion to ToolProvider.
+
+    A ToolProvider that owns related entities can implement this to
+    contribute a block of context (entity relationships, identity
+    bridges, common multi-tool sequences, …) into the AI's system
+    prompt. The AI service collects every active provider's context
+    once per turn and injects the non-empty results, so providers
+    don't have to cram everything into per-tool descriptions.
+
+    Returned content is markdown; conventionally a short ``## …``
+    section so it slots cleanly into the rest of the system prompt.
+    Return an empty string to skip.
+    """
+
+    def tool_provider_context(self) -> str:
+        ...
+
+
+@runtime_checkable
 class ToolProvider(Protocol):
     """Protocol for services that expose tools to the AI.
 

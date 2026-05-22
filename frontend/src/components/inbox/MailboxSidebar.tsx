@@ -2,6 +2,7 @@ import { InboxIcon, PlusIcon, UsersIcon, ShieldIcon, GlobeIcon } from "lucide-re
 import type { InboxMailbox, MailboxAccess } from "@/types/inbox";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 interface MailboxSidebarProps {
   mailboxes: InboxMailbox[];
@@ -46,31 +47,43 @@ const ACCESS_ICON: Record<MailboxAccess, typeof UsersIcon> = {
   admin: GlobeIcon,
 };
 
+/**
+ * Mailbox list rendered into the global SideNav via usePageSidebar.
+ *
+ * Layout matches the contextual side-nav vocabulary — eyebrow-styled
+ * group labels (uppercase mono), 32px list rows, signal-color
+ * accent bar on the active row.
+ */
 export function MailboxSidebar({
   mailboxes, selectedId, onSelect, onCreate, isAdmin,
 }: MailboxSidebarProps) {
   const groups = groupMailboxes(mailboxes, isAdmin);
 
   return (
-    <aside className="flex h-full w-full shrink-0 flex-col border-r bg-muted/20 sm:w-64">
-      <div className="flex items-center justify-between px-3 py-3 border-b">
-        <h2 className="text-sm font-semibold">Mailboxes</h2>
+    <div className="flex h-full w-full flex-col">
+      <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-border">
+        <h2 className="text-[15px] font-semibold tracking-[-0.01em]">
+          Mailboxes
+        </h2>
         <Button
           variant="ghost"
-          size="icon-sm"
+          size="icon-xs"
           title="Add mailbox"
           onClick={onCreate}
         >
-          <PlusIcon className="size-4" />
+          <PlusIcon />
         </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto py-2">
         {mailboxes.length === 0 && (
-          <div className="px-3 py-4 text-xs text-muted-foreground">
-            No mailboxes yet.
-            <br />
-            Click <PlusIcon className="inline size-3" /> to add one.
+          <div className="px-4 py-6 text-center">
+            <p className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-muted-foreground">
+              No mailboxes
+            </p>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Click the + above to add one.
+            </p>
           </div>
         )}
 
@@ -101,7 +114,7 @@ export function MailboxSidebar({
           />
         )}
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -114,11 +127,11 @@ function SidebarGroup({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="mb-3">
-      <div className="px-3 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+    <div className="mb-3 last:mb-0">
+      <div className="px-4 pb-1 font-mono text-[11px] uppercase tracking-[0.08em] font-medium text-muted-foreground">
         {label}
       </div>
-      <ul>
+      <ul className="px-2">
         {mailboxes.map((m) => {
           const Icon = m.access ? ACCESS_ICON[m.access] : InboxIcon;
           const active = m.id === selectedId;
@@ -127,16 +140,25 @@ function SidebarGroup({
               <button
                 type="button"
                 onClick={() => onSelect(m.id)}
-                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors ${
+                className={cn(
+                  "group relative flex w-full items-center gap-2",
+                  "h-8 px-2 rounded-md text-sm leading-none text-left",
+                  "transition-[background-color,color] duration-(--duration-fast) ease-(--ease-out)",
                   active
-                    ? "bg-accent text-foreground"
-                    : "hover:bg-accent/50 text-foreground/80"
-                }`}
+                    ? "bg-foreground/8 text-foreground font-medium"
+                    : "text-foreground/80 hover:bg-foreground/5 hover:text-foreground",
+                )}
               >
-                <Icon className="size-4 shrink-0 text-muted-foreground" />
+                {active && (
+                  <span
+                    aria-hidden
+                    className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-r-full bg-(--signal)"
+                  />
+                )}
+                <Icon className="size-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate">{m.name}</span>
                 {m.can_admin && (
-                  <Badge variant="outline" className="h-4 px-1 text-[9px]">
+                  <Badge variant="neutral" className="text-[9.5px]">
                     admin
                   </Badge>
                 )}

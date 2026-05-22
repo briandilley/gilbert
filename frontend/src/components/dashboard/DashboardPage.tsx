@@ -9,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   MessageSquareIcon,
   FileTextIcon,
@@ -19,32 +20,37 @@ import {
   MonitorIcon,
   LayoutDashboardIcon,
   PlugIcon,
+  ArrowUpRightIcon,
   type LucideIcon,
 } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
 import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
+import { cn } from "@/lib/utils";
 
 interface CardStyle {
   icon: LucideIcon;
-  color: string;
-  border: string;
+  /** Full Tailwind text-color class for the icon. Static strings so
+   *  the JIT scanner can see them. */
+  iconClass: string;
+  /** Full bg-color class for the accent rail. */
+  railClass: string;
 }
 
 const CARD_STYLES: Record<string, CardStyle> = {
-  "message-square": { icon: MessageSquareIcon, color: "text-blue-500", border: "border-blue-500/40" },
-  "file-text": { icon: FileTextIcon, color: "text-amber-500", border: "border-amber-500/40" },
-  "inbox": { icon: InboxIcon, color: "text-green-500", border: "border-green-500/40" },
-  "shield": { icon: ShieldIcon, color: "text-purple-500", border: "border-purple-500/40" },
-  "settings": { icon: SettingsIcon, color: "text-slate-500", border: "border-slate-500/40" },
-  "database": { icon: DatabaseIcon, color: "text-cyan-500", border: "border-cyan-500/40" },
-  "monitor": { icon: MonitorIcon, color: "text-rose-500", border: "border-rose-500/40" },
-  "plug": { icon: PlugIcon, color: "text-pink-500", border: "border-pink-500/40" },
+  "message-square": { icon: MessageSquareIcon, iconClass: "text-blue-500", railClass: "bg-blue-500" },
+  "file-text": { icon: FileTextIcon, iconClass: "text-amber-500", railClass: "bg-amber-500" },
+  "inbox": { icon: InboxIcon, iconClass: "text-emerald-500", railClass: "bg-emerald-500" },
+  "shield": { icon: ShieldIcon, iconClass: "text-violet-500", railClass: "bg-violet-500" },
+  "settings": { icon: SettingsIcon, iconClass: "text-slate-500", railClass: "bg-slate-500" },
+  "database": { icon: DatabaseIcon, iconClass: "text-cyan-500", railClass: "bg-cyan-500" },
+  "monitor": { icon: MonitorIcon, iconClass: "text-rose-500", railClass: "bg-rose-500" },
+  "plug": { icon: PlugIcon, iconClass: "text-pink-500", railClass: "bg-pink-500" },
 };
 
 const DEFAULT_STYLE: CardStyle = {
   icon: LayoutDashboardIcon,
-  color: "text-muted-foreground",
-  border: "border-border",
+  iconClass: "text-muted-foreground",
+  railClass: "bg-border-strong",
 };
 
 export function DashboardPage() {
@@ -59,43 +65,86 @@ export function DashboardPage() {
 
   if (isLoading) {
     return (
-      <div className="p-4 sm:p-6 text-muted-foreground">Loading dashboard...</div>
+      <div>
+        <PageHeader eyebrow="HOME" title="Dashboard" />
+        <div className="px-6 py-12 text-xs text-muted-foreground">
+          Loading…
+        </div>
+      </div>
     );
   }
 
+  const cardCount = data?.cards.length ?? 0;
+  const greeting = user?.display_name
+    ? `Welcome back, ${user.display_name.split(" ")[0]}.`
+    : "Welcome back.";
+
   return (
-    <div className="p-4 sm:p-6">
-      <h1 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 text-center">Gilbert</h1>
-      {/* Above-the-grid slot: plugins can drop banner-style widgets,
-          system-status panels, etc. before the standard card grid. */}
-      <div className="mb-4 sm:mb-6 space-y-3">
-        <UpcomingEventCard />
-        <PluginPanelSlot slot="dashboard.top" />
-      </div>
+    <div>
+      <PageHeader
+        eyebrow="HOME"
+        title="Dashboard"
+        description={`${greeting} ${cardCount} section${cardCount === 1 ? "" : "s"} available.`}
+      />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
-        {data?.cards.map((card) => {
-          const style = CARD_STYLES[card.icon] ?? DEFAULT_STYLE;
-          const Icon = style.icon;
-          return (
-            <Link key={card.url} to={card.url}>
-              <Card className={`h-full transition-colors hover:bg-accent border-2 ${style.border}`}>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Icon className={`h-5 w-5 ${style.color}`} />
-                    {card.title}
-                  </CardTitle>
-                  <CardDescription>{card.description}</CardDescription>
-                </CardHeader>
-              </Card>
-            </Link>
-          );
-        })}
-      </div>
+      <div className="px-6 py-6 space-y-6">
+        {/* Above-the-grid slot: plugins can drop banner-style widgets,
+            system-status panels, etc. before the standard card grid. */}
+        <div className="space-y-3 empty:hidden">
+          <UpcomingEventCard />
+          <PluginPanelSlot slot="dashboard.top" />
+        </div>
 
-      {/* Below-the-grid slot: long-form widgets go here. */}
-      <div className="mt-4 sm:mt-6 space-y-3">
-        <PluginPanelSlot slot="dashboard.bottom" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          {data?.cards.map((card) => {
+            const style = CARD_STYLES[card.icon] ?? DEFAULT_STYLE;
+            const Icon = style.icon;
+            return (
+              <Link key={card.url} to={card.url} className="group">
+                <Card
+                  className={cn(
+                    "h-full relative transition-[border-color,background-color] duration-(--duration-fast) ease-(--ease-out)",
+                    "hover:bg-foreground/[0.03] group-hover:border-border-strong",
+                  )}
+                >
+                  {/* Color-coded left rail — narrow vertical bar that
+                      encodes the section's identity without filling
+                      the entire card. */}
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "absolute left-0 top-3 bottom-3 w-[2px] rounded-r-full",
+                      "opacity-50 transition-opacity duration-(--duration-fast)",
+                      "group-hover:opacity-100",
+                      style.railClass,
+                    )}
+                  />
+
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Icon className={cn("h-4 w-4 shrink-0", style.iconClass)} />
+                      <span className="flex-1">{card.title}</span>
+                      <ArrowUpRightIcon
+                        className={cn(
+                          "size-3.5 shrink-0 text-muted-foreground",
+                          "opacity-0 -translate-x-1",
+                          "group-hover:opacity-100 group-hover:translate-x-0",
+                          "transition-[opacity,transform] duration-(--duration-fast) ease-(--ease-out)",
+                        )}
+                      />
+                    </CardTitle>
+                    <CardDescription>{card.description}</CardDescription>
+                  </CardHeader>
+                </Card>
+              </Link>
+            );
+          })}
+        </div>
+
+        {/* Below-the-grid slot: long-form widgets go here. */}
+        <div className="space-y-3 empty:hidden">
+          <PluginPanelSlot slot="dashboard.bottom" />
+        </div>
       </div>
     </div>
   );

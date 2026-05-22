@@ -201,6 +201,7 @@ class KnowledgeService(Service):
                     schedule=Schedule.every(self._sync_interval),
                     callback=self._sync_all,
                     system=True,
+                    replace_existing=True,
                 )
 
         # Schedule initial sync as a one-shot background job so it doesn't block startup.
@@ -214,6 +215,7 @@ class KnowledgeService(Service):
                     schedule=Schedule.once_after(2),
                     callback=self._sync_all,
                     system=True,
+                    replace_existing=True,
                 )
 
         logger.info(
@@ -505,33 +507,62 @@ class KnowledgeService(Service):
         # Track current document IDs for removal detection
         current_doc_ids = {meta.document_id for meta in docs}
 
-        # Detect removed documents (were indexed but no longer in backend)
-        if self._collection is not None:
-            try:
-                stored = self._collection.get(
-                    where={"source_id": backend.source_id},
-                    include=["metadatas"],
+        # Detect removed documents — anything tracked under this
+        # source_id that the backend's current listing no longer sees.
+        # ``knowledge_documents`` is the source of truth (gets a row in
+        # ``_track_document`` the moment a doc is discovered, even
+        # before it's chunked or embedded), so iterate that and not
+        # the ChromaDB metadata. Otherwise orphans persist whenever a
+        # doc was tracked but never made it into ChromaDB — e.g. when
+        # the backend's ``path`` config changes underneath it, leaving
+        # stale tracked entries that the UI still surfaces under the
+        # Knowledge tab.
+        try:
+            from gilbert.interfaces.storage import Filter, FilterOp, Query as StoreQuery
+
+            tracked_rows = await self._storage.query(
+                StoreQuery(
+                    collection="knowledge_documents",
+                    filters=[
+                        Filter(
+                            field="source_id",
+                            op=FilterOp.EQ,
+                            value=backend.source_id,
+                        )
+                    ],
                 )
-                stored_ids = {
-                    m["document_id"] for m in (stored.get("metadatas") or []) if "document_id" in m
-                }
-                removed_ids = stored_ids - current_doc_ids
-                for removed_id in removed_ids:
+            )
+            tracked_ids = {
+                str(row.get("document_id", ""))
+                for row in tracked_rows
+                if row.get("document_id")
+            }
+            removed_ids = tracked_ids - current_doc_ids
+            for removed_id in removed_ids:
+                if self._collection is not None:
                     try:
                         self._collection.delete(where={"document_id": removed_id})
                     except Exception:
                         pass
-                    await self._untrack_document(removed_id)
-                    await self._emit(
-                        "knowledge.document.removed",
-                        {
-                            "document_id": removed_id,
-                            "source_id": backend.source_id,
-                        },
-                    )
-                    logger.info("Document removed from index: %s", removed_id)
-            except Exception:
-                pass
+                await self._untrack_document(removed_id)
+                await self._emit(
+                    "knowledge.document.removed",
+                    {
+                        "document_id": removed_id,
+                        "source_id": backend.source_id,
+                    },
+                )
+            if removed_ids:
+                logger.info(
+                    "Pruned %d stale tracking entr%s for %s",
+                    len(removed_ids),
+                    "y" if len(removed_ids) == 1 else "ies",
+                    backend.source_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to prune stale tracking for %s", backend.source_id, exc_info=True
+            )
 
         # Filter to documents that need indexing
         to_index: list[DocumentMeta] = []

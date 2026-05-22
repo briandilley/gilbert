@@ -147,6 +147,19 @@ class MusicBackend(ABC):
         return dict(cls._registry)
 
     @classmethod
+    def compatible_speaker_backends(cls) -> frozenset[str]:
+        """Names of SpeakerBackends whose play_uri can consume this music
+        backend's URIs.
+
+        Returns ``frozenset({"*"})`` for wildcard ("works anywhere").
+        Subclasses override when their URIs are vendor-specific —
+        for example, Sonos's music backend produces S2 streams / SMAPI
+        refs that only Sonos speakers can play, so it returns
+        ``frozenset({"sonos"})``.
+        """
+        return frozenset({"*"})
+
+    @classmethod
     def backend_config_params(cls) -> list[ConfigParam]:
         """Describe backend-specific configuration parameters."""
         return []

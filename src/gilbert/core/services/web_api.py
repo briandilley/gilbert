@@ -65,13 +65,18 @@ def _merge_plugin_nav(gilbert: Any, nav_groups: list[dict[str, Any]]) -> None:
         for r in routes:
             if not r.add_to_nav:
                 continue
-            item = {
+            item: dict[str, Any] = {
                 "label": r.label or r.path,
                 "description": r.description,
                 "url": r.path,
                 "icon": r.icon,
                 "required_role": r.required_role,
             }
+            if r.requires_capability:
+                # ``_visible`` reads this and hides the nav item when
+                # the underlying service is missing / disabled, so a
+                # toggled-off plugin doesn't render dead nav entries.
+                item["requires_capability"] = r.requires_capability
             _append(r.nav_parent_group, item)
 
         try:
@@ -268,6 +273,23 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                # Parent for plugin-contributed media sources (radio,
+                # music libraries, etc.). Has no built-in children;
+                # ``items`` is filled entirely by plugin
+                # ``ui_routes(... nav_parent_group="media")`` entries.
+                # ``placeholder_group`` tells the visibility filter to
+                # drop the group if no plugin populated it — otherwise
+                # an empty-items entry would render as a no-op leaf.
+                "key": "media",
+                "label": "Media",
+                "description": "Listen to radio, music, and other audio sources",
+                "url": "",
+                "icon": "headphones",
+                "required_role": "user",
+                "items": [],
+                "placeholder_group": True,
+            },
+            {
                 "key": "mcp",
                 "label": "MCP",
                 "description": "Model Context Protocol",
@@ -423,6 +445,14 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Presence",
+                        "description": "Map detected presence signals to users",
+                        "url": "/presence",
+                        "icon": "user-check",
+                        "required_role": "admin",
+                        "requires_capability": "presence",
+                    },
+                    {
                         "label": "Restart",
                         "description": "Restart the Gilbert host process",
                         "icon": "rotate-ccw",
@@ -493,6 +523,11 @@ class WebApiService(Service):
                         "items": visible_items,
                     }
                 )
+            elif group.get("placeholder_group"):
+                # Plugin-extension parent (e.g. Media). Hide entirely
+                # when no plugin contributed a child — without this,
+                # the empty-items entry would render as a dead leaf.
+                continue
             else:
                 # Leaf: filter by its own role/capability.
                 if not _visible(group):
@@ -524,11 +559,24 @@ class WebApiService(Service):
         ]
         cards.extend(_visible_plugin_cards(gilbert, _visible))
 
+        # The TopBar's <BrowserSpeakerControl/> needs a signal to hide
+        # itself when the ``browser`` speaker backend isn't loaded — its
+        # activate/deactivate RPCs would no-op anyway. Surface a simple
+        # boolean rather than leaking the full backend list to every nav
+        # consumer.
+        speaker_svc = sm.get_by_capability("speaker_control")
+        browser_speaker_available = (
+            speaker_svc is not None
+            and speaker_svc.enabled
+            and getattr(speaker_svc, "backends", {}).get("browser") is not None
+        )
+
         return {
             "type": "dashboard.get.result",
             "ref": frame.get("id"),
             "cards": cards,
             "nav": visible_nav,
+            "browser_speaker_available": browser_speaker_available,
         }
 
     async def _ws_ui_routes_list(
@@ -544,7 +592,8 @@ class WebApiService(Service):
         gilbert = conn.manager.gilbert
         if gilbert is None:
             return {"type": "ui.routes.list.result", "ref": frame.get("id"), "routes": []}
-        acl = gilbert.service_manager.get_by_capability("access_control")
+        sm = gilbert.service_manager
+        acl = sm.get_by_capability("access_control")
         caller_level = getattr(conn, "user_level", 200)
 
         def _level_for(role: str) -> int:
@@ -554,6 +603,18 @@ class WebApiService(Service):
                 except Exception:
                     pass
             return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+
+        def _capability_live(cap: str) -> bool:
+            # Mirrors the nav-visibility check in ``_ws_dashboard_get``:
+            # a route's capability is only "live" when a service
+            # advertises it AND that service is enabled. Disabled
+            # toggleable services keep their capability declared but
+            # report ``svc.enabled == False`` — the route should
+            # disappear with them.
+            if not cap:
+                return True
+            svc = sm.get_by_capability(cap)
+            return svc is not None and svc.enabled
 
         out: list[dict[str, Any]] = []
         for entry in gilbert.list_loaded_plugins():
@@ -566,6 +627,8 @@ class WebApiService(Service):
                 continue
             for r in routes:
                 if caller_level > _level_for(r.required_role):
+                    continue
+                if not _capability_live(r.requires_capability):
                     continue
                 out.append(
                     {

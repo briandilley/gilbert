@@ -31,6 +31,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { Label } from "@/components/ui/label";
 import { formatCost, formatTokens } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -157,30 +158,29 @@ export function UsagePage() {
     metric !== "cost_usd";
 
   return (
-    <div className="max-w-screen-xl mx-auto p-4 md:p-6 space-y-5">
-      {/* Header */}
-      <header className="flex items-center justify-between gap-2 flex-wrap">
-        <div>
-          <h1 className="text-xl font-semibold">Usage</h1>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            AI token consumption and cost reporting
-          </p>
-        </div>
-        {canReset && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setFilters(EMPTY_FILTERS);
-              setGroupBy("date");
-              setMetric("cost_usd");
-            }}
-          >
-            <RotateCcwIcon className="size-3.5 mr-1.5" />
-            Reset
-          </Button>
-        )}
-      </header>
+    <div>
+      <PageHeader
+        eyebrow="OPERATIONS"
+        title="Usage"
+        description="AI token consumption and cost reporting."
+        actions={
+          canReset ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFilters(EMPTY_FILTERS);
+                setGroupBy("date");
+                setMetric("cost_usd");
+              }}
+            >
+              <RotateCcwIcon />
+              Reset filters
+            </Button>
+          ) : null
+        }
+      />
+      <div className="max-w-screen-xl mx-auto px-4 py-4 md:px-6 md:py-6 space-y-4">
 
       {/* KPI strip */}
       <KpiStrip totals={totals} />
@@ -240,6 +240,7 @@ export function UsagePage() {
           </>
         )}
       </Card>
+      </div>
     </div>
   );
 }

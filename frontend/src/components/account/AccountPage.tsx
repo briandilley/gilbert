@@ -29,14 +29,19 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { PageHeader } from "@/components/layout/PageHeader";
 
 export function AccountPage() {
   const { user } = useAuth();
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-2xl mx-auto">
-      <h1 className="text-xl sm:text-2xl font-semibold">Account</h1>
-
+    <div>
+      <PageHeader
+        eyebrow="YOU"
+        title="Account"
+        description={user?.display_name || user?.email || "Signed in."}
+      />
+      <div className="mx-auto max-w-2xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
       <Card>
         <CardHeader>
           <CardTitle>Profile</CardTitle>
@@ -68,6 +73,7 @@ export function AccountPage() {
       <PluginPanelSlot slot="account.extensions" />
 
       <RevokeAllSessionsCard />
+      </div>
     </div>
   );
 }

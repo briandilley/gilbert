@@ -76,6 +76,12 @@ class UIRoute:
     item; ``nav_parent_group`` controls which existing group the
     nav item slots into (or blank for a new top-level group).
     Setting ``show_in_dashboard=True`` also adds a dashboard card.
+
+    ``requires_capability`` gates the route on a service capability
+    being live (i.e. the providing service is started and enabled).
+    Pair this with the plugin's own service capability so a
+    toggleable service's route disappears from nav AND from the
+    SPA's route table when the user disables it under Services.
     """
 
     path: str
@@ -84,6 +90,7 @@ class UIRoute:
     description: str = ""
     icon: str = ""
     required_role: str = "user"
+    requires_capability: str = ""
     add_to_nav: bool = False
     nav_parent_group: str = ""
     show_in_dashboard: bool = False
