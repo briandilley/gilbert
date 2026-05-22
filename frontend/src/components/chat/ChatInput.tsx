@@ -20,8 +20,14 @@ import {
 } from "lucide-react";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useAuth } from "@/hooks/useAuth";
 import type { SlashCommand, SlashParameter } from "@/types/slash";
 import type { FileAttachment } from "@/types/chat";
+import {
+  detectMentionAtCursor,
+  filterMembers,
+  renderMentionMarkup,
+} from "@/components/chat/mentionPicker";
 
 /** A pending attachment owned by the chat page. Always carries an ``id``
  *  and user-visible ``name``; ``preview`` is only set for images so the
@@ -106,6 +112,10 @@ interface ChatInputProps {
   backends?: BackendModelsGroup[];
   modelSelection?: ModelSelection;
   onModelChange?: (selection: ModelSelection) => void;
+  /** When present, this is a shared room — the @-mention picker
+   *  surfaces these members (plus the Gilbert pseudo-user). Personal
+   *  chats pass ``undefined`` and the picker stays disabled. */
+  mentionableMembers?: Array<{ user_id: string; display_name: string }>;
 }
 
 const readAsBase64 = (blob: Blob): Promise<string> =>
@@ -389,6 +399,7 @@ export function ChatInput({
   backends,
   modelSelection,
   onModelChange,
+  mentionableMembers,
 }: ChatInputProps) {
   // The textarea stays editable even while Gilbert is thinking so the
   // user can start drafting their next message. ``sending`` only
@@ -398,6 +409,12 @@ export function ChatInput({
   const disabled = false;
   const [message, setMessage] = useState("");
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  // Mention picker state — separate index from the slash picker so the
+  // two never share an active row when both could theoretically fire
+  // (slash only triggers at message start, mention only with a non-
+  // whitespace ``@``, but defense in depth is cheap).
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [cursorPos, setCursorPos] = useState(0);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const historyRef = useRef<string[]>(loadHistory());
@@ -406,6 +423,7 @@ export function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { connected } = useWebSocket();
   const api = useWsApi();
+  const { user } = useAuth();
 
   const { data: allCommands = [] } = useQuery({
     queryKey: ["slash-commands"],
@@ -430,6 +448,59 @@ export function ChatInput({
     () => matchSlash(message, knownCommandNames),
     [message, knownCommandNames],
   );
+
+  // Mention picker — only active in shared rooms (mentionableMembers
+  // passed). The picker's pool is the room members plus the Gilbert
+  // pseudo-user. Cursor-position-driven so it tracks edits mid-line.
+  const mentionPool = useMemo(() => {
+    if (!mentionableMembers) return [];
+    // Filter out self — you can't @-mention yourself usefully, and
+    // hiding it cuts visual noise.
+    const meFiltered = mentionableMembers.filter(
+      (m) => m.user_id !== user?.user_id,
+    );
+    // Append the Gilbert pseudo-user. Using the literal id "gilbert"
+    // (see ``GILBERT_MENTION_USER_ID`` on the backend) so the
+    // structured tag round-trips into the AI trigger check.
+    return [...meFiltered, { user_id: "gilbert", display_name: "Gilbert" }];
+  }, [mentionableMembers, user?.user_id]);
+
+  const mentionMatch = useMemo(
+    () => detectMentionAtCursor(message, cursorPos),
+    [message, cursorPos],
+  );
+
+  const mentionSuggestions = useMemo(() => {
+    if (!mentionMatch || mentionPool.length === 0) return [];
+    return filterMembers(mentionPool, mentionMatch.query, 8);
+  }, [mentionMatch, mentionPool]);
+
+  // Clamp the mention picker index whenever the list changes.
+  useEffect(() => {
+    if (mentionIndex >= mentionSuggestions.length) setMentionIndex(0);
+  }, [mentionSuggestions.length, mentionIndex]);
+
+  function completeMention(member: { user_id: string; display_name: string }) {
+    if (!mentionMatch) return;
+    const before = message.slice(0, mentionMatch.triggerStart);
+    const after = message.slice(mentionMatch.triggerEnd);
+    const insert = renderMentionMarkup(member);
+    const next = before + insert + after;
+    setMessage(next);
+    setMentionIndex(0);
+    // Position the caret right after the inserted markup (and trailing
+    // space). The next paint cycle owns DOM updates; defer with rAF
+    // so the textarea has applied the new value before we move the
+    // selection.
+    const nextCaret = before.length + insert.length;
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.setSelectionRange(nextCaret, nextCaret);
+        setCursorPos(nextCaret);
+      }
+    });
+  }
 
   // Pickable commands list: shown while the user is still picking a
   // command (hasn't committed to a known one yet). Filter on the
@@ -551,6 +622,38 @@ export function ChatInput({
 
   function handleKeyDown(e: React.KeyboardEvent) {
     const pickerOpen = suggestions.length > 0;
+    const mentionOpen = mentionSuggestions.length > 0;
+
+    if (mentionOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % mentionSuggestions.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIndex(
+          (i) => (i - 1 + mentionSuggestions.length) % mentionSuggestions.length,
+        );
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        completeMention(mentionSuggestions[mentionIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Close the picker by stuffing a space after the ``@`` —
+        // that breaks the trigger pattern and the user keeps typing.
+        if (mentionMatch) {
+          const before = message.slice(0, mentionMatch.triggerEnd);
+          const after = message.slice(mentionMatch.triggerEnd);
+          setMessage(before + " " + after);
+        }
+        return;
+      }
+    }
 
     if (pickerOpen) {
       if (e.key === "ArrowDown") {
@@ -630,6 +733,13 @@ export function ChatInput({
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 150) + "px";
+    // Track the textarea caret so the mention picker can resolve a
+    // mention-in-progress without re-reading from the DOM each render.
+    setCursorPos(el.selectionStart ?? 0);
+  }
+
+  function handleSelectionChange(e: React.SyntheticEvent<HTMLTextAreaElement>) {
+    setCursorPos(e.currentTarget.selectionStart ?? 0);
   }
 
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -676,6 +786,46 @@ export function ChatInput({
   return (
     <div className="shrink-0 border-t bg-background p-3 sm:p-4">
       <div className="relative mx-auto max-w-3xl">
+        {/* Mention picker popover. Mutually exclusive with the slash
+            command picker — slash triggers at message start; mention
+            triggers on ``@`` in any position. Both can't be open at
+            once in practice. */}
+        {mentionSuggestions.length > 0 && (
+          <div className="absolute bottom-full left-0 right-0 mb-2 max-h-72 overflow-y-auto rounded-md border bg-popover shadow-lg">
+            {mentionSuggestions.map((member, idx) => {
+              const isActive = idx === mentionIndex;
+              const isGilbert = member.user_id === "gilbert";
+              return (
+                <button
+                  key={member.user_id}
+                  type="button"
+                  ref={(el) => {
+                    if (isActive && el) {
+                      el.scrollIntoView({ block: "nearest" });
+                    }
+                  }}
+                  className={`flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left text-sm ${
+                    isActive
+                      ? "bg-accent text-foreground"
+                      : "text-foreground/90 hover:bg-accent/60"
+                  }`}
+                  onMouseEnter={() => setMentionIndex(idx)}
+                  onClick={() => completeMention(member)}
+                >
+                  <div className="flex w-full items-center gap-2">
+                    <span className="font-medium">@{member.display_name}</span>
+                    {isGilbert && (
+                      <span className="text-xs text-muted-foreground">
+                        AI assistant
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Autocomplete popover (commands picker) */}
         {suggestions.length > 0 && (
           <div className="absolute bottom-full left-0 right-0 mb-2 max-h-72 overflow-y-auto rounded-md border bg-popover shadow-lg">
@@ -785,6 +935,9 @@ export function ChatInput({
             value={message}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
+            onKeyUp={handleSelectionChange}
+            onClick={handleSelectionChange}
+            onSelect={handleSelectionChange}
             onPaste={handlePaste}
             placeholder={placeholder}
             rows={1}

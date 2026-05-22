@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
+import { MentionText } from "@/components/chat/MentionText";
 import type {
   ChatRound,
   ChatRoundTool,
@@ -82,7 +83,7 @@ export function TurnBubble({
         )}
         {userContent && (
           <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-            {userContent}
+            <MentionText content={userContent} />
           </p>
         )}
       </TurnRail>

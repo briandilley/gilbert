@@ -105,6 +105,12 @@ export interface ConversationSummary {
   /** When ``kind === "agent"``, the owning Agent's id so the SPA can
    *  link the sidebar entry back to ``/agents/<id>``. */
   agent_id?: string;
+  /** Number of messages newer than this user's
+   *  ``last_read_mention_index`` cursor that @-mention them. Drives
+   *  the dot/count badge on the sidebar entry. Reset via the
+   *  ``chat.conversation.mark_mentions_read`` RPC when the user
+   *  focuses the conversation. */
+  unread_mentions_count?: number;
 }
 
 export interface ConversationMember {
