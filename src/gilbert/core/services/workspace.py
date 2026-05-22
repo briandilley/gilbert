@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 _READ_FILE_CAP = 1 * 1024 * 1024  # 1 MiB
 _WORKSPACE_FILES_COLLECTION = "workspace_files"
+# Same collection AIService writes to. Used here for the shared-room
+# upload fallback in ``_ws_workspace_download`` — when the caller's
+# own workspace doesn't hold the file, we fetch the conversation
+# document so we can scan the other members' workspaces.
+_CONVERSATIONS_COLLECTION = "ai_conversations"
 _WORKSPACE_SHARES_COLLECTION = "workspace_file_shares"
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
@@ -2333,6 +2338,46 @@ class WorkspaceService(Service, ToolProvider, WsHandlerProvider):
         # Legacy per-user workspace
         if skill_name:
             candidates.append(self._legacy_workspace_dir(user_id, skill_name))
+
+        # Shared-room fallback. Workspaces are per-user-per-conv on disk,
+        # so an upload by Dylan in a shared room lives under
+        # ``users/Dylan/conversations/<conv>/...`` — Root opening the
+        # same attachment can't find it under his own workspace path
+        # and the lookup 404s. When the caller is a member of a shared
+        # conversation, fall back to scanning the other members'
+        # workspace roots for the same relative path. Access is gated
+        # by ``check_conversation_access`` — only members + invited
+        # users can see the conv at all, so widening the file search
+        # within the conv is safe.
+        if conv_id and self._storage is not None:
+            try:
+                conv_data = await self._storage.get(
+                    _CONVERSATIONS_COLLECTION, conv_id
+                )
+            except Exception:
+                conv_data = None
+            if conv_data and conv_data.get("shared"):
+                from gilbert.core.chat import check_conversation_access
+                from gilbert.interfaces.auth import UserContext
+
+                # Build a minimal UserContext for the access check.
+                # Roles aren't surfaced on ``conn`` directly; the
+                # check only relies on user_id + membership lookup so
+                # role-frozenset can be empty here.
+                caller_ctx = UserContext(
+                    user_id=user_id,
+                    email="",
+                    display_name="",
+                    roles=frozenset(),
+                )
+                if check_conversation_access(conv_data, caller_ctx) is None:
+                    for member in conv_data.get("members", []):
+                        other_uid = str(member.get("user_id") or "")
+                        if not other_uid or other_uid == user_id:
+                            continue
+                        candidates.append(
+                            self.get_workspace_root(other_uid, conv_id)
+                        )
 
         target: Path | None = None
         for workspace in candidates:
