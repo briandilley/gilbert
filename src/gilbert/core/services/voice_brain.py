@@ -147,6 +147,8 @@ async def _pump_audio_to_stt(
     audio_in: Any,
     stream: Any,
     on_speech_detected: Any = None,
+    *,
+    input_is_mulaw: bool = True,
 ) -> None:
     """Read mulaw-8k chunks from the session and feed PCM-16 to the
     transcriber. Decodes per-chunk so latency stays at the chunk
@@ -181,7 +183,10 @@ async def _pump_audio_to_stt(
     suppress_until = 0
     try:
         async for chunk in audio_in:
-            pcm = audioop.ulaw2lin(chunk, 2)  # 8-bit µ-law → 16-bit PCM
+            # Phone-call sessions yield mulaw 8 kHz (carrier wire
+            # format) and we decode here. Voice-agent / browser-mic
+            # sessions yield PCM_S16LE already; pass-through.
+            pcm = audioop.ulaw2lin(chunk, 2) if input_is_mulaw else chunk
             await stream.send(pcm)
             pump_count += 1
 
@@ -419,12 +424,22 @@ class VoiceBrainService(Service):
                 await _record_turn("us", text)
                 spoke_at_all = True
 
+                # Pick the output format. Phone calls leave
+                # ``tts_output_format`` unset → MULAW_8000 (Telnyx wire
+                # format). Voice-agent browser sessions configure MP3
+                # so the SPA can play the buffered clip via
+                # HTMLAudioElement.
+                out_fmt = (
+                    config.tts_output_format
+                    if config.tts_output_format is not None
+                    else TTSAudioFormat.MULAW_8000
+                )
                 try:
                     synth = await self._tts.synthesize(
                         SynthesisRequest(
                             text=text,
                             voice_id="",
-                            output_format=TTSAudioFormat.MULAW_8000,
+                            output_format=out_fmt,
                         )
                     )
                 except Exception:
@@ -470,6 +485,14 @@ class VoiceBrainService(Service):
                         chunks_written * 0.02,
                         speaking.cancelled,
                     )
+                    # End-of-utterance signal. Real-time sinks (Telnyx)
+                    # ignore it; turn-taking sinks (browser tab) use
+                    # this to flush their buffer and dispatch a single
+                    # clip per utterance.
+                    try:
+                        await session.audio_out.flush()
+                    except Exception:
+                        log.debug("audio_out.flush raised", exc_info=True)
                 finally:
                     speaking.active = False
 
@@ -569,14 +592,19 @@ class VoiceBrainService(Service):
                 log.warning("Transcription unavailable — conversation continues TTS-only")
                 outcome["transcription_available"] = False
                 return
+            # Pick the STT input format. Phone calls leave
+            # ``stt_audio_format`` unset → 8 kHz PCM (carrier rate).
+            # Voice-agent / browser sessions configure 16 kHz because
+            # the mic captures cleanly there.
+            stt_fmt = config.stt_audio_format or TranscriptionAudioFormat(
+                encoding=AudioEncoding.PCM_S16LE,
+                sample_rate=8000,
+                channels=1,
+            )
             try:
                 stt_stream = await self._transcription.open_stream(
                     StreamConfig(
-                        format=TranscriptionAudioFormat(
-                            encoding=AudioEncoding.PCM_S16LE,
-                            sample_rate=8000,
-                            channels=1,
-                        ),
+                        format=stt_fmt,
                         interim_results=True,
                         vad_events=True,
                     )
@@ -595,11 +623,22 @@ class VoiceBrainService(Service):
                 asyncio.create_task(session.audio_out.clear())
                 log.info("local VAD: barge-in cancelling in-flight TTS")
 
+            # Phone-call sessions send mulaw 8kHz over the wire and
+            # the pump decodes to PCM. Voice-agent browser sessions
+            # send PCM directly and the pump skips the decode. Set the
+            # flag based on the configured input format.
+            input_is_mulaw = (
+                config.audio_input_format is None
+                or getattr(config.audio_input_format, "encoding", None)
+                != AudioEncoding.PCM_S16LE
+            )
+
             pump_task = asyncio.create_task(
                 _pump_audio_to_stt(
                     session.audio_in,
                     stt_stream,
                     on_speech_detected=_on_local_vad_speech,
+                    input_is_mulaw=input_is_mulaw,
                 )
             )
             try:

@@ -79,10 +79,23 @@ class AudioSink(Protocol):
     sink, etc.). ``clear()`` discards anything buffered-but-unsent — the
     barge-in handler calls this so the engine can stop talking the
     instant the user starts.
+
+    ``flush()`` signals end-of-utterance — the engine calls this once
+    the LLM's spoken text has been fully written. Real-time transports
+    (carrier media streams) ignore it because they're already pumping
+    chunks at wire rate. Turn-taking transports (a browser tab that
+    plays an MP3 per turn via ``<audio>``) use the flush boundary to
+    package the buffered bytes into a single clip and dispatch it.
+    The default implementation is a no-op, so existing sinks don't
+    have to change.
     """
 
     async def write(self, chunk: bytes) -> None: ...
     async def clear(self) -> None: ...
+
+    async def flush(self) -> None:
+        """Optional end-of-utterance signal. Default is a no-op."""
+        return None
 
 
 # ── Session ──────────────────────────────────────────────────────────
@@ -275,6 +288,37 @@ class ConversationConfig:
     brain_tool_provider: BrainToolProvider
     opening_policy: OpeningPolicy = field(default_factory=OpeningPolicy)
     max_conversation_seconds: int = 900
+    # TTS output format used for synthesis. Phone calls want mulaw_8000
+    # (Telnyx wire format). Browser-tab voice agents want MP3 because
+    # the SPA plays clips via HTMLAudioElement. The default is
+    # ``None`` which means "use the engine's default" (mulaw_8000,
+    # matching the original phone-call brain). The engine passes this
+    # straight to ``TTSProvider.synthesize`` as ``output_format``.
+    tts_output_format: Any = None  # gilbert.interfaces.tts.AudioFormat | None
+    # MIME hint for the buffered/flushed audio, used by sinks that
+    # need to package the audio into a single clip and dispatch it
+    # via a URL-based player. The voice-agent's ``BrowserAudioSink``
+    # reads this to set the data-URL MIME type; sinks that don't
+    # need it can ignore.
+    tts_output_mime: str = "audio/wav"
+
+    # Format of the bytes the session's ``audio_in`` iterator yields.
+    # Phone calls hand the engine raw mulaw 8 kHz (the carrier wire
+    # format). Voice-agent browser sessions hand us PCM_S16LE
+    # 16 kHz (what WebAudio captures natively). The engine's STT
+    # pump branches on this to skip the ulaw→PCM decode for the
+    # PCM-in case.
+    #
+    # ``None`` means "the legacy mulaw_8000 default" so existing
+    # phone-call wrappers don't need to opt in.
+    audio_input_format: Any = None  # gilbert.interfaces.transcription.AudioFormat | None
+
+    # Format the engine asks STT for. Phone calls always run STT at
+    # 8 kHz because that's the carrier rate; voice-agent uses 16 kHz
+    # because the mic captures cleanly there and Scribe Realtime is
+    # happier with higher-rate audio. ``None`` falls back to PCM_S16LE
+    # @ 8 kHz (phone-call default).
+    stt_audio_format: Any = None  # gilbert.interfaces.transcription.AudioFormat | None
 
     # Optional priming messages prepended to the message list before the
     # first LLM turn. Phone-call wrapper uses this to inject the
