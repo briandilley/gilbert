@@ -18,6 +18,7 @@ from typing import Any
 from gilbert.interfaces.acl import (
     resolve_default_event_level,
     resolve_default_rpc_level,
+    resolve_event_visibility,
 )
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.events import Event, EventBusProvider
@@ -40,15 +41,32 @@ _PING_TIMEOUT = 90
 
 
 def get_event_visibility_level(event_type: str) -> int:
-    """Resolve the minimum role level for an event type (longest prefix match)."""
+    """Resolve the minimum role level for an event type (longest prefix match).
+
+    Pure-prefix resolution. Per-event overrides via
+    ``event.data["required_role"]`` go through
+    :func:`resolve_event_visibility` instead — call that one when an
+    ``Event`` is in hand.
+    """
     return resolve_default_event_level(event_type)
 
 
-def can_see_event(user_level: int, event_type: str) -> bool:
-    """Check if a user at the given level can see this event type."""
+def can_see_event(
+    user_level: int,
+    event_type: str,
+    data: dict[str, Any] | None = None,
+) -> bool:
+    """Check if a user at the given level can see this event.
+
+    When ``data`` is provided, honors the per-event
+    ``data["required_role"]`` override; otherwise falls back to pure
+    prefix-based resolution (the default behaviour for tests / call
+    sites that don't have the full event payload).
+    """
     if user_level < 0:  # system user
         return True
-    return user_level <= get_event_visibility_level(event_type)
+    required_level = resolve_event_visibility(event_type, data)
+    return user_level <= required_level
 
 
 # Registry of RPC handlers: frame type → handler function
@@ -102,9 +120,20 @@ class WsConnection:
         """Check if the event matches any of this connection's subscriptions."""
         return any(fnmatch.fnmatch(event_type, pat) for pat in self.subscriptions)
 
-    def can_see_event(self, event_type: str) -> bool:
-        """Check role-based visibility for an event type."""
-        return can_see_event(self.user_level, event_type)
+    def can_see_event(
+        self,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+    ) -> bool:
+        """Check role-based visibility for an event.
+
+        ``data`` is passed through so the per-event
+        ``data["required_role"]`` override is honored — admin-gated
+        cameras whose detection events ride a prefix-everyone topic
+        (``camera.event.detected``) get correctly filtered out for
+        non-admin connections.
+        """
+        return can_see_event(self.user_level, event_type, data)
 
     def can_see_auth_event(self, event: Event) -> bool:
         """Content-level filter for auth events.
@@ -144,6 +173,56 @@ class WsConnection:
         if not event.event_type.startswith("notification."):
             return True
         return event.data.get("user_id") == self.user_id
+
+    def can_see_health_event(self, event: Event) -> bool:
+        """Content-level filter for health events.
+
+        Health metrics + daily summaries: owner-only — connections only
+        see their own user_id. Audit events: actor + target + admins.
+        Link events: owner-only. Mirrors the inbox / notification
+        pattern with the audit-row twist (target sees what touched
+        their data, actor sees their own activity, admins see all).
+        """
+        if not event.event_type.startswith("health."):
+            return True
+        # Admin sees all (level 0 or below — system is negative).
+        if self.user_level <= 0:
+            return True
+
+        if event.event_type == "health.access.audit":
+            actor = event.data.get("actor_user_id")
+            target = event.data.get("target_user_id")
+            return actor == self.user_id or target == self.user_id
+
+        # Everything else (metric.received, metric.deleted,
+        # daily.summary, link.connected, link.disconnected) is
+        # owner-only — the per-user filter narrows delivery to the
+        # one connection whose user_id matches.
+        return event.data.get("user_id") == self.user_id
+
+    def can_see_feed_event(self, event: Event) -> bool:
+        """Content-level filter for feed events that target a user.
+
+        ``feed.briefing.ready`` carries a ``user_id`` (the recipient of
+        the briefing) and is fanned out only to that user (admins see
+        all). Per spec §12: "fanned out only to the recipient ``user_id``
+        via a dedicated filter, not to every user — analogous to how
+        notification events work."
+
+        ``feed.ingest.throttled`` is also user-targeted (carries the
+        owner's ``user_id``). Other ``feed.*`` events (item / subscription
+        / shares) are feed-scoped, not user-scoped, and pass this filter
+        — the SPA / consumer applies a per-feed ACL check on top by
+        keeping a cache of accessible feed_ids.
+        """
+        if not event.event_type.startswith("feed."):
+            return True
+        # Admins (level 0 or below) see all feed events.
+        if self.user_level <= 0:
+            return True
+        if event.event_type in ("feed.briefing.ready", "feed.ingest.throttled"):
+            return event.data.get("user_id") == self.user_id
+        return True
 
     def can_see_speaker_browser_event(self, event: Event) -> bool:
         """Content-level filter for browser-speaker playback frames.
@@ -477,7 +556,7 @@ class WsConnectionManager:
         for conn in self._connections:
             if not conn.matches_subscription(event.event_type):
                 continue
-            if not conn.can_see_event(event.event_type):
+            if not conn.can_see_event(event.event_type, event.data):
                 continue
             if not conn.can_see_chat_event(event):
                 continue
@@ -487,9 +566,13 @@ class WsConnectionManager:
                 continue
             if not conn.can_see_notification_event(event):
                 continue
+            if not conn.can_see_feed_event(event):
+                continue
             if not conn.can_see_speaker_browser_event(event):
                 continue
             if not conn.can_see_chat_read_aloud_event(event):
+                continue
+            if not conn.can_see_health_event(event):
                 continue
             conn.send_event(event)
 

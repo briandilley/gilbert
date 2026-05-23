@@ -454,7 +454,30 @@ run_gilbert_supervised() {
                 echo "Gilbert terminated (SIGTERM) — not restarting."
                 break
                 ;;
+            120)
+                # Uvicorn's exit code when graceful shutdown completes
+                # with leftover async tasks (CancelledError propagating
+                # out of the loop). Semantically a clean SIGTERM stop —
+                # the previous Python process did exit promptly. The
+                # only thing that made restarts feel slow was this
+                # branch falling through to the crash path and sleeping
+                # 20 seconds. Treat 120 as ``stopped by signal``.
+                echo "Gilbert exited via uvicorn-graceful-shutdown (code 120) — not restarting."
+                break
+                ;;
             *)
+                # If we got a SIGTERM/SIGINT while Gilbert was running,
+                # ``SUPERVISOR_STOP`` is already true even if Gilbert
+                # exited with some odd code (asyncio cleanup quirks
+                # can leak a non-zero out). Honor the stop instead of
+                # spinning a crash-restart loop the user just asked
+                # us not to enter. Checked FIRST so a routine
+                # ``systemctl restart`` skips both the LKG rollback
+                # check and the 20-second crash-restart sleep.
+                if [ "$SUPERVISOR_STOP" = "true" ]; then
+                    echo "Gilbert exited with code $exit_code during shutdown — not restarting."
+                    break
+                fi
                 # Crash path. First check whether this is a "broken
                 # switch" inside the post-switch probe window — if so,
                 # roll back to LKG immediately rather than burning
@@ -493,7 +516,59 @@ run_gilbert_supervised() {
     trap - INT TERM
 }
 
+frontend_is_up_to_date() {
+    # Returns 0 (success) when the bundled SPA in src/gilbert/web/spa/
+    # is newer than every frontend source file, so we can skip the
+    # ~16-second tsc + vite build on a routine ``./gilbert.sh start``.
+    # Returns 1 (rebuild needed) on any of:
+    #   - bundle missing (first run after clone)
+    #   - any TS/TSX/CSS/HTML under frontend/src or std-plugins/*/frontend
+    #     has a newer mtime than the bundle's index.html
+    #   - frontend/package.json, vite.config.*, tsconfig.*, or the repo
+    #     root package.json changed
+    #
+    # ``find -newer`` is robust to git checkouts (which preserve mtimes
+    # only when configured) — if a user just pulled and source files
+    # have stamps newer than the bundle, we rebuild.
+    local bundle="$SCRIPT_DIR/src/gilbert/web/spa/index.html"
+    if [ ! -f "$bundle" ]; then
+        return 1
+    fi
+
+    # Any source file newer than the bundle? -name patterns cover the
+    # extensions Vite/TSC actually compile. ``-quit`` bails on the
+    # first hit so we don't walk all 29 plugin frontends after one
+    # miss.
+    local changed
+    changed=$(find \
+        "$SCRIPT_DIR/frontend/src" \
+        "$SCRIPT_DIR/frontend/index.html" \
+        "$SCRIPT_DIR/frontend/vite.config.ts" \
+        "$SCRIPT_DIR/frontend/tsconfig.json" \
+        "$SCRIPT_DIR/frontend/tsconfig.app.json" \
+        "$SCRIPT_DIR/frontend/tsconfig.node.json" \
+        "$SCRIPT_DIR/frontend/package.json" \
+        "$SCRIPT_DIR/package.json" \
+        "$SCRIPT_DIR/std-plugins"/*/frontend \
+        -newer "$bundle" \
+        \( -name "*.ts" -o -name "*.tsx" -o -name "*.css" \
+           -o -name "*.html" -o -name "*.json" \) \
+        -print -quit 2>/dev/null)
+
+    [ -z "$changed" ]
+}
+
 build_frontend() {
+    # Skip the build when the bundled SPA is already up to date with
+    # the source tree — a routine ``./gilbert.sh start`` with no
+    # frontend changes is the common case, and tsc -b + vite build
+    # costs ~16 seconds we don't need to pay.
+    if frontend_is_up_to_date; then
+        echo "Frontend bundle is up to date — skipping build."
+        echo "  (delete src/gilbert/web/spa/index.html to force a rebuild)"
+        return 0
+    fi
+
     echo "Building frontend..."
     # npm workspaces: install runs from the repo root so frontend AND
     # every plugin's frontend/ directory share a single node_modules
@@ -540,6 +615,10 @@ case "$1" in
         run_gilbert_supervised
         ;;
     build)
+        # ``./gilbert.sh build`` is an explicit "rebuild the SPA"
+        # command — bypass the up-to-date check so the user gets
+        # what they asked for even if the bundle looks fresh.
+        rm -f "$SCRIPT_DIR/src/gilbert/web/spa/index.html"
         build_frontend
         echo "Frontend built to src/gilbert/web/spa/"
         ;;

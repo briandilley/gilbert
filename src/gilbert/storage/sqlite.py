@@ -197,6 +197,64 @@ class SQLiteStorage(StorageBackend):
             row = await cursor.fetchone()
             return int(row[0]) if row else 0
 
+    async def delete_query(self, query: Query) -> int:
+        """Delete every row matching ``query`` in one statement.
+
+        Returns the number of rows removed. Sort and offset on the
+        ``Query`` are ignored — only filters select which rows are
+        deleted. ``limit`` is honored when set (translates to
+        ``LIMIT``).
+
+        Note: SQLite supports ``DELETE ... LIMIT`` only when compiled
+        with ``SQLITE_ENABLE_UPDATE_DELETE_LIMIT``. The wheels uv pulls
+        in (``aiosqlite`` against the bundled SQLite) include this build
+        option as of recent releases. If a future SQLite build drops the
+        option, the implementation falls back to "select ids → delete"
+        — but the common case is one round-trip.
+        """
+        if query.collection not in self._known_collections:
+            return 0
+        db = await self._conn()
+        table = self._table_name(query.collection)
+        where_clause, params = self._build_where(query.filters)
+
+        sql = f'DELETE FROM "{table}"'
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        if query.limit is not None:
+            sql += " LIMIT ?"
+            params.append(query.limit)
+
+        try:
+            cursor = await db.execute(sql, params)
+            await db.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            # Fallback: SQLite without UPDATE_DELETE_LIMIT — fetch the
+            # ids matching the query and delete them in a single
+            # ``DELETE WHERE id IN (...)`` round-trip.
+            select_sql = f'SELECT id FROM "{table}"'
+            select_params = list(params)
+            if query.limit is not None:
+                select_params.pop()  # drop the LIMIT param we just appended
+            if where_clause:
+                select_sql += f" WHERE {where_clause}"
+            if query.limit is not None:
+                select_sql += " LIMIT ?"
+                select_params.append(query.limit)
+            async with db.execute(select_sql, select_params) as cursor:
+                rows = await cursor.fetchall()
+            ids = [r[0] for r in rows]
+            if not ids:
+                return 0
+            placeholders = ", ".join("?" for _ in ids)
+            await db.execute(
+                f'DELETE FROM "{table}" WHERE id IN ({placeholders})',
+                ids,
+            )
+            await db.commit()
+            return len(ids)
+
     # --- Indexing ---
 
     async def ensure_index(self, index: IndexDefinition) -> None:

@@ -131,6 +131,20 @@ class StorageBackend(ABC):
         """Count entities matching a query."""
         ...
 
+    @abstractmethod
+    async def delete_query(self, query: Query) -> int:
+        """Delete every row matching ``query``. Returns the count removed.
+
+        Implementations SHOULD perform this as a single atomic operation
+        where the underlying store supports it (one ``DELETE WHERE`` for
+        SQLite). Cascading FK deletes still apply.
+
+        Sort and offset on ``query`` are ignored — only filters select
+        which rows are deleted. ``limit`` is honored when supported (the
+        SQLite implementation translates it to ``LIMIT`` when present).
+        """
+        ...
+
     # --- Collection Management ---
 
     @abstractmethod
@@ -292,6 +306,9 @@ class NamespacedStorageBackend(StorageBackend):
 
     async def count(self, query: Query) -> int:
         return await self._inner.count(self._ns_query(query))
+
+    async def delete_query(self, query: Query) -> int:
+        return await self._inner.delete_query(self._ns_query(query))
 
     # --- Collection management ---
 

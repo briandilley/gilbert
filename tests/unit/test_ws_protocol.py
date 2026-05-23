@@ -594,3 +594,77 @@ class TestOutboundRpc:
         )
         assert result is not None
         assert result["type"] == "gilbert.error"
+
+
+# --- Per-event data-level required_role override ---
+
+
+class TestEventDataRequiredRole:
+    """The per-event ACL override added for camera-style admin-gating.
+
+    A camera publishes ``camera.event.detected`` events whose prefix
+    visibility is everyone (200), but per-camera ``role_overrides`` may
+    upgrade a specific event to admin-only by stamping
+    ``data["required_role"]="admin"`` before publish. The WS event
+    filter must honor that override.
+    """
+
+    def test_event_data_required_role_admin_blocks_user(self) -> None:
+        # camera.event.detected is prefix-everyone; required_role=admin
+        # should override and block a regular user from seeing it.
+        assert not can_see_event(
+            100,  # user-level
+            "camera.event.detected",
+            {"required_role": "admin"},
+        )
+        # Admin level can still see it.
+        assert can_see_event(0, "camera.event.detected", {"required_role": "admin"})
+
+    def test_event_data_required_role_falls_back_to_prefix_when_missing(
+        self,
+    ) -> None:
+        # No required_role -> fall back to the prefix table
+        # (camera.event.detected -> 200, everyone, so user can see).
+        assert can_see_event(100, "camera.event.detected", {})
+        assert can_see_event(200, "camera.event.detected", {})
+
+    def test_event_data_required_role_unknown_value_falls_back(self) -> None:
+        # Unknown role string -> fall back to the prefix table
+        # (everyone for camera.event.detected) — never crash, never let
+        # the event through if the prefix would have blocked it.
+        assert can_see_event(
+            100,
+            "camera.event.detected",
+            {"required_role": "dragon"},
+        )
+        # Same fallback for an admin-prefix event with bogus override
+        # (service.* is admin-only by prefix, so user-level cannot see).
+        assert not can_see_event(
+            100,
+            "service.started",
+            {"required_role": "wizard"},
+        )
+
+    def test_event_data_required_role_user_blocks_everyone(self) -> None:
+        # Required role user (level 100) blocks an everyone-only (200)
+        # connection from receiving an otherwise everyone event.
+        assert not can_see_event(
+            200,
+            "camera.event.detected",
+            {"required_role": "user"},
+        )
+        assert can_see_event(
+            100,
+            "camera.event.detected",
+            {"required_role": "user"},
+        )
+
+    def test_system_bypasses_data_level_override(self) -> None:
+        # System-level (negative) bypasses every visibility check
+        # including the data-level override.
+        assert can_see_event(
+            -1,
+            "camera.event.detected",
+            {"required_role": "admin"},
+        )
+

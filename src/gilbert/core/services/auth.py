@@ -371,6 +371,7 @@ class AuthService(Service):
             roles=frozenset(user.get("roles", [])),
             provider=provider_type,
             session_id=session_id,
+            tz=user.get("tz") or None,
         )
 
     async def _resolve_local_user(self, auth_info: AuthInfo) -> dict[str, Any] | None:
@@ -464,6 +465,7 @@ class AuthService(Service):
             roles=frozenset(user.get("roles", [])),
             provider=session.get("provider", "local"),
             session_id=session_id,
+            tz=user.get("tz") or None,
         )
 
     async def invalidate_session(self, session_id: str) -> None:

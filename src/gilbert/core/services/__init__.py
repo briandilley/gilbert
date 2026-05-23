@@ -3,12 +3,15 @@
 from gilbert.core.services.access_control import AccessControlService
 from gilbert.core.services.ai import AIService
 from gilbert.core.services.auth import AuthService
+from gilbert.core.services.calendar import CalendarService
 from gilbert.core.services.configuration import ConfigurationService
 from gilbert.core.services.doorbell import DoorbellService
 from gilbert.core.services.event_bus import EventBusService
+from gilbert.core.services.health import HealthService
 from gilbert.core.services.inbox import InboxService
 from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 from gilbert.core.services.lights import LightsService
+from gilbert.core.services.media_library import MediaLibraryService
 from gilbert.core.services.music import MusicService
 from gilbert.core.services.shades import ShadesService
 from gilbert.core.services.speaker import SpeakerService
@@ -22,12 +25,15 @@ __all__ = [
     "AccessControlService",
     "AIService",
     "AuthService",
+    "CalendarService",
     "DoorbellService",
     "ConfigurationService",
     "EventBusService",
+    "HealthService",
     "InboxService",
     "InboxAIChatService",
     "LightsService",
+    "MediaLibraryService",
     "MusicService",
     "ShadesService",
     "SpeakerService",

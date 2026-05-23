@@ -288,3 +288,54 @@ async def test_ensure_index_idempotent(sqlite_storage: SQLiteStorage) -> None:
     await sqlite_storage.ensure_index(idx)  # should not raise
     indexes = await sqlite_storage.list_indexes("devices")
     assert len(indexes) == 1
+
+
+# --- Delete-by-query ---
+
+
+async def test_delete_query_removes_matching_rows(sqlite_storage: SQLiteStorage) -> None:
+    await _seed_devices(sqlite_storage)
+    deleted = await sqlite_storage.delete_query(
+        Query(
+            collection="devices",
+            filters=[Filter(field="type", op=FilterOp.EQ, value="light")],
+        )
+    )
+    assert deleted == 2
+    remaining = await sqlite_storage.query(Query(collection="devices"))
+    assert len(remaining) == 1
+    assert remaining[0]["type"] == "thermostat"
+
+
+async def test_delete_query_no_filters_clears_collection(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    await _seed_devices(sqlite_storage)
+    deleted = await sqlite_storage.delete_query(Query(collection="devices"))
+    assert deleted == 3
+    remaining = await sqlite_storage.query(Query(collection="devices"))
+    assert remaining == []
+
+
+async def test_delete_query_unknown_collection_returns_zero(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    deleted = await sqlite_storage.delete_query(Query(collection="nonexistent"))
+    assert deleted == 0
+
+
+async def test_delete_query_with_lt_filter(sqlite_storage: SQLiteStorage) -> None:
+    await sqlite_storage.put("events", "e1", {"started_at": 100})
+    await sqlite_storage.put("events", "e2", {"started_at": 200})
+    await sqlite_storage.put("events", "e3", {"started_at": 300})
+    deleted = await sqlite_storage.delete_query(
+        Query(
+            collection="events",
+            filters=[Filter(field="started_at", op=FilterOp.LT, value=250)],
+        )
+    )
+    assert deleted == 2
+    remaining = await sqlite_storage.query(Query(collection="events"))
+    assert len(remaining) == 1
+    assert remaining[0]["started_at"] == 300
+

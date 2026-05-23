@@ -66,6 +66,35 @@ class WebSearchConfig(BaseConfig):
     settings: dict[str, Any] = {}
 
 
+class WeatherConfig(BaseConfig):
+    """Weather service configuration.
+
+    All non-bootstrap; the live values are managed via the Settings UI
+    and stored in entity storage. Defaults below are seeded into the
+    ``gilbert.config`` collection on first run. ``home_location`` is
+    intentionally absent — set via the ``home_location.set`` Settings
+    ConfigAction and stored at
+    ``gilbert.weather.service_state._id="home_location"``.
+    """
+
+    enabled: bool = False
+    backend: str = "open-meteo"
+    default_units: str = "metric"
+    cache_ttl_current_seconds: int = 600
+    cache_ttl_hourly_seconds: int = 1800
+    cache_ttl_daily_seconds: int = 3600
+    cache_ttl_alerts_seconds: int = 300
+    digest_enabled: bool = False
+    digest_hour: int = 7
+    digest_minute: int = 0
+    digest_horizon_hours: int = 12
+    digest_horizon_days: int = 3
+    alert_poll_seconds: int = 300
+    alert_voice_enabled: bool = False
+    alert_voice_minimum: str = "extreme"
+    settings: dict[str, Any] = {}
+
+
 class SkillsConfig(BaseConfig):
     """Skills system configuration."""
 
@@ -287,6 +316,7 @@ class GilbertConfig(BaseConfig):
     backup: BackupConfig = BackupConfig()
     roast: RoastConfig = RoastConfig()
     websearch: WebSearchConfig = WebSearchConfig()
+    weather: WeatherConfig = WeatherConfig()
     skills: SkillsConfig = SkillsConfig()
 
 

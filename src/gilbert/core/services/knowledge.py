@@ -464,6 +464,45 @@ class KnowledgeService(Service):
 
         return len(chunks)
 
+    async def remove_document(self, document_id: str) -> bool:
+        """Remove a document and its chunks from ChromaDB and tracking.
+
+        Implements the ``KnowledgeProvider.remove_document`` contract.
+        Returns ``True`` when the document was removed (or did not
+        exist), ``False`` only on hard error. Used by ``FeedsService``
+        for retention purges and unsubscribe cascade.
+        """
+        if not document_id:
+            return False
+        ok = True
+        if self._collection is not None:
+            try:
+                import asyncio
+
+                await asyncio.to_thread(
+                    self._collection.delete,
+                    where={"document_id": document_id},
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to delete chunks for %s from ChromaDB",
+                    document_id,
+                    exc_info=True,
+                )
+                ok = False
+        # Tracking row + cached text — best-effort; missing rows are fine.
+        await self._untrack_document(document_id)
+        if self._storage is not None:
+            try:
+                await self._storage.delete("knowledge_text", document_id)
+            except Exception:
+                pass
+        await self._emit(
+            "knowledge.document.removed",
+            {"document_id": document_id},
+        )
+        return ok
+
     async def _cache_text(self, document_id: str, text: str) -> None:
         """Cache extracted text in entity store for fast keyword search."""
         if self._storage is None:

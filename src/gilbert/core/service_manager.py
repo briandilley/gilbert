@@ -8,6 +8,15 @@ from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 
 logger = logging.getLogger(__name__)
 
+# How long each service gets to honor ``stop()`` before we move on.
+# Five seconds is generous for an in-process teardown (close DB
+# connection, cancel a background task) and short enough that a single
+# wedged service can't stretch a systemd restart from "instant" to
+# "twenty seconds." Services that legitimately need longer (e.g. flushing
+# a large write buffer) should do that work in a background task during
+# normal operation, not during shutdown.
+_SERVICE_STOP_TIMEOUT = 5.0
+
 
 class ServiceManager(ServiceResolver):
     """Manages service registration, dependency resolution, startup, and discovery."""
@@ -110,14 +119,30 @@ class ServiceManager(ServiceResolver):
             await self._publish_event("service.failed", name, info)
 
     async def stop_all(self) -> None:
-        """Stop all started services in reverse order."""
+        """Stop all started services in reverse order.
+
+        Each ``stop()`` is bounded by ``_SERVICE_STOP_TIMEOUT`` so a
+        single wedged service can't stall the whole shutdown. The
+        previous behavior was an unbounded ``await``, which let one
+        misbehaving service stretch a systemd restart to 20+ seconds
+        while the cgroup waited for stragglers.
+        """
         for name in reversed(self._started):
             svc = self._registered.get(name)
             if svc is None:
                 continue
             try:
-                await svc.stop()
+                await asyncio.wait_for(svc.stop(), timeout=_SERVICE_STOP_TIMEOUT)
                 logger.info("Service stopped: %s", name)
+            except TimeoutError:
+                # Don't propagate — keep stopping the rest of the
+                # services. The wedged one will be SIGKILLed with
+                # the process; we just don't want it gating shutdown.
+                logger.warning(
+                    "Service stop timed out after %.1fs: %s (continuing shutdown)",
+                    _SERVICE_STOP_TIMEOUT,
+                    name,
+                )
             except Exception:
                 logger.exception("Error stopping service: %s", name)
         self._started.clear()

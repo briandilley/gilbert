@@ -26,6 +26,16 @@ dependencies = [
     "markdown>=3.5",
     "pyjwt[crypto]>=2.12.1",
     "aiohttp>=3.13.5",
+    # feedparser parses RSS 2.0 / Atom 1.0 — both open standards, no
+    # vendor-specific behavior. ~150 KB on disk, BSD-licensed,
+    # stdlib-only transitive deps. Justified in
+    # ``docs/specs/04-rss-feeds.md`` §3 (Note on integrations/
+    # precedent) — the test for "may live in core integrations/" is
+    # vendor-free + small + provider-neutral; feedparser clears all
+    # three. The only feed backend that stays in core; provider-
+    # specific backends (Reddit, HackerNews, YouTube, podcasts) belong
+    # in ``std-plugins/``.
+    "feedparser>=6.0.10",
     # Std-plugin workspace members — each is a uv workspace member with
     # its own ``pyproject.toml`` declaring its third-party Python deps.
     # Listing them here (with ``{ workspace = true }`` sources below)
@@ -34,31 +44,42 @@ dependencies = [
     "gilbert-plugin-american-standard",
     "gilbert-plugin-andon-fm",
     "gilbert-plugin-anthropic",
+    "gilbert-plugin-apple-health",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
+    "gilbert-plugin-discord-webhook",
     "gilbert-plugin-elevenlabs",
+    "gilbert-plugin-frigate",
     "gilbert-plugin-gemini",
+    "gilbert-plugin-jellyfin",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-hk-webhook",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
+    "gilbert-plugin-ntfy",
     "gilbert-plugin-ollama",
+    "gilbert-plugin-open-meteo",
     "gilbert-plugin-openai",
     "gilbert-plugin-openwakeword",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-plex",
     "gilbert-plugin-porcupine",
+    "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
     "gilbert-plugin-sonos",
     "gilbert-plugin-tavily",
+    "gilbert-plugin-telegram",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-withings",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
     "faster-whisper>=1.2.1",
@@ -68,31 +89,42 @@ dependencies = [
 gilbert-plugin-american-standard = { workspace = true }
 gilbert-plugin-andon-fm = { workspace = true }
 gilbert-plugin-anthropic = { workspace = true }
+gilbert-plugin-apple-health = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }
 gilbert-plugin-browser = { workspace = true }
 gilbert-plugin-deepgram = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
+gilbert-plugin-discord-webhook = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
+gilbert-plugin-frigate = { workspace = true }
 gilbert-plugin-gemini = { workspace = true }
+gilbert-plugin-jellyfin = { workspace = true }
 gilbert-plugin-google = { workspace = true }
 gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }
+gilbert-plugin-hk-webhook = { workspace = true }
 gilbert-plugin-lutron-radiora = { workspace = true }
 gilbert-plugin-mistral = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
+gilbert-plugin-ntfy = { workspace = true }
 gilbert-plugin-ollama = { workspace = true }
+gilbert-plugin-open-meteo = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openwakeword = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
+gilbert-plugin-plex = { workspace = true }
+gilbert-plugin-pushover = { workspace = true }
 gilbert-plugin-porcupine = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
 gilbert-plugin-slack = { workspace = true }
 gilbert-plugin-sonos = { workspace = true }
 gilbert-plugin-tavily = { workspace = true }
+gilbert-plugin-telegram = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
+gilbert-plugin-withings = { workspace = true }
 gilbert-plugin-xai = { workspace = true }
 
 [project.optional-dependencies]
@@ -198,6 +230,15 @@ ignore = [
     "SIM108",
     "SIM117",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin directories use kebab-case names (apple-health, hk-webhook,
+# guess-that-song, ...) per the plugin manifest convention. The
+# package name CAN'T be lowercased without breaking the manifest +
+# uv-workspace member name; the per-file ignore lets the plugin
+# loader's sys.modules registration (which substitutes underscores
+# at import time) continue to work.
+"std-plugins/*/__init__.py" = ["N999"]
 
 [dependency-groups]
 dev = [
