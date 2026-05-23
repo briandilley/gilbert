@@ -33,6 +33,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from gilbert.interfaces.conversation import (
+    BrainToolResult,
+    ConversationContext,
+)
 from gilbert.interfaces.ai import (
     AIResponse,
     AISamplingProvider,
@@ -914,6 +918,44 @@ class PhoneCallService(Service):
                 },
             )
 
+        # ── brain-tool plumbing ────────────────────────────────────────
+        #
+        # The phone-call service's brain tools (``hang_up`` /
+        # ``confirm_and_end`` / ``escalate_to_user`` / ``note`` /
+        # ``send_dtmf``) are now owned by a ``PhoneCallBrainToolProvider``
+        # instance. The provider is stateless; per-conversation state
+        # (the record's outcome dict, the transcript recorder, the
+        # bus publisher) is passed in via a fresh ``ConversationContext``
+        # on every tool dispatch. Phone-call-specific bus event names
+        # are added back here (the provider publishes the generic event
+        # name; we prepend the ``phone.call.`` namespace).
+        brain_tool_provider = PhoneCallBrainToolProvider()
+
+        async def _publish_namespaced(event_type: str, data: dict[str, Any]) -> None:
+            namespaced = (
+                event_type
+                if "." in event_type
+                else f"phone.call.{event_type}"
+            )
+            payload = {
+                "call_id": record.call_id,
+                "user_id": record.user_id,
+                **data,
+            }
+            await self._publish(namespaced, payload)
+
+        def _make_brain_ctx() -> ConversationContext:
+            # Fresh context per dispatch — the outcome dict is the
+            # SAME mutable ref as ``record.outcome``, so tool writes
+            # land on the persisted record.
+            return ConversationContext(
+                session=session,  # type: ignore[arg-type]
+                outcome=record.outcome,
+                failure_reason=record.failure_reason,
+                record_turn=_record_turn,
+                publish_event=_publish_namespaced,
+            )
+
         async def _set_status(new: CallStatus, reason: str = "") -> None:
             if record.status == new.value:
                 log.info("status unchanged: already %s", new.value)
@@ -1146,7 +1188,7 @@ class PhoneCallService(Service):
                     messages=messages,
                     system_prompt=system_prompt,
                     max_tokens=600,
-                    tools_override=_brain_tools(),
+                    tools_override=brain_tool_provider.get_brain_tools(),
                 )
             except Exception:
                 log.exception("LLM call failed")
@@ -1295,12 +1337,18 @@ class PhoneCallService(Service):
                 speaking.active = False
 
             # Dispatch the LLM's tool calls now that the audio has
-            # been spoken. ``hang_up`` here ends the call cleanly —
-            # the remote heard the goodbye line before the line went
-            # dead.
+            # been spoken. ``END_CONVERSATION`` / ``ESCALATE`` end the
+            # call cleanly — the remote heard the goodbye line before
+            # the line went dead.
+            ctx_after_speak = _make_brain_ctx()
             for tc in response.message.tool_calls:
-                handled = await _handle_brain_tool(tc.tool_name, tc.arguments)
-                if handled == "hang_up":
+                handled = await brain_tool_provider.handle_brain_tool(
+                    tc.tool_name, tc.arguments, ctx_after_speak
+                )
+                if handled in (
+                    BrainToolResult.END_CONVERSATION,
+                    BrainToolResult.ESCALATE,
+                ):
                     stop.set()
                     try:
                         await session.hang_up()
@@ -1308,57 +1356,10 @@ class PhoneCallService(Service):
                         log.debug("hang_up cleanup error", exc_info=True)
                     return
 
-        # ── brain tools (the LLM-callable ones during the call) ─────
-
-        async def _handle_brain_tool(
-            name: str, args: dict[str, Any]
-        ) -> str:
-            if name == "hang_up":
-                record.outcome["hang_up_reason"] = str(args.get("reason") or "")
-                await _record_turn(
-                    "system", f"(brain hung up: {args.get('reason', '')})"
-                )
-                return "hang_up"
-            if name == "confirm_and_end":
-                summary = args.get("summary") or {}
-                if isinstance(summary, dict):
-                    record.outcome.update(summary)
-                await _record_turn(
-                    "system",
-                    f"(brain reading back confirmation: {summary})",
-                )
-                return "ok"
-            if name == "escalate_to_user":
-                record.outcome["escalated"] = True
-                record.outcome["escalation_reason"] = str(args.get("reason") or "")
-                await _record_turn(
-                    "system",
-                    f"(brain escalating: {args.get('reason', '')})",
-                )
-                await self._publish(
-                    "phone.call.escalation_requested",
-                    {
-                        "call_id": record.call_id,
-                        "user_id": record.user_id,
-                        "reason": str(args.get("reason") or ""),
-                    },
-                )
-                return "ok"
-            if name == "note":
-                key = str(args.get("key") or "").strip()
-                value = args.get("value")
-                if key:
-                    record.outcome[key] = value
-                return "ok"
-            if name == "send_dtmf":
-                # The LLM declared DTMF digits — backend doesn't yet
-                # support sending these, so we just log + record.
-                # Phase 4 will route this through a backend hook.
-                digits = str(args.get("digits") or "")
-                await _record_turn("us", f"(DTMF: {digits})")
-                return "ok"
-            log.warning("brain emitted unknown tool: %s", name)
-            return "unknown"
+        # (brain tools have moved out of this function — see
+        # ``PhoneCallBrainToolProvider`` at module scope. The
+        # dispatch loop above invokes the provider's
+        # ``handle_brain_tool`` with a per-call ``ConversationContext``.)
 
         # ── timeout watchdog: hard cap the call duration ──────────────
 
@@ -1814,108 +1815,185 @@ async def _pump_audio_to_stt(
         logger.debug("audio pump ended", exc_info=True)
 
 
-def _brain_tools() -> list[ToolDefinition]:
-    """Tools the LLM may call during a phone conversation.
+class PhoneCallBrainToolProvider:
+    """Brain-tool provider for outbound phone calls.
 
-    These are NOT exposed as Gilbert chat tools — they're scoped to the
-    one-shot LLM call inside the brain. The brain dispatches them
-    locally rather than going back through the service manager.
+    Implements ``BrainToolProvider``. The conversation engine (once
+    extracted in Step 3 of the engine refactor) asks for the tool list
+    once at call start and routes every tool call the LLM emits through
+    ``handle_brain_tool``. This provider is the canonical home for
+    phone-call-specific tools — ``hang_up`` / ``confirm_and_end`` /
+    ``escalate_to_user`` / ``note`` / ``send_dtmf``.
+
+    Stateless apart from the constructor refs. Each conversation gets
+    its own ``ConversationContext`` (mutable outcome / record_turn /
+    publish_event callbacks); the provider just dispatches against it.
     """
-    return [
-        ToolDefinition(
-            name="hang_up",
-            description=(
-                "Drop the line. Bookkeeping ONLY — does NOT speak. "
-                "You MUST say goodbye in the message content of THIS "
-                "SAME turn, e.g. content='Thanks so much, have a good "
-                "one!' + hang_up(reason='completed'). Calling hang_up "
-                "without spoken content gives the remote dead air and "
-                "then a dial tone — rude. Use only when the "
-                "conversation is genuinely done."
-            ),
-            parameters=[
-                ToolParameter(
-                    name="reason",
-                    type=ToolParameterType.STRING,
-                    description="Short reason recorded on the call.",
+
+    def get_brain_tools(self) -> list[ToolDefinition]:
+        """Tools the LLM may call during a phone conversation.
+
+        These are NOT exposed as Gilbert chat tools — they're scoped
+        to the one-shot LLM call inside the brain. The engine
+        dispatches them locally rather than going back through the
+        service manager.
+        """
+        return [
+            ToolDefinition(
+                name="hang_up",
+                description=(
+                    "Drop the line. Bookkeeping ONLY — does NOT speak. "
+                    "You MUST say goodbye in the message content of THIS "
+                    "SAME turn, e.g. content='Thanks so much, have a good "
+                    "one!' + hang_up(reason='completed'). Calling hang_up "
+                    "without spoken content gives the remote dead air and "
+                    "then a dial tone — rude. Use only when the "
+                    "conversation is genuinely done."
                 ),
-            ],
-        ),
-        ToolDefinition(
-            name="confirm_and_end",
-            description=(
-                "Bookkeeping ONLY — records the structured outcome onto "
-                "the call. Does NOT speak. You MUST speak the readback "
-                "yourself in the message content of THIS SAME turn, e.g. "
-                "content='Great, so that\\'s Tuesday at 8 AM with a loaner "
-                "lined up — sound right?' + confirm_and_end({...}). On "
-                "the NEXT turn, after the remote confirms, speak a brief "
-                "thanks/goodbye and call ``hang_up``."
-            ),
-            parameters=[
-                ToolParameter(
-                    name="summary",
-                    type=ToolParameterType.OBJECT,
-                    description=(
-                        "Structured outcome — e.g. "
-                        '{"appointment_datetime": "...", '
-                        '"service_advisor": "...", "loaner_confirmed": true}. '
-                        "Stored on the call record for the post-call "
-                        "summary. The remote does NOT hear these fields; "
-                        "say them yourself in the message content."
+                parameters=[
+                    ToolParameter(
+                        name="reason",
+                        type=ToolParameterType.STRING,
+                        description="Short reason recorded on the call.",
                     ),
-                ),
-            ],
-        ),
-        ToolDefinition(
-            name="escalate_to_user",
-            description=(
-                "Bail out — the situation needs the actual user. Gilbert "
-                "will apologize, ask the remote to call back, and hang up."
+                ],
             ),
-            parameters=[
-                ToolParameter(
-                    name="reason",
-                    type=ToolParameterType.STRING,
-                    description="Why escalation is required.",
+            ToolDefinition(
+                name="confirm_and_end",
+                description=(
+                    "Bookkeeping ONLY — records the structured outcome onto "
+                    "the call. Does NOT speak. You MUST speak the readback "
+                    "yourself in the message content of THIS SAME turn, e.g. "
+                    "content='Great, so that\\'s Tuesday at 8 AM with a loaner "
+                    "lined up — sound right?' + confirm_and_end({...}). On "
+                    "the NEXT turn, after the remote confirms, speak a brief "
+                    "thanks/goodbye and call ``hang_up``."
                 ),
-            ],
-        ),
-        ToolDefinition(
-            name="note",
-            description=(
-                "Stash a fact onto the call's structured outcome. Use for "
-                "anything worth surfacing in the post-call summary that "
-                "doesn't trigger an end-of-call."
+                parameters=[
+                    ToolParameter(
+                        name="summary",
+                        type=ToolParameterType.OBJECT,
+                        description=(
+                            "Structured outcome — e.g. "
+                            '{"appointment_datetime": "...", '
+                            '"service_advisor": "...", "loaner_confirmed": true}. '
+                            "Stored on the call record for the post-call "
+                            "summary. The remote does NOT hear these fields; "
+                            "say them yourself in the message content."
+                        ),
+                    ),
+                ],
             ),
-            parameters=[
-                ToolParameter(
-                    name="key",
-                    type=ToolParameterType.STRING,
-                    description="Outcome field name (snake_case).",
+            ToolDefinition(
+                name="escalate_to_user",
+                description=(
+                    "Bail out — the situation needs the actual user. Gilbert "
+                    "will apologize, ask the remote to call back, and hang up."
                 ),
-                ToolParameter(
-                    name="value",
-                    type=ToolParameterType.STRING,
-                    description="Value to store.",
-                ),
-            ],
-        ),
-        ToolDefinition(
-            name="send_dtmf",
-            description=(
-                "Send DTMF digits to navigate an IVR menu. Use ONLY when "
-                "the remote prompts for a key press."
+                parameters=[
+                    ToolParameter(
+                        name="reason",
+                        type=ToolParameterType.STRING,
+                        description="Why escalation is required.",
+                    ),
+                ],
             ),
-            parameters=[
-                ToolParameter(
-                    name="digits",
-                    type=ToolParameterType.STRING,
-                    description='Sequence of 0-9, *, # — e.g. "2" or "1234#".',
+            ToolDefinition(
+                name="note",
+                description=(
+                    "Stash a fact onto the call's structured outcome. Use for "
+                    "anything worth surfacing in the post-call summary that "
+                    "doesn't trigger an end-of-call."
                 ),
-            ],
-        ),
-    ]
+                parameters=[
+                    ToolParameter(
+                        name="key",
+                        type=ToolParameterType.STRING,
+                        description="Outcome field name (snake_case).",
+                    ),
+                    ToolParameter(
+                        name="value",
+                        type=ToolParameterType.STRING,
+                        description="Value to store.",
+                    ),
+                ],
+            ),
+            ToolDefinition(
+                name="send_dtmf",
+                description=(
+                    "Send DTMF digits to navigate an IVR menu. Use ONLY when "
+                    "the remote prompts for a key press."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="digits",
+                        type=ToolParameterType.STRING,
+                        description='Sequence of 0-9, *, # — e.g. "2" or "1234#".',
+                    ),
+                ],
+            ),
+        ]
+
+    async def handle_brain_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ConversationContext,
+    ) -> BrainToolResult:
+        """Dispatch a phone-call brain tool.
+
+        ``ctx.outcome`` is the same mutable dict the wrapper persists
+        onto ``_CallRecord.outcome`` — writes here flow through. Same
+        for ``record_turn`` (transcript appending) and ``publish_event``
+        (event bus).
+        """
+        if name == "hang_up":
+            ctx.outcome["hang_up_reason"] = str(args.get("reason") or "")
+            await ctx.record_turn(
+                "system", f"(brain hung up: {args.get('reason', '')})"
+            )
+            return BrainToolResult.END_CONVERSATION
+
+        if name == "confirm_and_end":
+            summary = args.get("summary") or {}
+            if isinstance(summary, dict):
+                ctx.outcome.update(summary)
+            await ctx.record_turn(
+                "system",
+                f"(brain reading back confirmation: {summary})",
+            )
+            return BrainToolResult.OK
+
+        if name == "escalate_to_user":
+            ctx.outcome["escalated"] = True
+            ctx.outcome["escalation_reason"] = str(args.get("reason") or "")
+            await ctx.record_turn(
+                "system",
+                f"(brain escalating: {args.get('reason', '')})",
+            )
+            await ctx.publish_event(
+                "phone.call.escalation_requested",
+                {"reason": str(args.get("reason") or "")},
+            )
+            return BrainToolResult.ESCALATE
+
+        if name == "note":
+            key = str(args.get("key") or "").strip()
+            value = args.get("value")
+            if key:
+                ctx.outcome[key] = value
+            return BrainToolResult.OK
+
+        if name == "send_dtmf":
+            # Backend doesn't yet support sending DTMF — log + record.
+            # Phase 4 will route this through a backend hook (the
+            # telephony interface needs a ``send_dtmf`` method).
+            digits = str(args.get("digits") or "")
+            await ctx.record_turn("us", f"(DTMF: {digits})")
+            return BrainToolResult.OK
+
+        logger.warning("phone-call brain emitted unknown tool: %s", name)
+        return BrainToolResult.OK
 
 
 _DEFAULT_OPENING_DISCLOSURE = (

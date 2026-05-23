@@ -1,0 +1,345 @@
+"""Conversation-engine interface — the reusable bidirectional-audio loop.
+
+The conversation engine drives any back-and-forth voice exchange Gilbert is
+in: outbound phone calls, wake-word activated local voice sessions,
+videoconference participants, etc. The shape mirrors what proved necessary
+in the phone-call brain — a session-like audio I/O endpoint, a few status
+events, an LLM brain that turn-takes and barges-in, and a pluggable set of
+"brain tools" the LLM can call to mutate the conversation's outcome.
+
+This module deliberately contains nothing carrier-, hardware-, or
+modality-specific. The phone-call wrapper builds on top of these
+abstractions; the eventual voice-agent / wake-word wrapper will too. Each
+of them brings their own brain-tool provider, their own session
+implementation, and their own opening policy (do we speak first? wait for
+the other side?) — the engine just orchestrates.
+
+This file is pure: standard library + the existing ``gilbert.interfaces``
+sub-modules only. No core service imports.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Protocol, runtime_checkable
+
+from gilbert.interfaces.tools import ToolDefinition
+
+# ── Status / event types ─────────────────────────────────────────────
+
+
+class ConversationStatus(StrEnum):
+    """High-level lifecycle states a conversation session moves through.
+
+    These are the engine-visible states. Modality-specific layers can
+    introduce their own (``CallStatus`` carries ``RINGING`` for phone
+    calls, for instance) and translate to / from these on the boundary.
+    """
+
+    PENDING = "pending"        # session created, audio not yet flowing
+    ACTIVE = "active"          # bidirectional audio is live
+    ENDED = "ended"            # session closed cleanly
+    FAILED = "failed"          # session never reached active, or crashed
+
+
+@dataclass(frozen=True)
+class ConversationStatusEvent:
+    """Lifecycle transition emitted by the session."""
+
+    status: ConversationStatus
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ConversationErrorEvent:
+    """Non-fatal stream-level issue surfaced by the session."""
+
+    message: str
+    recoverable: bool = True
+
+
+# Concrete event types layers like telephony will extend this union.
+# Engine code branches on ``isinstance`` so unknown subtypes are
+# logged-and-ignored gracefully.
+ConversationEvent = ConversationStatusEvent | ConversationErrorEvent
+
+
+# ── Audio I/O ────────────────────────────────────────────────────────
+
+
+class AudioSink(Protocol):
+    """Where the engine pushes synthesized audio that should reach the
+    remote/listener.
+
+    Implementations buffer + chunk for whatever transport carries the
+    session (a Media Stream WebSocket, a speaker driver, an HTTP audio
+    sink, etc.). ``clear()`` discards anything buffered-but-unsent — the
+    barge-in handler calls this so the engine can stop talking the
+    instant the user starts.
+    """
+
+    async def write(self, chunk: bytes) -> None: ...
+    async def clear(self) -> None: ...
+
+
+# ── Session ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class ConversationSession:
+    """One open conversation. The engine reads inbound audio + events from
+    this, and writes outbound audio through ``audio_out``. Closing is the
+    consumer's responsibility (``end_session`` calls back into whatever
+    transport owns the session).
+
+    Modality-specific layers extend this dataclass with their own fields
+    (``CallSession`` adds DTMF events + caller-ID metadata, a future
+    ``LocalVoiceSession`` would add wake-word-source information, etc.).
+    The engine only touches the common fields.
+
+    Audio format: 8 kHz mulaw is the lowest common denominator (carriers
+    require it; local mics resample down to it). Higher-rate sessions
+    can negotiate via the audio-format negotiation hook (TODO when the
+    voice-agent plugin lands and needs 16 kHz mic input).
+    """
+
+    session_id: str
+    audio_in: AsyncIterator[bytes]
+    audio_out: AudioSink
+    events: AsyncIterator[ConversationEvent]
+
+    async def end_session(self) -> None:
+        """Tear down the underlying transport. Idempotent — repeated
+        calls are safe. The session's audio iterators must stop yielding
+        after this returns."""
+        ...
+
+
+# ── Brain-tool framework ─────────────────────────────────────────────
+
+
+class BrainToolResult(StrEnum):
+    """What the engine should do after dispatching a brain tool.
+
+    - ``OK``: tool ran, conversation continues.
+    - ``END_CONVERSATION``: tool requested termination — engine should
+      call ``session.end_session()`` and exit the loop.
+    - ``ESCALATE``: tool flagged this as something the supervising user
+      needs to handle. Engine ends the session (semantically the same as
+      END_CONVERSATION at this layer); the wrapper plugin's bus-event
+      handler is what actually surfaces the escalation to the user.
+    """
+
+    OK = "ok"
+    END_CONVERSATION = "end_conversation"
+    ESCALATE = "escalate"
+
+
+@dataclass
+class ConversationContext:
+    """Per-conversation runtime context handed to brain-tool handlers.
+
+    Lets tool providers record transcript turns, mutate a structured
+    outcome dict the wrapper persists, publish bus events, and inspect
+    the session itself. Lives only during the conversation; the wrapper
+    typically reads the final state from ``outcome`` after the engine
+    returns.
+
+    Mutable on purpose — tool handlers update ``outcome`` in place. The
+    record-turn / publish-event hooks are async because the wrappers
+    they bridge to (storage writes, bus publishes) are too.
+    """
+
+    session: ConversationSession
+    outcome: dict[str, Any]
+    failure_reason: str = ""
+
+    record_turn: Callable[[str, str], Awaitable[None]] = field(
+        default=lambda who, text: _noop_record(who, text)  # type: ignore[assignment, return-value]
+    )
+    publish_event: Callable[[str, dict[str, Any]], Awaitable[None]] = field(
+        default=lambda etype, data: _noop_publish(etype, data)  # type: ignore[assignment, return-value]
+    )
+
+
+async def _noop_record(who: str, text: str) -> None:
+    """Default ``record_turn`` callback — drops the turn on the floor.
+
+    Tests and skeleton wrappers can construct a ``ConversationContext``
+    without wiring up persistence; this avoids requiring a callback at
+    every callsite. Production wrappers (phone-call service, voice-agent
+    plugin) override this with their real persistence.
+    """
+    return None
+
+
+async def _noop_publish(event_type: str, data: dict[str, Any]) -> None:
+    """Default ``publish_event`` callback — drops the event on the floor."""
+    return None
+
+
+class BrainToolProvider(Protocol):
+    """Plug-in source of brain tools for the conversation engine.
+
+    The engine asks for the tool list once at conversation start
+    (``get_brain_tools()``) and dispatches every tool call the LLM
+    emits through ``handle_brain_tool``. Providers carry their own
+    state — the phone-call wrapper carries the ``_CallRecord``, a
+    voice-agent wrapper would carry its own session-state — and they
+    return a ``BrainToolResult`` telling the engine whether the
+    conversation should continue.
+
+    All providers SHOULD include a way for the LLM to end the
+    conversation; without one, the engine will only exit on the
+    session's own status events (timeout, remote hangup, etc.).
+    """
+
+    def get_brain_tools(self) -> list[ToolDefinition]: ...
+
+    async def handle_brain_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ConversationContext,
+    ) -> BrainToolResult: ...
+
+
+@runtime_checkable
+class BrainToolProviderRT(Protocol):
+    """Runtime-checkable variant of ``BrainToolProvider``.
+
+    Use this when you need ``isinstance(x, BrainToolProviderRT)`` (e.g.
+    discovery / wiring code). The plain ``Protocol`` form above is
+    preferred for type hints because it doesn't drag in
+    ``@runtime_checkable``'s reflection cost on every isinstance call.
+    """
+
+    def get_brain_tools(self) -> list[ToolDefinition]: ...
+
+    async def handle_brain_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ConversationContext,
+    ) -> BrainToolResult: ...
+
+
+# ── Opening policy ───────────────────────────────────────────────────
+
+
+class OpeningBehavior(StrEnum):
+    """Who speaks first when the session becomes active?
+
+    - ``WAIT_FOR_REMOTE``: stay silent and listen; on the first inbound
+      FinalTranscript, run the brain in response. Phone-call use:
+      recipient picks up, says "hello?", brain responds.
+    - ``SPEAK_FIRST``: brain produces a cold-open immediately on the
+      ACTIVE status. Wake-word use: wake fires, brain greets.
+    """
+
+    WAIT_FOR_REMOTE = "wait_for_remote"
+    SPEAK_FIRST = "speak_first"
+
+
+@dataclass(frozen=True)
+class OpeningPolicy:
+    """How the engine should open the conversation.
+
+    ``behavior`` selects the strategy. ``fallback_timeout_seconds`` only
+    applies to ``WAIT_FOR_REMOTE`` — if the remote stays silent past
+    this many seconds, the engine cold-opens anyway so the line doesn't
+    hang in dead silence (voicemail, mute, hold music).
+    """
+
+    behavior: OpeningBehavior = OpeningBehavior.SPEAK_FIRST
+    fallback_timeout_seconds: float = 4.0
+
+
+# ── Engine configuration ─────────────────────────────────────────────
+
+
+@dataclass
+class ConversationConfig:
+    """Per-conversation configuration handed to the engine.
+
+    Carries everything the engine needs that isn't part of the session
+    itself: the LLM system prompt, the brain-tool provider, the opening
+    policy, and a few callbacks the wrapper uses to observe the
+    conversation as it progresses.
+    """
+
+    system_prompt: str
+    brain_tool_provider: BrainToolProvider
+    opening_policy: OpeningPolicy = field(default_factory=OpeningPolicy)
+    max_conversation_seconds: int = 900
+
+    # Optional priming messages prepended to the message list before the
+    # first LLM turn. Phone-call wrapper uses this to inject the
+    # "(SYSTEM) call answered" cue + the disclosure-line example.
+    priming_messages: list[Any] = field(default_factory=list)
+
+    # ── Observability callbacks (all optional) ───────────────────────
+    #
+    # The engine invokes these as the conversation progresses. Wrappers
+    # use them to persist their own per-modality records, publish bus
+    # events, and so on. ``None`` callbacks are skipped — no need to
+    # write a no-op stub at every callsite.
+
+    on_status_change: (
+        Callable[[ConversationStatus, str], Awaitable[None]] | None
+    ) = None
+    on_transcript_turn: (
+        Callable[[str, str, float], Awaitable[None]] | None
+    ) = None  # (who, text, ts_seconds)
+    on_llm_turn: (
+        Callable[[str, list[str]], Awaitable[None]] | None
+    ) = None  # (text, tool_names)
+
+
+# ── Outcome the engine returns ───────────────────────────────────────
+
+
+@dataclass
+class ConversationOutcome:
+    """Final state of a completed conversation.
+
+    The engine returns this; the wrapper uses it to populate its
+    per-modality record (a ``_CallRecord`` for phone calls, a
+    ``_VoiceConversationRecord`` for voice-agent sessions, etc.).
+    """
+
+    final_status: ConversationStatus
+    duration_seconds: float
+    outcome: dict[str, Any]  # what brain-tools wrote
+    failure_reason: str = ""
+    # Whether any LLM turn was actually produced (False means we never
+    # got past the opening — useful for filtering out "ringback then
+    # hangup" non-conversations from the SPA listing).
+    spoke_at_all: bool = False
+
+
+# ── Service-level capability protocol ────────────────────────────────
+
+
+@runtime_checkable
+class ConversationEngine(Protocol):
+    """The capability other services / plugins consume to run a
+    conversation. Implemented by the core ``VoiceBrainService`` (Step
+    3 of the conversation-engine extraction); other services resolve
+    it via ``resolver.get_capability("voice_brain")``.
+
+    Single method: ``run_conversation(session, config) -> outcome``.
+    The implementation handles three-loop orchestration (status drain,
+    listen+STT, watchdog), barge-in (local-VAD plus STT signal),
+    speak-first / wait-for-remote opening, LLM turn-loop with tool
+    dispatch, and TTS pacing. None of that is the caller's concern.
+    """
+
+    async def run_conversation(
+        self,
+        session: ConversationSession,
+        config: ConversationConfig,
+    ) -> ConversationOutcome: ...

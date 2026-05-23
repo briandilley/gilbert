@@ -14,8 +14,8 @@ import pytest
 from gilbert.core.services.phone_call import (
     _DEFAULT_CALL_SYSTEM_PROMPT,
     _DEFAULT_OPENING_DISCLOSURE,
+    PhoneCallBrainToolProvider,
     PhoneCallService,
-    _brain_tools,
     _CallRecord,
     _record_from_dict,
     _summarize_for_list,
@@ -100,7 +100,7 @@ def test_get_tools_returns_make_phone_call_when_enabled() -> None:
 def test_brain_tools_includes_lifecycle_tools() -> None:
     """The LLM needs at minimum a way to end the call cleanly and to
     bail out. Without these the call hits the watchdog timeout."""
-    by_name = {t.name: t for t in _brain_tools()}
+    by_name = {t.name: t for t in PhoneCallBrainToolProvider().get_brain_tools()}
     for required in (
         "hang_up",
         "confirm_and_end",
@@ -115,8 +115,78 @@ def test_brain_tools_confirm_and_end_takes_structured_summary() -> None:
     """``summary`` must be a structured object so the brain can write
     typed outcome fields onto the call record — flattening it to a
     string would lose the ability to query outcomes downstream."""
-    confirm = next(t for t in _brain_tools() if t.name == "confirm_and_end")
+    confirm = next(
+        t
+        for t in PhoneCallBrainToolProvider().get_brain_tools()
+        if t.name == "confirm_and_end"
+    )
     assert any(p.name == "summary" for p in confirm.parameters)
+
+
+async def test_brain_tools_hang_up_returns_end_conversation() -> None:
+    """``hang_up`` must signal END_CONVERSATION so the engine drops
+    the line. Regression-guard: the provider's return-value protocol
+    is what tells the dispatch loop to stop processing further turns."""
+    from gilbert.interfaces.conversation import (
+        BrainToolResult,
+        ConversationContext,
+    )
+
+    provider = PhoneCallBrainToolProvider()
+    outcome: dict = {}
+    turns: list[tuple[str, str]] = []
+
+    async def _record(who: str, text: str) -> None:
+        turns.append((who, text))
+
+    async def _publish(event: str, data: dict) -> None:
+        pass
+
+    ctx = ConversationContext(
+        session=None,  # type: ignore[arg-type]  — hang_up doesn't touch session
+        outcome=outcome,
+        record_turn=_record,
+        publish_event=_publish,
+    )
+    result = await provider.handle_brain_tool(
+        "hang_up", {"reason": "test"}, ctx
+    )
+    assert result == BrainToolResult.END_CONVERSATION
+    assert outcome["hang_up_reason"] == "test"
+    assert any("(brain hung up:" in text for _, text in turns)
+
+
+async def test_brain_tools_escalate_returns_escalate() -> None:
+    """``escalate_to_user`` must end the call AND signal escalation so
+    the wrapper can fire its specific bus event downstream."""
+    from gilbert.interfaces.conversation import (
+        BrainToolResult,
+        ConversationContext,
+    )
+
+    provider = PhoneCallBrainToolProvider()
+    outcome: dict = {}
+    published: list[tuple[str, dict]] = []
+
+    async def _record(who: str, text: str) -> None:
+        pass
+
+    async def _publish(event: str, data: dict) -> None:
+        published.append((event, data))
+
+    ctx = ConversationContext(
+        session=None,  # type: ignore[arg-type]
+        outcome=outcome,
+        record_turn=_record,
+        publish_event=_publish,
+    )
+    result = await provider.handle_brain_tool(
+        "escalate_to_user", {"reason": "needs human"}, ctx
+    )
+    assert result == BrainToolResult.ESCALATE
+    assert outcome["escalated"] is True
+    assert outcome["escalation_reason"] == "needs human"
+    assert any("escalation_requested" in event for event, _ in published)
 
 
 def test_default_call_system_prompt_only_uses_known_format_keys() -> None:
