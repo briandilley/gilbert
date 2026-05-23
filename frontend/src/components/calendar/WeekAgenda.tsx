@@ -3,13 +3,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { CalendarEvent } from "@/types/calendar";
-import { ExternalLink, Trash2 } from "lucide-react";
+import { localDateKey } from "./datetime";
+import { ExternalLink, Plus, Trash2 } from "lucide-react";
 
 interface Props {
   weekStart: Date;
   events: CalendarEvent[];
   loading?: boolean;
+  canCreateEvent: boolean;
   onDeleteEvent: (accountId: string, eventId: string) => void;
+  onCreateEvent: (date: Date) => void;
 }
 
 /** Group events by day-of-week and render them as cards. */
@@ -17,7 +20,9 @@ export function WeekAgenda({
   weekStart,
   events,
   loading,
+  canCreateEvent,
   onDeleteEvent,
+  onCreateEvent,
 }: Props) {
   const days = useMemo(() => {
     const out: { label: string; date: Date; events: CalendarEvent[] }[] = [];
@@ -29,8 +34,8 @@ export function WeekAgenda({
         month: "short",
         day: "numeric",
       });
-      const dayKey = d.toISOString().slice(0, 10);
-      const dayEvents = events.filter((e) => e.start.slice(0, 10) === dayKey);
+      const dayKey = localDateKey(d);
+      const dayEvents = events.filter((e) => localDateKey(e.start) === dayKey);
       out.push({ label, date: d, events: dayEvents });
     }
     return out;
@@ -44,8 +49,17 @@ export function WeekAgenda({
     <div className="space-y-4">
       {days.map((day) => (
         <Card key={day.label}>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
             <CardTitle className="text-base">{day.label}</CardTitle>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => onCreateEvent(day.date)}
+              disabled={!canCreateEvent}
+              title={`Create event on ${day.label}`}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
           </CardHeader>
           <CardContent className="space-y-2">
             {day.events.length === 0 ? (
@@ -121,4 +135,3 @@ function formatTime(iso: string): string {
     minute: "2-digit",
   });
 }
-

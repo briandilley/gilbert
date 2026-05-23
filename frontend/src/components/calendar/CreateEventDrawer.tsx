@@ -19,10 +19,12 @@ import {
 } from "@/components/ui/select";
 import { useWsApi } from "@/hooks/useWsApi";
 import type { CalendarAccount } from "@/types/calendar";
+import { addMinutes, defaultEventTimesForDate } from "./datetime";
 
 interface Props {
   accounts: CalendarAccount[];
   defaultAccountId: string | null;
+  defaultStartDate: Date | null;
   onClose: () => void;
   onCreated: () => void;
 }
@@ -37,6 +39,7 @@ interface Props {
 export function CreateEventDrawer({
   accounts,
   defaultAccountId,
+  defaultStartDate,
   onClose,
   onCreated,
 }: Props) {
@@ -45,9 +48,10 @@ export function CreateEventDrawer({
   const [accountId, setAccountId] = useState(
     defaultAccountId || writableAccounts[0]?.id || "",
   );
+  const defaultTimes = defaultEventTimesForDate(defaultStartDate);
   const [title, setTitle] = useState("");
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
+  const [start, setStart] = useState(defaultTimes.start);
+  const [end, setEnd] = useState(defaultTimes.end);
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
   const [attendees, setAttendees] = useState("");
@@ -83,6 +87,31 @@ export function CreateEventDrawer({
     onError: (e: Error) => setError(e.message),
   });
 
+  const setStartDate = (date: string) => {
+    if (!date) return;
+    const nextStart = `${date}T${timePart(start)}`;
+    setStart(nextStart);
+    if (end <= nextStart) {
+      setEnd(addMinutes(nextStart, 60));
+    }
+  };
+
+  const setStartTime = (time: string) => {
+    if (!time) return;
+    const nextStart = `${datePart(start)}T${time}`;
+    setStart(nextStart);
+    if (end <= nextStart) {
+      setEnd(addMinutes(nextStart, 60));
+    }
+  };
+
+  const setEndDate = (date: string) => {
+    if (date) setEnd(`${date}T${timePart(end)}`);
+  };
+  const setEndTime = (time: string) => {
+    if (time) setEnd(`${datePart(end)}T${time}`);
+  };
+
   return (
     <Sheet open onOpenChange={(o) => (!o ? onClose() : null)}>
       <SheetContent className="sm:max-w-lg overflow-y-auto">
@@ -109,21 +138,56 @@ export function CreateEventDrawer({
             <Label>Title</Label>
             <Input value={title} onChange={(e) => setTitle(e.target.value)} />
           </div>
-          <div className="space-y-2">
-            <Label>Start</Label>
-            <Input
-              type="datetime-local"
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-            />
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <div className="space-y-2">
+              <Label>Start date</Label>
+              <Input
+                type="date"
+                value={datePart(start)}
+                onChange={(e) => setStartDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Start time</Label>
+              <Input
+                type="time"
+                step={900}
+                value={timePart(start)}
+                onChange={(e) => setStartTime(e.target.value)}
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label>End</Label>
-            <Input
-              type="datetime-local"
-              value={end}
-              onChange={(e) => setEnd(e.target.value)}
-            />
+          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+            <div className="space-y-2">
+              <Label>End date</Label>
+              <Input
+                type="date"
+                value={datePart(end)}
+                onChange={(e) => setEndDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>End time</Label>
+              <Input
+                type="time"
+                step={900}
+                value={timePart(end)}
+                onChange={(e) => setEndTime(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {[30, 60, 90, 120].map((minutes) => (
+              <Button
+                key={minutes}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setEnd(addMinutes(start, minutes))}
+              >
+                {minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}
+              </Button>
+            ))}
           </div>
           <div className="space-y-2">
             <Label>Location</Label>
@@ -185,3 +249,10 @@ export function CreateEventDrawer({
   );
 }
 
+function datePart(localDateTime: string): string {
+  return localDateTime.slice(0, 10);
+}
+
+function timePart(localDateTime: string): string {
+  return localDateTime.slice(11, 16);
+}

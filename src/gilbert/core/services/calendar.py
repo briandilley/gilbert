@@ -1770,6 +1770,11 @@ class CalendarService(Service):
         request.start = self._localize_naive(request.start, account.timezone)
         request.end = self._localize_naive(request.end, account.timezone)
         evt = await runtime.backend.create_event(account.calendar_id, request)
+        await self._storage.put(
+            _EVENTS_COLLECTION,
+            self._event_row_id(account_id, evt.event_id),
+            self._event_row_payload(account, evt),
+        )
         self._record_mutate_publish(account_id, evt.event_id)
         await self._publish_event_change("calendar.event.created", account, evt)
         return evt

@@ -623,6 +623,30 @@ async def test_mutation_publish_dedup_suppresses_poll_republication(sqlite_stora
 
 
 @pytest.mark.asyncio
+async def test_created_event_is_listed_before_next_poll(sqlite_storage: SQLiteStorage) -> None:
+    svc, _, _ = await _service(sqlite_storage)
+    account, _backend = await _seed_account(svc)
+    user = _user_ctx("alice")
+    start = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+    req = EventCreateRequest(
+        title="Planning",
+        start=start,
+        end=start + timedelta(minutes=30),
+    )
+
+    created = await svc.create_event(account.id, req, user)
+    listed = await svc.list_events(
+        account.id,
+        start - timedelta(minutes=1),
+        start + timedelta(hours=1),
+        user,
+    )
+
+    assert [event.event_id for event in listed.events] == [created.event_id]
+    assert listed.events[0].title == "Planning"
+
+
+@pytest.mark.asyncio
 async def test_idempotency_dedup_for_repeated_create(sqlite_storage: SQLiteStorage) -> None:
     """Edge case 17 — same args ⇒ same idempotency key ⇒ backend
     deduplicates and only one event is created."""
