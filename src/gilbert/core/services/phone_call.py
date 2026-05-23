@@ -555,9 +555,24 @@ class PhoneCallService(Service):
                 description=(
                     "Place an outbound phone call. Gilbert will identify "
                     "himself as an automated assistant calling on behalf "
-                    "of the user, follow the brief, and report back when "
-                    "the call ends. Caller is limited to one active call "
-                    "at a time."
+                    "of the user and follow the brief. The user can watch "
+                    "the live transcript on the Calls page (/calls) and "
+                    "intervene by text from there. "
+                    "\n\n"
+                    "IMPORTANT: ALWAYS invoke this tool when the user "
+                    "asks to make a call. Do NOT assume from chat history "
+                    "that a previous call is still active — call records "
+                    "live in their own store, not in this conversation. "
+                    "The tool itself enforces the one-active-call-per-user "
+                    "limit and will return a specific error if a real "
+                    "active call exists. If you THINK a call is in "
+                    "progress but the user is asking again, the previous "
+                    "call almost certainly ended; place the new call. "
+                    "\n\n"
+                    "This tool does NOT deliver outcome notifications "
+                    "back into chat — do not promise the user you'll "
+                    "report back here. Direct them to /calls for the "
+                    "transcript and outcome."
                 ),
                 parameters=[
                     ToolParameter(
