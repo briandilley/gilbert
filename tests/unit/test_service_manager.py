@@ -260,6 +260,52 @@ async def test_stop_handles_errors(manager: ServiceManager) -> None:
     await manager.stop_all()  # should not raise
 
 
+async def test_stop_all_caps_hung_service(
+    manager: ServiceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A service whose ``stop()`` never returns must not stall shutdown.
+
+    Without the timeout in ``stop_all`` a single wedged service would
+    block the whole teardown indefinitely — that's the root cause of
+    the 20-second systemd-restart stall we're fixing here.
+    """
+    import asyncio
+
+    # Shorten the timeout so the test doesn't burn the real 5s budget.
+    monkeypatch.setattr(
+        "gilbert.core.service_manager._SERVICE_STOP_TIMEOUT", 0.05
+    )
+
+    stopped: list[str] = []
+
+    class HungStop(StubService):
+        async def stop(self) -> None:
+            await asyncio.sleep(10)  # would hang well past any sensible cap
+            stopped.append(self._info.name)
+
+    class FastStop(StubService):
+        async def stop(self) -> None:
+            stopped.append(self._info.name)
+
+    hung = HungStop("hung", capabilities=frozenset({"hung"}))
+    fast = FastStop("fast", requires=frozenset({"hung"}))
+    manager.register(hung)
+    manager.register(fast)
+    await manager.start_all()
+
+    # Should complete in well under a second even though ``hung.stop``
+    # would sleep for 10s.
+    start = asyncio.get_event_loop().time()
+    await manager.stop_all()
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 1.0, f"stop_all took {elapsed}s — timeout didn't fire"
+    # Reverse order: fast (requires hung) stops first and completes,
+    # then hung is asked to stop and times out.
+    assert "fast" in stopped
+    assert "hung" not in stopped  # the hung one was abandoned
+
+
 # --- Lifecycle Events ---
 
 

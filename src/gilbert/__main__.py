@@ -56,6 +56,13 @@ async def main() -> None:
         host=gilbert.config.web.host,
         port=gilbert.config.web.port,
         log_level="info",
+        # Cap how long uvicorn waits for in-flight requests + active
+        # WebSocket connections to drain before forcing a close. Without
+        # this uvicorn waits forever (its default), which means a single
+        # idle WS client can stretch shutdown to systemd's hard kill
+        # timeout. 10s is plenty for normal request finalization and
+        # short enough that a routine restart feels instant.
+        timeout_graceful_shutdown=10,
     )
     server = uvicorn.Server(uv_config)
 
