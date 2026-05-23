@@ -20,6 +20,7 @@ import {
 import { useWsApi } from "@/hooks/useWsApi";
 import type { CalendarAccount } from "@/types/calendar";
 import { addMinutes, defaultEventTimesForDate } from "./datetime";
+import { DateTimePicker } from "./DateTimePicker";
 
 interface Props {
   accounts: CalendarAccount[];
@@ -138,44 +139,20 @@ export function CreateEventDrawer({
             <Label>Title</Label>
             <Input value={title} onChange={(e) => setTitle(e.target.value)} />
           </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
-            <div className="space-y-2">
-              <Label>Start date</Label>
-              <Input
-                type="date"
-                value={datePart(start)}
-                onChange={(e) => setStartDate(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Start time</Label>
-              <Input
-                type="time"
-                step={900}
-                value={timePart(start)}
-                onChange={(e) => setStartTime(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
-            <div className="space-y-2">
-              <Label>End date</Label>
-              <Input
-                type="date"
-                value={datePart(end)}
-                onChange={(e) => setEndDate(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>End time</Label>
-              <Input
-                type="time"
-                step={900}
-                value={timePart(end)}
-                onChange={(e) => setEndTime(e.target.value)}
-              />
-            </div>
-          </div>
+          <DateTimePicker
+            label="Start"
+            date={datePart(start)}
+            time={timePart(start)}
+            onDateChange={setStartDate}
+            onTimeChange={setStartTime}
+          />
+          <DateTimePicker
+            label="End"
+            date={datePart(end)}
+            time={timePart(end)}
+            onDateChange={setEndDate}
+            onTimeChange={setEndTime}
+          />
           <div className="flex flex-wrap gap-1">
             {[30, 60, 90, 120].map((minutes) => (
               <Button

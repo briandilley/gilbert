@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   addMinutes,
+  buildMonthCalendar,
   dateInputValue,
   defaultEventTimesForDate,
   localDateKey,
@@ -44,4 +45,26 @@ test("date and datetime input formatting is local and zero-padded", () => {
 
 test("addMinutes preserves local input format", () => {
   assert.equal(addMinutes("2026-06-01T09:45", 30), "2026-06-01T10:15");
+});
+
+test("buildMonthCalendar returns a Sunday-starting six week month grid", () => {
+  const weeks = buildMonthCalendar(new Date(2026, 5, 15));
+
+  assert.equal(weeks.length, 6);
+  assert.deepEqual(
+    weeks[0].map((day) => day.dateKey),
+    [
+      "2026-05-31",
+      "2026-06-01",
+      "2026-06-02",
+      "2026-06-03",
+      "2026-06-04",
+      "2026-06-05",
+      "2026-06-06",
+    ],
+  );
+  assert.equal(weeks[0][0].isCurrentMonth, false);
+  assert.equal(weeks[0][1].isCurrentMonth, true);
+  assert.equal(weeks[5][6].dateKey, "2026-07-11");
+  assert.equal(weeks[5][6].isCurrentMonth, false);
 });

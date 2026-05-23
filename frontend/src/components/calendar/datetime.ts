@@ -25,6 +25,40 @@ export function addMinutes(localDateTime: string, minutes: number): string {
   return localDateTimeInputValue(date);
 }
 
+export interface CalendarDay {
+  date: Date;
+  dateKey: string;
+  dayOfMonth: number;
+  isCurrentMonth: boolean;
+}
+
+export function buildMonthCalendar(monthDate: Date): CalendarDay[][] {
+  const firstOfMonth = new Date(
+    monthDate.getFullYear(),
+    monthDate.getMonth(),
+    1,
+  );
+  const cursor = new Date(firstOfMonth);
+  cursor.setDate(cursor.getDate() - cursor.getDay());
+
+  const weeks: CalendarDay[][] = [];
+  for (let weekIndex = 0; weekIndex < 6; weekIndex += 1) {
+    const week: CalendarDay[] = [];
+    for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+      const date = new Date(cursor);
+      week.push({
+        date,
+        dateKey: dateInputValue(date),
+        dayOfMonth: date.getDate(),
+        isCurrentMonth: date.getMonth() === monthDate.getMonth(),
+      });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    weeks.push(week);
+  }
+  return weeks;
+}
+
 export function defaultEventTimesForDate(
   selectedDate: Date | null,
   now = new Date(),
