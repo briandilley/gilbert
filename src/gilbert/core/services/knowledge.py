@@ -10,8 +10,12 @@ from typing import Any
 from gilbert.core.documents.chunking import chunk_text
 from gilbert.core.documents.extractors import extract_text
 from gilbert.core.output import get_output_dir
+from gilbert.core.services._backend_actions import (
+    all_backend_actions,
+    invoke_backend_action_from_payload,
+)
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.configuration import ConfigAction, ConfigActionResult, ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.knowledge import (
     DocumentBackend,
@@ -325,6 +329,42 @@ class KnowledgeService(Service):
                 )
         return params
 
+    def config_actions(self) -> list[ConfigAction]:
+        return all_backend_actions(
+            registry=DocumentBackend.registered_backends(),
+            current_backend=None,
+        )
+
+    async def invoke_config_action(
+        self,
+        key: str,
+        payload: dict[str, Any],
+    ) -> ConfigActionResult:
+        backend_name = str(payload.get("backend") or "")
+        values = payload.get("values")
+        if backend_name and isinstance(values, dict) and "config" not in payload:
+            prefix = f"{backend_name}."
+            payload = {
+                **payload,
+                "config": {
+                    k[len(prefix) :]: v
+                    for k, v in values.items()
+                    if isinstance(k, str) and k.startswith(prefix)
+                },
+            }
+        result = await invoke_backend_action_from_payload(
+            registry=DocumentBackend.registered_backends(),
+            current_backend=None,
+            key=key,
+            payload=payload,
+        )
+        persist = result.data.get("persist")
+        if backend_name and isinstance(persist, dict):
+            result.data["persist"] = {
+                f"{backend_name}.{k}": v for k, v in persist.items()
+            }
+        return result
+
     @staticmethod
     def _build_backend_configs(section: dict[str, Any]) -> list[dict[str, Any]]:
         """Build backend config list from per-type sub-sections or legacy arrays."""
@@ -557,7 +597,8 @@ class KnowledgeService(Service):
         # stale tracked entries that the UI still surfaces under the
         # Knowledge tab.
         try:
-            from gilbert.interfaces.storage import Filter, FilterOp, Query as StoreQuery
+            from gilbert.interfaces.storage import Filter, FilterOp
+            from gilbert.interfaces.storage import Query as StoreQuery
 
             tracked_rows = await self._storage.query(
                 StoreQuery(

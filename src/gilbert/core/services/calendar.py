@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
-    invoke_backend_action,
+    invoke_backend_action_from_payload,
 )
 from gilbert.core.services._ui_blocks import build_preview_output, confirm_or_execute
 from gilbert.interfaces.auth import UserContext
@@ -489,7 +489,12 @@ class CalendarService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(None, key, payload)
+        return await invoke_backend_action_from_payload(
+            registry=CalendarBackend.registered_backends(),
+            current_backend=None,
+            key=key,
+            payload=payload,
+        )
 
     # ── Authorization helpers ────────────────────────────────────────
 
@@ -3544,11 +3549,31 @@ class CalendarService(Service):
                 }
                 for p in cls.backend_config_params()
             ]
+            actions = []
+            try:
+                probe = cls()
+                raw_actions = probe.backend_actions() if hasattr(probe, "backend_actions") else []
+                actions = [
+                    {
+                        "key": a.key,
+                        "label": a.label,
+                        "description": a.description,
+                        "backend_action": True,
+                        "backend": name,
+                        "confirm": a.confirm,
+                        "required_role": a.required_role,
+                        "hidden": a.hidden,
+                    }
+                    for a in raw_actions
+                ]
+            except Exception:
+                actions = []
             backends.append(
                 {
                     "name": name,
                     "display_name": (cls.display_name or name.replace("_", " ").title()),
                     "config_params": params,
+                    "actions": actions,
                 }
             )
         return {

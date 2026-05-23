@@ -2,38 +2,31 @@
 
 ## Summary
 
-Refactors the `google` std-plugin's credential plumbing so Gilbert's Gmail and
-Drive integrations — and, downstream, the pending Calendar backend from
-spec #01 — work with an **ordinary, free `@gmail.com` account**: no Google
-Workspace, no Admin console, no domain-wide delegation. A single
-**plugin-internal** `google_credentials` module sits between each backend's
-`initialize()` and `google.oauth2`, resolving one of three credential
-**modes**:
+Refactors the `google` std-plugin's credential plumbing so Gilbert's Gmail,
+Calendar, Drive, and Tasks data backends work with an **ordinary, free
+`@gmail.com` account** through OAuth: no Google Workspace, no Admin console,
+no domain-wide delegation. A single **plugin-internal**
+`google_credentials` module sits between each backend's `initialize()` and
+`google.oauth2`, resolving one of three credential **modes**:
 
-- **`shared_service_account`** *(primary, recommended)* — the operator
-  creates one GCP service account; each user **shares** their Calendar /
-  Drive folder *with the service account's email address* through Google's
-  ordinary consumer "Share" UI; the backend authenticates with the SA key and
-  **no** `with_subject()` delegation. This already works on free accounts
-  today — it is the existing `delegated_user == ""` code path
-  (`gmail.py:156`, `gdrive_documents.py:163`) promoted from an undocumented
-  accident to a first-class, validated, documented mode.
-- **`oauth_bot`** *(fallback)* — one ordinary Gmail account, linked once via
-  OAuth (loopback + PKCE by default — zero infrastructure; tunnel
-  web-redirect when a `TunnelBackend` is configured; manual paste when
-  headless). The refresh token is persisted and silently refreshed. Required
-  for **Gmail-as-its-own-mailbox** (you cannot share a free Gmail *inbox*
-  with a service account) and for operators who will not run `gcloud`/the
-  Console SA flow.
+- **`oauth_bot`** *(default for new setup)* — one ordinary Google account,
+  linked once through Google's OAuth consent screen. The refresh token is
+  persisted in backend config and silently refreshed. This is the required
+  mode for Gmail-as-its-own-mailbox and the recommended path for personal
+  Google accounts.
 - **`delegated_service_account`** *(legacy, unchanged)* — today's Workspace +
-  domain-wide-delegation path (`creds.with_subject(delegated_user)`), kept
-  byte-for-byte for backwards compatibility.
+  domain-wide-delegation path (`creds.with_subject(delegated_user)`), kept for
+  backwards compatibility. Legacy configs with `service_account_json` plus
+  `delegated_user` infer this mode when `credential_mode` is absent.
+- **`shared_service_account`** — a service-account identity with no
+  `with_subject()` delegation. Supported only by Calendar and Drive, where
+  Google lets a user share a calendar or folder with the service-account
+  email address. Gmail and Tasks return an actionable unsupported-mode error.
 
-Shipped alongside is an **admin-only, in-app setup wizard** (a plugin SPA
-panel) with deep links to the GCP Console, exact click-by-click steps per
-mode, and a live **Test connection** validator that — for
-`shared_service_account` — prints the literal service-account email the
-operator must tell users to share their Calendar/Drive with.
+OAuth setup is surfaced through existing `ConfigAction` buttons:
+`connect_google`, `connect_google_complete`, and `test_connection`. Actions
+return `data.persist` values that the UI applies to the current unsaved form
+before the admin clicks Save.
 
 The change is small and safe by construction: it extracts existing credential
 branching into a named resolver, adds one additive auth mode, and changes

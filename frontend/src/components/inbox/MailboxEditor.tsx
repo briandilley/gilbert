@@ -58,6 +58,8 @@ export function MailboxEditor({
   const [testResult, setTestResult] = useState<
     { ok: boolean; error: string } | null
   >(null);
+  const [backendActionResult, setBackendActionResult] = useState<string | null>(null);
+  const [backendActionRunning, setBackendActionRunning] = useState<string>("");
 
   // Reset form whenever the drawer opens with a new target
   useEffect(() => {
@@ -196,6 +198,36 @@ export function MailboxEditor({
     setBackendConfig((prev) => ({ ...prev, [key]: value }));
   };
 
+  const runBackendAction = async (key: string) => {
+    setBackendActionResult(null);
+    setBackendActionRunning(key);
+    try {
+      const response = await api.invokeConfigAction("inbox", key, {
+        backend: backendName,
+        config: {
+          ...backendConfig,
+          email_address: email,
+        },
+      });
+      const result = response.result;
+      const persistRaw = (result.data ?? {})["persist"];
+      if (persistRaw && typeof persistRaw === "object") {
+        setBackendConfig((prev) => ({
+          ...prev,
+          ...(persistRaw as Record<string, unknown>),
+        }));
+      }
+      if (result.open_url) {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
+      setBackendActionResult(result.message || result.status);
+    } catch (e) {
+      setBackendActionResult((e as Error).message || "Backend action failed");
+    } finally {
+      setBackendActionRunning("");
+    }
+  };
+
   const canSave = Boolean(name.trim() && backendName);
   const canAdmin = mailbox?.can_admin ?? true; // create mode is always "admin"
 
@@ -273,6 +305,32 @@ export function MailboxEditor({
                     onChange={handleBackendConfigChange}
                   />
                 ))}
+                {(activeBackend.actions ?? []).filter((a) => !a.hidden).length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {(activeBackend.actions ?? [])
+                      .filter((a) => !a.hidden)
+                      .map((a) => (
+                        <Button
+                          key={a.key}
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => runBackendAction(a.key)}
+                          disabled={backendActionRunning === a.key}
+                        >
+                          {a.key === "test_connection" ? (
+                            <CheckIcon className="h-4 w-4 mr-1" />
+                          ) : (
+                            <SearchIcon className="h-4 w-4 mr-1" />
+                          )}
+                          {backendActionRunning === a.key ? "Running..." : a.label}
+                        </Button>
+                      ))}
+                  </div>
+                )}
+                {backendActionResult && (
+                  <p className="text-xs text-muted-foreground">{backendActionResult}</p>
+                )}
               </div>
             )}
           </section>

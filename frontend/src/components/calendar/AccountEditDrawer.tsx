@@ -64,6 +64,8 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
     { id: string; name: string; timezone: string; primary: boolean }[]
   >([]);
   const [error, setError] = useState<string | null>(null);
+  const [backendActionResult, setBackendActionResult] = useState<string | null>(null);
+  const [backendActionRunning, setBackendActionRunning] = useState<string>("");
 
   useEffect(() => {
     if (!account) return;
@@ -96,6 +98,37 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
     () => backendsQuery.data?.find((b) => b.name === backendName),
     [backendsQuery.data, backendName],
   );
+
+  const runBackendAction = async (key: string) => {
+    setBackendActionResult(null);
+    setBackendActionRunning(key);
+    try {
+      const response = await api.invokeConfigAction("calendar", key, {
+        backend: backendName,
+        config: {
+          ...backendConfig,
+          email_address: emailAddress,
+          calendar_id: calendarId,
+        },
+      });
+      const result = response.result;
+      const persistRaw = (result.data ?? {})["persist"];
+      if (persistRaw && typeof persistRaw === "object") {
+        setBackendConfig((prev) => ({
+          ...prev,
+          ...(persistRaw as Record<string, unknown>),
+        }));
+      }
+      if (result.open_url) {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
+      setBackendActionResult(result.message || result.status);
+    } catch (e) {
+      setBackendActionResult((e as Error).message || "Backend action failed");
+    } finally {
+      setBackendActionRunning("");
+    }
+  };
 
   const create = useMutation({
     mutationFn: () =>
@@ -227,6 +260,28 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
               />
             </div>
           ))}
+
+          {(selectedBackend?.actions ?? []).filter((a) => !a.hidden).length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {(selectedBackend?.actions ?? [])
+                .filter((a) => !a.hidden)
+                .map((a) => (
+                  <Button
+                    key={a.key}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => runBackendAction(a.key)}
+                    disabled={backendActionRunning === a.key}
+                  >
+                    {backendActionRunning === a.key ? "Running..." : a.label}
+                  </Button>
+                ))}
+            </div>
+          )}
+          {backendActionResult && (
+            <p className="text-xs text-muted-foreground">{backendActionResult}</p>
+          )}
 
           {backendName === "google_calendar" && <GoogleCalendarSetupGuide />}
 
