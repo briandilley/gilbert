@@ -24,6 +24,7 @@ import {
   BarChart3Icon,
   RssIcon,
   ListTodoIcon,
+  MicIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -54,6 +55,7 @@ const ICONS: Record<string, LucideIcon> = {
   "bar-chart": BarChart3Icon,
   "rss": RssIcon,
   "list-todo": ListTodoIcon,
+  "mic": MicIcon,
 };
 
 export function groupIconFor(name: string): LucideIcon | undefined {
