@@ -48,6 +48,7 @@ dependencies = [
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
+    "gilbert-plugin-open-meteo",
     "gilbert-plugin-openai",
     "gilbert-plugin-openwakeword",
     "gilbert-plugin-openai-compatible",
@@ -82,6 +83,7 @@ gilbert-plugin-lutron-radiora = { workspace = true }
 gilbert-plugin-mistral = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
 gilbert-plugin-ollama = { workspace = true }
+gilbert-plugin-open-meteo = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openwakeword = { workspace = true }

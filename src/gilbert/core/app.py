@@ -281,6 +281,13 @@ class Gilbert:
 
         self.service_manager.register(WebSearchService())
 
+        # Weather service — multi-backend weather aggregator. Default
+        # backend is Open-Meteo (no API key required), provided by the
+        # open-meteo plugin.
+        from gilbert.core.services.weather import WeatherService
+
+        self.service_manager.register(WeatherService())
+
         # Workspace service (per-conversation file workspaces)
         from gilbert.core.services.workspace import WorkspaceService
 
