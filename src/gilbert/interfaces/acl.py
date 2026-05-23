@@ -133,6 +133,9 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "workspace.": 200,
     # user (100)
     "chat.": 100,
+    # Greeting RPCs are user-level (settings UI can enumerate discovered
+    # context providers and their enabled state).
+    "greeting.": 100,
     # Scheduler: listing is user-level; state-changing operations on
     # system jobs require admin. Handlers enforce ownership checks on
     # user jobs so a non-admin user can only touch their own.

@@ -626,6 +626,158 @@ class TestEnhancedGreetTool:
 # ── Camera-event announce tests (feature 06) ────────────────────────
 
 
+class TestWsListContextProviders:
+    """Test the greeting.context_providers.list WS handler."""
+
+    @pytest.mark.asyncio
+    async def test_ws_list_context_providers_returns_discovered_set(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        """The handler returns every discovered provider with the current
+        enabled-state flag computed from ``enabled_context_providers``."""
+        from gilbert.interfaces.greeting import GreetingContext, GreetingContextProvider
+
+        # Create two fake providers
+        class _WeatherProvider:
+            @property
+            def greeting_context_id(self) -> str:
+                return "weather"
+
+            @property
+            def greeting_context_label(self) -> str:
+                return "Weather"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return None
+
+        class _BriefingProvider:
+            @property
+            def greeting_context_id(self) -> str:
+                return "briefing"
+
+            @property
+            def greeting_context_label(self) -> str:
+                return "News briefing"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return None
+
+        assert isinstance(_WeatherProvider(), GreetingContextProvider)
+        assert isinstance(_BriefingProvider(), GreetingContextProvider)
+
+        await greeting_service.start(resolver)
+
+        # Wire both providers via get_all
+        weather_provider = _WeatherProvider()
+        briefing_provider = _BriefingProvider()
+        # Use resolver.get_all to return both providers
+        original_get_all = resolver.get_all
+
+        def patched_get_all(cap: str) -> list[Any]:
+            if cap == "greeting_context":
+                return [weather_provider, briefing_provider]
+            return original_get_all(cap)
+
+        resolver.get_all = patched_get_all
+        greeting_service._discover_context_providers()
+
+        # Set enabled_context_providers to only include weather
+        greeting_service._enabled_context_providers = ["weather"]
+
+        # Invoke the handler
+        handlers = greeting_service.get_ws_handlers()
+        handler = handlers["greeting.context_providers.list"]
+
+        # Mock connection with user context
+        class _MockConn:
+            class _UserCtx:
+                user_id = "test_user"
+
+            user_ctx = _UserCtx()
+
+        result = await handler(_MockConn(), {})
+
+        assert result == {
+            "providers": [
+                {"id": "weather", "label": "Weather", "enabled": True},
+                {"id": "briefing", "label": "News briefing", "enabled": False},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_ws_list_context_providers_treats_unset_config_as_all_enabled(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        """When _enabled_context_providers is None (default = all enabled),
+        all providers show enabled=True."""
+        from gilbert.interfaces.greeting import GreetingContext, GreetingContextProvider
+
+        class _WeatherProvider:
+            @property
+            def greeting_context_id(self) -> str:
+                return "weather"
+
+            @property
+            def greeting_context_label(self) -> str:
+                return "Weather"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return None
+
+        class _BriefingProvider:
+            @property
+            def greeting_context_id(self) -> str:
+                return "briefing"
+
+            @property
+            def greeting_context_label(self) -> str:
+                return "News briefing"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return None
+
+        assert isinstance(_WeatherProvider(), GreetingContextProvider)
+        assert isinstance(_BriefingProvider(), GreetingContextProvider)
+
+        await greeting_service.start(resolver)
+
+        # Wire both providers
+        weather_provider = _WeatherProvider()
+        briefing_provider = _BriefingProvider()
+        original_get_all = resolver.get_all
+
+        def patched_get_all(cap: str) -> list[Any]:
+            if cap == "greeting_context":
+                return [weather_provider, briefing_provider]
+            return original_get_all(cap)
+
+        resolver.get_all = patched_get_all
+        greeting_service._discover_context_providers()
+
+        # Leave _enabled_context_providers as None (the default)
+        greeting_service._enabled_context_providers = None
+
+        # Invoke the handler
+        handlers = greeting_service.get_ws_handlers()
+        handler = handlers["greeting.context_providers.list"]
+
+        class _MockConn:
+            class _UserCtx:
+                user_id = "test_user"
+
+            user_ctx = _UserCtx()
+
+        result = await handler(_MockConn(), {})
+
+        # All should be enabled when config is None
+        assert all(p["enabled"] for p in result["providers"])
+        assert len(result["providers"]) == 2
+
+
 class TestGreetingCameraEvents:
     """Cover the camera.event.detected announce path + dedup + mute."""
 

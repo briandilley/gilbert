@@ -147,7 +147,7 @@ class GreetingService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="greeting",
-            capabilities=frozenset({"greeting", "ai_tools"}),
+            capabilities=frozenset({"greeting", "ai_tools", "ws_handlers"}),
             requires=frozenset({"event_bus", "entity_storage"}),
             optional=frozenset(
                 {
@@ -1050,6 +1050,42 @@ class GreetingService(Service):
         if name == "mute_camera_alerts":
             return await self._tool_mute_camera_alerts(arguments)
         raise KeyError(f"Unknown tool: {name}")
+
+    # ── WS Handler Protocol ─────────────────────────────────────────
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        """Return the frame-type → handler map for this service.
+
+        Implements ``WsHandlerProvider`` (structurally — the protocol is
+        runtime-checkable, so explicit inheritance isn't required).
+        """
+        return {
+            "greeting.context_providers.list": self._ws_list_context_providers,
+        }
+
+    async def _ws_list_context_providers(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """List discovered greeting-context providers and whether each is
+        currently included in arrival greetings.
+
+        Returns ``{providers: [{id, label, enabled}, ...]}``.
+        """
+        enabled_set = (
+            set(self._enabled_context_providers)
+            if self._enabled_context_providers is not None
+            else None  # None = all enabled
+        )
+        return {
+            "providers": [
+                {
+                    "id": p.greeting_context_id,
+                    "label": p.greeting_context_label,
+                    "enabled": enabled_set is None or p.greeting_context_id in enabled_set,
+                }
+                for p in self._context_providers
+            ],
+        }
 
     async def _tool_mute_camera_alerts(
         self,
