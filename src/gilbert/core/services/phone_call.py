@@ -629,10 +629,18 @@ class PhoneCallService(Service):
             )
         except RuntimeError as exc:
             return f"Could not place the call: {exc}"
+        # Note carefully — the LLM has historically interpreted "I'll
+        # report back" as a promise to the user that it'll deliver an
+        # outcome message later in chat. We don't have that wiring yet
+        # (the call ends as a bus event the AIService doesn't currently
+        # listen to). Phrase the tool result as "I started the call,
+        # you go watch it" — no promise, just a hand-off.
         return (
-            f"Calling {to_number} now (call id `{call_id}`). I'll report back "
-            "when the call ends — you can watch the live transcript in the "
-            "calls panel and intervene if needed."
+            f"I started a phone call to {to_number} (call id `{call_id}`). "
+            "It's running in the background — the live transcript is on the "
+            "Calls page (/calls) and you can intervene by text from there. "
+            "I won't get a notification when the call ends, so don't expect "
+            "a follow-up in this chat; check the Calls page for the outcome."
         )
 
     # --- start_call (the public entry point) ------------------------
@@ -878,7 +886,8 @@ class PhoneCallService(Service):
 
         async def _listen_loop() -> None:
             if self._transcription is None:
-                log.warning("Transcription unavailable — call is one-way")
+                log.warning("Transcription unavailable — terminating call")
+                stop.set()
                 return
             try:
                 # Wrap mulaw-8k inbound bytes into PCM s16le-8k stream
@@ -895,7 +904,12 @@ class PhoneCallService(Service):
                     )
                 )
             except Exception:
-                log.exception("Failed to open transcription stream")
+                # No STT = no conversation. Don't leave the call dangling
+                # for 15 minutes waiting on the watchdog; tear it down
+                # immediately so the user can retry.
+                log.exception("Failed to open transcription stream — terminating call")
+                record.failure_reason = "transcription_unavailable"
+                stop.set()
                 return
 
             pump_task = asyncio.create_task(
@@ -928,7 +942,12 @@ class PhoneCallService(Service):
                         # status loop, not this single end.
                         _ = last_final_at  # keep for future heuristics
             except Exception:
-                log.exception("listen loop crashed")
+                # Mid-call STT crash kills the call — leaving the brain
+                # to run silently for 15 minutes on the watchdog is worse
+                # than just hanging up and surfacing the failure.
+                log.exception("listen loop crashed — terminating call")
+                record.failure_reason = "stt_stream_crashed"
+                stop.set()
             finally:
                 pump_task.cancel()
                 try:
@@ -1097,6 +1116,17 @@ class PhoneCallService(Service):
                 return_exceptions=True,
             )
         finally:
+            # Always tell the carrier to terminate. If the brain exited
+            # cleanly through the remote-hangup path the backend's
+            # hang_up is already a no-op; if we exited because of an
+            # internal crash (transcription failure, LLM error, etc.)
+            # this is what stops Telnyx from keeping the call line open
+            # and billing for it.
+            try:
+                await session.hang_up()
+            except Exception:
+                log.debug("hang_up cleanup error", exc_info=True)
+
             record.ended_at = _now_iso()
             try:
                 started = datetime.fromisoformat(
