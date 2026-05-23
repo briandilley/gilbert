@@ -258,6 +258,30 @@ class RecordingScheduler:
         return self.jobs[name]["schedule"]
 
 
+class StrictRecordingScheduler(RecordingScheduler):
+    """Scheduler fake that mirrors real duplicate/system-job guards."""
+
+    def add_job(self, **kwargs: Any) -> Any:
+        name = kwargs["name"]
+        if name in self.jobs and not kwargs.get("replace_existing", False):
+            raise ValueError(f"Job '{name}' already registered")
+        self.jobs[name] = kwargs
+
+    def remove_job(
+        self,
+        name: str,
+        requester_id: str = "",
+        *,
+        force: bool = False,
+    ) -> None:
+        job = self.jobs.get(name)
+        if job is None:
+            raise KeyError(f"Job not found: {name}")
+        if job.get("system") and not force:
+            raise ValueError(f"Cannot remove system job: {name}")
+        self.jobs.pop(name, None)
+
+
 class FakeResolver:
     def __init__(self) -> None:
         self.caps: dict[str, Any] = {}
@@ -295,6 +319,7 @@ def _user_ctx(user_id: str = "alice", *, roles: set[str] | None = None) -> UserC
 
 async def _service(
     sqlite_storage: SQLiteStorage,
+    scheduler: RecordingScheduler | None = None,
 ) -> tuple[CalendarService, RecordingScheduler, FakeEventBus]:
     """Build and start a CalendarService backed by real SQLite.
 
@@ -303,7 +328,7 @@ async def _service(
     tests assert on event types and payloads).
     """
     svc = CalendarService()
-    sched = RecordingScheduler()
+    sched = scheduler or RecordingScheduler()
     ev = FakeEventBusService()
     storage_provider = _FakeStorageProvider(sqlite_storage)
     resolver = FakeResolver()
@@ -415,6 +440,31 @@ async def test_update_account_with_invalid_timezone_rejected(sqlite_storage: SQL
             {"timezone": "Not/A/Real/Zone"},
             _user_ctx("alice"),
         )
+
+
+@pytest.mark.asyncio
+async def test_runtime_affecting_update_keeps_runtime_active_with_system_poll_job(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, _ = await _service(sqlite_storage, StrictRecordingScheduler())
+    account, _ = await _seed_account(svc)
+
+    await svc.update_account(
+        account.id,
+        {"timezone": "America/Los_Angeles"},
+        _user_ctx("alice"),
+    )
+
+    assert account.id in svc._runtimes
+    await svc.create_event(
+        account.id,
+        EventCreateRequest(
+            title="After update",
+            start=datetime(2026, 6, 1, 10, 0),
+            end=datetime(2026, 6, 1, 10, 30),
+        ),
+        _user_ctx("alice"),
+    )
 
 
 @pytest.mark.asyncio
