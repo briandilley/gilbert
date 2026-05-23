@@ -82,6 +82,11 @@ import type {
   OpmlImportResult,
   PollNowResult,
 } from "@/types/feeds";
+import type {
+  Task,
+  TaskBackendInfo,
+  TaskList,
+} from "@/types/tasks";
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
 
@@ -720,6 +725,185 @@ export function useWsApi() {
     listFeedBackends: () =>
       rpc<{ backends: FeedBackendInfo[] }>({
         type: "feeds.backends.list",
+      }).then((r) => r.backends),
+
+    // ── Tasks ─────────────────────────────────────────────────────
+
+    listTaskLists: () =>
+      rpc<{ lists: TaskList[] }>({ type: "tasks.lists.list" }).then(
+        (r) => r.lists,
+      ),
+
+    getTaskList: (listId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.get",
+        list_id: listId,
+      }).then((r) => r.list),
+
+    createTaskList: (params: {
+      name: string;
+      backend_name?: string;
+      backend_config?: Record<string, unknown>;
+      poll_enabled?: boolean;
+      poll_interval_sec?: number;
+      is_default?: boolean;
+    }) =>
+      rpc<{ list: TaskList }>({ type: "tasks.lists.create", ...params }).then(
+        (r) => r.list,
+      ),
+
+    updateTaskList: (listId: string, updates: Record<string, unknown>) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.update",
+        list_id: listId,
+        updates,
+      }).then((r) => r.list),
+
+    deleteTaskList: (listId: string, force = false) =>
+      rpc<{ status: string }>({
+        type: "tasks.lists.delete",
+        list_id: listId,
+        force,
+      }),
+
+    testTaskListConnection: (listId: string) =>
+      rpc<{ ok: boolean; error: string }>({
+        type: "tasks.lists.test_connection",
+        list_id: listId,
+      }),
+
+    refreshTaskList: (listId: string) =>
+      rpc<{ new?: number; total?: number; error?: string }>({
+        type: "tasks.lists.refresh",
+        list_id: listId,
+      }),
+
+    shareTaskListUser: (listId: string, userId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.share_user",
+        list_id: listId,
+        user_id: userId,
+      }).then((r) => r.list),
+
+    unshareTaskListUser: (listId: string, userId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.unshare_user",
+        list_id: listId,
+        user_id: userId,
+      }).then((r) => r.list),
+
+    shareTaskListRole: (listId: string, role: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.share_role",
+        list_id: listId,
+        role,
+      }).then((r) => r.list),
+
+    unshareTaskListRole: (listId: string, role: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.unshare_role",
+        list_id: listId,
+        role,
+      }).then((r) => r.list),
+
+    listTasks: (params?: {
+      list_id?: string;
+      backend?: string;
+      status?: string;
+      tag?: string;
+      project?: string;
+      due_before?: string;
+      due_after?: string;
+      limit?: number;
+    }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.list",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    getTask: (taskId: string) =>
+      rpc<{ task: Task }>({ type: "tasks.get", task_id: taskId }).then(
+        (r) => r.task,
+      ),
+
+    addTask: (params: {
+      list_id: string;
+      title: string;
+      notes?: string;
+      due_at?: string;
+      due_at_tz?: string;
+      priority?: number | string;
+      tags?: string[];
+      project?: string;
+      idempotency_key?: string;
+    }) =>
+      rpc<{ task: Task }>({ type: "tasks.add", ...params }).then(
+        (r) => r.task,
+      ),
+
+    updateTask: (taskId: string, updates: Record<string, unknown>) =>
+      rpc<{ task: Task }>({
+        type: "tasks.update",
+        task_id: taskId,
+        updates,
+      }).then((r) => r.task),
+
+    completeTask: (taskId: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.complete",
+        task_id: taskId,
+      }).then((r) => r.task),
+
+    cancelTask: (taskId: string, reason?: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.cancel",
+        task_id: taskId,
+        reason,
+      }).then((r) => r.task),
+
+    deleteTask: (taskId: string, force = false) =>
+      rpc<{ status: string; soft: boolean }>({
+        type: "tasks.delete",
+        task_id: taskId,
+        force,
+      }),
+
+    restoreTask: (taskId: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.restore",
+        task_id: taskId,
+      }).then((r) => r.task),
+
+    tasksDueToday: (params?: { list_id?: string; backend?: string }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.due_today",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksDueWindow: (
+      window: "today" | "tomorrow" | "this_week" | "this_month" | "overdue",
+      params?: { list_id?: string; backend?: string },
+    ) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.due_window",
+        window,
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksOverdue: (params?: { list_id?: string; backend?: string }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.overdue",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksSummary: () =>
+      rpc<{ summary: string }>({ type: "tasks.summary" }).then(
+        (r) => r.summary,
+      ),
+
+    listTaskBackends: () =>
+      rpc<{ backends: TaskBackendInfo[] }>({
+        type: "tasks.backends.list",
       }).then((r) => r.backends),
 
     // ── Documents ─────────────────────────────────────────────────

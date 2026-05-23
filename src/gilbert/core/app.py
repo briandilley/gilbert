@@ -266,6 +266,15 @@ class Gilbert:
 
         self.service_manager.register(InboxService())
 
+        # Tasks — multi-list to-do service with pluggable backends
+        # (local + Google Tasks via plugin). Registered after Inbox so
+        # AIService.start sees the tool provider; the side-effect
+        # import inside ``core/services/tasks.py`` registers the local
+        # backend without app.py touching ``integrations/``.
+        from gilbert.core.services.tasks import TasksService
+
+        self.service_manager.register(TasksService())
+
         # Calendar — multi-account calendar events, free/busy, and AI
         # tools. Registered alongside Inbox so the start order is
         # predictable; `app.py` is the only module that imports the

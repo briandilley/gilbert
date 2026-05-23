@@ -3508,6 +3508,11 @@ class AIService(Service):
             arguments["_user_roles"] = list(user_ctx.roles)
             if user_ctx.email:
                 arguments["_user_email"] = user_ctx.email
+            # Tools that resolve "today" / due windows in the caller's
+            # local time (e.g. tasks_due) need the user's IANA tz —
+            # inject it so they don't fall back to the host clock.
+            if user_ctx.tz:
+                arguments["_user_tz"] = user_ctx.tz
         if conv_id:
             arguments["_conversation_id"] = conv_id
         # Workspace tools may be redirected to a different conversation's
@@ -3526,6 +3531,10 @@ class AIService(Service):
         ws_conv = get_workspace_conversation_id()
         if ws_conv and "workspace" in tc.tool_name:
             arguments["_conversation_id"] = ws_conv
+        # The tool_use_id round-trips so tools can synthesize an
+        # implicit idempotency key from (_user_id, _conversation_id,
+        # _tool_call_id) — see tasks add_task.
+        arguments["_tool_call_id"] = tc.tool_call_id
         arguments["_invocation_source"] = "ai"
         if room_members is not None:
             arguments["_room_members"] = room_members

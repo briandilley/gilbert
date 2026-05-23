@@ -34,6 +34,23 @@ logger = logging.getLogger(__name__)
 
 _THREAD_COLLECTION = "inbox_ai_chat_threads"
 
+_DEFAULT_INBOX_AI_CHAT_PROMPT = (
+    "[EMAIL CONTEXT: You are replying to an email. Your text response "
+    "will be sent as a reply in the existing email thread automatically. "
+    "Do NOT use inbox_send or inbox_reply tools — your response IS the "
+    "reply. If you need to attach files or documents, use the "
+    "email_attach tool to queue them for this reply. You may attach "
+    "multiple documents by calling email_attach multiple times. "
+    "If the email contains concrete action items the user should track "
+    "(deadlines, deliverables, follow-ups), you may call add_task to "
+    "add them to their list. Use the email's Message-Id as "
+    "idempotency_key so re-deliveries don't create duplicates. Don't "
+    "create tasks for FYI / informational mail or for items the user "
+    "has clearly already handled. If you call add_task, mention the "
+    "addition in plain English in your reply (e.g., 'I added this to "
+    "your todo list.').]"
+)
+
 
 class InboxAIChatService(Service):
     """Bridges email and AI — conversations over email.
@@ -58,6 +75,7 @@ class InboxAIChatService(Service):
         self._event_bus: Any = None  # EventBus
         self._unsubscribe: Any = None
         self._ai_profile: str = "standard"
+        self._system_prompt: str = _DEFAULT_INBOX_AI_CHAT_PROMPT
 
         # Per-request pending attachments, protected by a lock so
         # concurrent _process_message calls don't mix attachments.
@@ -164,6 +182,19 @@ class InboxAIChatService(Service):
                 default="standard",
                 choices_from="ai_profiles",
             ),
+            ConfigParam(
+                key="system_prompt",
+                type=ToolParameterType.STRING,
+                description=(
+                    "System prompt prepended to every inbox-AI reply. "
+                    "Includes the email-context guidance and an "
+                    "instruction to extract action items via add_task. "
+                    "Leave blank to use the bundled default."
+                ),
+                default=_DEFAULT_INBOX_AI_CHAT_PROMPT,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -174,6 +205,12 @@ class InboxAIChatService(Service):
         subj = config.get("required_subject", "")
         self._required_subject = subj.lower().strip() if subj else ""
         self._ai_profile = config.get("ai_profile", self._ai_profile)
+        # AI prompts are configurable: empty override falls back to
+        # the bundled default constant.
+        self._system_prompt = (
+            str(config.get("system_prompt", "") or "")
+            or _DEFAULT_INBOX_AI_CHAT_PROMPT
+        )
 
     # ── Event handler ──────────────────────────────────────────
 
@@ -283,21 +320,21 @@ class InboxAIChatService(Service):
         # Clear pending attachments before the AI runs
         self._pending_attachments = []
 
-        # Inject email context so the AI knows how to handle attachments.
-        # This tells it to use email_attach instead of inbox_send/inbox_reply.
-        context_prefix = (
-            "[EMAIL CONTEXT: You are replying to an email. Your text response "
-            "will be sent as a reply in the existing email thread automatically. "
-            "Do NOT use inbox_send or inbox_reply tools — your response IS the "
-            "reply. If you need to attach files or documents, use the "
-            "email_attach tool to queue them for this reply. "
-            "You may attach multiple documents by calling email_attach "
-            "multiple times.]\n\n"
-        )
+        # Re-set the current-user contextvar to the resolved sender —
+        # defense in depth so any tool that reads ``get_current_user()``
+        # inside its execute path (e.g. add_task) sees the sender's
+        # identity, not the SYSTEM sentinel we set above to bypass
+        # inbox visibility filtering. This is partially redundant with
+        # AIService._run_one_tool's own contextvar set, but keeping it
+        # explicit prevents subtle "task ended up on the wrong user's
+        # list" bugs if the tool framework ever changes.
+        set_current_user(user_ctx)
 
-        # Run through AI
+        # Run through AI. The configurable system_prompt prepends the
+        # email-context guidance + add_task hint. Live config edits
+        # take effect on the next message (cached in on_config_changed).
         response_text, conv_id, _ui, _tu, *_ = await self._ai.chat(
-            user_message=context_prefix + body,
+            user_message=self._system_prompt + "\n\n" + body,
             conversation_id=conversation_id,
             user_ctx=user_ctx,
             ai_profile=self._ai_profile,

@@ -160,6 +160,7 @@ PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Prote
 DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend
 EmailBackend         →  google plugin → GmailBackend
 CalendarBackend      →  google plugin → GoogleCalendarBackend
+TaskBackend          →  core (LocalTaskBackend) + google plugin (GoogleTasksBackend)
 DocumentBackend      →  core (LocalDocuments) + google plugin (GDriveDocuments)
 AuthBackend          →  core (LocalAuth) + google plugin (GoogleAuthBackend)
 UserProviderBackend  →  google plugin → GoogleDirectoryBackend
@@ -263,7 +264,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **arr** | Radarr + Sonarr services for movie/TV library management from chat |
 | **deepgram** | Deepgram Nova streaming speech-to-text backend |
 | **elevenlabs** | High-quality TTS + Scribe batch and streaming speech-to-text backends |
-| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar |
+| **google** | OAuth login, Workspace directory sync, Gmail backend, Google Drive documents, Google Calendar, Google Tasks |
 | **groq** | Groq LPU chat backend + Groq Whisper batch speech-to-text backend |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |

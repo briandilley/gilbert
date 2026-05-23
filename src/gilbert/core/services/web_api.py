@@ -273,6 +273,16 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                "key": "tasks",
+                "label": "Tasks",
+                "description": "Task lists, due work, and backlog triage",
+                "url": "/tasks",
+                "icon": "list-todo",
+                "required_role": "user",
+                "requires_capability": "tasks",
+                "items": [],
+            },
+            {
                 "key": "knowledge",
                 "label": "Knowledge",
                 "description": "Browse, search, and manage indexed documents",
