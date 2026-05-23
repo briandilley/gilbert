@@ -216,7 +216,15 @@ async def telnyx_media(ws: WebSocket) -> None:
             return
 
         session.media_ws = ws
-        session.stream_id = str(start.get("stream_id") or "")
+        # ``stream_id`` lives at the top level of the frame, NOT
+        # nested inside ``start``. Diagnostic dump showed:
+        #   top-keys: ['event', 'sequence_number', 'start', 'stream_id']
+        #   start-keys: ['call_control_id', 'call_session_id', 'from', 'to', …]
+        # Reading the wrong level here was the actual reason every
+        # outbound media frame got silently dropped — we'd stamp an
+        # empty ``stream_id`` into the JSON and Telnyx couldn't route
+        # it back onto the call.
+        session.stream_id = str(start_frame.get("stream_id") or "")
         logger.info(
             "Telnyx media WS: bound to session — call=%s stream_id=%s",
             session.call_id,
