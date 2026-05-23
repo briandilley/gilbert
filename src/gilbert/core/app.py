@@ -22,6 +22,7 @@ from gilbert.core.services import (
     AuthService,
     CalendarService,
     EventBusService,
+    HealthService,
     InboxService,
     LightsService,
     MediaLibraryService,
@@ -284,6 +285,12 @@ class Gilbert:
         from gilbert.core.services.tasks import TasksService
 
         self.service_manager.register(TasksService())
+
+        # Health — multi-backend personal health metrics (Apple Health,
+        # Withings, HKWebhook). Concrete backends register themselves
+        # via std-plugin side-effect imports; the service discovers
+        # them through ``HealthBackend.registered_backends()``.
+        self.service_manager.register(HealthService())
 
         # Calendar — multi-account calendar events, free/busy, and AI
         # tools. Registered alongside Inbox so the start order is

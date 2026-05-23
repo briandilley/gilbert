@@ -44,6 +44,7 @@ dependencies = [
     "gilbert-plugin-american-standard",
     "gilbert-plugin-andon-fm",
     "gilbert-plugin-anthropic",
+    "gilbert-plugin-apple-health",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
@@ -57,6 +58,7 @@ dependencies = [
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
+    "gilbert-plugin-hk-webhook",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
@@ -77,6 +79,7 @@ dependencies = [
     "gilbert-plugin-telegram",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-withings",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
     "faster-whisper>=1.2.1",
@@ -86,6 +89,7 @@ dependencies = [
 gilbert-plugin-american-standard = { workspace = true }
 gilbert-plugin-andon-fm = { workspace = true }
 gilbert-plugin-anthropic = { workspace = true }
+gilbert-plugin-apple-health = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }
 gilbert-plugin-browser = { workspace = true }
@@ -99,6 +103,7 @@ gilbert-plugin-jellyfin = { workspace = true }
 gilbert-plugin-google = { workspace = true }
 gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }
+gilbert-plugin-hk-webhook = { workspace = true }
 gilbert-plugin-lutron-radiora = { workspace = true }
 gilbert-plugin-mistral = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
@@ -119,6 +124,7 @@ gilbert-plugin-tavily = { workspace = true }
 gilbert-plugin-telegram = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
+gilbert-plugin-withings = { workspace = true }
 gilbert-plugin-xai = { workspace = true }
 
 [project.optional-dependencies]
@@ -224,6 +230,15 @@ ignore = [
     "SIM108",
     "SIM117",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin directories use kebab-case names (apple-health, hk-webhook,
+# guess-that-song, ...) per the plugin manifest convention. The
+# package name CAN'T be lowercased without breaking the manifest +
+# uv-workspace member name; the per-file ignore lets the plugin
+# loader's sys.modules registration (which substitutes underscores
+# at import time) continue to work.
+"std-plugins/*/__init__.py" = ["N999"]
 
 [dependency-groups]
 dev = [

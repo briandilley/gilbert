@@ -4,7 +4,10 @@ from typing import Any
 
 import pytest
 
+from gilbert.core.events import InMemoryEventBus
+from gilbert.core.services.event_bus import EventBusService
 from gilbert.core.services.users import _ROOT_USER_ID, UserService
+from gilbert.interfaces.events import Event
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import NamespacedStorageBackend, StorageBackend
 
@@ -118,6 +121,55 @@ async def test_create_user_applies_default_roles(user_service: UserService) -> N
 async def test_delete_root_rejected(user_service: UserService) -> None:
     with pytest.raises(ValueError, match="root"):
         await user_service.delete_user(_ROOT_USER_ID)
+
+
+async def test_delete_user_publishes_event(storage: Any) -> None:
+    """delete_user fires an auth.user.deleted event when an EventBusProvider
+    is wired into the resolver."""
+    bus = InMemoryEventBus()
+    received: list[Event] = []
+
+    async def _handler(evt: Event) -> None:
+        received.append(evt)
+
+    bus.subscribe("auth.user.deleted", _handler)
+
+    svc = UserService(root_password_hash="hashed_pw", default_roles=["user"])
+    resolver = StubResolver(
+        {
+            "entity_storage": StubStorageService(storage),
+            "event_bus": EventBusService(bus),
+        }
+    )
+    await svc.start(resolver)
+    await svc.create_user("u1", {"email": "a@b.com", "display_name": "A"})
+
+    await svc.delete_user("u1")
+
+    assert len(received) == 1
+    evt = received[0]
+    assert evt.event_type == "auth.user.deleted"
+    assert evt.source == "auth"
+    assert evt.data["user_id"] == "u1"
+    assert isinstance(evt.data["deleted_at"], str)
+    # Validates as an ISO timestamp.
+    from datetime import datetime
+
+    parsed = datetime.fromisoformat(evt.data["deleted_at"])
+    assert parsed.tzinfo is not None
+
+
+async def test_delete_user_no_event_bus_no_publish(storage: Any) -> None:
+    """delete_user is a no-op on the publish path when no event bus is wired."""
+    svc = UserService(root_password_hash="hashed_pw", default_roles=["user"])
+    resolver = StubResolver({"entity_storage": StubStorageService(storage)})
+    await svc.start(resolver)
+    await svc.create_user("u1", {"email": "a@b.com", "display_name": "A"})
+
+    # Should not raise even with no bus wired.
+    await svc.delete_user("u1")
+    user = await svc.get_user("u1")
+    assert user is None
 
 
 async def test_add_provider_link_to_root_rejected(user_service: UserService) -> None:

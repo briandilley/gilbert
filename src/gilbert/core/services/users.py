@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from gilbert.interfaces.auth import UserContext
@@ -14,6 +15,7 @@ from gilbert.interfaces.configuration import (
     ConfigActionResult,
     ConfigParam,
 )
+from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import StorageBackend, StorageProvider
 from gilbert.interfaces.tools import (
@@ -56,6 +58,7 @@ class UserService(Service):
         self._allow_user_creation = allow_user_creation
         self._backend: UserBackend | None = None
         self._resolver: ServiceResolver | None = None
+        self._event_bus: Any = None  # EventBus from EventBusProvider; None ok
         self._last_sync: float = 0.0  # monotonic timestamp of last provider sync
         # Live provider backends, keyed on ``backend_name`` from the
         # registry (e.g. ``"google_directory"``). Populated in start()
@@ -68,7 +71,8 @@ class UserService(Service):
             name="users",
             capabilities=frozenset({"users", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
-            optional=frozenset({"user_provider"}),
+            optional=frozenset({"user_provider", "event_bus"}),
+            events=frozenset({"auth.user.deleted"}),
         )
 
     @property
@@ -96,6 +100,14 @@ class UserService(Service):
         await backend.ensure_indexes()
         self._backend = backend
         self._resolver = resolver
+
+        # Optional event bus — used to publish ``auth.user.deleted`` so
+        # downstream services (HealthService, future per-user services)
+        # can run their cascade-delete logic. Absence is fine: many test
+        # scenarios don't wire a bus.
+        event_bus_svc = resolver.get_capability("event_bus")
+        if isinstance(event_bus_svc, EventBusProvider):
+            self._event_bus = event_bus_svc.bus
 
         # Load config — sync TTL, allow_user_creation, and each
         # registered provider backend's per-backend subsection.
@@ -392,6 +404,24 @@ class UserService(Service):
         if user_id == _ROOT_USER_ID:
             raise ValueError("Cannot delete the root user")
         await self.backend.delete_user(user_id)
+        # Publish ``auth.user.deleted`` so downstream services (HealthService,
+        # future per-user services) can run their cascade-delete logic.
+        # Fire-and-forget on the resolved EventBusProvider; no-op if absent
+        # (the bus is optional in many test scenarios).
+        if self._event_bus is not None:
+            deleted_at = datetime.now(UTC).isoformat()
+            try:
+                await self._event_bus.publish(
+                    Event(
+                        event_type="auth.user.deleted",
+                        data={"user_id": user_id, "deleted_at": deleted_at},
+                        source="auth",
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish auth.user.deleted for %s", user_id
+                )
 
     async def add_provider_link(
         self, user_id: str, provider_type: str, provider_user_id: str

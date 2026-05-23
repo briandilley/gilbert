@@ -7,6 +7,7 @@ from gilbert.core.services.calendar import CalendarService
 from gilbert.core.services.configuration import ConfigurationService
 from gilbert.core.services.doorbell import DoorbellService
 from gilbert.core.services.event_bus import EventBusService
+from gilbert.core.services.health import HealthService
 from gilbert.core.services.inbox import InboxService
 from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 from gilbert.core.services.lights import LightsService
@@ -28,6 +29,7 @@ __all__ = [
     "DoorbellService",
     "ConfigurationService",
     "EventBusService",
+    "HealthService",
     "InboxService",
     "InboxAIChatService",
     "LightsService",

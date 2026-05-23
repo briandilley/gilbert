@@ -89,6 +89,10 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # auth.user.roles.changed fires on role mutation. The WS layer
     # restricts delivery to admins + the affected user themselves.
     "auth.": 100,
+    # Health events are user-level — owner-only filtering happens via
+    # the per-event ``can_see_health_event`` filter in
+    # ``web/ws_protocol.py`` (mirrors the notification pattern).
+    "health.": 100,
     # admin (0)
     "service.": 0,
     "config.": 0,

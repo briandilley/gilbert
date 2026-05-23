@@ -174,6 +174,32 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_health_event(self, event: Event) -> bool:
+        """Content-level filter for health events.
+
+        Health metrics + daily summaries: owner-only — connections only
+        see their own user_id. Audit events: actor + target + admins.
+        Link events: owner-only. Mirrors the inbox / notification
+        pattern with the audit-row twist (target sees what touched
+        their data, actor sees their own activity, admins see all).
+        """
+        if not event.event_type.startswith("health."):
+            return True
+        # Admin sees all (level 0 or below — system is negative).
+        if self.user_level <= 0:
+            return True
+
+        if event.event_type == "health.access.audit":
+            actor = event.data.get("actor_user_id")
+            target = event.data.get("target_user_id")
+            return actor == self.user_id or target == self.user_id
+
+        # Everything else (metric.received, metric.deleted,
+        # daily.summary, link.connected, link.disconnected) is
+        # owner-only — the per-user filter narrows delivery to the
+        # one connection whose user_id matches.
+        return event.data.get("user_id") == self.user_id
+
     def can_see_feed_event(self, event: Event) -> bool:
         """Content-level filter for feed events that target a user.
 
@@ -459,6 +485,8 @@ class WsConnectionManager:
             if not conn.can_see_speaker_browser_event(event):
                 continue
             if not conn.can_see_chat_read_aloud_event(event):
+                continue
+            if not conn.can_see_health_event(event):
                 continue
             conn.send_event(event)
 
