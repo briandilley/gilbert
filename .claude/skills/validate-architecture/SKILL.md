@@ -132,6 +132,7 @@ Plugin UI lives inside the plugin's own directory; core SPA never imports plugin
 - **Plugin-specific panels mounted via hardcoded conditionals** in core pages (`{current.name === "Browser" ? <BrowserCredentialsPanel /> : null}`). Replace with `<PluginPanelSlot slot="...">` and register the component via `Plugin.ui_panels()` + a side-effect `<plugin>/frontend/panels.ts` calling `registerPanel`.
 - **Core pages without extension slots in obvious places** — header (`header.widgets`, `header.user-menu`), dashboard (`dashboard.top`/`bottom`), per-page sidebars and toolbars. New core pages should drop a `<PluginPanelSlot slot="<page-name>.toolbar">` even if no plugin uses it yet. Empty slots cost nothing.
 - **`Plugin.ui_panels()` / `ui_routes()` declarations with `panel_id` not registered** in any `<plugin>/frontend/panels.ts` — silent dead code. Either remove the backend declaration or add the registration.
+- **UI elements that depend on a feature but don't declare `requires_capability`** — anything visible in the UI (nav items, dashboard cards, routes, menu entries, settings pages) whose backing service may be absent MUST carry a runtime gate. The user shouldn't see "Cameras" in the navbar if no camera service is running. Sample: `core/services/web_api.py` dashboard-group entries take a `"requires_capability": "<name>"` field; nav items in `frontend/src/components/layout/nav-shared.ts` and route definitions in `frontend/src/App.tsx` should hide entries whose capability isn't advertised. Audit: grep dashboard-group / nav / route definitions for feature names and confirm each carries `requires_capability` (or a frontend-side `useHasCapability(...)` gate).
 
 ### 10. AI Backend Visibility
 
@@ -147,7 +148,25 @@ python3 .claude/skills/validate-architecture/check_capabilities.py
 
 Anything reported is a bug — fix at the call site (consumer asking for the wrong name) or at the declaration (service forgot to advertise the cap the consumer needs). Lookups through a variable (`get_capability(self._cap_name)`) can't be checked statically and are skipped. The inverse direction (capabilities declared but never consumed) is **not** flagged: too many caps are identification-only (plugin slugs, framework-iterated `ws_handlers` / `ai_tools`, frontend RPC `requires_capability` fields).
 
-### 12. Documentation Freshness
+### 12. Cross-Service Integration (capability discovery, not hardcoded references)
+
+When service A needs data, prose, or behavior from service B, the integration must go through a capability protocol that any service can advertise — never a hardcoded import or stored reference to a specific consumer-known service. The greeting service refactor (`docs/plans/2026-05-23-greeting-context-providers.md`) is the canonical example: weather, news, and health no longer live as hardcoded `_weather` / `_feeds` / `_health` fields on `GreetingService`; instead each contributor implements `GreetingContextProvider` and the greeting service discovers them with `resolver.get_all("greeting_context")`.
+
+Anti-patterns to flag:
+
+- **Hardcoded consumer-side references on `self`** — fields like `self._weather: WeatherProvider | None`, `self._feeds: FeedsProvider | None`, populated at startup from a specific capability lookup and used directly thereafter. Adding a new contributor requires editing the consumer. **Replace with a single capability protocol that all contributors implement; consumer iterates `resolver.get_all(<cap>)`.**
+- **`isinstance(svc, ConsumerSpecificProvider)` lists in one consumer** that hardcode N protocols, one per known integration. Same anti-pattern. If three+ services contribute to the same outcome (greeting context, dashboard cards, search sources, briefing sources, …), define ONE shared capability protocol they all implement.
+- **Per-contributor toggle flags on the consumer** (`include_weather: bool`, `include_briefing: bool`, …) that gate hardcoded references. Replace with a single discovered list (`enabled_<cap>_providers: list[str]`) so adding a new contributor is purely additive on the consumer side.
+- **Consumer-side format templates for foreign data** (e.g., a `weather_hint_template` living on the greeting service, owning the layout of weather data). Move the template onto the owning service (WeatherService owns the weather hint), or accept rendered prose from the contributor — never let the consumer hold layout/format knowledge for another service's data.
+- **Consumer-side per-source fetch helpers** (`_build_weather_blurb`, `_fetch_health_brief`, `_maybe_briefing_text` on the consumer). Each one is a hidden coupling; move into the owning service behind the capability protocol.
+
+How to audit:
+
+- Grep `src/gilbert/core/services/<consumer>.py` for `self._<name>:` fields naming a specific other service or its protocol. Each is suspect — if there are 2+ named-specific consumer references in one service, that's the smell.
+- Cross-check the file's `resolver.get_capability("<name>")` / `resolver.require_capability(...)` calls. If 3+ different names are looked up and stored as instance fields, propose a capability-protocol unification.
+- Check for matching toggle/format/template configs on the consumer that name another service's domain (e.g., `weather_*` on greeting service).
+
+### 13. Documentation Freshness
 
 These docs are product documentation, not advisory notes. Drift is a regression to fix in the same change that caused it.
 

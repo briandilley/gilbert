@@ -822,6 +822,18 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
 
         caller_level = getattr(conn, "user_level", 200)
 
+        sm = gilbert.service_manager
+
+        def _capability_live(cap: str) -> bool:
+            """Mirror web_api.py's check — empty cap passes through;
+            otherwise the capability must be advertised by an enabled
+            service. Hides plugin panels whose backing service has
+            been toggled off."""
+            if not cap:
+                return True
+            svc = sm.get_by_capability(cap)
+            return svc is not None and svc.enabled
+
         panels: list[dict[str, Any]] = []
         for entry in gilbert.list_loaded_plugins():
             try:
@@ -836,6 +848,8 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 if slot_filter and panel.slot != slot_filter:
                     continue
                 if caller_level > _level_for(panel.required_role):
+                    continue
+                if not _capability_live(panel.requires_capability):
                     continue
                 panels.append(
                     {

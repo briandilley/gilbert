@@ -84,7 +84,12 @@ If anything fails, stop. Report the failures verbatim. Do **not** attempt to fix
 
 Invoke the `validate-architecture` skill in **audit mode** over the current tree (which now includes the PR changes merged with `main`). Report any violations.
 
-- If the audit finds violations, stop and report. Same rule as tests: do not auto-fix as part of the merge. The user decides whether to push fixes onto the PR branch or proceed anyway.
+**Pay extra attention to:**
+
+- **Cross-service hardcoded references** (category 12). If the PR adds a service that consumes data from 2+ other services and stores them as named fields (e.g., `self._weather`, `self._feeds`), that's a smell — propose a capability protocol so future contributors are zero-edit additive.
+- **UI elements without capability gating** (category 9, "UI elements that depend on a feature but don't declare `requires_capability`"). Walk the PR's nav additions, dashboard-group changes, route additions, and menu items. Each must hide when its backing service isn't running. "Cameras" in the navbar when no camera service is configured is the failure mode to prevent.
+
+If the audit finds violations, stop and report. Same rule as tests: do not auto-fix as part of the merge. The user decides whether to push fixes onto the PR branch or proceed anyway.
 
 ### 8. Squash-merge on GitHub
 

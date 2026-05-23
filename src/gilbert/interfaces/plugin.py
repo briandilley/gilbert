@@ -123,6 +123,10 @@ class UIPanel:
       (``"user"`` / ``"admin"``). The frontend filters server-side
       via the auth context; clients can't request a panel they
       don't qualify for.
+    - ``requires_capability`` — gates the panel on a service
+      capability being live. Pair with the plugin's own service
+      capability so a toggleable service's dashboard panel
+      disappears when the user disables it under Services.
     """
 
     panel_id: str
@@ -130,6 +134,7 @@ class UIPanel:
     label: str = ""
     description: str = ""
     required_role: str = "user"
+    requires_capability: str = ""
 
 
 @dataclass(frozen=True)
