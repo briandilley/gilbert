@@ -359,7 +359,7 @@ class HealthService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="health",
-            capabilities=frozenset({"health", "ai_tools", "ws_handlers"}),
+            capabilities=frozenset({"health", "ai_tools", "ws_handlers", "greeting_context"}),
             requires=frozenset({"entity_storage", "scheduler"}),
             optional=frozenset(
                 {
@@ -1610,6 +1610,45 @@ class HealthService(Service):
             resting_hr_latest=resting_hr.value if resting_hr else None,
             flags=flags,
         )
+
+    # ── GreetingContextProvider protocol ──────────────────────────────
+
+    @property
+    def greeting_context_id(self) -> str:
+        return "health"
+
+    @property
+    def greeting_context_label(self) -> str:
+        return "Health"
+
+    async def greeting_context(self, user_id: str) -> "GreetingContext | None":
+        """Return a labeled health fact for the greeting, or None.
+
+        Wraps ``health_brief_for_greeting`` and formats the structured
+        brief into prose. Returns None if the brief has no data."""
+        from gilbert.interfaces.greeting import GreetingContext
+
+        try:
+            brief = await self.health_brief_for_greeting(user_id)
+        except Exception:
+            logger.debug("HealthService.greeting_context failed for %s", user_id, exc_info=True)
+            return None
+        if brief is None or not brief.has_data:
+            return None
+        parts: list[str] = []
+        if brief.sleep_hours is not None:
+            parts.append(f"Last night's sleep: {brief.sleep_hours:.1f}h.")
+        if brief.steps_today_so_far is not None:
+            parts.append(f"Steps today so far: {brief.steps_today_so_far:,}.")
+        if brief.weight_latest is not None:
+            parts.append(f"Latest weight: {brief.weight_latest:g} {brief.weight_unit.value}.")
+        if brief.resting_hr_latest is not None:
+            parts.append(f"Latest resting HR: {brief.resting_hr_latest:g} bpm.")
+        if brief.flags:
+            parts.append(f"Flags: {', '.join(brief.flags)}.")
+        if not parts:
+            return None
+        return GreetingContext(provider_id="health", label="Health", prose=" ".join(parts))
 
     # ── Cross-user read (audit-logged) ───────────────────────────────
 

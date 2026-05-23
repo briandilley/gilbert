@@ -28,6 +28,7 @@ from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.events import Event
 from gilbert.interfaces.health import (
     HEALTH_ADMIN_ROLE,
+    DailySummary,
     MetricType,
 )
 from gilbert.interfaces.notifications import (
@@ -1419,3 +1420,90 @@ def test_default_trend_prompt_forbids_clinical_words() -> None:
         assert pattern.search(text), (
             f"Bundled trend prompt no longer FORBIDS {word!r} explicitly"
         )
+
+
+# ── Task 4: GreetingContextProvider protocol implementation ──────────────
+
+
+async def test_greeting_context_returns_prose_from_brief(
+    started_service: Any,
+) -> None:
+    """HealthService.greeting_context wraps health_brief_for_greeting
+    and formats it as prose suitable for the greeting prompt."""
+    from gilbert.interfaces.greeting import GreetingContext
+
+    svc: HealthService = started_service["svc"]
+    storage: SQLiteStorage = started_service["storage"]
+
+    # Seed a health link so the brief has data.
+    await storage.put(
+        _LINKS_COLLECTION,
+        "alice/_fake_health",
+        {
+            "_id": "alice/_fake_health",
+            "user_id": "alice",
+            "backend_name": "_fake_health",
+            "enabled": True,
+        },
+    )
+
+    # Ingest metrics that will be picked up by health_brief_for_greeting.
+    await svc.ingest_metrics(
+        "alice",
+        "_fake_health",
+        [
+            make_metric(
+                user_id="alice",
+                source_event_id="sleep-evt",
+                metric_type=MetricType.SLEEP_DURATION,
+                value=7.5 * 3600.0,  # 7.5 hours in seconds
+            ),
+            make_metric(
+                user_id="alice",
+                source_event_id="steps-evt",
+                metric_type=MetricType.STEPS,
+                value=4200.0,
+            ),
+        ],
+    )
+
+    # Trigger a daily summary with a flag to test flag output.
+    summary = DailySummary(
+        user_id="alice",
+        local_date="2026-05-23",
+        summary_text="Good day",
+        metrics_snapshot={"sleep_hours": 7.5, "steps": 4200},
+        flags=["high_hr"],
+        generated_at=datetime.now(UTC),
+    )
+    await storage.put(
+        _SUMMARIES_COLLECTION,
+        f"alice/2026-05-23",
+        summary.to_dict() | {"_id": f"alice/2026-05-23"},
+    )
+
+    ctx = await svc.greeting_context(user_id="alice")
+    assert isinstance(ctx, GreetingContext)
+    assert ctx.provider_id == "health"
+    assert ctx.label == "Health"
+    # Check that the prose contains the expected formatted values.
+    assert "7.5" in ctx.prose
+    assert "4,200" in ctx.prose
+    assert "high_hr" in ctx.prose
+
+
+async def test_greeting_context_returns_none_for_empty_brief(
+    started_service: Any,
+) -> None:
+    """If the user has no health links, greeting_context returns None."""
+    svc: HealthService = started_service["svc"]
+    # Don't seed any health links for alice.
+    ctx = await svc.greeting_context(user_id="alice")
+    assert ctx is None
+
+
+def test_health_service_advertises_greeting_context_capability() -> None:
+    """The service_info must include 'greeting_context' in capabilities."""
+    svc = HealthService()
+    info = svc.service_info()
+    assert "greeting_context" in info.capabilities
