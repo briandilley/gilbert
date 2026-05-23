@@ -331,6 +331,9 @@ class TestGreetingService:
 
         # A fake provider that returns weather context.
         class _WeatherProvider:
+            def __init__(self) -> None:
+                self.received_user_id: str | None = None
+
             @property
             def greeting_context_id(self) -> str:
                 return "weather"
@@ -340,6 +343,7 @@ class TestGreetingService:
                 return "Weather"
 
             async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                self.received_user_id = user_id
                 return GreetingContext(
                     provider_id="weather",
                     label="Weather",
@@ -364,6 +368,8 @@ class TestGreetingService:
         prompt_sent = fake_ai.calls[0]["messages"][0].content
         assert "Available context" in prompt_sent
         assert "Weather: Sunny, 72°F." in prompt_sent
+        # Verify that the context provider received the correct user_id
+        assert provider.received_user_id == "alice"
 
     @pytest.mark.asyncio
     async def test_generate_greeting_omits_context_section_when_empty(
