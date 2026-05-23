@@ -479,6 +479,14 @@ class VoiceBrainService(Service):
                 try:
                     chunk_size = 160  # 20ms mulaw @ 8kHz mono
                     chunks_written = 0
+                    # Voice-agent / browser sessions don't need realtime
+                    # pacing — the browser plays the whole clip in one
+                    # shot. Pacing MP3 bytes at the mulaw rate added
+                    # ~30 seconds of gratuitous delay before the browser
+                    # got the audio. Carrier sessions (Telnyx) keep the
+                    # 20ms-per-chunk pacing — without it the wire
+                    # buffer overruns and Telnyx disables barge-in.
+                    pace = 0.02 if config.tts_realtime_pacing else 0.0
                     for i in range(0, len(audio), chunk_size):
                         if (
                             speaking.cancelled
@@ -490,14 +498,16 @@ class VoiceBrainService(Service):
                             audio[i : i + chunk_size]
                         )
                         chunks_written += 1
-                        await asyncio.sleep(0.02)
+                        if pace > 0:
+                            await asyncio.sleep(pace)
                     log.info(
                         "TTS playback done — chunks_written=%d bytes=%d "
-                        "wall_seconds≈%.2f (cancelled=%s)",
+                        "wall_seconds≈%.2f (cancelled=%s pace=%.3fs)",
                         chunks_written,
                         chunks_written * chunk_size,
-                        chunks_written * 0.02,
+                        chunks_written * pace,
                         speaking.cancelled,
+                        pace,
                     )
                     # End-of-utterance signal. Real-time sinks (Telnyx)
                     # ignore it; turn-taking sinks (browser tab) use

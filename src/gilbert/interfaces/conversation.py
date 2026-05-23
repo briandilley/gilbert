@@ -320,6 +320,16 @@ class ConversationConfig:
     # @ 8 kHz (phone-call default).
     stt_audio_format: Any = None  # gilbert.interfaces.transcription.AudioFormat | None
 
+    # Whether the engine should pace TTS chunks at realtime (20ms per
+    # chunk). Phone calls NEED this — Telnyx expects mulaw frames at
+    # 50fps for the carrier to play them correctly. Voice-agent
+    # sessions DON'T — the browser plays the whole MP3 clip in one
+    # shot from a data URL, and pacing the bytes adds 30+ seconds of
+    # gratuitous delay (the engine paces MP3 at the mulaw byte-rate
+    # which is ~10x slower than the MP3's actual playback rate).
+    # Default True to preserve phone-call behaviour.
+    tts_realtime_pacing: bool = True
+
     # Optional priming messages prepended to the message list before the
     # first LLM turn. Phone-call wrapper uses this to inject the
     # "(SYSTEM) call answered" cue + the disclosure-line example.
