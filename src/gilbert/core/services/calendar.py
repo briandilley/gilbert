@@ -265,11 +265,11 @@ class CalendarService(Service):
             for runtime in list(self._runtimes.values()):
                 if runtime.poll_job_name:
                     with contextlib.suppress(Exception):
-                        self._scheduler.remove_job(runtime.poll_job_name)
+                        self._scheduler.remove_job(runtime.poll_job_name, force=True)
             with contextlib.suppress(Exception):
-                self._scheduler.remove_job("calendar-boot")
+                self._scheduler.remove_job("calendar-boot", force=True)
             with contextlib.suppress(Exception):
-                self._scheduler.remove_job("calendar-announcement-sweep")
+                self._scheduler.remove_job("calendar-announcement-sweep", force=True)
 
         if self._runtimes:
             await asyncio.gather(
@@ -357,7 +357,7 @@ class CalendarService(Service):
             return
         if self._scheduler is not None and runtime.poll_job_name:
             with contextlib.suppress(Exception):
-                self._scheduler.remove_job(runtime.poll_job_name)
+                self._scheduler.remove_job(runtime.poll_job_name, force=True)
         await self._close_runtime_backend(runtime)
         logger.info("Calendar runtime stopped: id=%s", account_id)
 

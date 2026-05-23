@@ -367,6 +367,7 @@ async def test_music_service_rejects_my_browser_alias_when_music_is_sonos_only()
         async def delete(self, c, i): pass
         async def exists(self, c, i): return False
         async def query(self, q): return []
+        async def delete_query(self, q): return 0
         async def count(self, q): return 0
         async def list_collections(self): return []
         async def drop_collection(self, c): pass
