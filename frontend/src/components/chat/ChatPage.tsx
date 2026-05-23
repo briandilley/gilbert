@@ -127,12 +127,13 @@ export function ChatPage() {
     activeConvIdRef.current = activeConvId;
   }, [activeConvId]);
 
-  // Reset the user's "unread mentions" cursor when they open a room.
-  // Optimistically zero the count in the cached conversations list so
-  // the sidebar badge clears immediately — the server-side cursor
-  // advance is async and the next ``chat.conversation.list`` refresh
-  // would otherwise leave a stale badge on screen. Personal
-  // conversations don't have mention tracking so we skip them.
+  // Reset both unread cursors (mentions + messages) when the user
+  // opens a room. Optimistically zero both counts in the cached
+  // conversations list so the sidebar clears immediately — the
+  // server-side cursor advance is async and the next
+  // ``chat.conversation.list`` refresh would otherwise leave a stale
+  // badge on screen. Personal conversations don't have multi-member
+  // unread tracking so we skip them.
   useEffect(() => {
     if (!activeConvId || !connected || !isShared) return;
     queryClient.setQueryData<ConversationSummary[] | undefined>(
@@ -140,16 +141,24 @@ export function ChatPage() {
       (prev) =>
         prev?.map((c) =>
           c.conversation_id === activeConvId
-            ? { ...c, unread_mentions_count: 0 }
+            ? {
+                ...c,
+                unread_mentions_count: 0,
+                unread_messages_count: 0,
+              }
             : c,
         ),
     );
+    // ``chat.conversation.mark_read`` advances BOTH cursors. The
+    // narrower ``mark_mentions_read`` still exists for the mention-bell
+    // flow where the user wants to clear the @-badge without claiming
+    // they've read the whole thread.
     void rpc({
-      type: "chat.conversation.mark_mentions_read",
+      type: "chat.conversation.mark_read",
       conversation_id: activeConvId,
     } as Record<string, unknown>).catch((err) => {
       // eslint-disable-next-line no-console
-      console.debug("mark_mentions_read failed", err);
+      console.debug("mark_read failed", err);
     });
   }, [activeConvId, connected, isShared, queryClient, rpc]);
 

@@ -111,6 +111,11 @@ export interface ConversationSummary {
    *  ``chat.conversation.mark_mentions_read`` RPC when the user
    *  focuses the conversation. */
   unread_mentions_count?: number;
+  /** Number of messages newer than this user's
+   *  ``last_read_message_index`` cursor — any new activity in the
+   *  room, not just @-mentions. Reset via ``chat.conversation.mark_read``
+   *  whenever the user opens the conversation. */
+  unread_messages_count?: number;
 }
 
 export interface ConversationMember {

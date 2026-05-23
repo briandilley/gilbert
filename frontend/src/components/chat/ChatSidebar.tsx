@@ -65,6 +65,7 @@ export function ChatSidebarContent({
               // status dot, so it doesn't compete with signal-amber for
               // the design system's accent role.
               const hasUnreadMentions = (conv.unread_mentions_count ?? 0) > 0;
+              const hasUnreadMessages = (conv.unread_messages_count ?? 0) > 0;
               return (
                 <div
                   key={conv.conversation_id}
@@ -87,9 +88,14 @@ export function ChatSidebarContent({
                     <MailIcon className="size-3.5 text-primary shrink-0" />
                   )}
                   <span
-                    className={`flex-1 truncate ${
-                      hasUnreadMentions ? "font-semibold" : ""
-                    }`}
+                    className={cn(
+                      "flex-1 truncate",
+                      // Bold the title for ANY unread state — mentions or
+                      // ordinary messages. The badges differentiate the
+                      // urgency; the bolding just says "there's something
+                      // new here."
+                      (hasUnreadMentions || hasUnreadMessages) && "font-semibold",
+                    )}
                   >
                     {conv.title}
                   </span>
@@ -107,6 +113,24 @@ export function ChatSidebarContent({
                     >
                       @{conv.unread_mentions_count}
                     </Badge>
+                  )}
+                  {/* Generic "new messages" indicator — a small dot, no
+                      number. Shown only when there ARE unread messages
+                      but the user isn't @-mentioned (otherwise the
+                      mention badge dominates and adding a dot is
+                      double-signalling). Quieter than the @-badge so
+                      the visual hierarchy stays: "you're called out" >
+                      "new activity" > "just members count." */}
+                  {hasUnreadMessages && !hasUnreadMentions && (
+                    <span
+                      aria-label={`${conv.unread_messages_count} unread message${
+                        conv.unread_messages_count === 1 ? "" : "s"
+                      }`}
+                      title={`${conv.unread_messages_count} unread message${
+                        conv.unread_messages_count === 1 ? "" : "s"
+                      }`}
+                      className="size-1.5 rounded-full bg-emerald-500 shrink-0"
+                    />
                   )}
                   {conv.member_count !== undefined && !isInvited && (
                     <Badge variant="secondary" className="text-[10px] px-1.5">
