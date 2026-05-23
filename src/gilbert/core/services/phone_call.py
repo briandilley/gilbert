@@ -1087,21 +1087,36 @@ class PhoneCallService(Service):
                 log.exception("LLM call failed")
                 return
 
-            # Execute the tool calls the LLM emitted first; their
-            # results may end the call or alter outcome BEFORE we
-            # synthesize.
-            for tc in response.message.tool_calls:
-                handled = await _handle_brain_tool(tc.tool_name, tc.arguments)
-                if handled == "hang_up":
-                    stop.set()
-                    try:
-                        await session.hang_up()
-                    except Exception:
-                        log.debug("hang_up cleanup error", exc_info=True)
-                    return
-
+            # We speak the LLM's text BEFORE dispatching its tool
+            # calls. The old order was tool-calls-first, which meant
+            # if the LLM emitted ``hang_up`` alongside its actual
+            # reply ("Yes, the sky is blue. Goodbye!" + ``hang_up``),
+            # the tool would fire and ``return`` before the answer
+            # ever made it to TTS — the remote got dead air, the
+            # call ended, and the chat log showed an
+            # answered-but-never-spoken outcome.
+            #
+            # All brain tools (``hang_up`` / ``confirm_and_end`` /
+            # ``escalate_to_user`` / ``note``) only need to fire
+            # AFTER whatever the LLM wanted to say on this turn. The
+            # tool-dispatch loop now runs at the bottom of this
+            # function, after the audio has been written to the
+            # carrier.
             text = response.message.content.strip()
+            if not text and not response.message.tool_calls:
+                return
             if not text:
+                # No spoken response this turn, just tool calls — skip
+                # straight to the dispatch loop at the bottom.
+                for tc in response.message.tool_calls:
+                    handled = await _handle_brain_tool(tc.tool_name, tc.arguments)
+                    if handled == "hang_up":
+                        stop.set()
+                        try:
+                            await session.hang_up()
+                        except Exception:
+                            log.debug("hang_up cleanup error", exc_info=True)
+                        return
                 return
 
             messages.append(Message(role=MessageRole.ASSISTANT, content=text))
@@ -1166,6 +1181,20 @@ class PhoneCallService(Service):
                 )
             finally:
                 speaking.active = False
+
+            # Dispatch the LLM's tool calls now that the audio has
+            # been spoken. ``hang_up`` here ends the call cleanly —
+            # the remote heard the goodbye line before the line went
+            # dead.
+            for tc in response.message.tool_calls:
+                handled = await _handle_brain_tool(tc.tool_name, tc.arguments)
+                if handled == "hang_up":
+                    stop.set()
+                    try:
+                        await session.hang_up()
+                    except Exception:
+                        log.debug("hang_up cleanup error", exc_info=True)
+                    return
 
         # ── brain tools (the LLM-callable ones during the call) ─────
 
