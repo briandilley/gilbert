@@ -218,10 +218,24 @@ async def _pump_audio_to_stt(
 
             # Heartbeat: ~1/sec at the 50fps inbound cadence. Confirms
             # the pump is keeping up with ingest during a TTS burst.
+            # Includes the rolling RMS so we can tell at a glance
+            # whether the inbound audio is silent (mic mute, wrong
+            # source, AEC nuking everything) vs. real speech that's
+            # just below the local-VAD threshold.
             if pump_count % 50 == 0:
+                avg_rms = (
+                    sum(rms_window) // len(rms_window)
+                    if rms_window
+                    else 0
+                )
+                peak_rms = max(rms_window) if rms_window else 0
                 logger.info(
-                    "audio pump → STT: chunks_forwarded=%d",
+                    "audio pump → STT: chunks_forwarded=%d "
+                    "avg_rms=%d peak_rms=%d (VAD thresh=%d)",
                     pump_count,
+                    avg_rms,
+                    peak_rms,
+                    _VAD_RMS_THRESHOLD,
                 )
     except Exception:
         logger.debug("audio pump ended", exc_info=True)
