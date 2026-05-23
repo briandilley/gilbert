@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useWsApi } from "@/hooks/useWsApi";
 import { ConfigField } from "./ConfigField";
+import { GreetingContextProvidersList } from "./GreetingContextProvidersList";
 import { useSettingsSection } from "./SettingsContext";
 import {
   ChevronDownIcon,
@@ -215,8 +216,16 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
   // Split params into groups
   const enabledParam = section.params.find((p) => p.key === "enabled");
   const backendParam = section.params.find((p) => p.key === "backend");
+  // For the greeting namespace, the enabled_context_providers array field is
+  // replaced by GreetingContextProvidersList (a dynamic checkbox driven by
+  // the greeting.context_providers.list RPC). Exclude it from the generic loop.
+  const isGreetingSection = section.namespace === "greeting";
   const serviceParams = section.params.filter(
-    (p) => p.key !== "enabled" && p.key !== "backend" && !p.backend_param,
+    (p) =>
+      p.key !== "enabled" &&
+      p.key !== "backend" &&
+      !p.backend_param &&
+      !(isGreetingSection && p.key === "enabled_context_providers"),
   );
   const backendSettingsParams = section.params.filter((p) => p.backend_param);
 
@@ -308,6 +317,26 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
                     />
                   ))}
                 </div>
+              )}
+
+              {isGreetingSection && (
+                <Card size="sm">
+                  <CardHeader className="pb-1">
+                    <CardTitle className="text-sm">Context contributors</CardTitle>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Choose which services contribute to the greeting's
+                      available_context block. Each service decides what facts to
+                      expose; you can write rules in the greeting prompt template
+                      for how the AI should use them.
+                    </p>
+                  </CardHeader>
+                  <CardContent className="pt-2">
+                    <GreetingContextProvidersList
+                      onChange={handleFieldChange}
+                      currentValue={merged["enabled_context_providers"] as string[] | null | undefined}
+                    />
+                  </CardContent>
+                </Card>
               )}
 
               {backendParam && (

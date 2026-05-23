@@ -1346,6 +1346,13 @@ export function useWsApi() {
     listProposalCycles: (params?: { kind?: string; limit?: number }) =>
       rpc<ProposalsListCyclesResult>({ type: "proposals.list_cycles", ...params }),
 
+    // ── Greeting ──────────────────────────────────────────────────
+
+    listGreetingContextProviders: () =>
+      rpc<{ providers: { id: string; label: string; enabled: boolean }[] }>({
+        type: "greeting.context_providers.list",
+      }).then((r) => r.providers),
+
     // ── Notifications ─────────────────────────────────────────────
 
     listNotifications: (filter?: { read?: boolean; source?: string; since?: string }, limit = 100) =>
