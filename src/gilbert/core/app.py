@@ -354,6 +354,18 @@ class Gilbert:
 
         self.service_manager.register(NotificationService())
 
+        # Push-notification fan-out — subscribes to ``notification.received``
+        # and delivers each one to the recipient user's external routes
+        # (ntfy / Pushover / Discord webhook / Telegram). Registered AFTER
+        # NotificationService so the bus subscription happens once both
+        # services are up; ordering does not affect correctness because
+        # ``InMemoryEventBus`` is in-memory pub/sub with no replay.
+        from gilbert.core.services.push_notifications import (
+            PushNotificationService,
+        )
+
+        self.service_manager.register(PushNotificationService())
+
         from gilbert.core.services.agent import AgentService
 
         self.service_manager.register(AgentService())

@@ -3,7 +3,7 @@
 import pytest
 
 from gilbert.interfaces.context import get_current_user, set_current_user
-from gilbert.interfaces.auth import AuthInfo, UserContext
+from gilbert.interfaces.auth import AuthInfo, UserContext, is_valid_tz
 
 # --- UserContext ---
 
@@ -37,6 +37,29 @@ def test_user_context_defaults() -> None:
     assert ctx.provider == "local"
     assert ctx.session_id is None
     assert ctx.metadata == {}
+    assert ctx.tz is None
+
+
+def test_user_context_carries_tz() -> None:
+    ctx = UserContext(
+        user_id="u1",
+        email="a@b.com",
+        display_name="A",
+        tz="America/Los_Angeles",
+    )
+    assert ctx.tz == "America/Los_Angeles"
+
+
+def test_is_valid_tz_accepts_iana() -> None:
+    assert is_valid_tz("UTC")
+    assert is_valid_tz("America/Los_Angeles")
+    assert is_valid_tz("Europe/Paris")
+
+
+def test_is_valid_tz_rejects_garbage() -> None:
+    assert not is_valid_tz("")
+    assert not is_valid_tz("Not/A/Real/Zone")
+    assert not is_valid_tz("UTC+5")  # not IANA-formatted
 
 
 # --- AuthInfo ---

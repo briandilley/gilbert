@@ -112,6 +112,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **Knowledge base** — index local files (built-in `local_documents` backend) and Google Drive folders (`google` plugin) into a ChromaDB vector store for semantic search.
 - **Web search** — the `tavily` plugin surfaces a `/web search`, `/web images`, and `/web fetch` command set for up-to-date answers grounded in real results.
 - **Weather** — the Weather service exposes `current_weather`, `forecast`, `weather_alerts`, and `geocode_location` AI tools (plus slash-only `/weather set_home` and `/weather set_units`). The default `open-meteo` plugin needs no API key and covers global current + hourly + daily forecasts. The interface accommodates NWS (US severe-weather alerts) and OpenWeatherMap as future plugins without breaking changes.
+- **External notification fan-out** — every notification persisted by the Notifications service is also dispatched, on a per-user opt-in basis, to external push providers via the `push_notifications` service. Users add "notification routes" on `/account/notifications` (`ntfy`, `pushover`, `discord-webhook`, and `telegram` plugins ship out of the box) with per-route urgency floors, source allow/deny lists, and tz-aware quiet hours. The fan-out runs through a bounded queue + worker pool so a slow provider can never back-pressure the in-app dispatcher; URGENT-failure exhaustion escalates to an in-app `push_failure` notification so operators see drops without re-implementing alerting.
 - **OCR** — the `tesseract` plugin extracts text from images locally (no network, no API key) for document indexing and vision workflows.
 - **Public tunnel** — the `ngrok` plugin provides a public HTTPS URL so OAuth callbacks (Google login, Slack Socket Mode) work behind NAT.
 - **Slack bridge** — the `slack` plugin connects a Socket Mode bot so users can chat with Gilbert from Slack DMs and mentions, with the same tool access as the web UI.
@@ -265,6 +266,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **groq** | Groq LPU chat backend + Groq Whisper batch speech-to-text backend |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
+| **ntfy / pushover / discord-webhook / telegram** | External notification fan-out backends |
 | **open-meteo** | Weather backend (no API key) — current, hourly, and daily forecasts |
 | **openai** | OpenAI GPT chat backend + Whisper batch speech-to-text backend |
 | **openai-compatible** | Vendor-neutral Chat Completions backend for vLLM, LM Studio, corporate proxies, and other endpoints without a dedicated plugin |

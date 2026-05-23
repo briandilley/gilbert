@@ -18,6 +18,7 @@ members = [
     "gilbert-plugin-browser",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
+    "gilbert-plugin-discord-webhook",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-gemini",
     "gilbert-plugin-google",
@@ -26,6 +27,7 @@ members = [
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
+    "gilbert-plugin-ntfy",
     "gilbert-plugin-ollama",
     "gilbert-plugin-open-meteo",
     "gilbert-plugin-openai",
@@ -33,10 +35,12 @@ members = [
     "gilbert-plugin-openrouter",
     "gilbert-plugin-openwakeword",
     "gilbert-plugin-porcupine",
+    "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
     "gilbert-plugin-sonos",
     "gilbert-plugin-tavily",
+    "gilbert-plugin-telegram",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
     "gilbert-plugin-xai",
@@ -1016,6 +1020,7 @@ dependencies = [
     { name = "gilbert-plugin-browser" },
     { name = "gilbert-plugin-deepgram" },
     { name = "gilbert-plugin-deepseek" },
+    { name = "gilbert-plugin-discord-webhook" },
     { name = "gilbert-plugin-elevenlabs" },
     { name = "gilbert-plugin-gemini" },
     { name = "gilbert-plugin-google" },
@@ -1024,6 +1029,7 @@ dependencies = [
     { name = "gilbert-plugin-lutron-radiora" },
     { name = "gilbert-plugin-mistral" },
     { name = "gilbert-plugin-ngrok" },
+    { name = "gilbert-plugin-ntfy" },
     { name = "gilbert-plugin-ollama" },
     { name = "gilbert-plugin-open-meteo" },
     { name = "gilbert-plugin-openai" },
@@ -1031,10 +1037,12 @@ dependencies = [
     { name = "gilbert-plugin-openrouter" },
     { name = "gilbert-plugin-openwakeword" },
     { name = "gilbert-plugin-porcupine" },
+    { name = "gilbert-plugin-pushover" },
     { name = "gilbert-plugin-qwen" },
     { name = "gilbert-plugin-slack" },
     { name = "gilbert-plugin-sonos" },
     { name = "gilbert-plugin-tavily" },
+    { name = "gilbert-plugin-telegram" },
     { name = "gilbert-plugin-tesseract" },
     { name = "gilbert-plugin-unifi" },
     { name = "gilbert-plugin-xai" },
@@ -1089,6 +1097,7 @@ requires-dist = [
     { name = "gilbert-plugin-browser", virtual = "std-plugins/browser" },
     { name = "gilbert-plugin-deepgram", virtual = "std-plugins/deepgram" },
     { name = "gilbert-plugin-deepseek", virtual = "std-plugins/deepseek" },
+    { name = "gilbert-plugin-discord-webhook", virtual = "std-plugins/discord-webhook" },
     { name = "gilbert-plugin-elevenlabs", virtual = "std-plugins/elevenlabs" },
     { name = "gilbert-plugin-gemini", virtual = "std-plugins/gemini" },
     { name = "gilbert-plugin-google", virtual = "std-plugins/google" },
@@ -1097,6 +1106,7 @@ requires-dist = [
     { name = "gilbert-plugin-lutron-radiora", virtual = "std-plugins/lutron-radiora" },
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
+    { name = "gilbert-plugin-ntfy", virtual = "std-plugins/ntfy" },
     { name = "gilbert-plugin-ollama", virtual = "std-plugins/ollama" },
     { name = "gilbert-plugin-open-meteo", virtual = "std-plugins/open-meteo" },
     { name = "gilbert-plugin-openai", virtual = "std-plugins/openai" },
@@ -1104,10 +1114,12 @@ requires-dist = [
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
     { name = "gilbert-plugin-openwakeword", virtual = "std-plugins/openwakeword" },
     { name = "gilbert-plugin-porcupine", virtual = "std-plugins/porcupine" },
+    { name = "gilbert-plugin-pushover", virtual = "std-plugins/pushover" },
     { name = "gilbert-plugin-qwen", virtual = "std-plugins/qwen" },
     { name = "gilbert-plugin-slack", virtual = "std-plugins/slack" },
     { name = "gilbert-plugin-sonos", virtual = "std-plugins/sonos" },
     { name = "gilbert-plugin-tavily", virtual = "std-plugins/tavily" },
+    { name = "gilbert-plugin-telegram", virtual = "std-plugins/telegram" },
     { name = "gilbert-plugin-tesseract", virtual = "std-plugins/tesseract" },
     { name = "gilbert-plugin-unifi", virtual = "std-plugins/unifi" },
     { name = "gilbert-plugin-xai", virtual = "std-plugins/xai" },
@@ -1212,6 +1224,11 @@ version = "1.0.0"
 source = { virtual = "std-plugins/deepseek" }
 
 [[package]]
+name = "gilbert-plugin-discord-webhook"
+version = "1.0.0"
+source = { virtual = "std-plugins/discord-webhook" }
+
+[[package]]
 name = "gilbert-plugin-elevenlabs"
 version = "1.0.0"
 source = { virtual = "std-plugins/elevenlabs" }
@@ -1276,6 +1293,11 @@ dependencies = [
 requires-dist = [{ name = "pyngrok", specifier = ">=8.0.0" }]
 
 [[package]]
+name = "gilbert-plugin-ntfy"
+version = "1.0.0"
+source = { virtual = "std-plugins/ntfy" }
+
+[[package]]
 name = "gilbert-plugin-ollama"
 version = "1.0.0"
 source = { virtual = "std-plugins/ollama" }
@@ -1323,6 +1345,11 @@ dependencies = [
 requires-dist = [{ name = "pvporcupine", specifier = ">=3.0" }]
 
 [[package]]
+name = "gilbert-plugin-pushover"
+version = "1.0.0"
+source = { virtual = "std-plugins/pushover" }
+
+[[package]]
 name = "gilbert-plugin-qwen"
 version = "1.0.0"
 source = { virtual = "std-plugins/qwen" }
@@ -1357,6 +1384,11 @@ requires-dist = [
 name = "gilbert-plugin-tavily"
 version = "1.0.0"
 source = { virtual = "std-plugins/tavily" }
+
+[[package]]
+name = "gilbert-plugin-telegram"
+version = "1.0.0"
+source = { virtual = "std-plugins/telegram" }
 
 [[package]]
 name = "gilbert-plugin-tesseract"

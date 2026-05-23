@@ -84,15 +84,24 @@ export function NotificationsPage() {
             : `${unread} unread.`
         }
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleMarkAllRead}
-            disabled={unread === 0}
-          >
-            <CheckIcon />
-            Mark all read
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/account/notifications")}
+            >
+              Delivery routes
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleMarkAllRead}
+              disabled={unread === 0}
+            >
+              <CheckIcon />
+              Mark all read
+            </Button>
+          </div>
         }
       />
 
