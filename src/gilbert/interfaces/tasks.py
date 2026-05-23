@@ -564,7 +564,7 @@ class TaskProvider(Protocol):
     concrete ``TasksService`` class.
 
     Mirror of ``InboxProvider`` — reads use the current user from
-    ``gilbert.interfaces.context.get_current_user`` for visibility filtering;
+    ``gilbert.core.context.get_current_user`` for visibility filtering;
     mutations take ``user_ctx`` explicitly.
     """
 
@@ -683,3 +683,4 @@ __all__ = [
     "can_admin_list",
     "determine_access",
 ]
+

@@ -42,6 +42,9 @@ class StubStorageBackend(StorageBackend):
     async def query(self, query: Any) -> list[dict[str, Any]]:
         return []
 
+    async def delete_query(self, query: Any) -> int:
+        return 0
+
     async def count(self, query: Any) -> int:
         return 0
 
