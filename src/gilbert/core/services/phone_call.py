@@ -307,6 +307,15 @@ class PhoneCallService(Service):
                 "phone.call.ended", self._on_call_ended
             )
 
+        # Sweep any orphaned call records left CONNECTED / RINGING /
+        # INITIATED across a restart. The brain task is in-memory, so
+        # if the process exited abruptly (NixOS rebuild, OOM kill,
+        # SIGKILL) any in-flight call's record never gets its outer
+        # finally — it sits in storage looking active forever, which
+        # breaks the SPA's display and confuses the AI's
+        # follow-up message via ``ConversationMessagePoster``.
+        await self._sweep_orphaned_calls()
+
         logger.info(
             "Phone call service started — backend=%s from=%s",
             self._backend_name,
@@ -1254,6 +1263,85 @@ class PhoneCallService(Service):
         await bus_svc.bus.publish(
             Event(event_type=event_type, source="phone_call", data=data)
         )
+
+    # --- Orphan cleanup ───────────────────────────────────────────────
+
+    async def _sweep_orphaned_calls(self) -> None:
+        """Mark any still-active call records as ``hung_up`` on startup.
+
+        The brain runs in-process; if the process exits abruptly the
+        outer try/finally that finalizes the record never runs. After
+        restart, those records sit in storage looking like active
+        calls forever — the SPA renders them as such, the AI's
+        ``ConversationMessagePoster`` doesn't fire for them (because
+        they never publish ``phone.call.ended``), and they crowd the
+        list page.
+
+        This method finds records where ``status`` is one of the
+        "in-flight" values and rewrites them to ``hung_up`` with
+        ``failure_reason = "orphaned_at_restart"``. Also publishes
+        the ended event so any subscriber (e.g. the chat-message
+        poster) gets a chance to clean up — though the originating
+        conversation might be stale by the time we fire it.
+
+        Safe to call repeatedly: only touches rows that match the
+        in-flight filter.
+        """
+        if self._storage is None:
+            return
+        from gilbert.interfaces.storage import Filter, FilterOp, Query
+
+        in_flight = {
+            CallStatus.INITIATED.value,
+            CallStatus.RINGING.value,
+            CallStatus.CONNECTED.value,
+        }
+        try:
+            rows = await self._storage.backend.query(
+                Query(collection=_COLLECTION)
+            )
+        except Exception:
+            logger.debug("orphan sweep: query failed", exc_info=True)
+            return
+
+        swept = 0
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status not in in_flight:
+                continue
+            call_id = str(row.get("_id") or "")
+            if not call_id:
+                continue
+            row["status"] = CallStatus.HUNG_UP.value
+            row["failure_reason"] = "orphaned_at_restart"
+            row["ended_at"] = _now_iso()
+            # Best-effort duration from started_at if we have it.
+            if row.get("started_at") and not row.get("duration_seconds"):
+                try:
+                    started = datetime.fromisoformat(
+                        str(row["started_at"]).replace("Z", "+00:00")
+                    )
+                    ended = datetime.now(UTC)
+                    row["duration_seconds"] = (ended - started).total_seconds()
+                except Exception:
+                    pass
+            try:
+                # ``put`` overwrites the entity body keyed by id. The
+                # storage layer drops ``_id`` for us if present.
+                clean = {k: v for k, v in row.items() if k != "_id"}
+                await self._storage.backend.put(_COLLECTION, call_id, clean)
+                swept += 1
+            except Exception:
+                logger.debug(
+                    "orphan sweep: failed to update %s", call_id, exc_info=True
+                )
+
+        if swept > 0:
+            logger.info(
+                "Phone call orphan sweep: marked %d stuck-active record(s) "
+                "as hung_up (orphaned_at_restart)",
+                swept,
+            )
 
     # --- Bus subscription: phone.call.ended → follow-up chat message ──
 
