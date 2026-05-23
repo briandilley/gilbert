@@ -31,6 +31,32 @@ from typing import ClassVar, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
 
+# ``AudioSink`` and the generic conversation primitives live in
+# ``interfaces/conversation``. ``CallSession`` is a phone-call-specific
+# ``ConversationSession`` — we re-export ``AudioSink`` from here for
+# backward compatibility with the carrier-plugin code that still
+# imports it from this module.
+from gilbert.interfaces.conversation import (
+    AudioSink,
+    ConversationErrorEvent,
+    ConversationSession,
+    ConversationStatusEvent,
+)
+
+__all__ = [
+    "AudioSink",
+    "CallBrief",
+    "CallErrorEvent",
+    "CallEvent",
+    "CallSession",
+    "CallStatus",
+    "CallStatusEvent",
+    "DtmfEvent",
+    "PhoneCallProvider",
+    "TelephonyBackend",
+    "TranscriptTurn",
+]
+
 # ── Call status / events ─────────────────────────────────────────────
 
 
@@ -86,34 +112,36 @@ class CallErrorEvent:
 CallEvent = CallStatusEvent | DtmfEvent | CallErrorEvent
 
 
-# ── Outbound-audio sink ──────────────────────────────────────────────
-
-
-class AudioSink(Protocol):
-    """Where we push bytes that should be played to the remote party.
-
-    Implementations buffer + chunk as needed for the carrier protocol;
-    the call brain just hands over raw mulaw 8 kHz bytes. ``clear()``
-    flushes any buffered-but-unsent audio — used on barge-in so we stop
-    talking the moment the remote starts speaking.
-    """
-
-    async def write(self, chunk: bytes) -> None: ...
-    async def clear(self) -> None: ...
-
-
 # ── The session handed out by ``place_call`` ─────────────────────────
+#
+# ``CallSession`` is a phone-call-specific specialization of the
+# generic ``ConversationSession`` defined in
+# ``gilbert.interfaces.conversation``. The engine sees it as a
+# ``ConversationSession``; the carrier-plugin code (and any caller
+# wanting to send DTMF, transfer the call, etc.) treats it as a
+# ``CallSession`` and uses the phone-specific extensions.
+#
+# The ``hang_up`` method is the phone-specific name for
+# ``end_session`` — kept as the canonical telephony name. The engine
+# expects ``end_session`` so we provide it as a thin alias below.
 
 
 @dataclass
-class CallSession:
-    """An open call. Single use — close it by calling ``hang_up``.
+class CallSession(ConversationSession):
+    """An open phone call. Inherits the generic conversation-session
+    shape (``session_id``, ``audio_in``, ``audio_out``, ``events``,
+    ``end_session``) and adds phone-call-specific bits.
 
-    The three streams are independent producer/consumer endpoints:
+    Single use — close it by calling ``hang_up`` (or the engine-level
+    ``end_session``; they're aliases).
+
+    The three audio/event streams are independent producer/consumer
+    endpoints:
 
     - ``audio_in``  — async iterator of mulaw 8 kHz chunks from the remote
     - ``audio_out`` — sink the brain writes our synthesized audio into
-    - ``events``    — async iterator of ``CallEvent``s (status changes, DTMF)
+    - ``events``    — async iterator of ``ConversationEvent``s, with
+      phone-specific ``DtmfEvent`` and ``CallStatusEvent`` mixed in.
 
     The brain typically spawns one task per stream and joins them on
     hang-up. The backend handles reconnect/retry of the underlying
@@ -122,12 +150,27 @@ class CallSession:
     streams will close shortly after.
     """
 
-    call_id: str  # backend-issued unique call id
-    audio_in: AsyncIterator[bytes]
-    audio_out: AudioSink
-    events: AsyncIterator[CallEvent]
+    # Phone-specific aliases / extensions on top of ConversationSession.
+    # ``session_id`` is the backend-issued unique call id; we expose
+    # it under the legacy name ``call_id`` via a property below for
+    # the considerable amount of existing code that reads it that way.
 
-    async def hang_up(self) -> None: ...  # set by the backend at construction
+    @property
+    def call_id(self) -> str:
+        """Phone-specific alias for ``session_id`` (the
+        carrier-issued unique call identifier). Kept so the existing
+        telephony plugin + service code doesn't have to be rewritten
+        in lockstep with the abstraction extraction."""
+        return self.session_id
+
+    async def hang_up(self) -> None:
+        """Phone-specific alias for ``end_session``. Backends set
+        this in their session-construction code (the alias relationship
+        is enforced via composition at the carrier layer). Calling
+        through to ``end_session`` here covers the fall-through case
+        when a backend didn't override; for the real implementations
+        the backend's ``hang_up`` IS the underlying carrier action."""
+        await self.end_session()
 
 
 # ── The backend ABC ──────────────────────────────────────────────────
