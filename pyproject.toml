@@ -53,6 +53,7 @@ dependencies = [
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-frigate",
     "gilbert-plugin-gemini",
+    "gilbert-plugin-jellyfin",
     "gilbert-plugin-google",
     "gilbert-plugin-groq",
     "gilbert-plugin-guess-that-song",
@@ -66,6 +67,7 @@ dependencies = [
     "gilbert-plugin-openwakeword",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
+    "gilbert-plugin-plex",
     "gilbert-plugin-porcupine",
     "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
@@ -93,6 +95,7 @@ gilbert-plugin-discord-webhook = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
 gilbert-plugin-frigate = { workspace = true }
 gilbert-plugin-gemini = { workspace = true }
+gilbert-plugin-jellyfin = { workspace = true }
 gilbert-plugin-google = { workspace = true }
 gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }
@@ -106,6 +109,7 @@ gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openwakeword = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
+gilbert-plugin-plex = { workspace = true }
 gilbert-plugin-pushover = { workspace = true }
 gilbert-plugin-porcupine = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }

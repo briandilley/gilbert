@@ -32,6 +32,7 @@ import {
 import { PageHeader } from "@/components/layout/PageHeader";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { ConfigSection } from "./ConfigSection";
+import { MediaLibraryUserMappings } from "./MediaLibraryUserMappings";
 import { ServiceToggles } from "./ServiceToggles";
 import {
   SettingsProvider,
@@ -307,6 +308,14 @@ function SettingsPageInner() {
                     searchQuery={query}
                   />
                 ))}
+                {current.name === "Media" &&
+                  current.sections.some(
+                    (s) => s.namespace === "media_library",
+                  ) && <MediaLibraryUserMappings />}
+                {current.name === "Media" &&
+                  current.sections.some(
+                    (s) => s.namespace === "media_library",
+                  ) && <PluginPanelSlot slot="settings.media_library" />}
                 <PluginPanelSlot
                   slot={`settings.${current.name.toLowerCase()}`}
                 />
