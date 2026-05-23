@@ -2,6 +2,7 @@ import {
   MessageSquareIcon,
   FileTextIcon,
   InboxIcon,
+  PhoneIcon,
   ShieldIcon,
   SlidersHorizontalIcon,
   SettingsIcon,
@@ -31,6 +32,7 @@ const ICONS: Record<string, LucideIcon> = {
   "message-square": MessageSquareIcon,
   "file-text": FileTextIcon,
   "inbox": InboxIcon,
+  "phone": PhoneIcon,
   "shield": ShieldIcon,
   "sliders": SlidersHorizontalIcon,
   "settings": SettingsIcon,
@@ -67,6 +69,7 @@ export const GROUP_COLORS: Record<string, string> = {
   knowledge: "text-amber-500",
   media: "text-rose-500",
   mcp: "text-pink-500",
+  calls: "text-cyan-500",
   security: "text-violet-500",
   system: "text-slate-500",
 };
@@ -80,6 +83,7 @@ export const GROUP_ACCENT_BG: Record<string, string> = {
   knowledge: "bg-amber-500",
   media: "bg-rose-500",
   mcp: "bg-pink-500",
+  calls: "bg-cyan-500",
   security: "bg-violet-500",
   system: "bg-slate-500",
 };
