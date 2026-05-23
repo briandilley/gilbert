@@ -153,3 +153,4 @@ PY
 - The JSON key is masked as `********` in normal account payloads. Owners and
   admins can reveal it through the edit drawer; the value is still stored in the
   local SQLite database, so protect `.gilbert/gilbert.db` and backups.
+

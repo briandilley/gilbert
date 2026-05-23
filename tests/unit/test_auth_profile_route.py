@@ -56,6 +56,9 @@ class _FakeUsersService:
     async def list_users(self) -> list[dict[str, Any]]:
         return []
 
+    async def resolve_user_id_by_name(self, name: str) -> None:
+        return None
+
 
 class _FakeAuthService:
     """Stub auth service. ``/auth/me`` calls ``user_has_password`` to
