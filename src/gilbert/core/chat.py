@@ -218,25 +218,40 @@ def conv_summary(
         summary["is_member"] = c.get("_is_member", True)
         summary["is_invited"] = c.get("_is_invited", False)
 
-    # Per-viewer unread mention count. Index-based cursor (not
-    # timestamp) because messages don't carry per-row created_at
-    # timestamps today — the index of the message in ``messages[]``
-    # is the source of truth for "newer than what I've seen."
+    # Per-viewer unread counts. Two cursors, two counts:
+    #   - ``last_read_mention_index``  → ``unread_mentions_count``  (@-mentions only)
+    #   - ``last_read_message_index``  → ``unread_messages_count``  (any new message)
+    # Index-based cursors (not timestamps) because messages don't carry
+    # per-row created_at fields today — the position in ``messages[]``
+    # is the source of truth for "newer than what I've seen." Messages
+    # the viewer wrote themselves never count as unread either way —
+    # you don't get a badge for your own message.
     if viewer_user_id:
-        cursor = -1
+        mention_cursor = -1
+        message_cursor = -1
         for m in c.get("members", []):
             if m.get("user_id") == viewer_user_id:
-                raw = m.get("last_read_mention_index")
-                cursor = int(raw) if isinstance(raw, int) else -1
+                raw_mention = m.get("last_read_mention_index")
+                if isinstance(raw_mention, int):
+                    mention_cursor = raw_mention
+                raw_msg = m.get("last_read_message_index")
+                if isinstance(raw_msg, int):
+                    message_cursor = raw_msg
                 break
-        unread = 0
+        unread_mentions = 0
+        unread_messages = 0
         for idx, msg in enumerate(messages):
-            if idx <= cursor:
-                continue
-            mentioned = msg.get("mentioned_user_ids") or []
-            if viewer_user_id in mentioned and msg.get("author_id") != viewer_user_id:
-                unread += 1
-        summary["unread_mentions_count"] = unread
+            author_id = msg.get("author_id")
+            if author_id == viewer_user_id:
+                continue  # your own message — never unread
+            if idx > mention_cursor:
+                mentioned = msg.get("mentioned_user_ids") or []
+                if viewer_user_id in mentioned:
+                    unread_mentions += 1
+            if idx > message_cursor:
+                unread_messages += 1
+        summary["unread_mentions_count"] = unread_mentions
+        summary["unread_messages_count"] = unread_messages
     return summary
 
 

@@ -5805,6 +5805,7 @@ class AIService(Service):
             "chat.conversation.rename": self._ws_conversation_rename,
             "chat.conversation.delete": self._ws_conversation_delete,
             "chat.conversation.mark_mentions_read": self._ws_mark_mentions_read,
+            "chat.conversation.mark_read": self._ws_mark_read,
             "chat.room.create": self._ws_room_create,
             "chat.room.join": self._ws_room_join,
             "chat.room.leave": self._ws_room_leave,
@@ -6914,6 +6915,70 @@ class AIService(Service):
             "type": "chat.conversation.list.result",
             "ref": frame.get("id"),
             "conversations": conversations,
+        }
+
+    async def _ws_mark_read(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Advance both the message and mention read-cursors to "now."
+
+        Fired by the frontend when the user opens a conversation (or
+        returns to a visible tab while one is open). Stores
+        ``last_read_message_index`` AND ``last_read_mention_index`` on
+        the caller's member entry, both set to the index of the most
+        recent message. ``conv_summary`` reads these to compute the two
+        unread badges. Self-only — a frame can only move the caller's
+        own cursors.
+
+        Separate from ``chat.conversation.mark_mentions_read`` because
+        the mention-bell flow wants to clear only the mention badge
+        without touching the message badge ("I see I have mentions, but
+        I haven't actually read the whole thread yet").
+        """
+        conversation_id = (frame.get("conversation_id") or "").strip()
+        if not conversation_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id is required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        data = await self._storage.get(_COLLECTION, conversation_id)
+        if data is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        members = data.get("members") or []
+        last_index = len(data.get("messages") or []) - 1
+        updated = False
+        for m in members:
+            if m.get("user_id") == conn.user_id:
+                if m.get("last_read_message_index") != last_index:
+                    m["last_read_message_index"] = last_index
+                    updated = True
+                if m.get("last_read_mention_index") != last_index:
+                    m["last_read_mention_index"] = last_index
+                    updated = True
+                break
+        if updated:
+            data["members"] = members
+            await self._storage.put(_COLLECTION, conversation_id, data)
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "conversation_id": conversation_id,
+            "last_read_message_index": last_index,
+            "last_read_mention_index": last_index,
         }
 
     async def _ws_mark_mentions_read(

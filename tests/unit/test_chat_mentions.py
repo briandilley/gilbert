@@ -187,6 +187,96 @@ def test_conv_summary_zero_when_viewer_is_not_mentioned() -> None:
     assert out["unread_mentions_count"] == 0
 
 
+# --- conv_summary unread_messages_count ---
+
+
+def test_conv_summary_counts_all_unread_messages_not_just_mentions() -> None:
+    """``unread_messages_count`` counts every message past the viewer's
+    ``last_read_message_index`` cursor, regardless of whether it
+    mentions them — that's what powers the "room has new activity"
+    badge separate from the @-mention badge."""
+    conv = {
+        "_id": "c1",
+        "messages": [
+            _msg(author_id="bob", mentioned=[]),
+            _msg(author_id="bob", mentioned=["alice"]),
+            _msg(author_id="bob", mentioned=[]),
+        ],
+        "members": [{"user_id": "alice", "display_name": "Alice"}],
+    }
+    out = conv_summary(conv, shared=True, viewer_user_id="alice")
+    assert out["unread_messages_count"] == 3
+    assert out["unread_mentions_count"] == 1
+
+
+def test_conv_summary_unread_messages_respects_cursor() -> None:
+    conv = {
+        "_id": "c1",
+        "messages": [
+            _msg(author_id="bob"),  # idx 0 — seen
+            _msg(author_id="bob"),  # idx 1 — seen
+            _msg(author_id="bob"),  # idx 2 — unread
+            _msg(author_id="bob"),  # idx 3 — unread
+        ],
+        "members": [
+            {
+                "user_id": "alice",
+                "display_name": "Alice",
+                "last_read_message_index": 1,
+            },
+        ],
+    }
+    out = conv_summary(conv, shared=True, viewer_user_id="alice")
+    assert out["unread_messages_count"] == 2
+
+
+def test_conv_summary_unread_messages_excludes_self_authored() -> None:
+    """Your own messages don't badge — you obviously read them."""
+    conv = {
+        "_id": "c1",
+        "messages": [
+            _msg(author_id="alice"),
+            _msg(author_id="bob"),
+            _msg(author_id="alice"),
+        ],
+        "members": [{"user_id": "alice", "display_name": "Alice"}],
+    }
+    out = conv_summary(conv, shared=True, viewer_user_id="alice")
+    assert out["unread_messages_count"] == 1  # only bob's
+
+
+def test_conv_summary_unread_messages_omitted_for_no_viewer() -> None:
+    conv = {"_id": "c1", "messages": [_msg(author_id="bob")], "members": []}
+    out = conv_summary(conv, shared=True)
+    assert "unread_messages_count" not in out
+
+
+def test_conv_summary_unread_messages_independent_of_mentions_cursor() -> None:
+    """Clearing the mention cursor (via ``mark_mentions_read``) must
+    not zero the message cursor, and vice versa. Two cursors, two
+    independent counts."""
+    conv = {
+        "_id": "c1",
+        "messages": [
+            _msg(author_id="bob", mentioned=["alice"]),
+            _msg(author_id="bob"),
+            _msg(author_id="bob"),
+        ],
+        "members": [
+            {
+                "user_id": "alice",
+                "display_name": "Alice",
+                # Mentions all caught up...
+                "last_read_mention_index": 2,
+                # ...but the message cursor still at -1 (default).
+            },
+        ],
+    }
+    out = conv_summary(conv, shared=True, viewer_user_id="alice")
+    assert out["unread_mentions_count"] == 0
+    assert out["unread_messages_count"] == 3
+
+
 def test_conv_summary_handles_missing_member_entry_for_viewer() -> None:
     # Viewer isn't a member — start cursor at -1 so every mention
     # counts as unread. (Realistic case: an admin browsing a public
