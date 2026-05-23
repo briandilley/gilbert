@@ -99,6 +99,15 @@ _REMOTE_SILENCE_NUDGE_SECONDS = 12.0
 # finishes its greeting, switch to one-shot voicemail mode.
 _VOICEMAIL_SILENCE_SECONDS = 6.0
 
+# Real phone etiquette: the recipient picks up and says "hello?" first;
+# THEN the caller identifies themselves. We wait this long after the
+# call connects for the remote to speak before falling back to a
+# proactive cold-open from our side. Long enough to absorb the half-
+# second between Telnyx flagging CONNECTED and the recipient actually
+# opening their mouth, short enough that a true dead line (voicemail
+# beep we missed, hold music, mute button) doesn't sit silent.
+_INITIAL_OPENER_TIMEOUT_SECONDS = 4.0
+
 
 # ── Persisted call-record shape (entity in ``phone_calls`` collection) ──
 
@@ -930,22 +939,46 @@ class PhoneCallService(Service):
 
         # ── status loop: drains backend events, terminates the call ───
         #
-        # Also fires the FIRST ``think_and_speak`` once the call reaches
-        # CONNECTED. Without this the brain would sit silent on every
-        # call because the previous design only triggered speaking from
-        # the listen loop's FinalTranscript handler — i.e. the remote
-        # had to talk first, which they won't until WE introduce
-        # ourselves. The opener is the disclosure line + whatever the
-        # LLM extracts from the brief.
+        # On CONNECTED we don't speak immediately — we wait for the
+        # remote to say "hello?" first (real phone etiquette). The
+        # listen loop's FinalTranscript handler will then call
+        # ``_think_and_speak`` with the remote's greeting as the first
+        # user message, and the LLM responds naturally with the
+        # disclosure-plus-greeting woven in.
+        #
+        # Belt-and-suspenders for the silent-line case (recipient
+        # picks up but doesn't speak, or we hit voicemail beep that
+        # we miss): a fallback timer fires the opener proactively
+        # after ``_INITIAL_OPENER_TIMEOUT_SECONDS``. ``already_spoke``
+        # is the latch — both the FinalTranscript path and the timer
+        # path flip it true, so whichever fires first wins.
 
         already_spoke = False
 
-        async def _maybe_open_with_disclosure() -> None:
+        async def _open_with_disclosure_now() -> None:
+            """Speak the cold-open disclosure (no user message yet).
+            Called only by the fallback timer when the remote stayed
+            silent past ``_INITIAL_OPENER_TIMEOUT_SECONDS``."""
             nonlocal already_spoke
             if already_spoke:
                 return
             already_spoke = True
             await _think_and_speak()
+
+        async def _wait_then_open() -> None:
+            """Fallback: if the remote hasn't spoken by the timeout,
+            we open the conversation ourselves so the call doesn't
+            sit in dead silence forever (voicemail, mute, etc.)."""
+            try:
+                await asyncio.sleep(_INITIAL_OPENER_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                return
+            if not already_spoke and not stop.is_set():
+                log.info(
+                    "opener: remote silent %.1fs after CONNECT — speaking proactively",
+                    _INITIAL_OPENER_TIMEOUT_SECONDS,
+                )
+                await _open_with_disclosure_now()
 
         async def _status_loop() -> None:
             log.info("status_loop: starting")
@@ -955,10 +988,14 @@ class PhoneCallService(Service):
                     if isinstance(event, CallStatusEvent):
                         await _set_status(event.status, event.reason)
                         if event.status is CallStatus.CONNECTED:
-                            # Kick off the greeting in a task so the
-                            # status loop keeps draining events
-                            # (including a remote hangup mid-greeting).
-                            asyncio.create_task(_maybe_open_with_disclosure())
+                            # Don't speak immediately — wait for the
+                            # remote to say "hello?" first (handled in
+                            # the listen loop). Arm the fallback timer
+                            # so a silent line eventually gets opened
+                            # by us. The task is fire-and-forget; the
+                            # ``already_spoke`` latch makes it a no-op
+                            # if the listen loop got in first.
+                            asyncio.create_task(_wait_then_open())
                         if event.status in (CallStatus.HUNG_UP, CallStatus.FAILED):
                             log.info(
                                 "status_loop: terminal status %s — setting stop",
@@ -978,6 +1015,7 @@ class PhoneCallService(Service):
         # ── listen loop: STT → think_and_speak on end-of-speech ───────
 
         async def _listen_loop() -> None:
+            nonlocal already_spoke
             if self._transcription is None:
                 # Degrade gracefully — call continues, brain speaks the
                 # opening + brief but won't get any responses back.
@@ -1029,6 +1067,12 @@ class PhoneCallService(Service):
                         text = ev.text.strip()
                         if not text:
                             continue
+                        # Latch the opener flag — the remote spoke
+                        # first, so the fallback timer's proactive
+                        # cold-open should NOT fire. ``_think_and_speak``
+                        # below produces the disclosure-plus-greeting
+                        # naturally as a reply to whatever they said.
+                        already_spoke = True
                         await _record_turn("them", text)
                         messages.append(
                             Message(role=MessageRole.USER, content=text)
