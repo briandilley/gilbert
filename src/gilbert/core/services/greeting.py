@@ -16,9 +16,7 @@ from gilbert.interfaces.ai import AIProvider, AISamplingProvider, Message, Messa
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
-from gilbert.interfaces.feeds import FeedsProvider
 from gilbert.interfaces.greeting import GreetingContext, GreetingContextProvider
-from gilbert.interfaces.health import GreetingBrief, HealthProvider
 from gilbert.interfaces.presence import PresenceProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import SpeakerProvider
@@ -29,12 +27,6 @@ from gilbert.interfaces.tools import (
     ToolParameterType,
 )
 from gilbert.interfaces.users import UserManagementProvider
-from gilbert.interfaces.weather import (
-    LocationNotConfiguredError,
-    WeatherProvider,
-    WeatherUnavailableError,
-    WeatherUnits,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +58,13 @@ Do NOT call any tool that broadcasts, announces, sends a message, or plays \
 audio — the greeting is delivered separately by the calling code. Reply with \
 ONLY the greeting text — no quotes, no preamble, no commentary on which tools \
 you used.{style_instruction}{avoid_section}"""
+
+_DEFAULT_ARRIVAL_GREETING_PROMPT = """\
+Generate a morning greeting for {name} who just arrived at the shop. \
+You're Gilbert, an AI assistant at a business. Be creative — vary your \
+tone across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). \
+Mention their name. 1-2 sentences max. Write ONLY the greeting — no \
+quotes, no preamble.{style_instruction}{context_section}{avoid_section}"""
 
 _DEFAULT_WEATHER_HINT_TEMPLATE = (
     "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
@@ -120,21 +119,7 @@ class GreetingService(Service):
         self._timezone: str = "UTC"
         self._ai_profile: str = "light"
         self._enhanced_greeting_prompt: str = _DEFAULT_ENHANCED_GREETING_PROMPT
-        self._include_weather: bool = True
-        self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
-        self._weather: WeatherProvider | None = None
-        self._include_briefing: bool = False
-        self._briefing_max_seconds: int = 60
-        self._feeds: FeedsProvider | None = None
-
-        # Health integration — when the HealthProvider capability is
-        # present and the greeted user has at least one ``health_links``
-        # row, the greeting prompt receives structured headline values
-        # (NOT a pre-canned paragraph) so the model can react to the
-        # facts in its own voice. Subject to the same non-clinical
-        # constraints as the daily-summary prompt — see spec §14.
-        self._health: HealthProvider | None = None
-        self._include_health_brief: bool = True
+        self._arrival_greeting_prompt: str = _DEFAULT_ARRIVAL_GREETING_PROMPT
 
         # Context provider discovery and assembly
         self._enabled_context_providers: list[str] | None = None  # None = "all"
@@ -171,12 +156,6 @@ class GreetingService(Service):
                     "text_to_speech",
                     "presence",
                     "configuration",
-                    "feeds",
-                    # Optional health-brief splice — when present and
-                    # the greeted user has at least one health_links
-                    # row, the prompt receives structured headline
-                    # values per spec §14.
-                    "health",
                 }
             ),
             ai_calls=frozenset({"greeting"}),
@@ -233,37 +212,9 @@ class GreetingService(Service):
                 self._enhanced_greeting_prompt = (
                     section.get("enhanced_greeting_prompt") or _DEFAULT_ENHANCED_GREETING_PROMPT
                 )
-                self._include_weather = bool(
-                    section.get("include_weather", self._include_weather)
+                self._arrival_greeting_prompt = (
+                    section.get("arrival_greeting_prompt") or _DEFAULT_ARRIVAL_GREETING_PROMPT
                 )
-                self._weather_hint_template = section.get(
-                    "weather_hint_template",
-                    self._weather_hint_template,
-                ) or _DEFAULT_WEATHER_HINT_TEMPLATE
-                self._include_briefing = bool(
-                    section.get("include_briefing", self._include_briefing)
-                )
-                self._briefing_max_seconds = int(
-                    section.get("briefing_max_seconds", self._briefing_max_seconds)
-                    or self._briefing_max_seconds
-                )
-
-        # Optional weather provider — if missing or wrong protocol,
-        # degrade to the no-weather greeting.
-        weather_svc = resolver.get_capability("weather")
-        if isinstance(weather_svc, WeatherProvider):
-            self._weather = weather_svc
-
-        feeds_svc = resolver.get_capability("feeds")
-        if isinstance(feeds_svc, FeedsProvider):
-            self._feeds = feeds_svc
-
-        # Optional health provider — when present and the greeted
-        # user has at least one ``health_links`` row, the greeting
-        # prompt receives a ``GreetingBrief`` structured snapshot.
-        health_svc = resolver.get_capability("health")
-        if isinstance(health_svc, HealthProvider):
-            self._health = health_svc
 
         # Schedule a one-shot check for people already present at startup.
         # This handles the case where Gilbert restarts while people are
@@ -348,46 +299,20 @@ class GreetingService(Service):
                 choices_from="ai_profiles",
             ),
             ConfigParam(
-                key="include_weather",
-                type=ToolParameterType.BOOLEAN,
-                description=(
-                    "Enrich greetings with a one-line weather hint when "
-                    "the WeatherService is available."
-                ),
-                default=True,
-            ),
-            ConfigParam(
-                key="weather_hint_template",
+                key="arrival_greeting_prompt",
                 type=ToolParameterType.STRING,
                 description=(
-                    "Python str.format template for the weather hint "
-                    "blurb interpolated into the greeting prompt. "
-                    "Available placeholders: {location_name}, "
-                    "{temperature}, {temp_suffix}, {condition_phrase}, "
-                    "{wind_speed}, {speed_suffix}, {feels_like_clause}."
+                    "Prompt template for the auto-generated arrival greeting. "
+                    "Placeholders: {name}, {style_instruction}, {avoid_section}, "
+                    "{context_section}. The context section is a labeled list "
+                    "(\"Weather: ...\", \"Health: ...\", \"News briefing: ...\") "
+                    "drawn from whichever GreetingContextProvider services are "
+                    "enabled under enabled_context_providers — you can write "
+                    "rules like \"always mention the weather if it's extreme.\""
                 ),
-                default=_DEFAULT_WEATHER_HINT_TEMPLATE,
+                default=_DEFAULT_ARRIVAL_GREETING_PROMPT,
                 multiline=True,
                 ai_prompt=True,
-            ),
-            ConfigParam(
-                key="include_briefing",
-                type=ToolParameterType.BOOLEAN,
-                description=(
-                    "When the FeedsProvider capability is available and "
-                    "the user hasn't been briefed today, splice the "
-                    "news briefing into the arrival greeting."
-                ),
-                default=False,
-            ),
-            ConfigParam(
-                key="briefing_max_seconds",
-                type=ToolParameterType.INTEGER,
-                description=(
-                    "Soft cap on the briefing length passed as a hint "
-                    "into the briefing AI call (~2.5 words/sec)."
-                ),
-                default=60,
             ),
             ConfigParam(
                 key="enhanced_greeting_prompt",
@@ -477,7 +402,6 @@ class GreetingService(Service):
                     "every discovered provider."
                 ),
                 default=None,
-                required=False,
             ),
         ]
 
@@ -488,20 +412,10 @@ class GreetingService(Service):
         self._ai_profile = config.get("ai_profile", self._ai_profile)
         self._speakers = config.get("speakers", self._speakers)
         self._timezone = config.get("timezone", self._timezone)
-        self._include_weather = bool(
-            config.get("include_weather", self._include_weather)
-        )
-        self._weather_hint_template = config.get(
-            "weather_hint_template",
-            self._weather_hint_template,
-        ) or _DEFAULT_WEATHER_HINT_TEMPLATE
-        self._include_briefing = bool(
-            config.get("include_briefing", self._include_briefing)
-        )
-        self._briefing_max_seconds = int(
-            config.get("briefing_max_seconds", self._briefing_max_seconds)
-            or self._briefing_max_seconds
-        )
+        if "arrival_greeting_prompt" in config:
+            self._arrival_greeting_prompt = (
+                config["arrival_greeting_prompt"] or _DEFAULT_ARRIVAL_GREETING_PROMPT
+            )
         if "enhanced_greeting_prompt" in config:
             # Empty string explicitly clears back to the bundled default.
             self._enhanced_greeting_prompt = (
@@ -610,8 +524,13 @@ class GreetingService(Service):
         for p in here:
             all_recent.extend(await self._get_recent_greetings(p.user_id))
 
-        # Generate a single combined greeting
-        greeting = await self._generate_group_greeting(to_greet_names, all_recent)
+        # Generate a single combined greeting.
+        # Group greetings pass user_ids so single-person groups still
+        # get per-user context; true multi-person groups skip per-user
+        # context for simplicity in v1.
+        greeting = await self._generate_group_greeting(
+            to_greet_names, all_recent, user_ids=to_greet_ids
+        )
         logger.info("Startup greeting: %s", greeting)
 
         await self._announce(greeting)
@@ -660,22 +579,14 @@ class GreetingService(Service):
 
             display_name = await self._get_display_name(user_id)
             recent = await self._get_recent_greetings(user_id)
-            health_brief = await self._fetch_health_brief(user_id)
             greeting = await self._generate_greeting(
-                display_name, recent, health_brief=health_brief
+                display_name, recent, user_id=user_id
             )
 
-            briefing_appendix = await self._maybe_briefing_text(user_id)
-            announcement = (
-                f"{greeting} {briefing_appendix}".strip()
-                if briefing_appendix
-                else greeting
-            )
-
-            logger.info("Greeting %s: %s", user_id, announcement)
+            logger.info("Greeting %s: %s", user_id, greeting)
 
             await self._mark_greeted(user_id, greeting)
-            await self._announce(announcement)
+            await self._announce(greeting)
 
             if self._event_bus:
                 await self._event_bus.publish(
@@ -684,46 +595,10 @@ class GreetingService(Service):
                         data={
                             "user_id": user_id,
                             "greeting": greeting,
-                            "briefing_included": bool(briefing_appendix),
                         },
                         source="greeting",
                     )
                 )
-
-    async def _maybe_briefing_text(self, user_id: str) -> str:
-        """Build the briefing text to splice into a greeting, if configured."""
-        if not self._include_briefing or self._feeds is None:
-            return ""
-        if self._storage_backend is None:
-            return ""
-
-        state = await self._storage_backend.get("feed_briefing_state", user_id)
-        today = self._today_str()
-        if state and state.get("last_briefed_on") == today:
-            return ""
-
-        user_ctx = UserContext(
-            user_id=user_id,
-            email=f"{user_id}@local",
-            display_name=user_id,
-            roles=frozenset({"user"}),
-        )
-        try:
-            result = await self._feeds.build_briefing(
-                user_ctx,
-                top_n=3,
-                max_spoken_seconds=self._briefing_max_seconds,
-                mark_briefed=True,
-            )
-        except Exception:
-            logger.warning(
-                "greeting: build_briefing failed for %s",
-                user_id,
-                exc_info=True,
-            )
-            return ""
-
-        return (getattr(result, "spoken", "") or "").strip()
 
     def _in_greeting_window(self) -> bool:
         """Check if current time is within the greeting window."""
@@ -799,63 +674,6 @@ class GreetingService(Service):
         except Exception:
             return datetime.now(UTC).strftime("%Y-%m-%d")
 
-    async def _build_weather_blurb(self, user: UserContext | None = None) -> str:
-        """Build a deterministic one-line weather blurb for the greeting prompt."""
-        if not self._include_weather or self._weather is None:
-            return ""
-        try:
-            current = await self._weather.get_current(user=user)
-        except LocationNotConfiguredError:
-            return ""
-        except WeatherUnavailableError:
-            logger.debug("Weather backend unavailable for greeting; skipping blurb")
-            return ""
-
-        temp_suffix = "°F" if current.units is WeatherUnits.IMPERIAL else "°C"
-        speed_suffix = "mph" if current.units is WeatherUnits.IMPERIAL else "km/h"
-        condition_phrase = current.condition.value.replace("_", " ")
-        feels_like_clause = ""
-        if (
-            current.feels_like is not None
-            and abs(current.feels_like - current.temperature) >= 3
-        ):
-            feels_like_clause = f", feels like {current.feels_like:.0f}{temp_suffix}"
-        location_name = current.location.name or "the configured location"
-
-        try:
-            return self._weather_hint_template.format(
-                location_name=location_name,
-                temperature=current.temperature,
-                temp_suffix=temp_suffix,
-                condition_phrase=condition_phrase,
-                wind_speed=current.wind_speed,
-                speed_suffix=speed_suffix,
-                feels_like_clause=feels_like_clause,
-            )
-        except (KeyError, IndexError, ValueError):
-            logger.warning("Greeting weather_hint_template format failed", exc_info=True)
-            return ""
-
-    async def _fetch_health_brief(self, user_id: str) -> GreetingBrief | None:
-        """Pull a ``GreetingBrief`` for the greeted user, or None.
-
-        Capability-protocol-only — never imports HealthService. Errors
-        degrade silently so a misconfigured health backend never blocks
-        a greeting.
-        """
-        if not self._include_health_brief or self._health is None:
-            return None
-        try:
-            brief = await self._health.health_brief_for_greeting(user_id)
-        except Exception:
-            logger.debug(
-                "greeting: health_brief_for_greeting failed for %s",
-                user_id,
-                exc_info=True,
-            )
-            return None
-        return brief
-
     def _discover_context_providers(self) -> None:
         """Populate self._context_providers from the resolver.
 
@@ -911,45 +729,25 @@ class GreetingService(Service):
             return ""
         return "\n".join(f"{e.label}: {e.prose}" for e in entries)
 
-    @staticmethod
-    def _format_health_brief(brief: GreetingBrief | None) -> str:
-        """Render the brief as a structured-prose body the greeting
-        prompt can fold in. Empty string when there's no data so the
-        prompt explicitly omits any health reference.
-        """
-        if brief is None or not brief.has_data:
-            return ""
-        parts: list[str] = []
-        if brief.sleep_hours is not None:
-            parts.append(f"Last night's sleep: {brief.sleep_hours:.1f}h.")
-        if brief.steps_today_so_far is not None:
-            parts.append(f"Steps today so far: {brief.steps_today_so_far:,}.")
-        if brief.weight_latest is not None:
-            parts.append(f"Latest weight: {brief.weight_latest:g} {brief.weight_unit.value}.")
-        if brief.resting_hr_latest is not None:
-            parts.append(f"Latest resting HR: {brief.resting_hr_latest:g} bpm.")
-        if brief.flags:
-            parts.append(f"Flags: {', '.join(brief.flags)}.")
-        return " ".join(parts)
-
     async def _generate_greeting(
         self,
         name: str,
         recent: list[str] | None = None,
         *,
-        health_brief: GreetingBrief | None = None,
+        user_id: str | None = None,
     ) -> str:
-        """Generate a personalized greeting via AI, with fallback."""
+        """Generate a personalized arrival greeting via AI, with fallback.
+
+        ``user_id`` is required to fetch per-user context; when it's None
+        the greeting still works, just without the contextual block.
+        """
         if self._resolver is None:
             return f"Good morning, {name}!"
-
         ai_svc = self._resolver.get_capability("ai_chat")
         if not isinstance(ai_svc, AISamplingProvider):
             return f"Good morning, {name}!"
 
-        style_instruction = ""
-        if self._style:
-            style_instruction = f"\nStyle: {self._style}."
+        style_instruction = f"\nStyle: {self._style}." if self._style else ""
 
         avoid_section = ""
         if recent:
@@ -959,28 +757,20 @@ class GreetingService(Service):
                 "structure, and word choice:\n" + "\n".join(f"- {g}" for g in recent[-7:])
             )
 
-        weather_blurb = await self._build_weather_blurb(user=None)
-        weather_section = f"\n\nContext: {weather_blurb}" if weather_blurb else ""
+        context_section = ""
+        if user_id:
+            block = await self.collect_context_block(user_id)
+            if block:
+                context_section = (
+                    "\n\nAvailable context (use what's relevant, skip what isn't):\n"
+                    + block
+                )
 
-        health_blurb = self._format_health_brief(health_brief)
-        if health_blurb:
-            health_section = (
-                "\n\nHealth context (you MAY weave one short non-clinical "
-                "observation into the greeting in your own voice — do NOT "
-                "diagnose, suggest causes, or use words like concerning, "
-                "abnormal, warning, risk, or should):\n"
-                f"{health_blurb}"
-            )
-        else:
-            health_section = ""
-
-        prompt = (
-            f"Generate a morning greeting for {name} who just arrived at the shop. "
-            f"You're Gilbert, an AI assistant at a business. Be creative — vary your "
-            f"tone across days (witty, warm, dramatic, deadpan, poetic, nerdy, etc.). "
-            f"Mention their name. 1-2 sentences max. "
-            f"Write ONLY the greeting — no quotes, no preamble."
-            f"{style_instruction}{weather_section}{health_section}{avoid_section}"
+        prompt = self._arrival_greeting_prompt.format(
+            name=name,
+            style_instruction=style_instruction,
+            avoid_section=avoid_section,
+            context_section=context_section,
         )
 
         # tools_override=[] forces a zero-tool call regardless of the
@@ -1002,11 +792,15 @@ class GreetingService(Service):
         return f"Good morning, {name}!"
 
     async def _generate_group_greeting(
-        self, names: list[str], recent: list[str] | None = None
+        self,
+        names: list[str],
+        recent: list[str] | None = None,
+        user_ids: list[str] | None = None,
     ) -> str:
         """Generate a single greeting for multiple people."""
         if len(names) == 1:
-            return await self._generate_greeting(names[0], recent)
+            uid = user_ids[0] if user_ids else None
+            return await self._generate_greeting(names[0], recent, user_id=uid)
 
         if self._resolver is None:
             return f"Good morning, {', '.join(names)}!"

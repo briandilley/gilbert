@@ -1523,18 +1523,23 @@ class TestDailyDigest:
 
 class TestGreetingWeatherHintTemplateConfig:
     def test_weather_hint_template_is_ai_prompt(self) -> None:
-        """The greeting service's ``weather_hint_template`` is fed into
-        the AI greeting prompt, so per the "AI Prompts Are Always
-        Configurable" rule it must declare ``ai_prompt=True`` to expose
-        the Author-with-AI affordance to operators.
+        """The ``weather_hint_template`` was moved from GreetingService to
+        WeatherService (Task 2) so it lives with the code that owns the
+        template rendering. Per the "AI Prompts Are Always Configurable"
+        rule it must declare ``ai_prompt=True``.
         """
-        from gilbert.core.services.greeting import GreetingService
-
-        params = GreetingService().config_params()
+        params = WeatherService().config_params()
         by_key = {p.key: p for p in params}
         assert "weather_hint_template" in by_key
         assert by_key["weather_hint_template"].ai_prompt is True
         assert by_key["weather_hint_template"].multiline is True
+
+    def test_greeting_service_no_longer_has_weather_hint_template(self) -> None:
+        """Regression guard: template ownership moved to WeatherService."""
+        from gilbert.core.services.greeting import GreetingService
+
+        keys = {p.key for p in GreetingService().config_params()}
+        assert "weather_hint_template" not in keys
 
 
 # ── GreetingContextProvider capability ────────────────────────────────

@@ -320,6 +320,73 @@ class TestGreetingService:
         assert fake_ai.calls == []
 
     @pytest.mark.asyncio
+    async def test_generate_greeting_includes_context_block(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        """The rendered prompt must contain whatever collect_context_block
+        returns, under an 'Available context:' header."""
+        from gilbert.interfaces.greeting import GreetingContext, GreetingContextProvider
+
+        # A fake provider that returns weather context.
+        class _WeatherProvider:
+            @property
+            def greeting_context_id(self) -> str:
+                return "weather"
+
+            @property
+            def greeting_context_label(self) -> str:
+                return "Weather"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return GreetingContext(
+                    provider_id="weather",
+                    label="Weather",
+                    prose="Sunny, 72°F.",
+                )
+
+        assert isinstance(_WeatherProvider(), GreetingContextProvider)
+
+        await greeting_service.start(resolver)
+
+        # Wire the context provider via get_all.
+        provider = _WeatherProvider()
+        resolver.caps["greeting_context"] = provider
+        greeting_service._discover_context_providers()
+
+        fake_ai = _FakeAISampling(content="Hi there!")
+        resolver.caps["ai_chat"] = fake_ai
+
+        text = await greeting_service._generate_greeting("Alice", recent=[], user_id="alice")
+        assert text == "Hi there!"
+        assert fake_ai.calls, "AI must have been called"
+        prompt_sent = fake_ai.calls[0]["messages"][0].content
+        assert "Available context" in prompt_sent
+        assert "Weather: Sunny, 72°F." in prompt_sent
+
+    @pytest.mark.asyncio
+    async def test_generate_greeting_omits_context_section_when_empty(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        """No providers / all disabled → no 'Available context:' header at all."""
+        await greeting_service.start(resolver)
+
+        # No context providers registered — _context_providers is empty.
+        greeting_service._context_providers = []
+
+        fake_ai = _FakeAISampling(content="Good day!")
+        resolver.caps["ai_chat"] = fake_ai
+
+        text = await greeting_service._generate_greeting("Alice", recent=[], user_id="alice")
+        assert text == "Good day!"
+        assert fake_ai.calls, "AI must have been called"
+        prompt_sent = fake_ai.calls[0]["messages"][0].content
+        assert "Available context:" not in prompt_sent
+
+    @pytest.mark.asyncio
     async def test_startup_greets_already_present(
         self,
         greeting_service: GreetingService,
@@ -371,133 +438,12 @@ class TestGreetingService:
         mock_presence.who_is_here.assert_not_called()
 
 
-# ── FeedsProvider integration ────────────────────────────────────────
-
-
-class _FakeFeedsForGreeting:
-    """Bare-minimum FeedsProvider stub for greeting splice tests."""
-
-    def __init__(self, spoken: str = "news today") -> None:
-        self.calls: list[Any] = []
-        self.spoken = spoken
-        self.fail = False
-
-    async def subscribe(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    async def unsubscribe(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError
-
-    async def list_accessible_feeds(self, *args: Any, **kwargs: Any) -> list[Any]:
-        return []
-
-    async def get_feed(self, *args: Any, **kwargs: Any) -> Any:
-        return None
-
-    async def search_items(self, **kwargs: Any) -> list[Any]:
-        return []
-
-    async def get_top_items(self, *args: Any, **kwargs: Any) -> list[Any]:
-        return []
-
-    async def mark_read(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    async def build_briefing(self, user_ctx: Any, **kwargs: Any) -> Any:
-        from datetime import UTC, datetime
-
-        from gilbert.interfaces.feeds import BriefingResult
-
-        self.calls.append({"user_id": user_ctx.user_id, **kwargs})
-        if self.fail:
-            raise RuntimeError("forced failure")
-        return BriefingResult(
-            spoken=self.spoken,
-            headlines=[],
-            item_ids=["x"],
-            since=datetime.now(UTC),
-            briefing_id=f"brief_{user_ctx.user_id}",
-        )
-
-
 class TestGreetingBriefingSplice:
-    """Per spec §16 — when ``include_briefing=True`` and the user
-    hasn't been briefed today, the greeting splices in the briefing
-    text before announcing."""
-
-    @pytest.mark.asyncio
-    async def test_greeting_includes_briefing_when_flag_on(
-        self, greeting_service: GreetingService, resolver: FakeResolver
-    ) -> None:
-        from gilbert.interfaces.feeds import FeedsProvider
-
-        feeds = _FakeFeedsForGreeting(spoken="THE BRIEFING")
-        assert isinstance(feeds, FeedsProvider)
-        resolver.caps["feeds"] = feeds
-        await greeting_service.start(resolver)
-        greeting_service._include_briefing = True
-        text = await greeting_service._maybe_briefing_text("alice")
-        assert text == "THE BRIEFING"
-        assert feeds.calls and feeds.calls[0]["user_id"] == "alice"
-
-    @pytest.mark.asyncio
-    async def test_greeting_skips_briefing_when_flag_off(
-        self, greeting_service: GreetingService, resolver: FakeResolver
-    ) -> None:
-        feeds = _FakeFeedsForGreeting()
-        resolver.caps["feeds"] = feeds
-        await greeting_service.start(resolver)
-        greeting_service._include_briefing = False
-        text = await greeting_service._maybe_briefing_text("alice")
-        assert text == ""
-        assert feeds.calls == []
-
-    @pytest.mark.asyncio
-    async def test_greeting_skips_briefing_when_feeds_capability_absent(
-        self, greeting_service: GreetingService, resolver: FakeResolver
-    ) -> None:
-        await greeting_service.start(resolver)
-        greeting_service._include_briefing = True
-        # No feeds capability registered.
-        text = await greeting_service._maybe_briefing_text("alice")
-        assert text == ""
-
-    @pytest.mark.asyncio
-    async def test_greeting_skips_briefing_when_already_briefed_today(
-        self, greeting_service: GreetingService, resolver: FakeResolver
-    ) -> None:
-        from datetime import UTC, datetime
-
-        feeds = _FakeFeedsForGreeting()
-        resolver.caps["feeds"] = feeds
-        await greeting_service.start(resolver)
-        greeting_service._include_briefing = True
-        # Pre-seed today's briefing on the storage backend used by greeting.
-        storage = resolver.caps["entity_storage"].backend
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        await storage.put(
-            "feed_briefing_state",
-            "alice",
-            {"_id": "alice", "last_briefed_on": today},
-        )
-        # _maybe_briefing_text uses self._today_str() which uses
-        # self._timezone — make sure it matches.
-        greeting_service._timezone = "UTC"
-        text = await greeting_service._maybe_briefing_text("alice")
-        assert text == ""
-        assert feeds.calls == []  # never called build_briefing
-
-    @pytest.mark.asyncio
-    async def test_greeting_briefing_failure_degrades_silently(
-        self, greeting_service: GreetingService, resolver: FakeResolver
-    ) -> None:
-        feeds = _FakeFeedsForGreeting()
-        feeds.fail = True
-        resolver.caps["feeds"] = feeds
-        await greeting_service.start(resolver)
-        greeting_service._include_briefing = True
-        text = await greeting_service._maybe_briefing_text("alice")
-        assert text == ""
+    """Briefing splice tests — the briefing is now contributed via
+    FeedBriefingService implementing GreetingContextProvider (Task 3).
+    The old ``_maybe_briefing_text`` / ``_include_briefing`` plumbing
+    was removed; only the regression guard for the interface symbol
+    shape is kept."""
 
     def test_greeting_does_not_import_briefing_provider(self) -> None:
         # Regression guard for Round-2 architect spec change. Verify
