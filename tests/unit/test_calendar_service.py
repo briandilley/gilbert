@@ -317,6 +317,22 @@ def _user_ctx(user_id: str = "alice", *, roles: set[str] | None = None) -> UserC
     )
 
 
+class _FakeConfigReader:
+    """Minimal ConfigurationReader that enables the calendar service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "calendar" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 async def _service(
     sqlite_storage: SQLiteStorage,
     scheduler: RecordingScheduler | None = None,
@@ -335,6 +351,7 @@ async def _service(
     resolver.caps["entity_storage"] = storage_provider
     resolver.caps["scheduler"] = sched
     resolver.caps["event_bus"] = ev
+    resolver.caps["configuration"] = _FakeConfigReader()
     await svc.start(resolver)  # type: ignore[arg-type]
     return svc, sched, ev.bus
 

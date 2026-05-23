@@ -282,6 +282,22 @@ def _make_item(uid: str, *, title: str = "Story", link: str = "https://x.com/a")
     )
 
 
+class _FakeConfigReader:
+    """Minimal ConfigurationReader that enables the feeds service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "feeds" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 @pytest.fixture
 async def feeds_svc(
     sqlite_storage: Any,
@@ -298,6 +314,7 @@ async def feeds_svc(
         scheduler=sched,
         ai_chat=ai,
         knowledge=knowledge,
+        configuration=_FakeConfigReader(),
     )
     svc = FeedsService()
     await svc.start(resolver)

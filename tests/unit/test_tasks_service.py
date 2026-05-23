@@ -325,6 +325,22 @@ def _ext_list(
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
+class _FakeConfigReader:
+    """Minimal ConfigurationReader that enables the tasks service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "tasks" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 @pytest.fixture
 async def started_service(
     sqlite_storage: SQLiteStorage,
@@ -341,6 +357,7 @@ async def started_service(
         scheduler=scheduler,
         access_control=access_control,
         ai_chat=ai,
+        configuration=_FakeConfigReader(),
     )
     await svc.start(resolver)
     # Test handles bring up runtimes themselves; cancel the scheduled

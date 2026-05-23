@@ -138,6 +138,22 @@ def _resolver(**caps: Any) -> Any:
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
+class _FakeConfigReader:
+    """Minimal ConfigurationReader that enables the health service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "health" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 @pytest.fixture
 async def started_service(sqlite_storage: SQLiteStorage) -> Any:
     """Boot a HealthService against a real SQLite DB + a fake bus."""
@@ -150,6 +166,7 @@ async def started_service(sqlite_storage: SQLiteStorage) -> Any:
         event_bus=_FakeEventBusProvider(bus),
         scheduler=scheduler,
         notifications=notifications,
+        configuration=_FakeConfigReader(),
     )
     await svc.start(resolver)
     yield {
@@ -977,7 +994,7 @@ async def test_startup_warns_on_oauth_with_non_localhost_bind(
     config = _ConfigReader(
         {
             "gilbert": {"web": {"bind_address": "0.0.0.0"}, "public_base_url": ""},
-            "health": {},
+            "health": {"enabled": True},
         }
     )
     bus = InMemoryEventBus()
@@ -1039,7 +1056,7 @@ async def test_startup_warns_on_debug_log_values_with_multiuser(
     config = _ConfigReader(
         {
             "gilbert": {"web": {"bind_address": "127.0.0.1"}, "public_base_url": ""},
-            "health": {"debug_log_values": True},
+            "health": {"enabled": True, "debug_log_values": True},
         }
     )
     bus = InMemoryEventBus()

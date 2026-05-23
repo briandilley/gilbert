@@ -112,6 +112,22 @@ class StubUserService(Service):
         return ServiceInfo(name="users", capabilities=frozenset({"users"}))
 
 
+class StubConfigReader:
+    """Minimal ConfigurationReader that enables the user_memory service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "user_memory" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 class StubResolver(ServiceResolver):
     def __init__(self, services: dict[str, Service]) -> None:
         self._by_cap = services
@@ -145,6 +161,7 @@ async def memory_service(
             "ai_chat": StubAIService(ai),
             "entity_storage": StubStorageService(sqlite_storage),
             "users": StubUserService(user_backend),
+            "configuration": StubConfigReader(),
         }
     )
     await svc.start(resolver)
@@ -572,6 +589,7 @@ async def test_archiving_handler_is_non_blocking(
             "entity_storage": StubStorageService(sqlite_storage),
             "event_bus": StubEventBusService(bus),
             "users": StubUserService(user_backend),
+            "configuration": StubConfigReader(),
         }
     )
     await svc.start(resolver)
@@ -633,6 +651,7 @@ async def test_stop_drains_background_tasks(
             "entity_storage": StubStorageService(sqlite_storage),
             "event_bus": StubEventBusService(bus),
             "users": StubUserService(StubUserBackend()),
+            "configuration": StubConfigReader(),
         }
     )
     await svc.start(resolver)

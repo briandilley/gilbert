@@ -99,6 +99,22 @@ def _resolver(**caps: Any) -> Any:
     return _R()
 
 
+class _FakeConfigReader:
+    """Minimal ConfigurationReader that enables the health service."""
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return {"enabled": True} if namespace == "health" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
 @pytest.fixture
 async def app_and_svc(sqlite_storage: Any) -> AsyncIterator[tuple[FastAPI, HealthService, str]]:
     """Boot a started HealthService and a FastAPI app wiring its routes."""
@@ -107,6 +123,7 @@ async def app_and_svc(sqlite_storage: Any) -> AsyncIterator[tuple[FastAPI, Healt
         entity_storage=_FakeStorageProvider(sqlite_storage),
         event_bus=_FakeEventBusProvider(),
         scheduler=_FakeSchedulerProvider(),
+        configuration=_FakeConfigReader(),
     )
     await svc.start(resolver)
     yield (
