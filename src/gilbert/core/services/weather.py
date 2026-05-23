@@ -51,6 +51,7 @@ from gilbert.interfaces.configuration import (
     ConfigParam,
 )
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
+from gilbert.interfaces.greeting import GreetingContext
 from gilbert.interfaces.notifications import (
     NotificationProvider,
     NotificationUrgency,
@@ -133,6 +134,14 @@ _GEOCODE_TOOL_DESCRIPTION = (
     "Springfield' returns multiple hits). Returns a list of "
     "candidates; pick one and pass it back to `current_weather` / "
     "`forecast` as `lat,lon` to skip a second geocoding round-trip."
+)
+
+_DEFAULT_WEATHER_HINT_TEMPLATE = (
+    "Current weather at {location_name}: {temperature:.0f}{temp_suffix} "
+    "{condition_phrase}, wind {wind_speed:.0f}{speed_suffix}"
+    "{feels_like_clause}. Mention it casually if it fits the moment, "
+    "otherwise ignore. Quote only the values shown — never invent additional "
+    "weather details."
 )
 
 
@@ -440,10 +449,13 @@ class WeatherService(Service, ToolProvider):
         self._alert_voice_minimum: AlertSeverity = AlertSeverity.EXTREME
         self._alert_voice_enabled: bool = False
 
+        # Greeting context provider
+        self._weather_hint_template: str = _DEFAULT_WEATHER_HINT_TEMPLATE
+
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="weather",
-            capabilities=frozenset({"weather", "ai_tools"}),
+            capabilities=frozenset({"weather", "ai_tools", "greeting_context"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
                 {"event_bus", "scheduler", "notifications", "speaker_control",
@@ -572,6 +584,19 @@ class WeatherService(Service, ToolProvider):
                 default="extreme",
                 choices=("severe", "extreme"),
             ),
+            ConfigParam(
+                key="weather_hint_template",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Prose template inserted into the greeting context block "
+                    "when this provider is enabled. Placeholders: {location_name}, "
+                    "{temperature}, {temp_suffix}, {condition_phrase}, "
+                    "{wind_speed}, {speed_suffix}, {feels_like_clause}."
+                ),
+                default=_DEFAULT_WEATHER_HINT_TEMPLATE,
+                multiline=True,
+                ai_prompt=True,
+            ),
         ]
         # Backend-specific config (timeout_seconds, user_agent for Open-Meteo, etc.)
         backends = WeatherBackend.registered_backends()
@@ -642,6 +667,10 @@ class WeatherService(Service, ToolProvider):
             )
         except ValueError:
             self._alert_voice_minimum = AlertSeverity.EXTREME
+        if "weather_hint_template" in section:
+            self._weather_hint_template = (
+                section["weather_hint_template"] or _DEFAULT_WEATHER_HINT_TEMPLATE
+            )
 
     # ── ConfigActionProvider ─────────────────────────────────────────
 
@@ -2096,6 +2125,56 @@ class WeatherService(Service, ToolProvider):
                     "fired_at": datetime.now(UTC).isoformat(),
                 },
             )
+
+    # ── GreetingContextProvider ──────────────────────────────────────
+
+    @property
+    def greeting_context_id(self) -> str:
+        return "weather"
+
+    @property
+    def greeting_context_label(self) -> str:
+        return "Weather"
+
+    async def greeting_context(self, user_id: str) -> GreetingContext | None:
+        """Render the current-weather template, or return None on any
+        error / no-data condition. Never raises."""
+        try:
+            if self._backend is None:
+                return None
+
+            location = await self._load_home_location()
+            if location is None:
+                return None
+
+            current = await self.get_current()
+
+            temp_suffix = "°F" if current.units is WeatherUnits.IMPERIAL else "°C"
+            speed_suffix = "mph" if current.units is WeatherUnits.IMPERIAL else "km/h"
+            condition_phrase = current.condition.value.replace("_", " ")
+            feels_like_clause = ""
+            if (
+                current.feels_like is not None
+                and abs(current.feels_like - current.temperature) >= 3
+            ):
+                feels_like_clause = f", feels like {current.feels_like:.0f}{temp_suffix}"
+            location_name = current.location.name or "the configured location"
+
+            prose = self._weather_hint_template.format(
+                location_name=location_name,
+                temperature=current.temperature,
+                temp_suffix=temp_suffix,
+                condition_phrase=condition_phrase,
+                wind_speed=current.wind_speed,
+                speed_suffix=speed_suffix,
+                feels_like_clause=feels_like_clause,
+            )
+            return GreetingContext(provider_id="weather", label="Weather", prose=prose)
+        except Exception:
+            logger.debug(
+                "WeatherService.greeting_context failed for %s", user_id, exc_info=True
+            )
+            return None
 
 
 __all__ = [

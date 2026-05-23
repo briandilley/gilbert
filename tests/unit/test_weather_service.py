@@ -1535,3 +1535,90 @@ class TestGreetingWeatherHintTemplateConfig:
         assert "weather_hint_template" in by_key
         assert by_key["weather_hint_template"].ai_prompt is True
         assert by_key["weather_hint_template"].multiline is True
+
+
+# ── GreetingContextProvider capability ────────────────────────────────
+
+
+class TestWeatherGreetingContextProvider:
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_labeled_blurb(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """WeatherService.greeting_context returns a GreetingContext with the
+        rendered weather_hint_template when current data is available."""
+        from gilbert.interfaces.greeting import GreetingContext
+
+        backend = FakeWeatherBackend()
+        backend.location_to_return = GeoLocation(
+            latitude=41.4993,
+            longitude=-81.6944,
+            name="Cleveland, OH",
+            timezone="America/New_York",
+            country_code="US",
+        )
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            ctx = await svc.greeting_context(user_id="alice")
+            assert isinstance(ctx, GreetingContext)
+            assert ctx.provider_id == "weather"
+            assert ctx.label == "Weather"
+            assert "Cleveland" in ctx.prose
+            assert "18" in ctx.prose  # temperature in celsius
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_none_when_unconfigured(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """No location configured → None (greeting proceeds without)."""
+        backend = FakeWeatherBackend()
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            # No home location saved
+            ctx = await svc.greeting_context(user_id="alice")
+            assert ctx is None
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_none_on_backend_failure(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """Backend raises → None."""
+        backend = FakeWeatherBackend()
+        backend.fail_with = WeatherUnavailableError("backend down")
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            ctx = await svc.greeting_context(user_id="alice")
+            assert ctx is None
+        finally:
+            await svc.stop()
+
+    def test_weather_service_advertises_greeting_context_capability(self) -> None:
+        svc = WeatherService()
+        info = svc.service_info()
+        assert "greeting_context" in info.capabilities
+        assert svc.greeting_context_id == "weather"
+        assert svc.greeting_context_label == "Weather"
+
+    def test_weather_service_has_weather_hint_template_config(self) -> None:
+        """The template was on GreetingService; this task moves it here."""
+        svc = WeatherService()
+        keys = {p.key for p in svc.config_params()}
+        assert "weather_hint_template" in keys
