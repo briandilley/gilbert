@@ -20,10 +20,13 @@ import {
   MonitorIcon,
   LayoutDashboardIcon,
   PlugIcon,
+  ListTodoIcon,
   ArrowUpRightIcon,
   type LucideIcon,
 } from "lucide-react";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { UpcomingEventCard } from "@/components/calendar/UpcomingEventCard";
+import { DueTodayCard } from "@/components/tasks/DueTodayCard";
 import { cn } from "@/lib/utils";
 
 interface CardStyle {
@@ -44,6 +47,7 @@ const CARD_STYLES: Record<string, CardStyle> = {
   "database": { icon: DatabaseIcon, iconClass: "text-cyan-500", railClass: "bg-cyan-500" },
   "monitor": { icon: MonitorIcon, iconClass: "text-rose-500", railClass: "bg-rose-500" },
   "plug": { icon: PlugIcon, iconClass: "text-pink-500", railClass: "bg-pink-500" },
+  "list-todo": { icon: ListTodoIcon, iconClass: "text-teal-500", railClass: "bg-teal-500" },
 };
 
 const DEFAULT_STYLE: CardStyle = {
@@ -90,6 +94,8 @@ export function DashboardPage() {
         {/* Above-the-grid slot: plugins can drop banner-style widgets,
             system-status panels, etc. before the standard card grid. */}
         <div className="space-y-3 empty:hidden">
+          <UpcomingEventCard />
+          <DueTodayCard />
           <PluginPanelSlot slot="dashboard.top" />
         </div>
 

@@ -282,4 +282,3 @@ class BrowserSpeakerBackend(SpeakerBackend):
             if sid:
                 return sid
         return caller_user_id
-

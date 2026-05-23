@@ -371,6 +371,142 @@ class TestGreetingService:
         mock_presence.who_is_here.assert_not_called()
 
 
+# ── FeedsProvider integration ────────────────────────────────────────
+
+
+class _FakeFeedsForGreeting:
+    """Bare-minimum FeedsProvider stub for greeting splice tests."""
+
+    def __init__(self, spoken: str = "news today") -> None:
+        self.calls: list[Any] = []
+        self.spoken = spoken
+        self.fail = False
+
+    async def subscribe(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def unsubscribe(self, *args: Any, **kwargs: Any) -> None:
+        raise NotImplementedError
+
+    async def list_accessible_feeds(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def get_feed(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+    async def search_items(self, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def get_top_items(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def mark_read(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def build_briefing(self, user_ctx: Any, **kwargs: Any) -> Any:
+        from datetime import UTC, datetime
+
+        from gilbert.interfaces.feeds import BriefingResult
+
+        self.calls.append({"user_id": user_ctx.user_id, **kwargs})
+        if self.fail:
+            raise RuntimeError("forced failure")
+        return BriefingResult(
+            spoken=self.spoken,
+            headlines=[],
+            item_ids=["x"],
+            since=datetime.now(UTC),
+            briefing_id=f"brief_{user_ctx.user_id}",
+        )
+
+
+class TestGreetingBriefingSplice:
+    """Per spec §16 — when ``include_briefing=True`` and the user
+    hasn't been briefed today, the greeting splices in the briefing
+    text before announcing."""
+
+    @pytest.mark.asyncio
+    async def test_greeting_includes_briefing_when_flag_on(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        from gilbert.interfaces.feeds import FeedsProvider
+
+        feeds = _FakeFeedsForGreeting(spoken="THE BRIEFING")
+        assert isinstance(feeds, FeedsProvider)
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == "THE BRIEFING"
+        assert feeds.calls and feeds.calls[0]["user_id"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_flag_off(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        feeds = _FakeFeedsForGreeting()
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = False
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+        assert feeds.calls == []
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_feeds_capability_absent(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        # No feeds capability registered.
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+
+    @pytest.mark.asyncio
+    async def test_greeting_skips_briefing_when_already_briefed_today(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        from datetime import UTC, datetime
+
+        feeds = _FakeFeedsForGreeting()
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        # Pre-seed today's briefing on the storage backend used by greeting.
+        storage = resolver.caps["entity_storage"].backend
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        await storage.put(
+            "feed_briefing_state",
+            "alice",
+            {"_id": "alice", "last_briefed_on": today},
+        )
+        # _maybe_briefing_text uses self._today_str() which uses
+        # self._timezone — make sure it matches.
+        greeting_service._timezone = "UTC"
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+        assert feeds.calls == []  # never called build_briefing
+
+    @pytest.mark.asyncio
+    async def test_greeting_briefing_failure_degrades_silently(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        feeds = _FakeFeedsForGreeting()
+        feeds.fail = True
+        resolver.caps["feeds"] = feeds
+        await greeting_service.start(resolver)
+        greeting_service._include_briefing = True
+        text = await greeting_service._maybe_briefing_text("alice")
+        assert text == ""
+
+    def test_greeting_does_not_import_briefing_provider(self) -> None:
+        # Regression guard for Round-2 architect spec change. Verify
+        # the symbol does not exist.
+        from gilbert.interfaces import feeds as feeds_mod
+
+        assert not hasattr(feeds_mod, "BriefingProvider")
+
+
 class TestEnhancedGreetTool:
     """Coverage for the manual ``/greet`` path:
 
@@ -533,3 +669,170 @@ class TestEnhancedGreetTool:
         assert "Brian" in ai.calls[0]["user_message"]
         # The broken template is still saved (we don't auto-repair).
         assert greeting_service._enhanced_greeting_prompt == "Hello {nope_unknown_key}."
+
+
+# ── Camera-event announce tests (feature 06) ────────────────────────
+
+
+class TestGreetingCameraEvents:
+    """Cover the camera.event.detected announce path + dedup + mute."""
+
+    @pytest.mark.asyncio
+    async def test_announces_on_camera_package_event(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        # Default: announce_camera_labels = ["package"]
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "package", "camera": "porch"},
+            )
+        )
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_announce_label_not_in_list(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        # Default doesn't include person.
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "person", "camera": "porch"},
+            )
+        )
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_dedups_repeat_camera_event(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        for _ in range(3):
+            await greeting_service._on_camera_event(
+                Event(
+                    event_type="camera.event.detected",
+                    data={"label": "package", "camera": "porch"},
+                )
+            )
+        # Default dedup key for package = ["label"] — single announce.
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_announce_dedups_across_camera_zone_group(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        # Configure zone groups + add person to announce labels with
+        # ["label", "zone_group"] dedup.
+        await greeting_service.on_config_changed(
+            {
+                "announce_camera_labels": ["person"],
+                "camera_zone_groups": {
+                    "front_entry": ["driveway", "front_porch", "front_door"]
+                },
+                "camera_announce_dedup_keys": {
+                    "person": ["label", "zone_group"]
+                },
+            }
+        )
+        for cam in ("driveway", "front_porch", "front_door"):
+            await greeting_service._on_camera_event(
+                Event(
+                    event_type="camera.event.detected",
+                    data={"label": "person", "camera": cam},
+                )
+            )
+        assert len(called) == 1
+
+    @pytest.mark.asyncio
+    async def test_mute_camera_alerts_returns_preview_when_not_confirmed(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        out = await greeting_service.execute_tool(
+            "mute_camera_alerts",
+            {
+                "camera": "side_gate",
+                "label": "person",
+                "until": "8h",
+            },
+        )
+        from gilbert.interfaces.ui import ToolOutput
+
+        assert isinstance(out, ToolOutput)
+        assert out.ui_blocks
+        block = out.ui_blocks[0]
+        # Confirm/Cancel buttons present.
+        button_element = next(
+            e for e in block.elements if e.type == "buttons"
+        )
+        values = {opt.value for opt in button_element.options}
+        assert {"confirm", "cancel"} == values
+
+    @pytest.mark.asyncio
+    async def test_mute_camera_alerts_suppresses_announce(
+        self,
+        greeting_service: GreetingService,
+        resolver: FakeResolver,
+    ) -> None:
+        await greeting_service.start(resolver)
+        # Mute the (porch, package) combo.
+        await greeting_service.execute_tool(
+            "mute_camera_alerts",
+            {
+                "camera": "porch",
+                "label": "package",
+                "until": "8h",
+                "confirm": True,
+            },
+        )
+        called: list[str] = []
+
+        async def fake_announce(text: str) -> None:
+            called.append(text)
+
+        greeting_service._announce = fake_announce  # type: ignore[method-assign]
+        await greeting_service._on_camera_event(
+            Event(
+                event_type="camera.event.detected",
+                data={"label": "package", "camera": "porch"},
+            )
+        )
+        assert called == []

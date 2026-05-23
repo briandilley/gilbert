@@ -30,6 +30,14 @@ import type {
   OutboxStatus,
   EmailBackendInfo,
 } from "@/types/inbox";
+import type {
+  CalendarAccount,
+  CalendarBackendInfo,
+  CalendarEvent,
+  EventDraft,
+  FreeBusyBlock,
+  FreeSlot,
+} from "@/types/calendar";
 import type { UIBlock } from "@/types/ui";
 import type { SkillInfo } from "@/types/skills";
 import type {
@@ -66,6 +74,19 @@ import type {
   NotificationListResult,
   NotificationUrgency,
 } from "@/types/notifications";
+import type {
+  BriefingPayload,
+  Feed,
+  FeedBackendInfo,
+  FeedItem,
+  OpmlImportResult,
+  PollNowResult,
+} from "@/types/feeds";
+import type {
+  Task,
+  TaskBackendInfo,
+  TaskList,
+} from "@/types/tasks";
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
 
@@ -409,6 +430,481 @@ export function useWsApi() {
     listEmailBackends: () =>
       rpc<{ backends: EmailBackendInfo[] }>({ type: "inbox.backends.list" })
         .then((r) => r.backends),
+
+    // ── Calendar: accounts ────────────────────────────────────────
+
+    listCalendarAccounts: () =>
+      rpc<{ accounts: CalendarAccount[] }>({ type: "calendar.accounts.list" })
+        .then((r) => r.accounts),
+
+    getCalendarAccount: (accountId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.get", account_id: accountId,
+      }).then((r) => r.account),
+
+    createCalendarAccount: (account: {
+      name: string;
+      email_address: string;
+      backend_name: string;
+      backend_config: Record<string, unknown>;
+      calendar_id?: string;
+      timezone?: string;
+      working_hours_start_hour?: number;
+      working_hours_end_hour?: number;
+      poll_enabled?: boolean;
+      poll_interval_sec?: number;
+      upcoming_event_lookahead_minutes?: number;
+    }) =>
+      rpc<{ account: CalendarAccount }>({ type: "calendar.accounts.create", ...account })
+        .then((r) => r.account),
+
+    updateCalendarAccount: (accountId: string, updates: Record<string, unknown>) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.update", account_id: accountId, updates,
+      }).then((r) => r.account),
+
+    deleteCalendarAccount: (accountId: string) =>
+      rpc<{ status: string }>({ type: "calendar.accounts.delete", account_id: accountId }),
+
+    testCalendarConnection: (accountId: string) =>
+      rpc<{ ok: boolean; error?: string; calendars?: { id: string; name: string; timezone: string; primary: boolean }[] }>(
+        { type: "calendar.accounts.test_connection", account_id: accountId },
+      ),
+
+    probeCalendarsForAccount: (accountId: string) =>
+      rpc<{ calendars: { id: string; name: string; timezone: string; primary: boolean }[] }>(
+        { type: "calendar.accounts.probe_calendars", account_id: accountId },
+      ).then((r) => r.calendars),
+
+    revealCalendarBackendConfig: (accountId: string) =>
+      rpc<{ backend_config: Record<string, unknown> }>(
+        { type: "calendar.accounts.reveal_backend_config", account_id: accountId },
+      ).then((r) => r.backend_config),
+
+    shareCalendarUser: (accountId: string, userId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.share_user", account_id: accountId, user_id: userId,
+      }).then((r) => r.account),
+
+    unshareCalendarUser: (accountId: string, userId: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.unshare_user", account_id: accountId, user_id: userId,
+      }).then((r) => r.account),
+
+    shareCalendarRole: (accountId: string, role: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.share_role", account_id: accountId, role,
+      }).then((r) => r.account),
+
+    unshareCalendarRole: (accountId: string, role: string) =>
+      rpc<{ account: CalendarAccount }>({
+        type: "calendar.accounts.unshare_role", account_id: accountId, role,
+      }).then((r) => r.account),
+
+    listCalendarBackends: () =>
+      rpc<{ backends: CalendarBackendInfo[] }>({ type: "calendar.backends.list" })
+        .then((r) => r.backends),
+
+    // ── Calendar: events / freebusy ───────────────────────────────
+
+    listCalendarEvents: (params: {
+      time_min: string;
+      time_max: string;
+      account_id?: string | null;
+      max_results?: number;
+    }) =>
+      rpc<{ events: CalendarEvent[]; warnings: string[] }>({
+        type: "calendar.events.list",
+        ...params,
+      }),
+
+    getCalendarEvent: (accountId: string, eventId: string) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.get",
+        account_id: accountId,
+        event_id: eventId,
+      }).then((r) => r.event),
+
+    createCalendarEvent: (accountId: string, draft: EventDraft) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.create",
+        account_id: accountId,
+        event: draft,
+      }).then((r) => r.event),
+
+    updateCalendarEvent: (
+      accountId: string,
+      eventId: string,
+      draft: Partial<EventDraft>,
+      ifMatchEtag?: string,
+    ) =>
+      rpc<{ event: CalendarEvent }>({
+        type: "calendar.events.update",
+        account_id: accountId,
+        event_id: eventId,
+        event: draft,
+        if_match_etag: ifMatchEtag || "",
+      }).then((r) => r.event),
+
+    deleteCalendarEvent: (
+      accountId: string,
+      eventId: string,
+      sendCancellations = false,
+    ) =>
+      rpc<{ status: string }>({
+        type: "calendar.events.delete",
+        account_id: accountId,
+        event_id: eventId,
+        send_cancellations: sendCancellations,
+      }),
+
+    getCalendarFreeBusy: (params: {
+      time_min: string;
+      time_max: string;
+      account_id?: string | null;
+    }) =>
+      rpc<{ blocks: FreeBusyBlock[] }>({
+        type: "calendar.freebusy.get",
+        ...params,
+      }).then((r) => r.blocks),
+
+    findCalendarFreeTime: (params: {
+      time_min: string;
+      time_max: string;
+      duration_minutes: number;
+      account_id?: string | null;
+      respect_working_hours?: boolean;
+      max_results?: number;
+      attendee_emails?: string[];
+    }) =>
+      rpc<{ slots: FreeSlot[] }>({
+        type: "calendar.find_free_time",
+        ...params,
+      }).then((r) => r.slots),
+
+    // ── Feeds ─────────────────────────────────────────────────────
+
+    listFeeds: () =>
+      rpc<{ feeds: Feed[] }>({ type: "feeds.list" }).then((r) => r.feeds),
+
+    getFeed: (feedId: string) =>
+      rpc<{ feed: Feed }>({ type: "feeds.get", feed_id: feedId }).then(
+        (r) => r.feed,
+      ),
+
+    createFeed: (params: {
+      url: string;
+      name?: string;
+      category?: string;
+      backend_name?: string;
+      poll_interval_sec?: number;
+    }) =>
+      rpc<{ feed: Feed }>({ type: "feeds.create", ...params }).then(
+        (r) => r.feed,
+      ),
+
+    updateFeed: (feedId: string, updates: Record<string, unknown>) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.update",
+        feed_id: feedId,
+        updates,
+      }).then((r) => r.feed),
+
+    deleteFeed: (feedId: string) =>
+      rpc<{ status: string }>({ type: "feeds.delete", feed_id: feedId }),
+
+    testFeed: (url: string, backendName = "rss_atom") =>
+      rpc<{ title: string; description: string; link: string }>({
+        type: "feeds.test",
+        url,
+        backend_name: backendName,
+      }),
+
+    pollFeedNow: (feedId: string) =>
+      rpc<PollNowResult>({ type: "feeds.poll_now", feed_id: feedId }),
+
+    shareFeedUser: (feedId: string, userId: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.share_user",
+        feed_id: feedId,
+        user_id: userId,
+      }).then((r) => r.feed),
+
+    unshareFeedUser: (feedId: string, userId: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.unshare_user",
+        feed_id: feedId,
+        user_id: userId,
+      }).then((r) => r.feed),
+
+    shareFeedRole: (feedId: string, role: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.share_role",
+        feed_id: feedId,
+        role,
+      }).then((r) => r.feed),
+
+    unshareFeedRole: (feedId: string, role: string) =>
+      rpc<{ feed: Feed }>({
+        type: "feeds.unshare_role",
+        feed_id: feedId,
+        role,
+      }).then((r) => r.feed),
+
+    listFeedItems: (params?: {
+      feed_id?: string;
+      query?: string;
+      unread_only?: boolean;
+      min_score?: number;
+      category?: string;
+      limit?: number;
+      page?: number;
+    }) =>
+      rpc<{ items: FeedItem[]; total: number }>({
+        type: "feeds.items.list",
+        ...(params ?? {}),
+      }),
+
+    getFeedItem: (itemId: string) =>
+      rpc<{ item: FeedItem }>({
+        type: "feeds.items.get",
+        item_id: itemId,
+      }).then((r) => r.item),
+
+    markFeedItem: (itemId: string, read: boolean) =>
+      rpc<{ status: string; read: boolean }>({
+        type: "feeds.items.mark",
+        item_id: itemId,
+        read,
+      }),
+
+    deleteFeedItem: (itemId: string) =>
+      rpc<{ status: string }>({
+        type: "feeds.items.delete",
+        item_id: itemId,
+      }),
+
+    reingestFeedItem: (itemId: string) =>
+      rpc<{ status: string }>({
+        type: "feeds.items.reingest",
+        item_id: itemId,
+      }),
+
+    previewBriefing: (params?: { top_n?: number; category?: string }) =>
+      rpc<BriefingPayload>({ type: "feeds.briefing.preview", ...(params ?? {}) }),
+
+    runBriefing: (params?: {
+      user_id?: string;
+      top_n?: number;
+      category?: string;
+      force?: boolean;
+    }) =>
+      rpc<BriefingPayload>({ type: "feeds.briefing.run", ...(params ?? {}) }),
+
+    getBriefing: (briefingId: string) =>
+      rpc<BriefingPayload>({
+        type: "feeds.briefing.get",
+        briefing_id: briefingId,
+      }),
+
+    runDailyBriefing: (force = false) =>
+      rpc<{ fired: number }>({
+        type: "feeds.briefing.daily.run",
+        force,
+      }),
+
+    importOpml: (opml: string) =>
+      rpc<{ results: OpmlImportResult[] }>({
+        type: "feeds.import_opml",
+        opml,
+      }).then((r) => r.results),
+
+    exportOpml: () =>
+      rpc<{ opml: string }>({ type: "feeds.export_opml" }).then((r) => r.opml),
+
+    listFeedBackends: () =>
+      rpc<{ backends: FeedBackendInfo[] }>({
+        type: "feeds.backends.list",
+      }).then((r) => r.backends),
+
+    // ── Tasks ─────────────────────────────────────────────────────
+
+    listTaskLists: () =>
+      rpc<{ lists: TaskList[] }>({ type: "tasks.lists.list" }).then(
+        (r) => r.lists,
+      ),
+
+    getTaskList: (listId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.get",
+        list_id: listId,
+      }).then((r) => r.list),
+
+    createTaskList: (params: {
+      name: string;
+      backend_name?: string;
+      backend_config?: Record<string, unknown>;
+      poll_enabled?: boolean;
+      poll_interval_sec?: number;
+      is_default?: boolean;
+    }) =>
+      rpc<{ list: TaskList }>({ type: "tasks.lists.create", ...params }).then(
+        (r) => r.list,
+      ),
+
+    updateTaskList: (listId: string, updates: Record<string, unknown>) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.update",
+        list_id: listId,
+        updates,
+      }).then((r) => r.list),
+
+    deleteTaskList: (listId: string, force = false) =>
+      rpc<{ status: string }>({
+        type: "tasks.lists.delete",
+        list_id: listId,
+        force,
+      }),
+
+    testTaskListConnection: (listId: string) =>
+      rpc<{ ok: boolean; error: string }>({
+        type: "tasks.lists.test_connection",
+        list_id: listId,
+      }),
+
+    refreshTaskList: (listId: string) =>
+      rpc<{ new?: number; total?: number; error?: string }>({
+        type: "tasks.lists.refresh",
+        list_id: listId,
+      }),
+
+    shareTaskListUser: (listId: string, userId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.share_user",
+        list_id: listId,
+        user_id: userId,
+      }).then((r) => r.list),
+
+    unshareTaskListUser: (listId: string, userId: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.unshare_user",
+        list_id: listId,
+        user_id: userId,
+      }).then((r) => r.list),
+
+    shareTaskListRole: (listId: string, role: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.share_role",
+        list_id: listId,
+        role,
+      }).then((r) => r.list),
+
+    unshareTaskListRole: (listId: string, role: string) =>
+      rpc<{ list: TaskList }>({
+        type: "tasks.lists.unshare_role",
+        list_id: listId,
+        role,
+      }).then((r) => r.list),
+
+    listTasks: (params?: {
+      list_id?: string;
+      backend?: string;
+      status?: string;
+      tag?: string;
+      project?: string;
+      due_before?: string;
+      due_after?: string;
+      limit?: number;
+    }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.list",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    getTask: (taskId: string) =>
+      rpc<{ task: Task }>({ type: "tasks.get", task_id: taskId }).then(
+        (r) => r.task,
+      ),
+
+    addTask: (params: {
+      list_id: string;
+      title: string;
+      notes?: string;
+      due_at?: string;
+      due_at_tz?: string;
+      priority?: number | string;
+      tags?: string[];
+      project?: string;
+      idempotency_key?: string;
+    }) =>
+      rpc<{ task: Task }>({ type: "tasks.add", ...params }).then(
+        (r) => r.task,
+      ),
+
+    updateTask: (taskId: string, updates: Record<string, unknown>) =>
+      rpc<{ task: Task }>({
+        type: "tasks.update",
+        task_id: taskId,
+        updates,
+      }).then((r) => r.task),
+
+    completeTask: (taskId: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.complete",
+        task_id: taskId,
+      }).then((r) => r.task),
+
+    cancelTask: (taskId: string, reason?: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.cancel",
+        task_id: taskId,
+        reason,
+      }).then((r) => r.task),
+
+    deleteTask: (taskId: string, force = false) =>
+      rpc<{ status: string; soft: boolean }>({
+        type: "tasks.delete",
+        task_id: taskId,
+        force,
+      }),
+
+    restoreTask: (taskId: string) =>
+      rpc<{ task: Task }>({
+        type: "tasks.restore",
+        task_id: taskId,
+      }).then((r) => r.task),
+
+    tasksDueToday: (params?: { list_id?: string; backend?: string }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.due_today",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksDueWindow: (
+      window: "today" | "tomorrow" | "this_week" | "this_month" | "overdue",
+      params?: { list_id?: string; backend?: string },
+    ) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.due_window",
+        window,
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksOverdue: (params?: { list_id?: string; backend?: string }) =>
+      rpc<{ tasks: Task[] }>({
+        type: "tasks.overdue",
+        ...(params ?? {}),
+      }).then((r) => r.tasks),
+
+    tasksSummary: () =>
+      rpc<{ summary: string }>({ type: "tasks.summary" }).then(
+        (r) => r.summary,
+      ),
+
+    listTaskBackends: () =>
+      rpc<{ backends: TaskBackendInfo[] }>({
+        type: "tasks.backends.list",
+      }).then((r) => r.backends),
 
     // ── Documents ─────────────────────────────────────────────────
 

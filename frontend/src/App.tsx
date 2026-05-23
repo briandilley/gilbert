@@ -10,6 +10,9 @@ import { EntitiesPage } from "@/components/entities/EntitiesPage";
 import { CollectionDetail } from "@/components/entities/CollectionDetail";
 import { EntityDetail } from "@/components/entities/EntityDetail";
 import { InboxPage } from "@/components/inbox/InboxPage";
+import { CalendarPage } from "@/components/calendar/CalendarPage";
+import { FeedsPage } from "@/components/feeds/FeedsPage";
+import { TasksPage } from "@/components/tasks/TasksPage";
 import { RolesPage } from "@/components/roles/RolesPage";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { SystemPage } from "@/components/system/SystemPage";
@@ -22,12 +25,15 @@ import { McpClientsPage } from "@/components/mcp/McpClientsPage";
 import { McpLocalPage } from "@/components/mcp/McpLocalPage";
 import { UsagePage } from "@/components/usage/UsagePage";
 import { NotificationsPage } from "@/components/notifications/NotificationsPage";
+import { NotificationRoutesPage } from "@/components/notifications/NotificationRoutesPage";
 import { AgentsListPage } from "@/components/agent/AgentsListPage";
 import { AgentEditForm } from "@/components/agent/AgentEditForm";
 import { AgentDetailPage } from "@/components/agent/AgentDetailPage";
 import { GoalsListPage } from "@/components/goals/GoalsListPage";
 import { WarRoomPage } from "@/components/goals/WarRoomPage";
 import { PresencePage } from "@/components/presence/PresencePage";
+import { HealthPage } from "@/components/health/HealthPage";
+import { HealthAuditLogPage } from "@/components/health/HealthAuditLogPage";
 import { usePluginRouteElements } from "@/components/PluginRoutes";
 
 export default function App() {
@@ -47,6 +53,9 @@ export default function App() {
             element={<EntityDetail />}
           />
           <Route path="/inbox" element={<InboxPage />} />
+          <Route path="/calendar" element={<CalendarPage />} />
+          <Route path="/feeds" element={<FeedsPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
           <Route path="/security" element={<Navigate to="/security/users" replace />} />
           <Route path="/security/*" element={<RolesPage />} />
           <Route path="/scheduler" element={<SchedulerPage />} />
@@ -61,6 +70,10 @@ export default function App() {
           <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/notifications" element={<NotificationsPage />} />
+          <Route
+            path="/account/notifications"
+            element={<NotificationRoutesPage />}
+          />
           <Route path="/agents" element={<AgentsListPage />} />
           <Route path="/agents/new" element={<AgentEditForm mode="create" />} />
           <Route path="/agents/:agentId" element={<AgentDetailPage />} />
@@ -68,6 +81,11 @@ export default function App() {
           <Route path="/goals/:goalId" element={<WarRoomPage />} />
           <Route path="/presence" element={<PresencePage />} />
           <Route path="/account" element={<AccountPage />} />
+          <Route path="/health" element={<HealthPage />} />
+          <Route
+            path="/account/health/audit-log"
+            element={<HealthAuditLogPage />}
+          />
           {/* Plugin-contributed routes — looked up server-side and
               rendered with components from the per-plugin registry. */}
           {pluginRoutes}

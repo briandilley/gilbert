@@ -22,9 +22,12 @@ from gilbert.core.registry import ServiceRegistry
 from gilbert.core.service_manager import ServiceManager
 from gilbert.core.services import (
     AuthService,
+    CalendarService,
     EventBusService,
+    HealthService,
     InboxService,
     LightsService,
+    MediaLibraryService,
     MusicService,
     ShadesService,
     SpeakerService,
@@ -210,6 +213,11 @@ class Gilbert:
         self.service_manager.register(SpeakerService())
         self.service_manager.register(TranscriptionService())
         self.service_manager.register(MusicService())
+        # Media library — multi-backend Plex/Jellyfin video library +
+        # casting. Concrete backends (PlexBackend, JellyfinBackend) are
+        # registered by their respective std-plugins via side-effect
+        # imports during plugin setup; the service iterates the registry.
+        self.service_manager.register(MediaLibraryService())
         self.service_manager.register(LightsService())
         self.service_manager.register(ShadesService())
         self.service_manager.register(ThermostatService())
@@ -233,6 +241,10 @@ class Gilbert:
         from gilbert.core.services.doorbell import DoorbellService
 
         self.service_manager.register(DoorbellService())
+
+        from gilbert.core.services.camera import CameraEventService
+
+        self.service_manager.register(CameraEventService())
 
         from gilbert.core.services.screens import ScreenService
 
@@ -267,14 +279,53 @@ class Gilbert:
 
         self.service_manager.register(InboxService())
 
+        # Tasks — multi-list to-do service with pluggable backends
+        # (local + Google Tasks via plugin). Registered after Inbox so
+        # AIService.start sees the tool provider; the side-effect
+        # import inside ``core/services/tasks.py`` registers the local
+        # backend without app.py touching ``integrations/``.
+        from gilbert.core.services.tasks import TasksService
+
+        self.service_manager.register(TasksService())
+
+        # Health — multi-backend personal health metrics (Apple Health,
+        # Withings, HKWebhook). Concrete backends register themselves
+        # via std-plugin side-effect imports; the service discovers
+        # them through ``HealthBackend.registered_backends()``.
+        self.service_manager.register(HealthService())
+
+        # Calendar — multi-account calendar events, free/busy, and AI
+        # tools. Registered alongside Inbox so the start order is
+        # predictable; `app.py` is the only module that imports the
+        # concrete class.
+        self.service_manager.register(CalendarService())
+
         from gilbert.core.services.inbox_ai_chat import InboxAIChatService
 
         self.service_manager.register(InboxAIChatService())
+
+        # Feeds — RSS / news service. Brings the built-in
+        # ``RssAtomFeedBackend`` along via a side-effect import inside
+        # ``FeedsService.start()``. Briefing fan-out is a separate
+        # service so the FeedsService stays focused on the feed
+        # lifecycle + briefing builder.
+        from gilbert.core.services.feed_briefing import FeedBriefingService
+        from gilbert.core.services.feeds import FeedsService
+
+        self.service_manager.register(FeedsService())
+        self.service_manager.register(FeedBriefingService())
 
         # Web search service
         from gilbert.core.services.websearch import WebSearchService
 
         self.service_manager.register(WebSearchService())
+
+        # Weather service — multi-backend weather aggregator. Default
+        # backend is Open-Meteo (no API key required), provided by the
+        # open-meteo plugin.
+        from gilbert.core.services.weather import WeatherService
+
+        self.service_manager.register(WeatherService())
 
         # Workspace service (per-conversation file workspaces)
         from gilbert.core.services.workspace import WorkspaceService
@@ -341,6 +392,18 @@ class Gilbert:
         from gilbert.core.services.notifications import NotificationService
 
         self.service_manager.register(NotificationService())
+
+        # Push-notification fan-out — subscribes to ``notification.received``
+        # and delivers each one to the recipient user's external routes
+        # (ntfy / Pushover / Discord webhook / Telegram). Registered AFTER
+        # NotificationService so the bus subscription happens once both
+        # services are up; ordering does not affect correctness because
+        # ``InMemoryEventBus`` is in-memory pub/sub with no replay.
+        from gilbert.core.services.push_notifications import (
+            PushNotificationService,
+        )
+
+        self.service_manager.register(PushNotificationService())
 
         from gilbert.core.services.agent import AgentService
 

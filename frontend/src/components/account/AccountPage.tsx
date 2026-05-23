@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { changePassword, revokeAllSessions } from "@/api/auth";
+import {
+  changePassword,
+  revokeAllSessions,
+  updateProfileTz,
+} from "@/api/auth";
 import {
   type UserMemory,
   clearMemories,
@@ -62,6 +66,8 @@ export function AccountPage() {
         </CardContent>
       </Card>
 
+      <TimezoneCard />
+
       {user?.has_password && <ChangePasswordCard />}
 
       <MemoriesCard />
@@ -75,6 +81,190 @@ export function AccountPage() {
       <RevokeAllSessionsCard />
       </div>
     </div>
+  );
+}
+
+/**
+ * Curated short-list of common IANA timezones for the dropdown. Keeps
+ * the UI from becoming a 400-entry mega-menu while still covering the
+ * vast majority of Gilbert installs. Users with a more exotic zone can
+ * type it in the free-form input below the dropdown — anything the
+ * server-side ``zoneinfo`` recognises is accepted.
+ */
+const COMMON_TIMEZONES: string[] = [
+  "UTC",
+  "America/Los_Angeles",
+  "America/Denver",
+  "America/Chicago",
+  "America/New_York",
+  "America/Phoenix",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+  "America/Sao_Paulo",
+  "America/Mexico_City",
+  "America/Toronto",
+  "Europe/London",
+  "Europe/Dublin",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Europe/Madrid",
+  "Europe/Rome",
+  "Europe/Amsterdam",
+  "Europe/Stockholm",
+  "Europe/Helsinki",
+  "Europe/Warsaw",
+  "Europe/Athens",
+  "Europe/Istanbul",
+  "Europe/Moscow",
+  "Africa/Cairo",
+  "Africa/Johannesburg",
+  "Africa/Nairobi",
+  "Asia/Dubai",
+  "Asia/Karachi",
+  "Asia/Kolkata",
+  "Asia/Bangkok",
+  "Asia/Shanghai",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Asia/Seoul",
+  "Asia/Hong_Kong",
+  "Australia/Perth",
+  "Australia/Sydney",
+  "Australia/Melbourne",
+  "Pacific/Auckland",
+];
+
+function detectBrowserTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function TimezoneCard() {
+  const { user, refresh } = useAuth();
+  const browserTz = detectBrowserTz();
+
+  const initial = user?.tz ?? "";
+  const [selected, setSelected] = useState<string>(initial);
+  const [custom, setCustom] = useState<string>(
+    initial && !COMMON_TIMEZONES.includes(initial) ? initial : "",
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<string>("");
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    setSelected(user?.tz ?? "");
+    if (user?.tz && !COMMON_TIMEZONES.includes(user.tz)) {
+      setCustom(user.tz);
+    }
+  }, [user?.tz]);
+
+  async function handleSave(value: string | null) {
+    setError("");
+    setMessage("");
+    setSubmitting(true);
+    try {
+      const result = await updateProfileTz(value);
+      await refresh();
+      setMessage(
+        result.tz
+          ? `Saved — your timezone is ${result.tz}.`
+          : "Saved — timezone cleared.",
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save timezone");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const value = selected === "__custom__" ? custom.trim() : selected;
+    handleSave(value || null);
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Timezone</CardTitle>
+        <CardDescription>
+          Used for time-of-day features like quiet hours on push
+          notifications. Leave blank and Gilbert falls back to the
+          server's zone.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          {error && (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+          {message && (
+            <div className="rounded-md bg-green-500/10 px-3 py-2 text-sm text-green-700 dark:text-green-400">
+              {message}
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <Label htmlFor="tz-select">Timezone</Label>
+            <select
+              id="tz-select"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              <option value="">— Not set —</option>
+              {COMMON_TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+              <option value="__custom__">Custom IANA name…</option>
+            </select>
+          </div>
+          {selected === "__custom__" && (
+            <div className="space-y-1.5">
+              <Label htmlFor="tz-custom">IANA timezone</Label>
+              <Input
+                id="tz-custom"
+                placeholder="e.g. America/Indiana/Indianapolis"
+                value={custom}
+                onChange={(e) => setCustom(e.target.value)}
+              />
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" disabled={submitting}>
+              {submitting ? "Saving…" : "Save"}
+            </Button>
+            {browserTz && browserTz !== (user?.tz ?? "") && (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={submitting}
+                onClick={() => handleSave(browserTz)}
+              >
+                Use browser timezone ({browserTz})
+              </Button>
+            )}
+            {user?.tz && (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={submitting}
+                onClick={() => handleSave(null)}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom No-link Fixture</title>
+  <link href="https://example.com/" />
+  <id>urn:uuid:atom-no-link</id>
+  <updated>2026-05-01T00:00:00Z</updated>
+  <entry>
+    <title>Id-only entry</title>
+    <id>tag:example.com,2026:idonly</id>
+    <updated>2026-05-01T00:00:00Z</updated>
+    <summary>No link in this entry.</summary>
+  </entry>
+</feed>
+
