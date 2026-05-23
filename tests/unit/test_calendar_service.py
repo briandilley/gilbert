@@ -1192,6 +1192,37 @@ async def test_list_events_handles_non_utc_account_timezone(
 
 
 @pytest.mark.asyncio
+async def test_poll_keeps_yesterday_events_for_week_agenda_with_legacy_cache_setting(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, sched, _ = await _service(sqlite_storage)
+    svc._apply_config({"cache_back_hours": 2})
+    account, backend = await _seed_account(svc)
+    user = _user_ctx("alice")
+    start = datetime.now(UTC) - timedelta(hours=24)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_yesterday",
+            calendar_id="primary",
+            account_id=account.id,
+            title="Yesterday",
+            start=start,
+            end=start + timedelta(minutes=30),
+        )
+    )
+
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    agg = await svc.list_events(
+        account.id,
+        start - timedelta(minutes=1),
+        start + timedelta(hours=1),
+        user,
+    )
+
+    assert [event.event_id for event in agg.events] == ["evt_yesterday"]
+
+
+@pytest.mark.asyncio
 async def test_sweep_does_not_delete_current_events_on_west_of_utc_calendar(
     sqlite_storage: SQLiteStorage,
 ) -> None:
@@ -1233,8 +1264,8 @@ async def test_sweep_deletes_records_older_than_cache_window(
     the sweep, and assert both are gone."""
     svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
-    # Stale event — older than cache_back_hours (default 2h).
-    stale_event_iso = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    # Stale event — older than the minimum retained cache window.
+    stale_event_iso = (datetime.now(UTC) - timedelta(days=15)).isoformat()
     await svc._storage.put(
         "calendar_events",
         f"{account.id}:stale",

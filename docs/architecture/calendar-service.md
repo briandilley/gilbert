@@ -27,8 +27,11 @@ Indexes: `calendar_accounts(owner_user_id)`,
 `calendar_events(start_utc_iso)`, `calendar_events(end_utc_iso)`,
 `calendar_event_announcements(account_id, start_iso)`. The fetch and
 trim windows for `calendar_events` are deliberately **identical**
-(`now − cache_back_hours .. now + default_event_lookahead_days`) so the
-cache never holds rows the next poll wouldn't return.
+(`now − effective_cache_back_hours .. now + default_event_lookahead_days`)
+so the cache never holds rows the next poll wouldn't return.
+`effective_cache_back_hours` is `max(cache_back_hours, 336)` so older
+stored configs cannot shrink the cache below the two-week window needed
+by the agenda and recent schedule views.
 
 **`start` / `end` vs `start_utc_iso` / `end_utc_iso`** — `start` and
 `end` are the original-tz ISO strings (e.g. `"2026-05-09T22:00:00-08:00"`)
@@ -86,7 +89,7 @@ N runtimes don't synchronously hit the backend on startup.
 Per `_poll_runtime`:
 
 1. Lazy seed `last_seen_event_ids` from cache if first run.
-2. `backend.list_events(now − cache_back_hours, now + lookahead_days)`
+2. `backend.list_events(now − effective_cache_back_hours, now + lookahead_days)`
    wrapped in `aggregation_timeout_sec`. Auth/notfound errors trigger
    the unhealthy flip after threshold; other errors bump
    `consecutive_failures`.
@@ -106,7 +109,7 @@ Per `_poll_runtime`:
 
 The `calendar-announcement-sweep` recurring job (every 30 min) reaps
 stale announcement rows older than 48h and `calendar_events` rows
-older than `cache_back_hours` — entity storage has no TTL primitive.
+older than `effective_cache_back_hours` — entity storage has no TTL primitive.
 
 ### Mutations
 

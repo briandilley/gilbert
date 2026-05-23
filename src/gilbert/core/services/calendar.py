@@ -85,6 +85,7 @@ _EVENTS_COLLECTION = "calendar_events"
 _ANNOUNCEMENTS_COLLECTION = "calendar_event_announcements"
 
 _ANNOUNCEMENT_SWEEP_INTERVAL_SEC = 30 * 60  # 30 minutes
+_MIN_CACHE_BACK_HOURS = 14 * 24
 
 
 class CalendarPermissionError(PermissionError):
@@ -134,7 +135,7 @@ class CalendarService(Service):
         # Service-level config (defaults match config_params).
         self._enabled: bool = True
         self._default_lookahead_days: int = 14
-        self._cache_back_hours: int = 2
+        self._cache_back_hours: int = _MIN_CACHE_BACK_HOURS
         self._upcoming_announce_minutes: int = 15
         self._aggregation_timeout_sec: int = 10
         self._mutate_publish_dedup_sec: int = 60
@@ -399,11 +400,10 @@ class CalendarService(Service):
                 type=ToolParameterType.INTEGER,
                 description=(
                     "How many hours into the past the cache retains events. "
-                    "Wide enough to answer 'what was my last meeting' for a "
-                    "few hours after it ends; narrow enough to keep cache "
-                    "size bounded."
+                    "Values below 336 are raised to 336 so the weekly agenda "
+                    "and recent schedule tools can show recent past events."
                 ),
-                default=2,
+                default=_MIN_CACHE_BACK_HOURS,
             ),
             ConfigParam(
                 key="upcoming_announce_minutes",
@@ -466,7 +466,11 @@ class CalendarService(Service):
     def _apply_config(self, section: dict[str, Any]) -> None:
         self._enabled = bool(section.get("enabled", True))
         self._default_lookahead_days = int(section.get("default_event_lookahead_days", 14) or 14)
-        self._cache_back_hours = int(section.get("cache_back_hours", 2) or 2)
+        configured_cache_back = int(
+            section.get("cache_back_hours", _MIN_CACHE_BACK_HOURS)
+            or _MIN_CACHE_BACK_HOURS
+        )
+        self._cache_back_hours = max(_MIN_CACHE_BACK_HOURS, configured_cache_back)
         self._upcoming_announce_minutes = int(section.get("upcoming_announce_minutes", 15) or 15)
         self._aggregation_timeout_sec = int(section.get("aggregation_timeout_sec", 10) or 10)
         self._mutate_publish_dedup_sec = int(section.get("mutate_publish_dedup_sec", 60) or 60)
