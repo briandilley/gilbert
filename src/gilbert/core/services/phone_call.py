@@ -1131,6 +1131,16 @@ class PhoneCallService(Service):
                 log.exception("LLM call failed")
                 return
 
+            # Diagnostic: log what the LLM wants to do on this turn.
+            # Helps catch tool-only responses (which we used to silently
+            # drop) and lets us spot when ``confirm_and_end`` / ``hang_up``
+            # got called without any spoken text.
+            log.info(
+                "LLM turn: text_chars=%d tools=%s",
+                len(response.message.content or ""),
+                [tc.tool_name for tc in response.message.tool_calls],
+            )
+
             # We speak the LLM's text BEFORE dispatching its tool
             # calls. The old order was tool-calls-first, which meant
             # if the LLM emitted ``hang_up`` alongside its actual
@@ -1149,19 +1159,47 @@ class PhoneCallService(Service):
             text = response.message.content.strip()
             if not text and not response.message.tool_calls:
                 return
-            if not text:
-                # No spoken response this turn, just tool calls — skip
-                # straight to the dispatch loop at the bottom.
-                for tc in response.message.tool_calls:
-                    handled = await _handle_brain_tool(tc.tool_name, tc.arguments)
-                    if handled == "hang_up":
-                        stop.set()
-                        try:
-                            await session.hang_up()
-                        except Exception:
-                            log.debug("hang_up cleanup error", exc_info=True)
-                        return
-                return
+
+            # Fallback for the misbehaving "tool-only" case. The brain
+            # tools are documented as bookkeeping that don't speak on
+            # their own; the LLM is supposed to put a spoken line in
+            # the message content alongside the tool. If it forgets
+            # (Sonnet does this occasionally even with the explicit
+            # rule), we'd otherwise dispatch the tool against dead air
+            # — the remote either hears a sudden hangup or sits in
+            # silence wondering if the line dropped.
+            #
+            # Generate a generic-but-safe fallback line for ``hang_up``
+            # / ``confirm_and_end`` so the call doesn't end silently.
+            # The note + escalate tools don't need a fallback (note is
+            # purely internal; escalate has its own audio handling
+            # further down the system).
+            if not text and response.message.tool_calls:
+                tool_names = {tc.tool_name for tc in response.message.tool_calls}
+                if "hang_up" in tool_names:
+                    text = "Thanks so much, have a great day!"
+                elif "confirm_and_end" in tool_names:
+                    # Find the summary arg and build a short readback
+                    # from it. Best-effort — the real fix is the LLM
+                    # following the rule, this is just a safety net.
+                    summary_args: dict[str, Any] = {}
+                    for tc in response.message.tool_calls:
+                        if tc.tool_name == "confirm_and_end":
+                            summary_args = tc.arguments.get("summary") or {}
+                            break
+                    if isinstance(summary_args, dict) and summary_args:
+                        bits = ", ".join(
+                            f"{k.replace('_', ' ')}: {v}"
+                            for k, v in summary_args.items()
+                        )
+                        text = f"Just to confirm — {bits}. Does that sound right?"
+                    else:
+                        text = "Just to confirm what we agreed on — does that sound right?"
+                if text:
+                    log.warning(
+                        "LLM emitted tool-only response; using fallback text: %r",
+                        text,
+                    )
 
             messages.append(Message(role=MessageRole.ASSISTANT, content=text))
             await _record_turn("us", text)
@@ -1686,7 +1724,15 @@ def _brain_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="hang_up",
-            description="End the call. Use when the conversation is done.",
+            description=(
+                "Drop the line. Bookkeeping ONLY — does NOT speak. "
+                "You MUST say goodbye in the message content of THIS "
+                "SAME turn, e.g. content='Thanks so much, have a good "
+                "one!' + hang_up(reason='completed'). Calling hang_up "
+                "without spoken content gives the remote dead air and "
+                "then a dial tone — rude. Use only when the "
+                "conversation is genuinely done."
+            ),
             parameters=[
                 ToolParameter(
                     name="reason",
@@ -1698,18 +1744,25 @@ def _brain_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="confirm_and_end",
             description=(
-                "Read back a structured summary of what was agreed, then "
-                "end the call once the remote confirms. Use when an "
-                "appointment / booking / commitment was made."
+                "Bookkeeping ONLY — records the structured outcome onto "
+                "the call. Does NOT speak. You MUST speak the readback "
+                "yourself in the message content of THIS SAME turn, e.g. "
+                "content='Great, so that\\'s Tuesday at 8 AM with a loaner "
+                "lined up — sound right?' + confirm_and_end({...}). On "
+                "the NEXT turn, after the remote confirms, speak a brief "
+                "thanks/goodbye and call ``hang_up``."
             ),
             parameters=[
                 ToolParameter(
                     name="summary",
                     type=ToolParameterType.OBJECT,
                     description=(
-                        "Structured outcome to read back — e.g. "
+                        "Structured outcome — e.g. "
                         '{"appointment_datetime": "...", '
-                        '"service_advisor": "...", "loaner_confirmed": true}'
+                        '"service_advisor": "...", "loaner_confirmed": true}. '
+                        "Stored on the call record for the post-call "
+                        "summary. The remote does NOT hear these fields; "
+                        "say them yourself in the message content."
                     ),
                 ),
             ],
@@ -1807,8 +1860,17 @@ RULES OF ENGAGEMENT
 5. If the remote asks for a callback number, provide the callback number
    above. If none was given, say so and offer to have {display_name} reach
    out directly.
-6. When you've reached the objective, call ``confirm_and_end`` with a
-   structured summary, hear the confirmation, then ``hang_up``.
+6. Wrap-up flow when the objective is reached:
+   - Turn A: Speak the readback ("Great, so that's Tuesday at 8 AM with
+     a loaner — sound right?") AND call ``confirm_and_end({summary…})``
+     in the same response. The tool is bookkeeping; the spoken readback
+     is what the remote actually hears.
+   - Turn B (after the remote confirms): Speak a short goodbye ("Perfect,
+     thanks so much!") AND call ``hang_up({reason: …})`` in the same
+     response. Both bookkeeping tools are silent — every spoken line
+     comes from your message content.
+   Never call ``confirm_and_end`` or ``hang_up`` with empty content —
+   that's dead air on the remote's phone followed by a dial tone.
 7. If the situation is beyond your authority (legal questions, payment
    information, etc), call ``escalate_to_user`` with a reason.
 8. If the receptionist needs to transfer you and asks to put you on hold,
