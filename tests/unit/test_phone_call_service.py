@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 
 from gilbert.core.services.phone_call import (
+    _DEFAULT_CALL_SYSTEM_PROMPT,
+    _DEFAULT_OPENING_DISCLOSURE,
     PhoneCallService,
     _brain_tools,
     _CallRecord,
@@ -115,6 +117,38 @@ def test_brain_tools_confirm_and_end_takes_structured_summary() -> None:
     string would lose the ability to query outcomes downstream."""
     confirm = next(t for t in _brain_tools() if t.name == "confirm_and_end")
     assert any(p.name == "summary" for p in confirm.parameters)
+
+
+def test_default_call_system_prompt_only_uses_known_format_keys() -> None:
+    """The prompt is ``.format()``-ed at call setup with three named
+    fields. Any other ``{…}`` in the body would raise ``KeyError`` and
+    kill the brain task before it ever drained a status event, which
+    leaves the call record stuck at ``initiated``. Caught one real
+    regression already (``confirm_and_end({summary…})`` in rule #6's
+    example text). Belt-and-suspenders: this test renders the prompt
+    with the exact same kwargs ``_run_call`` uses and just asserts no
+    exception escapes."""
+    rendered = _DEFAULT_CALL_SYSTEM_PROMPT.format(
+        display_name="Test User",
+        brief="Call them and confirm the booking",
+        callback_number="+15551234567",
+    )
+    # Sanity-check substitution actually happened (catches the
+    # accidentally-doubled ``{{display_name}}`` case which would render
+    # the literal placeholder into the LLM context).
+    assert "Test User" in rendered
+    assert "{display_name}" not in rendered
+    assert "{brief}" not in rendered
+    assert "{callback_number}" not in rendered
+
+
+def test_default_opening_disclosure_only_uses_known_format_keys() -> None:
+    """Same hazard as the call system prompt — the opening disclosure
+    is ``.format(display_name=…)``-ed at call setup and any stray ``{…}``
+    would kill the brain. Smaller string but worth the same guard."""
+    rendered = _DEFAULT_OPENING_DISCLOSURE.format(display_name="Test User")
+    assert "Test User" in rendered
+    assert "{display_name}" not in rendered
 
 
 # ── Persistence shape ─────────────────────────────────────────────────

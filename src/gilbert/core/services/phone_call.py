@@ -1862,11 +1862,11 @@ RULES OF ENGAGEMENT
    out directly.
 6. Wrap-up flow when the objective is reached:
    - Turn A: Speak the readback ("Great, so that's Tuesday at 8 AM with
-     a loaner — sound right?") AND call ``confirm_and_end({summary…})``
-     in the same response. The tool is bookkeeping; the spoken readback
-     is what the remote actually hears.
+     a loaner — sound right?") AND call ``confirm_and_end`` with the
+     structured summary in the same response. The tool is bookkeeping;
+     the spoken readback is what the remote actually hears.
    - Turn B (after the remote confirms): Speak a short goodbye ("Perfect,
-     thanks so much!") AND call ``hang_up({reason: …})`` in the same
+     thanks so much!") AND call ``hang_up`` with a reason in the same
      response. Both bookkeeping tools are silent — every spoken line
      comes from your message content.
    Never call ``confirm_and_end`` or ``hang_up`` with empty content —
