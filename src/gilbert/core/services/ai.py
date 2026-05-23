@@ -6098,7 +6098,10 @@ class AIService(Service):
                         message,
                     )
 
-                # Broadcast to room members
+                # Broadcast to room members. Include ``mentioned_user_ids``
+                # so other members' frontends can bump their per-room
+                # unread-mention badge live, without waiting for the
+                # next ``chat.conversation.list`` refetch.
                 gilbert = conn.manager.gilbert
                 if gilbert:
                     await publish_event(
@@ -6112,6 +6115,7 @@ class AIService(Service):
                             "user_message": message,
                             "ui_blocks": ui_blocks,
                             "attachments": _serialize_attachments_for_wire(reply_attachments),
+                            "mentioned_user_ids": list(mentioned_ids),
                         },
                     )
             else:

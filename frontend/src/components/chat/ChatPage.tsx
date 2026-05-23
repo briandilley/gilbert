@@ -831,9 +831,17 @@ export function ChatPage() {
       const convId = data.conversation_id as string;
 
       switch (event.event_type) {
-        case "chat.message.created":
+        case "chat.message.created": {
+          const isOwnMessage = data.author_id === user?.user_id;
+          const mentionedUserIds =
+            (data.mentioned_user_ids as string[] | undefined) ?? [];
+          const mentionsMe =
+            !!user?.user_id && mentionedUserIds.includes(user.user_id);
+
           if (convId === activeConvId) {
-            const isOwnMessage = data.author_id === user?.user_id;
+            // Active room — render the new turn (existing behavior)
+            // and silently advance the server-side read cursor so the
+            // sidebar doesn't badge this conv when you tab away.
             if (!isOwnMessage) {
               // Shared-room broadcast: another user posted a message
               // and Gilbert may have replied. We don't get structured
@@ -862,6 +870,15 @@ export function ChatPage() {
                   },
                 ]);
               }
+              // The user is looking right at this message — keep their
+              // server cursor at the head. Best-effort; a transient
+              // RPC failure just means the next refetch will catch up.
+              void rpc({
+                type: "chat.conversation.mark_read",
+                conversation_id: convId,
+              } as Record<string, unknown>).catch(() => {
+                // suppressed — see comment above
+              });
             }
             if ((data.ui_blocks as UIBlock[])?.length && !isOwnMessage) {
               setUiBlocks((prev) => [
@@ -869,8 +886,32 @@ export function ChatPage() {
                 ...(data.ui_blocks as UIBlock[]),
               ]);
             }
+          } else if (!isOwnMessage && convId) {
+            // Message arrived in a room the user ISN'T currently
+            // viewing. The conv-list query's 30-second staleTime
+            // would otherwise leave the sidebar badge missing for up
+            // to half a minute. Optimistically bump the unread
+            // counters on the cached summary so the dot / @-pill
+            // light up immediately.
+            queryClient.setQueryData<ConversationSummary[] | undefined>(
+              ["conversations"],
+              (prev) =>
+                prev?.map((c) => {
+                  if (c.conversation_id !== convId) return c;
+                  return {
+                    ...c,
+                    unread_messages_count:
+                      (c.unread_messages_count ?? 0) + 1,
+                    unread_mentions_count: mentionsMe
+                      ? (c.unread_mentions_count ?? 0) + 1
+                      : c.unread_mentions_count,
+                    message_count: (c.message_count ?? 0) + 1,
+                  };
+                }),
+            );
           }
           break;
+        }
         case "chat.member.joined":
           if (convId === activeConvId) {
             setMembers((prev) => [
