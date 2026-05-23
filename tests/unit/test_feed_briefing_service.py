@@ -500,6 +500,32 @@ class TestGreetingContextProvider:
         # is called but the service was never started.
         assert await svc.greeting_context(user_id="alice") is None
 
+    async def test_greeting_context_returns_none_when_no_feeds_capability(
+        self, sqlite_storage: Any
+    ) -> None:
+        """When resolver exists but feeds capability is missing or not a
+        FeedsProvider, greeting_context returns None (feeds service not enabled).
+        """
+        storage_provider = FakeStorageProvider(sqlite_storage)
+        sched = FakeScheduler()
+        feeds_provider = FakeFeedsProvider()
+        # Resolver with feeds capability for start() to succeed
+        resolver = FakeResolver(
+            feeds=feeds_provider,
+            scheduler=sched,
+            entity_storage=storage_provider,
+            configuration=None,
+        )
+        svc = FeedBriefingService()
+        await svc.on_config_changed({"enabled": True})
+        await svc.start(resolver)
+        try:
+            # Patch resolver to return None for feeds capability
+            resolver.caps["feeds"] = None
+            assert await svc.greeting_context(user_id="alice") is None
+        finally:
+            await svc.stop()
+
     def test_feed_briefing_advertises_capability_and_config(
         self, briefing_svc: Any
     ) -> None:
