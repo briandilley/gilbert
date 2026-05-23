@@ -132,19 +132,51 @@ async def telnyx_media(ws: WebSocket) -> None:
     session = None
     inbound_media_frames = 0
     try:
-        # First frame must be ``start``. Telnyx sends it within
-        # ~milliseconds of accepting our upgrade.
-        first_raw = await ws.receive_text()
-        first = _safe_loads(first_raw)
-        logger.info(
-            "Telnyx media WS: first frame received — event=%r",
-            first.get("event"),
-        )
-        if first.get("event") != "start":
-            await ws.close(code=1008, reason="expected start frame")
+        # Telnyx's protocol sequence on the Media Stream WebSocket:
+        #
+        #   1. ``event: connected`` — handshake-complete handshake
+        #      from the carrier. NOT the audio-stream start. Has to
+        #      be accepted and ignored.
+        #   2. ``event: start``     — the real stream beginning with
+        #      ``call_control_id``, ``stream_id``, etc.
+        #   3. ``event: media``     — audio frames
+        #   4. ``event: stop``      — stream ended
+        #
+        # Earlier versions of this handler treated the first frame as
+        # ``start`` unconditionally — receiving ``connected`` instead
+        # made us close the socket immediately, which manifested in
+        # carrier-side logs as ``streaming.failed:
+        # disconnected_no_reconnect`` and on our side as hundreds of
+        # dropped media-WS writes per call.
+        #
+        # Loop until we see ``start`` (or anything terminal). Cap the
+        # iterations to keep a misbehaving carrier from holding the
+        # connection open with junk preambles.
+        start_frame: dict[str, Any] = {}
+        for _ in range(5):
+            raw = await ws.receive_text()
+            frame = _safe_loads(raw)
+            event_name = frame.get("event")
+            logger.info(
+                "Telnyx media WS: pre-start frame — event=%r",
+                event_name,
+            )
+            if event_name == "start":
+                start_frame = frame
+                break
+            if event_name == "connected":
+                continue  # expected handshake; wait for start
+            if event_name in (None, "stop"):
+                await ws.close(code=1008, reason="protocol error before start")
+                return
+            # Unknown event — log and keep waiting; Telnyx may add
+            # new preamble events over time and we don't want to drop
+            # the connection on a forward-compat addition.
+        else:
+            await ws.close(code=1008, reason="no start frame after preamble")
             return
 
-        start = first.get("start", {}) or {}
+        start = start_frame.get("start", {}) or {}
         cc_id = str(start.get("call_control_id") or "")
         params = start.get("custom_parameters") or {}
         token = str(params.get("token") or "")
