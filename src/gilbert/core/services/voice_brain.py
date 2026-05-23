@@ -32,6 +32,7 @@ import logging
 from typing import Any
 
 from gilbert.interfaces.ai import (
+    AIProvider,
     AIResponse,
     AISamplingProvider,
     Message,
@@ -45,6 +46,7 @@ from gilbert.interfaces.conversation import (
     ConversationSession,
     ConversationStatus,
     OpeningBehavior,
+    set_current_conversation_ctx,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.transcription import (
@@ -258,6 +260,13 @@ class VoiceBrainService(Service):
     def __init__(self) -> None:
         self._resolver: ServiceResolver | None = None
         self._ai: AISamplingProvider | None = None
+        # ``AIProvider`` is the multi-round agentic surface — used when
+        # ``ConversationConfig.use_full_ai_service`` is True so the
+        # brain can call knowledge.search / MCP tools / agent dispatch
+        # / etc. via the AI service's standard tool aggregation +
+        # multi-round loop. ``AISamplingProvider.complete_one_shot``
+        # stays the path for single-round phone-call brains.
+        self._ai_chat: AIProvider | None = None
         self._tts: TTSProvider | None = None
         self._transcription: StreamingTranscriber | None = None
 
@@ -277,6 +286,11 @@ class VoiceBrainService(Service):
         ai = resolver.get_capability("ai_chat")
         if isinstance(ai, AISamplingProvider):
             self._ai = ai
+        # The same service object also satisfies ``AIProvider`` (with
+        # the agentic ``chat()`` surface). Double-narrowing — the
+        # service implements both protocols.
+        if isinstance(ai, AIProvider):
+            self._ai_chat = ai
         tts_svc = resolver.get_capability("text_to_speech")
         if isinstance(tts_svc, TTSProvider):
             self._tts = tts_svc
@@ -364,13 +378,169 @@ class VoiceBrainService(Service):
 
         # ── the brain itself ───────────────────────────────────────────
 
-        async def _think_and_speak() -> None:
+        # Tracks the AI service conversation_id when running through
+        # ai.chat() — we mint one on the first call and reuse it for
+        # subsequent turns so history accumulates server-side. Stays
+        # None in complete_one_shot mode where the engine owns
+        # messages directly.
+        chat_conv_id: str | None = None
+
+        async def _speak_text(text: str) -> None:
+            """Synthesize ``text`` and write it to the session's audio
+            out. Shared between both think-and-speak paths."""
+            nonlocal spoke_at_all
+            if not text or self._tts is None:
+                return
+            out_fmt = (
+                config.tts_output_format
+                if config.tts_output_format is not None
+                else TTSAudioFormat.MULAW_8000
+            )
+            try:
+                synth = await self._tts.synthesize(
+                    SynthesisRequest(
+                        text=text,
+                        voice_id="",
+                        output_format=out_fmt,
+                    )
+                )
+            except Exception:
+                log.exception("TTS synthesize failed")
+                return
+            audio = synth.audio
+            log.info(
+                "TTS synth complete — format=%s bytes=%d "
+                "first_8_hex=%s last_8_hex=%s zero_ratio=%.2f text_chars=%d",
+                synth.format,
+                len(audio),
+                audio[:8].hex(),
+                audio[-8:].hex() if len(audio) >= 8 else "",
+                (audio.count(b"\xff") + audio.count(b"\x7f"))
+                / max(len(audio), 1),
+                len(text),
+            )
+            speaking.active = True
+            speaking.cancelled = False
+            generation = speaking.generation = speaking.generation + 1
+            spoke_at_all = True
+            try:
+                chunk_size = 160
+                chunks_written = 0
+                pace = 0.02 if config.tts_realtime_pacing else 0.0
+                for i in range(0, len(audio), chunk_size):
+                    if (
+                        speaking.cancelled
+                        or generation != speaking.generation
+                        or stop.is_set()
+                    ):
+                        break
+                    await session.audio_out.write(audio[i : i + chunk_size])
+                    chunks_written += 1
+                    if pace > 0:
+                        await asyncio.sleep(pace)
+                log.info(
+                    "TTS playback done — chunks_written=%d bytes=%d "
+                    "wall_seconds≈%.2f (cancelled=%s pace=%.3fs)",
+                    chunks_written,
+                    chunks_written * chunk_size,
+                    chunks_written * pace,
+                    speaking.cancelled,
+                    pace,
+                )
+                try:
+                    await session.audio_out.flush()
+                except Exception:
+                    log.debug("audio_out.flush raised", exc_info=True)
+            finally:
+                speaking.active = False
+
+        async def _think_and_speak_via_chat(user_text: str) -> None:
+            """LLM turn via ``AIProvider.chat()`` — the agentic loop
+            with the full Gilbert tool catalog (knowledge.search,
+            MCP, agent dispatch, scheduler, etc.). The ContextVar
+            is set so brain-tool ToolProviders (voice-agent's
+            end_conversation, etc.) can find the active session.
+            """
+            nonlocal chat_conv_id
+            if self._ai_chat is None:
+                log.warning("ai_chat AIProvider missing — cannot respond")
+                return
+
+            ctx = _make_brain_ctx()
+            set_current_conversation_ctx(ctx)
+            try:
+                result = await self._ai_chat.chat(
+                    user_message=user_text,
+                    conversation_id=chat_conv_id,
+                    system_prompt=config.system_prompt,
+                )
+            except Exception:
+                log.exception("ai.chat() failed")
+                set_current_conversation_ctx(None)
+                return
+            finally:
+                set_current_conversation_ctx(None)
+
+            chat_conv_id = result.conversation_id
+            text = (result.response_text or "").strip()
+            tool_names = [
+                tool.get("tool_name", "")
+                for r in (result.rounds or [])
+                for tool in (r.get("tools", []) if isinstance(r, dict) else [])
+            ]
+            log.info(
+                "LLM turn (chat): text_chars=%d rounds=%d tools=%s",
+                len(text),
+                len(result.rounds or []),
+                tool_names,
+            )
+            if config.on_llm_turn is not None:
+                try:
+                    await config.on_llm_turn(text, tool_names)
+                except Exception:
+                    log.debug("on_llm_turn callback raised", exc_info=True)
+
+            if text:
+                await _record_turn("us", text)
+                await _speak_text(text)
+
+            # Tools (e.g. ``end_conversation``) set this flag through
+            # the ContextVar-shared ``ConversationContext``. Inspecting
+            # the outcome dict after the chat() call lets the engine
+            # terminate cleanly.
+            if ctx.outcome.get("end_requested"):
+                outcome.update(ctx.outcome)
+                log.info("brain tool requested end-of-conversation")
+                stop.set()
+                try:
+                    await session.end_session()
+                except Exception:
+                    log.debug("end_session cleanup error", exc_info=True)
+
+        async def _think_and_speak(user_text: str | None = None) -> None:
             """One LLM turn → optional speech → optional tool dispatch."""
             nonlocal spoke_at_all
             if self._ai is None or self._tts is None:
                 log.warning("AI or TTS missing — cannot respond")
                 return
 
+            # Voice-agent path: full Gilbert tool ecosystem via
+            # ai.chat(). The engine doesn't manage the messages list;
+            # the AI service does (persisted by conversation_id). The
+            # caller must pass ``user_text`` — for the SPEAK_FIRST
+            # opener, the wrapper provides a synthetic cue.
+            if config.use_full_ai_service:
+                if not user_text:
+                    log.warning(
+                        "use_full_ai_service=True but no user_text given; "
+                        "skipping turn (this is a bug in the caller — pass "
+                        "a priming string for the opener cold-open)."
+                    )
+                    return
+                await _think_and_speak_via_chat(user_text)
+                return
+
+            # Phone-call path (legacy): complete_one_shot + BrainToolProvider.
             response: AIResponse
             try:
                 response = await self._ai.complete_one_shot(
@@ -546,7 +716,12 @@ class VoiceBrainService(Service):
             if already_spoke:
                 return
             already_spoke = True
-            await _think_and_speak()
+            # For the chat()-driven path we need to pass SOMETHING as
+            # the user message — ai.chat() requires a non-empty
+            # message. Use a synthetic system cue that tells the LLM
+            # to greet the user.
+            opener_cue = "(SYSTEM) Voice session activated. Greet me briefly."
+            await _think_and_speak(opener_cue if config.use_full_ai_service else None)
 
         async def _wait_then_open() -> None:
             """Fallback for WAIT_FOR_REMOTE: cold-open after timeout."""
@@ -681,10 +856,16 @@ class VoiceBrainService(Service):
                             continue
                         already_spoke = True
                         await _record_turn("them", text)
-                        messages.append(
-                            Message(role=MessageRole.USER, content=text)
-                        )
-                        await _think_and_speak()
+                        # Phone-call path: append to the engine's
+                        # messages list; complete_one_shot will see it.
+                        # Voice-agent path: ai.chat() takes the user
+                        # text directly via the ``_think_and_speak``
+                        # arg — no engine-side messages list needed.
+                        if not config.use_full_ai_service:
+                            messages.append(
+                                Message(role=MessageRole.USER, content=text)
+                            )
+                        await _think_and_speak(text)
                     elif isinstance(ev, SpeechEnded):
                         pass
             except Exception:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -330,6 +331,27 @@ class ConversationConfig:
     # Default True to preserve phone-call behaviour.
     tts_realtime_pacing: bool = True
 
+    # Whether the engine should drive the LLM via ``AIService.chat()``
+    # (full agentic loop — knowledge.search, MCP tools, agent
+    # dispatch, scheduler, etc. all available) or
+    # ``AIService.complete_one_shot()`` (single round, brain tools
+    # only).
+    #
+    # ``True`` — voice-agent path. The engine no longer maintains
+    # its own ``messages`` array; the AI service does (persisted by
+    # ``conversation_id``). Brain tools (``end_conversation``,
+    # ``hang_up``, …) are registered as regular Gilbert tools and
+    # read the active session via
+    # ``get_current_conversation_ctx()``. The engine sets that
+    # ContextVar before each ai.chat() call and inspects
+    # ``ctx.outcome["end_requested"]`` after to decide whether to
+    # terminate.
+    #
+    # ``False`` — phone-call path (existing). Engine maintains
+    # messages, calls complete_one_shot with brain-tool override,
+    # dispatches via the ``BrainToolProvider`` callback.
+    use_full_ai_service: bool = False
+
     # Optional priming messages prepended to the message list before the
     # first LLM turn. Phone-call wrapper uses this to inject the
     # "(SYSTEM) call answered" cue + the disclosure-line example.
@@ -376,6 +398,44 @@ class ConversationOutcome:
 
 
 # ── Service-level capability protocol ────────────────────────────────
+
+
+# ── Active-conversation context (ContextVar-backed) ─────────────────
+
+
+# Holds the active ``ConversationContext`` for the running async task.
+# The engine sets this before invoking the AI; brain tools that get
+# dispatched as regular Gilbert tools (voice-agent's
+# ``end_conversation``, phone-call's ``hang_up``, …) read it back to
+# find the session they're modifying. Default ``None`` outside of any
+# voice/phone session — tools should check and return early if they
+# can't locate a session.
+_current_conversation_ctx: ContextVar[ConversationContext | None] = ContextVar(
+    "_current_conversation_ctx", default=None
+)
+
+
+def get_current_conversation_ctx() -> ConversationContext | None:
+    """Return the active ``ConversationContext`` for this async task,
+    or ``None`` when not inside a voice/phone session.
+
+    Tools that want to mutate the live conversation (set outcome
+    fields, signal "end the conversation") read this and return early
+    when it's ``None`` (they're being called outside any session,
+    e.g. accidentally surfaced in regular chat).
+    """
+    return _current_conversation_ctx.get()
+
+
+def set_current_conversation_ctx(ctx: ConversationContext | None) -> None:
+    """Set / clear the active ``ConversationContext`` for this task.
+
+    Engine calls this before invoking the AI service so that any
+    brain tool the LLM calls can find its session. Should be paired
+    with a clear (``set(None)``) at the end of the turn, OR scoped
+    via ``copy_context()`` so the value doesn't leak across tasks.
+    """
+    _current_conversation_ctx.set(ctx)
 
 
 @runtime_checkable
