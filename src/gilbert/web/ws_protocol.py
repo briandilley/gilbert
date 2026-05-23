@@ -191,8 +191,19 @@ class WsConnection:
         if event.event_type.startswith("chat.invite."):
             return event.data.get("user_id") == self.user_id
 
-        # Filter by membership
-        if event.event_type.startswith(("chat.message.", "chat.member.")):
+        # Filter by membership. ``chat.typing.*`` is gated the same way
+        # as messages — a non-member of a shared room shouldn't see
+        # someone typing in there, and personal-chat typing events
+        # shouldn't leak to other users either. We also suppress the
+        # typer's own typing events from their own connections (no need
+        # to render your own "you are typing").
+        if event.event_type.startswith(
+            ("chat.message.", "chat.member.", "chat.typing.")
+        ):
+            if event.event_type.startswith("chat.typing.") and (
+                event.data.get("user_id") == self.user_id
+            ):
+                return False
             if conv_id and conv_id not in self.shared_conv_ids:
                 if not (
                     event.event_type == "chat.member.joined"
@@ -532,6 +543,91 @@ async def _handle_online_users(
         "ref": frame.get("id"),
         "user_ids": sorted(conn.manager.online_user_ids()),
     }
+
+
+async def _publish_typing_event(
+    conn: WsConnection, conversation_id: str, is_typing: bool
+) -> None:
+    """Fan out a chat.typing.* event so the conversation's other members
+    can render / clear the "X is typing…" footer.
+
+    Ephemeral — never persisted. Goes through the regular event bus so
+    the same ``can_see_chat_event`` membership filter that gates message
+    events also gates typing events (a non-member can't see who's typing
+    in a room they can't read).
+    """
+    gilbert = conn.manager.gilbert
+    if gilbert is None:
+        return
+    try:
+        event_bus_svc = gilbert.service_manager.get_by_capability("event_bus")
+    except Exception:  # noqa: BLE001
+        return
+    if event_bus_svc is None or not isinstance(event_bus_svc, EventBusProvider):
+        return
+    event = Event(
+        event_type="chat.typing.start" if is_typing else "chat.typing.stop",
+        source="ws_manager",
+        data={
+            "conversation_id": conversation_id,
+            "user_id": conn.user_id,
+            "display_name": conn.display_name,
+        },
+    )
+    await event_bus_svc.bus.publish(event)
+
+
+@rpc_handler("chat.typing.start")
+async def _handle_typing_start(
+    conn: WsConnection, frame: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Broadcast that the caller is typing in a conversation.
+
+    Frontend fires this on the first keystroke after a quiet period, then
+    re-fires every ~3 seconds while the user keeps typing (server doesn't
+    track timeouts — clients auto-clear stale indicators on their side).
+    Stopping is signalled explicitly via ``chat.typing.stop`` on blur /
+    send / silence.
+
+    No-op for personal conversations — typing indicators are only
+    interesting in shared rooms. We don't enforce that here; the event
+    just fans out and the receiving frontends ignore irrelevant
+    conversation_ids.
+    """
+    conversation_id = (frame.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return {
+            "type": "gilbert.error",
+            "ref": frame.get("id"),
+            "error": "conversation_id is required",
+            "code": 400,
+        }
+    await _publish_typing_event(conn, conversation_id, is_typing=True)
+    # No response — the event is the side effect. Returning ``None``
+    # tells ``dispatch_frame`` not to enqueue a reply.
+    return None
+
+
+@rpc_handler("chat.typing.stop")
+async def _handle_typing_stop(
+    conn: WsConnection, frame: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Broadcast that the caller stopped typing.
+
+    Counterpart to ``chat.typing.start``. Clients should also use a
+    short timeout to auto-clear an indicator if they don't see a fresh
+    ``start`` (in case the typer's connection drops silently).
+    """
+    conversation_id = (frame.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return {
+            "type": "gilbert.error",
+            "ref": frame.get("id"),
+            "error": "conversation_id is required",
+            "code": 400,
+        }
+    await _publish_typing_event(conn, conversation_id, is_typing=False)
+    return None
 
 
 @rpc_handler("gilbert.peer.publish")

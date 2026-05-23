@@ -330,6 +330,73 @@ class TestOnlinePresence:
         assert manager.online_user_ids() == set()
 
 
+# --- Typing-indicator event filtering ---
+
+
+class TestTypingEventVisibility:
+    """Typing events ride the same membership filter as message events.
+
+    Critical invariants:
+    - The typer's own connection doesn't receive its own typing event.
+    - Non-members of a shared room can't see typing events from it.
+    - Personal-chat typing events don't leak to other users.
+    """
+
+    def _conn(self, user_id: str, shared_conv_ids: set[str]) -> WsConnection:
+        user = UserContext(
+            user_id=user_id,
+            email="",
+            display_name=user_id.title(),
+            roles=frozenset({"user"}),
+        )
+        manager = MagicMock(spec=WsConnectionManager)
+        conn = WsConnection(user, 100, manager)
+        conn.shared_conv_ids = shared_conv_ids
+        return conn
+
+    def test_typer_does_not_see_own_typing_event(self) -> None:
+        """No "you are typing" footer for the typer themselves."""
+        alice = self._conn("alice", {"room1"})
+        event = Event(
+            event_type="chat.typing.start",
+            data={"conversation_id": "room1", "user_id": "alice"},
+            source="test",
+        )
+        assert alice.can_see_chat_event(event) is False
+
+    def test_other_member_sees_typing_event_in_their_room(self) -> None:
+        bob = self._conn("bob", {"room1"})
+        event = Event(
+            event_type="chat.typing.start",
+            data={"conversation_id": "room1", "user_id": "alice"},
+            source="test",
+        )
+        assert bob.can_see_chat_event(event) is True
+
+    def test_non_member_does_not_see_typing_event(self) -> None:
+        """Charlie isn't in room1 — they must not learn that Alice is
+        typing in there."""
+        charlie = self._conn("charlie", {"room2"})
+        event = Event(
+            event_type="chat.typing.start",
+            data={"conversation_id": "room1", "user_id": "alice"},
+            source="test",
+        )
+        assert charlie.can_see_chat_event(event) is False
+
+    def test_typing_stop_filtered_same_as_start(self) -> None:
+        """Both edge events ride the identical filter — keeps state
+        symmetric so we never have a "stop without a start" indicator
+        leak past membership."""
+        charlie = self._conn("charlie", {"room2"})
+        event = Event(
+            event_type="chat.typing.stop",
+            data={"conversation_id": "room1", "user_id": "alice"},
+            source="test",
+        )
+        assert charlie.can_see_chat_event(event) is False
+
+
 # --- Frame dispatch ---
 
 
