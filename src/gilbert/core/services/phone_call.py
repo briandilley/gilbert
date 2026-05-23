@@ -33,7 +33,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.interfaces.ai import AIResponse, AISamplingProvider, Message, MessageRole
+from gilbert.interfaces.ai import (
+    AIResponse,
+    AISamplingProvider,
+    ConversationMessagePoster,
+    Message,
+    MessageRole,
+)
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -113,6 +119,13 @@ class _CallRecord:
     brief: str
     status: str  # CallStatus value (kept as raw str for storage simplicity)
     webhook_token: str
+    # The conversation_id the user was in when they triggered the call.
+    # Empty for calls placed outside a chat context (e.g. the
+    # ``phone.call.test`` Settings button). When set, the brain posts
+    # an "(call ended)" follow-up message into this conversation when
+    # the call wraps so the next AI turn sees the outcome in history
+    # instead of hallucinating that the call is still active.
+    originating_conversation_id: str = ""
     started_at: str = ""
     ended_at: str = ""
     duration_seconds: float = 0.0
@@ -130,6 +143,7 @@ class _CallRecord:
             "brief": self.brief,
             "status": self.status,
             "webhook_token": self.webhook_token,
+            "originating_conversation_id": self.originating_conversation_id,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "duration_seconds": self.duration_seconds,
@@ -206,6 +220,13 @@ class PhoneCallService(Service):
         self._tts: TTSProvider | None = None
         self._transcription: StreamingTranscriber | None = None
         self._ai: AISamplingProvider | None = None
+        # Optional. Set when the AI service satisfies
+        # ``ConversationMessagePoster`` — used to post a "call ended"
+        # message back into the originating chat conversation so the
+        # next AI turn doesn't hallucinate a still-active call.
+        self._message_poster: ConversationMessagePoster | None = None
+        # Bus-subscription cleanup. Tracked so ``stop`` can detach.
+        self._unsubscribe_ended: Any = None
 
         # user_id -> active call (one slot, hard cap of 1 per user)
         self._active: dict[str, _ActiveCall] = {}
@@ -239,6 +260,11 @@ class PhoneCallService(Service):
         ai = resolver.get_capability("ai_chat")
         if isinstance(ai, AISamplingProvider):
             self._ai = ai
+        # Same service, narrower protocol — used at call end to post a
+        # follow-up message into the conversation that triggered the
+        # call. AIService satisfies both protocols simultaneously.
+        if isinstance(ai, ConversationMessagePoster):
+            self._message_poster = ai
         # ``TTSProvider`` / ``StreamingTranscriber`` are duck-typed in
         # via the service-level protocols — the service objects already
         # satisfy them.
@@ -270,6 +296,17 @@ class PhoneCallService(Service):
                 "(set phone_call.backend in /settings)"
             )
             return
+        # Subscribe to our own ``phone.call.ended`` bus events to post
+        # a follow-up assistant message into the originating chat —
+        # this is what stops the next AI turn from hallucinating that
+        # the call is still active when the user types a follow-up
+        # question.
+        bus_svc = resolver.get_capability("event_bus")
+        if isinstance(bus_svc, EventBusProvider):
+            self._unsubscribe_ended = bus_svc.bus.subscribe(
+                "phone.call.ended", self._on_call_ended
+            )
+
         logger.info(
             "Phone call service started — backend=%s from=%s",
             self._backend_name,
@@ -277,6 +314,12 @@ class PhoneCallService(Service):
         )
 
     async def stop(self) -> None:
+        if self._unsubscribe_ended is not None:
+            try:
+                self._unsubscribe_ended()
+            except Exception:
+                pass
+            self._unsubscribe_ended = None
         # Gracefully hang up active calls. ``stop_all`` upstream gives
         # us 5 seconds; finishing any one call is fast (just hang up,
         # don't await final summary).
@@ -620,7 +663,10 @@ class PhoneCallService(Service):
         # caller can't be attributed for the concurrency cap or the
         # call record's ``user_id``.
         from gilbert.interfaces.auth import UserContext
-        from gilbert.interfaces.context import get_current_user
+        from gilbert.interfaces.context import (
+            get_current_conversation_id,
+            get_current_user,
+        )
 
         ctx = get_current_user()
         if ctx is UserContext.SYSTEM or not getattr(ctx, "user_id", ""):
@@ -632,6 +678,12 @@ class PhoneCallService(Service):
         callback_number = str(arguments.get("callback_number") or "").strip()
         if not to_number or not brief:
             raise ValueError("to_number and brief are required")
+        # Capture which conversation triggered the call so the brain
+        # can post a "call ended" follow-up there on completion. Empty
+        # string when the tool is invoked outside a chat context (e.g.
+        # the /settings test button); the brain skips the follow-up
+        # post in that case.
+        originating_conv = get_current_conversation_id() or ""
         try:
             call_id = await self.start_call(
                 user_id=str(getattr(ctx, "user_id", "")),
@@ -641,6 +693,7 @@ class PhoneCallService(Service):
                 to_number=to_number,
                 brief=brief,
                 callback_number=callback_number,
+                originating_conversation_id=originating_conv,
             )
         except RuntimeError as exc:
             return f"Could not place the call: {exc}"
@@ -668,6 +721,7 @@ class PhoneCallService(Service):
         to_number: str,
         brief: str,
         callback_number: str = "",
+        originating_conversation_id: str = "",
     ) -> str:
         """Place an outbound call. Returns the new call_id immediately.
 
@@ -696,6 +750,7 @@ class PhoneCallService(Service):
             brief=brief,
             status=CallStatus.INITIATED.value,
             webhook_token=webhook_token,
+            originating_conversation_id=originating_conversation_id,
             started_at=_now_iso(),
         )
         await self._save_record(record)
@@ -1200,6 +1255,56 @@ class PhoneCallService(Service):
             Event(event_type=event_type, source="phone_call", data=data)
         )
 
+    # --- Bus subscription: phone.call.ended → follow-up chat message ──
+
+    async def _on_call_ended(self, event: Event) -> None:
+        """Post a synthetic assistant message into the originating chat
+        summarizing how the call wrapped.
+
+        Fires for every ``phone.call.ended`` event the bus sees. The
+        record is reloaded fresh from storage (the event payload only
+        carries a summary) so the message reflects the actual final
+        transcript / outcome — including anything the watchdog wrote
+        after the bus event was scheduled.
+
+        Best-effort throughout. A missing storage, missing record,
+        unset originating conversation, or missing AI poster each silently
+        no-ops — the failure mode is "no follow-up message," which is
+        the current behavior and not actively harmful.
+        """
+        if self._storage is None or self._message_poster is None:
+            return
+        data = event.data or {}
+        call_id = str(data.get("call_id") or "")
+        if not call_id:
+            return
+        try:
+            row = await self._storage.backend.get(_COLLECTION, call_id)
+        except Exception:
+            logger.debug(
+                "_on_call_ended: storage read failed for %s", call_id, exc_info=True
+            )
+            return
+        if not row:
+            return
+        conv_id = str(row.get("originating_conversation_id") or "")
+        if not conv_id:
+            return  # call wasn't triggered from a chat (e.g. test button)
+
+        record = _record_from_dict(row, call_id=call_id)
+        message_text = _format_call_ended_summary(record)
+        try:
+            await self._message_poster.append_assistant_message(
+                conversation_id=conv_id,
+                content=message_text,
+            )
+        except Exception:
+            logger.debug(
+                "_on_call_ended: append_assistant_message failed for conv %s",
+                conv_id,
+                exc_info=True,
+            )
+
     # --- Callback routing (inbound calls to the shared number) ──────
 
     async def find_call_for_inbound(
@@ -1269,6 +1374,9 @@ def _record_from_dict(d: dict[str, Any], *, call_id: str) -> _CallRecord:
         brief=str(d.get("brief", "")),
         status=str(d.get("status", "")),
         webhook_token=str(d.get("webhook_token", "")),
+        originating_conversation_id=str(
+            d.get("originating_conversation_id", "")
+        ),
         started_at=str(d.get("started_at", "")),
         ended_at=str(d.get("ended_at", "")),
         duration_seconds=float(d.get("duration_seconds") or 0.0),
@@ -1281,6 +1389,55 @@ def _record_from_dict(d: dict[str, Any], *, call_id: str) -> _CallRecord:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _format_call_ended_summary(record: _CallRecord) -> str:
+    """Render the "call ended" follow-up the originating chat sees.
+
+    Keep this in plain markdown — the chat renderer handles it the
+    same way as any other assistant message. The leading
+    "(call ended)" marker makes it obvious to both the user (visual
+    cue) and the LLM (on the next turn) that this is an out-of-band
+    insertion, not a real assistant response in the conversation.
+    """
+    duration = ""
+    if record.duration_seconds and record.duration_seconds > 0:
+        mins = int(record.duration_seconds // 60)
+        secs = int(record.duration_seconds % 60)
+        duration = (
+            f"{mins}m {secs}s" if mins else f"{secs}s"
+        )
+
+    parts: list[str] = []
+    parts.append(
+        f"(call ended) The phone call I started to {record.to_number} has "
+        f"ended (status: `{record.status}`"
+        + (f", duration: {duration}" if duration else "")
+        + f", call id: `{record.call_id}`)."
+    )
+    if record.failure_reason:
+        parts.append(f"\nFailure reason: `{record.failure_reason}`.")
+    if record.outcome:
+        # Keep the structured outcome readable but compact. Skip the
+        # internal-only flags the brain stamps for debugging.
+        outcome = {
+            k: v
+            for k, v in record.outcome.items()
+            if not k.startswith("transcription_")
+        }
+        if outcome:
+            parts.append(f"\nOutcome:\n```\n{outcome}\n```")
+    # Brief transcript preview — at most the last 6 turns so the
+    # follow-up message doesn't bloat the conversation.
+    if record.transcript:
+        tail = record.transcript[-6:]
+        lines = [f"- **{t.get('who', '?')}**: {t.get('text', '')}" for t in tail]
+        parts.append("\nRecent transcript:\n" + "\n".join(lines))
+    parts.append(
+        "\nThe call is no longer active. Full transcript + recording "
+        "(when available) is on the Calls page."
+    )
+    return "\n".join(parts)
 
 
 class _MonotonicClock:

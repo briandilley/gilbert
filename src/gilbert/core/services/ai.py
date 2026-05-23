@@ -4179,6 +4179,87 @@ class AIService(Service):
 
         await self._storage.put(_COLLECTION, conv_id, data)
 
+    async def append_assistant_message(
+        self,
+        conversation_id: str,
+        content: str,
+    ) -> None:
+        """Append a synthetic ASSISTANT message to a conversation.
+
+        Used by services that deliver async outcomes back into the chat
+        the user was in when they triggered an action — currently only
+        ``PhoneCallService`` posts "call ended with outcome X" when a
+        call wraps so the next AI turn doesn't hallucinate the call as
+        still active.
+
+        Implements the ``ConversationMessagePoster`` protocol. Best-effort:
+        silently no-ops on missing storage / unknown conversation rather
+        than raising — the originating service has no useful fallback if
+        this fails, and a hard error here would mask the actual outcome
+        we're trying to surface.
+        """
+        if self._storage is None or not conversation_id:
+            return
+        try:
+            existing = await self._storage.get(_COLLECTION, conversation_id)
+        except Exception:
+            logger.debug(
+                "append_assistant_message: storage.get failed for %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return
+        if existing is None:
+            logger.debug(
+                "append_assistant_message: conversation %s not found",
+                conversation_id,
+            )
+            return
+        messages_raw: list[dict[str, Any]] = existing.get("messages") or []
+        new_row = {
+            "role": MessageRole.ASSISTANT.value,
+            "content": content,
+        }
+        messages_raw.append(new_row)
+        existing["messages"] = messages_raw
+        existing["updated_at"] = datetime.now(UTC).isoformat()
+        try:
+            await self._storage.put(_COLLECTION, conversation_id, existing)
+        except Exception:
+            logger.debug(
+                "append_assistant_message: storage.put failed for %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return
+        # Publish so the SPA refreshes if the user has the conversation
+        # open. ``chat.message.created`` is what the chat list + active
+        # turn renderers already listen for; same event the normal
+        # message-write path uses.
+        if self._resolver is None:
+            return
+        bus_svc = self._resolver.get_capability("event_bus")
+        from gilbert.interfaces.events import EventBusProvider
+
+        if isinstance(bus_svc, EventBusProvider):
+            await bus_svc.bus.publish(
+                Event(
+                    event_type="chat.message.created",
+                    source="ai_service",
+                    data={
+                        "conversation_id": conversation_id,
+                        "author_id": "gilbert",
+                        "author_name": "Gilbert",
+                        "content": content,
+                        "user_message": "",
+                        "attachments": [],
+                        "user_attachments": [],
+                        "ui_blocks": [],
+                        "mentioned_user_ids": [],
+                    },
+                )
+            )
+
     async def list_conversations(
         self, user_id: str | None = None, limit: int = 50
     ) -> list[dict[str, Any]]:

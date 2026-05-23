@@ -561,3 +561,27 @@ class AIToolDiscoveryProvider(Protocol):
         profile_name: str | None = None,
     ) -> dict[str, Any]:
         ...
+
+
+@runtime_checkable
+class ConversationMessagePoster(Protocol):
+    """Protocol for posting a synthetic assistant message into a
+    conversation from outside the normal AI-driven chat flow.
+
+    Used by services that need to deliver an async outcome back into
+    the chat the user was in when they triggered an action — e.g.
+    ``PhoneCallService`` posts "the call ended with outcome X" when a
+    call wraps, so the next AI turn sees the outcome in its history
+    instead of hallucinating that the call is still active.
+
+    The message is recorded as an ``ASSISTANT`` role row with a
+    distinguishing marker in the content (e.g. ``(SYSTEM NOTE)`` or
+    ``(call ended)``) so the LLM understands it's an out-of-band
+    insertion, not something it actually said.
+    """
+
+    async def append_assistant_message(
+        self,
+        conversation_id: str,
+        content: str,
+    ) -> None: ...
