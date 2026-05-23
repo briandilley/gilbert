@@ -22,6 +22,7 @@ export function CalendarPage() {
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createDefaultDate, setCreateDefaultDate] = useState<Date | null>(null);
   const [editAccount, setEditAccount] = useState<CalendarAccount | null>(null);
   const [creatingAccount, setCreatingAccount] = useState(false);
   const [weekStart, setWeekStart] = useState<Date>(() => {
@@ -36,7 +37,7 @@ export function CalendarPage() {
     queryFn: () => api.listCalendarAccounts(),
   });
 
-  const accounts = accountsQuery.data ?? [];
+  const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const selectedAccount = useMemo(
     () =>
       selectedAccountId
@@ -137,7 +138,10 @@ export function CalendarPage() {
               </Button>
             )}
             <Button
-              onClick={() => setCreateOpen(true)}
+              onClick={() => {
+                setCreateDefaultDate(null);
+                setCreateOpen(true);
+              }}
               disabled={accounts.length === 0}
             >
               <Plus className="h-4 w-4 mr-1" /> New event
@@ -180,6 +184,11 @@ export function CalendarPage() {
           onDeleteEvent={(accountId, eventId) =>
             deleteEvent.mutate({ accountId, eventId })
           }
+          canCreateEvent={accounts.length > 0}
+          onCreateEvent={(date) => {
+            setCreateDefaultDate(date);
+            setCreateOpen(true);
+          }}
         />
       </main>
 
@@ -187,7 +196,11 @@ export function CalendarPage() {
         <CreateEventDrawer
           accounts={accounts}
           defaultAccountId={selectedAccountId}
-          onClose={() => setCreateOpen(false)}
+          defaultStartDate={createDefaultDate}
+          onClose={() => {
+            setCreateOpen(false);
+            setCreateDefaultDate(null);
+          }}
           onCreated={() =>
             queryClient.invalidateQueries({ queryKey: ["calendar.events"] })
           }
@@ -209,4 +222,3 @@ export function CalendarPage() {
     </div>
   );
 }
-

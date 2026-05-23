@@ -55,8 +55,10 @@ class FakeCalendarBackend(CalendarBackend):
     backend_name = "fake_calendar"
     display_name = "Fake Calendar"
     last_initialized_with: dict[str, Any] | None = None
+    last_instance: FakeCalendarBackend | None = None
 
     def __init__(self) -> None:
+        type(self).last_instance = self
         self.events: dict[str, CalendarEvent] = {}
         self.calendars: list[dict[str, Any]] = [
             {
@@ -797,6 +799,62 @@ async def test_health_recovers_to_ok_on_successful_poll(sqlite_storage: SQLiteSt
 
 
 @pytest.mark.asyncio
+async def test_default_poll_cache_includes_current_week_history(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, sched, _ = await _service(sqlite_storage)
+    account, backend = await _seed_account(svc)
+    now = datetime.now(UTC)
+    past_start = now - timedelta(days=2)
+    backend.add_event(
+        CalendarEvent(
+            event_id="evt_two_days_ago",
+            calendar_id=account.calendar_id,
+            account_id=account.id,
+            title="Two days ago",
+            start=past_start,
+            end=past_start + timedelta(minutes=30),
+            etag="x",
+        )
+    )
+
+    await sched.fire(svc._runtimes[account.id].poll_job_name)
+    agg = await svc.list_events(
+        account.id,
+        now - timedelta(days=6),
+        now + timedelta(days=1),
+        _user_ctx("alice"),
+    )
+
+    assert [event.event_id for event in agg.events] == ["evt_two_days_ago"]
+
+
+@pytest.mark.asyncio
+async def test_connection_exercises_event_access_and_recovers_health(
+    sqlite_storage: SQLiteStorage,
+) -> None:
+    svc, _, bus = await _service(sqlite_storage)
+    account, _ = await _seed_account(svc)
+    account.health = "unhealthy"
+    account.last_error = "previous auth failure"
+    account.last_error_at = datetime.now(UTC).isoformat()
+    await svc._storage.put("calendar_accounts", account.id, account.to_dict())
+    await svc._refresh_cache()
+    bus.published.clear()
+
+    out = await svc.test_account_connection(account.id, _user_ctx("alice"))
+
+    assert out["ok"] is True
+    assert FakeCalendarBackend.last_instance is not None
+    assert FakeCalendarBackend.last_instance.list_events_calls == 1
+    fresh = await svc._require_account(account.id)
+    assert fresh.health == "ok"
+    assert fresh.last_error == ""
+    assert fresh.last_error_at == ""
+    assert any(e.event_type == "calendar.account.health_changed" for e in bus.published)
+
+
+@pytest.mark.asyncio
 async def test_find_free_time_validates_arguments(sqlite_storage: SQLiteStorage) -> None:
     svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
@@ -1226,8 +1284,8 @@ async def test_sweep_deletes_records_older_than_cache_window(
     the sweep, and assert both are gone."""
     svc, _, _ = await _service(sqlite_storage)
     account, _ = await _seed_account(svc)
-    # Stale event — older than cache_back_hours (default 2h).
-    stale_event_iso = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    # Stale event — older than cache_back_hours (default 168h).
+    stale_event_iso = (datetime.now(UTC) - timedelta(days=8)).isoformat()
     await svc._storage.put(
         "calendar_events",
         f"{account.id}:stale",
