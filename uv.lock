@@ -46,8 +46,10 @@ members = [
     "gilbert-plugin-sonos",
     "gilbert-plugin-tavily",
     "gilbert-plugin-telegram",
+    "gilbert-plugin-telnyx",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-voice-agent",
     "gilbert-plugin-withings",
     "gilbert-plugin-xai",
 ]
@@ -1079,8 +1081,10 @@ dependencies = [
     { name = "gilbert-plugin-sonos" },
     { name = "gilbert-plugin-tavily" },
     { name = "gilbert-plugin-telegram" },
+    { name = "gilbert-plugin-telnyx" },
     { name = "gilbert-plugin-tesseract" },
     { name = "gilbert-plugin-unifi" },
+    { name = "gilbert-plugin-voice-agent" },
     { name = "gilbert-plugin-withings" },
     { name = "gilbert-plugin-xai" },
     { name = "httpx" },
@@ -1163,8 +1167,10 @@ requires-dist = [
     { name = "gilbert-plugin-sonos", virtual = "std-plugins/sonos" },
     { name = "gilbert-plugin-tavily", virtual = "std-plugins/tavily" },
     { name = "gilbert-plugin-telegram", virtual = "std-plugins/telegram" },
+    { name = "gilbert-plugin-telnyx", virtual = "std-plugins/telnyx" },
     { name = "gilbert-plugin-tesseract", virtual = "std-plugins/tesseract" },
     { name = "gilbert-plugin-unifi", virtual = "std-plugins/unifi" },
+    { name = "gilbert-plugin-voice-agent", virtual = "std-plugins/voice-agent" },
     { name = "gilbert-plugin-withings", virtual = "std-plugins/withings" },
     { name = "gilbert-plugin-xai", virtual = "std-plugins/xai" },
     { name = "httpx", specifier = ">=0.27" },
@@ -1482,6 +1488,11 @@ version = "1.0.0"
 source = { virtual = "std-plugins/telegram" }
 
 [[package]]
+name = "gilbert-plugin-telnyx"
+version = "1.0.0"
+source = { virtual = "std-plugins/telnyx" }
+
+[[package]]
 name = "gilbert-plugin-tesseract"
 version = "1.0.0"
 source = { virtual = "std-plugins/tesseract" }
@@ -1496,6 +1507,11 @@ requires-dist = [{ name = "pytesseract", specifier = ">=0.3.13" }]
 name = "gilbert-plugin-unifi"
 version = "1.0.0"
 source = { virtual = "std-plugins/unifi" }
+
+[[package]]
+name = "gilbert-plugin-voice-agent"
+version = "0.1.0"
+source = { virtual = "std-plugins/voice-agent" }
 
 [[package]]
 name = "gilbert-plugin-withings"
