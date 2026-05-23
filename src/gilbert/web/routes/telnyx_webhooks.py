@@ -122,17 +122,24 @@ async def telnyx_media(ws: WebSocket) -> None:
     secondary check.
     """
     await ws.accept()
+    logger.info("Telnyx media WS: connection accepted")
     plugin = _import_plugin()
     if plugin is None:
+        logger.warning("Telnyx media WS: plugin not loaded, closing")
         await ws.close(code=1011, reason="telnyx plugin not loaded")
         return
 
     session = None
+    inbound_media_frames = 0
     try:
         # First frame must be ``start``. Telnyx sends it within
         # ~milliseconds of accepting our upgrade.
         first_raw = await ws.receive_text()
         first = _safe_loads(first_raw)
+        logger.info(
+            "Telnyx media WS: first frame received — event=%r",
+            first.get("event"),
+        )
         if first.get("event") != "start":
             await ws.close(code=1008, reason="expected start frame")
             return
@@ -166,6 +173,11 @@ async def telnyx_media(ws: WebSocket) -> None:
 
         session.media_ws = ws
         session.stream_id = str(start.get("stream_id") or "")
+        logger.info(
+            "Telnyx media WS: bound to session — call=%s stream_id=%s",
+            session.call_id,
+            session.stream_id,
+        )
 
         # Main read loop: shovel inbound media into the session queue
         # and surface stop frames cleanly.
@@ -181,14 +193,41 @@ async def telnyx_media(ws: WebSocket) -> None:
                     except Exception:
                         continue
                     await session.push_audio_in(chunk)
+                    inbound_media_frames += 1
+                    # First media frame is the smoking gun — Telnyx
+                    # is actually forwarding remote audio to us.
+                    if inbound_media_frames == 1:
+                        logger.info(
+                            "Telnyx media WS: first inbound media chunk — call=%s",
+                            session.call_id,
+                        )
             elif ev == "stop":
                 # Carrier closing the media side. The webhook will
                 # follow up with the hangup event; we just let the
                 # socket close.
+                logger.info(
+                    "Telnyx media WS: stop frame received — call=%s "
+                    "inbound_frames=%d",
+                    session.call_id if session else "?",
+                    inbound_media_frames,
+                )
                 return
-            # Other events (mark, dtmf) come through the webhook path
-            # instead — Telnyx mirrors them there too.
+            else:
+                # Anything else (mark, error, ...) — log once so we
+                # can see what Telnyx is actually sending without
+                # spamming on media flood.
+                logger.debug(
+                    "Telnyx media WS: unhandled frame event=%r — call=%s",
+                    ev,
+                    session.call_id if session else "?",
+                )
     except WebSocketDisconnect:
+        logger.info(
+            "Telnyx media WS: disconnected (Telnyx closed) — call=%s "
+            "inbound_frames=%d",
+            session.call_id if session else "?",
+            inbound_media_frames,
+        )
         return
     except Exception:
         logger.exception("Telnyx media WS crashed")
