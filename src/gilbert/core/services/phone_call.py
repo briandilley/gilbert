@@ -25,7 +25,6 @@ leave a zombie carrier session.
 from __future__ import annotations
 
 import asyncio
-import audioop
 import logging
 import secrets
 import uuid
@@ -35,10 +34,15 @@ from typing import Any
 
 from gilbert.interfaces.conversation import (
     BrainToolResult,
+    ConversationConfig,
     ConversationContext,
+    ConversationEngine,
+    ConversationOutcome,
+    ConversationStatus,
+    OpeningBehavior,
+    OpeningPolicy,
 )
 from gilbert.interfaces.ai import (
-    AIResponse,
     AISamplingProvider,
     ConversationMessagePoster,
     Message,
@@ -64,21 +68,9 @@ from gilbert.interfaces.tools import (
     ToolParameterType,
 )
 from gilbert.interfaces.transcription import (
-    AudioEncoding,
-    FinalTranscript,
-    SpeechEnded,
-    SpeechStarted,
-    StreamConfig,
     StreamingTranscriber,
 )
-from gilbert.interfaces.transcription import (
-    AudioFormat as TranscriptionAudioFormat,
-)
 from gilbert.interfaces.tts import (
-    AudioFormat as TTSAudioFormat,
-)
-from gilbert.interfaces.tts import (
-    SynthesisRequest,
     TTSProvider,
 )
 from gilbert.interfaces.ui import ToolOutput
@@ -167,25 +159,8 @@ class _CallRecord:
         }
 
 
-# ── Brain runtime state — lives only inside ``_run_call`` ──────────────
-
-
-@dataclass
-class _Speaking:
-    """Tracks whether the brain is currently outputting TTS.
-
-    Barge-in: when the remote starts speaking while we're talking,
-    flip ``cancelled`` and the TTS writer drops the rest of its buffer.
-    The brain then resumes listening; the partial speech that was already
-    out the door is the cost of doing business.
-    """
-
-    active: bool = False
-    cancelled: bool = False
-    # Set by the brain on each "we want to speak" task so a stale cancel
-    # from a previous utterance doesn't poison the next one. Compared
-    # against the writer's local snapshot.
-    generation: int = 0
+# (``_Speaking`` moved into the conversation engine — see
+# ``gilbert.core.services.voice_brain``.)
 
 
 # ── Active-call tracker (one per user, enforces the concurrency cap) ───
@@ -233,6 +208,10 @@ class PhoneCallService(Service):
         self._tts: TTSProvider | None = None
         self._transcription: StreamingTranscriber | None = None
         self._ai: AISamplingProvider | None = None
+        # Resolved at start. The brain delegates the whole conversation
+        # loop to this engine; the phone-call service is just the
+        # modality-specific wrapper.
+        self._voice_brain: ConversationEngine | None = None
         # Optional. Set when the AI service satisfies
         # ``ConversationMessagePoster`` — used to post a "call ended"
         # message back into the originating chat conversation so the
@@ -255,6 +234,7 @@ class PhoneCallService(Service):
                     "ai_chat",
                     "text_to_speech",
                     "speech_to_text",
+                    "voice_brain",
                 }
             ),
             optional=frozenset({"configuration"}),
@@ -287,6 +267,12 @@ class PhoneCallService(Service):
         st_svc = resolver.get_capability("speech_to_text")
         if isinstance(st_svc, StreamingTranscriber):
             self._transcription = st_svc
+        # Resolve the conversation engine. ``isinstance`` against
+        # ``ConversationEngine`` here is the canonical capability
+        # check — the engine is shaped as a ``Protocol``.
+        brain_svc = resolver.get_capability("voice_brain")
+        if isinstance(brain_svc, ConversationEngine):
+            self._voice_brain = brain_svc
 
         config_svc = resolver.get_capability("configuration")
         section: dict[str, Any] = {}
@@ -839,7 +825,7 @@ class PhoneCallService(Service):
                 return active
         return None
 
-    # --- The brain --------------------------------------------------
+    # --- The brain (thin wrapper around voice_brain engine) -----------
 
     async def _run_call(
         self,
@@ -850,32 +836,39 @@ class PhoneCallService(Service):
         display_name: str,
         interventions: asyncio.Queue[str],
     ) -> None:
-        """The heart of the system: drive the LLM-powered conversation.
+        """Drive an outbound phone-call conversation through the
+        voice-brain engine.
 
-        Three concurrent jobs:
+        Builds the phone-specific system prompt + opener priming, hands
+        the session and config to ``voice_brain.run_conversation``, and
+        translates the returned ``ConversationOutcome`` back into the
+        ``_CallRecord`` fields the SPA/persistence layer expects.
 
-        - ``_status_loop``    — turn carrier events into record updates
-        - ``_listen_loop``    — STT inbound audio, feed brain on end-of-speech
-        - ``_speak_loop``     — LLM completions → TTS → outbound audio,
-                                interruptible on remote barge-in
-
-        ``_status_loop`` ends the call by setting ``stop.set()``; the
-        other two cooperatively exit. We then finalize the record + emit
-        the summary event.
+        The actual LLM-turn loop, STT pump, local-VAD barge-in, TTS
+        pacing, and brain-tool dispatch live in
+        ``core/services/voice_brain``. This method's job is the
+        modality-specific wiring: persistence callbacks, bus events,
+        the disclosure-prompt template, the WAIT_FOR_REMOTE opening
+        policy. (``interventions`` is currently unused inside the
+        engine — kept on the signature for API stability while the
+        intervention-by-text feature gets re-wired through the
+        engine's callbacks.)
         """
         log = logger.getChild(f"call:{record.call_id}")
-        stop = asyncio.Event()
-        speaking = _Speaking()
-        messages: list[Message] = []
-        # Cumulative seconds-since-call-start clock. Updated by the
-        # status loop on each carrier event; the loops stamp transcript
-        # turns + intervention rows from it.
-        clock = _MonotonicClock()
 
-        # System prompt for the LLM. The user's natural-language brief
-        # is embedded verbatim — the LLM's job is to read it, hold the
-        # conversation, and call the structured tools (hang_up,
-        # confirm_and_end, etc.) when appropriate.
+        if self._voice_brain is None:
+            log.error(
+                "voice_brain capability missing — cannot run call. "
+                "Aborting and marking call failed."
+            )
+            record.status = CallStatus.FAILED.value
+            record.failure_reason = "voice_brain_unavailable"
+            record.ended_at = _now_iso()
+            await self._save_record(record)
+            return
+
+        # ── build the system prompt + opening priming ─────────────────
+
         system_prompt = self._call_system_prompt.format(
             display_name=display_name or "the user",
             brief=brief.brief_text,
@@ -884,11 +877,7 @@ class PhoneCallService(Service):
         opening_line = self._opening_disclosure_prompt.format(
             display_name=display_name or "the user",
         )
-        # Prime the brain so its first "what should I say?" produces
-        # the disclosure-plus-greeting sequence rather than waiting for
-        # the receptionist to speak first. The LLM sees this as a
-        # "system says go" instruction.
-        messages.append(
+        priming_messages: list[Message] = [
             Message(
                 role=MessageRole.USER,
                 content=(
@@ -897,14 +886,15 @@ class PhoneCallService(Service):
                     f"and then continue naturally: {opening_line!r}"
                 ),
             )
-        )
+        ]
 
-        # ── helpers ────────────────────────────────────────────────────
+        # ── persistence + bus callbacks the engine invokes ───────────
 
-        async def _record_turn(who: str, text: str) -> None:
-            turn = TranscriptTurn(who=who, text=text, ts_seconds=clock.now())
+        async def _on_transcript_turn(
+            who: str, text: str, ts_seconds: float
+        ) -> None:
             record.transcript.append(
-                {"who": turn.who, "text": turn.text, "ts": turn.ts_seconds}
+                {"who": who, "text": text, "ts": ts_seconds}
             )
             await self._save_record(record)
             await self._publish(
@@ -912,61 +902,35 @@ class PhoneCallService(Service):
                 {
                     "call_id": record.call_id,
                     "user_id": record.user_id,
-                    "who": turn.who,
-                    "text": turn.text,
-                    "ts": turn.ts_seconds,
+                    "who": who,
+                    "text": text,
+                    "ts": ts_seconds,
                 },
             )
 
-        # ── brain-tool plumbing ────────────────────────────────────────
-        #
-        # The phone-call service's brain tools (``hang_up`` /
-        # ``confirm_and_end`` / ``escalate_to_user`` / ``note`` /
-        # ``send_dtmf``) are now owned by a ``PhoneCallBrainToolProvider``
-        # instance. The provider is stateless; per-conversation state
-        # (the record's outcome dict, the transcript recorder, the
-        # bus publisher) is passed in via a fresh ``ConversationContext``
-        # on every tool dispatch. Phone-call-specific bus event names
-        # are added back here (the provider publishes the generic event
-        # name; we prepend the ``phone.call.`` namespace).
-        brain_tool_provider = PhoneCallBrainToolProvider()
-
-        async def _publish_namespaced(event_type: str, data: dict[str, Any]) -> None:
-            namespaced = (
-                event_type
-                if "." in event_type
-                else f"phone.call.{event_type}"
-            )
-            payload = {
-                "call_id": record.call_id,
-                "user_id": record.user_id,
-                **data,
-            }
-            await self._publish(namespaced, payload)
-
-        def _make_brain_ctx() -> ConversationContext:
-            # Fresh context per dispatch — the outcome dict is the
-            # SAME mutable ref as ``record.outcome``, so tool writes
-            # land on the persisted record.
-            return ConversationContext(
-                session=session,  # type: ignore[arg-type]
-                outcome=record.outcome,
-                failure_reason=record.failure_reason,
-                record_turn=_record_turn,
-                publish_event=_publish_namespaced,
-            )
-
-        async def _set_status(new: CallStatus, reason: str = "") -> None:
-            if record.status == new.value:
-                log.info("status unchanged: already %s", new.value)
+        async def _on_status_change(
+            status: ConversationStatus, reason: str
+        ) -> None:
+            # Translate the generic status enum back into the phone-
+            # specific values the SPA + storage expect. The engine
+            # only knows PENDING / ACTIVE / ENDED / FAILED; phone
+            # calls track CONNECTED / HUNG_UP / FAILED on the record
+            # for backward compatibility.
+            mapped = {
+                ConversationStatus.ACTIVE: CallStatus.CONNECTED,
+                ConversationStatus.ENDED: CallStatus.HUNG_UP,
+                ConversationStatus.FAILED: CallStatus.FAILED,
+                ConversationStatus.PENDING: CallStatus.INITIATED,
+            }.get(status)
+            if mapped is None or record.status == mapped.value:
                 return
             log.info(
                 "status transition: %s → %s (reason=%r)",
                 record.status,
-                new.value,
+                mapped.value,
                 reason,
             )
-            record.status = new.value
+            record.status = mapped.value
             if reason:
                 record.failure_reason = reason
             await self._save_record(record)
@@ -975,436 +939,36 @@ class PhoneCallService(Service):
                 {
                     "call_id": record.call_id,
                     "user_id": record.user_id,
-                    "status": new.value,
+                    "status": mapped.value,
                     "reason": reason,
                 },
             )
 
-        # ── status loop: drains backend events, terminates the call ───
-        #
-        # On CONNECTED we don't speak immediately — we wait for the
-        # remote to say "hello?" first (real phone etiquette). The
-        # listen loop's FinalTranscript handler will then call
-        # ``_think_and_speak`` with the remote's greeting as the first
-        # user message, and the LLM responds naturally with the
-        # disclosure-plus-greeting woven in.
-        #
-        # Belt-and-suspenders for the silent-line case (recipient
-        # picks up but doesn't speak, or we hit voicemail beep that
-        # we miss): a fallback timer fires the opener proactively
-        # after ``_INITIAL_OPENER_TIMEOUT_SECONDS``. ``already_spoke``
-        # is the latch — both the FinalTranscript path and the timer
-        # path flip it true, so whichever fires first wins.
+        # ── drive the engine ──────────────────────────────────────────
 
-        already_spoke = False
+        engine_config = ConversationConfig(
+            system_prompt=system_prompt,
+            brain_tool_provider=PhoneCallBrainToolProvider(),
+            opening_policy=OpeningPolicy(
+                behavior=OpeningBehavior.WAIT_FOR_REMOTE,
+                fallback_timeout_seconds=4.0,
+            ),
+            max_conversation_seconds=self._max_call_seconds,
+            priming_messages=priming_messages,
+            on_status_change=_on_status_change,
+            on_transcript_turn=_on_transcript_turn,
+            on_llm_turn=None,  # engine logs LLM turns itself
+        )
 
-        async def _open_with_disclosure_now() -> None:
-            """Speak the cold-open disclosure (no user message yet).
-            Called only by the fallback timer when the remote stayed
-            silent past ``_INITIAL_OPENER_TIMEOUT_SECONDS``."""
-            nonlocal already_spoke
-            if already_spoke:
-                return
-            already_spoke = True
-            await _think_and_speak()
-
-        async def _wait_then_open() -> None:
-            """Fallback: if the remote hasn't spoken by the timeout,
-            we open the conversation ourselves so the call doesn't
-            sit in dead silence forever (voicemail, mute, etc.)."""
-            try:
-                await asyncio.sleep(_INITIAL_OPENER_TIMEOUT_SECONDS)
-            except asyncio.CancelledError:
-                return
-            if not already_spoke and not stop.is_set():
-                log.info(
-                    "opener: remote silent %.1fs after CONNECT — speaking proactively",
-                    _INITIAL_OPENER_TIMEOUT_SECONDS,
-                )
-                await _open_with_disclosure_now()
-
-        async def _status_loop() -> None:
-            log.info("status_loop: starting")
-            try:
-                async for event in session.events:
-                    log.info("status_loop: received event %s", type(event).__name__)
-                    if isinstance(event, CallStatusEvent):
-                        await _set_status(event.status, event.reason)
-                        if event.status is CallStatus.CONNECTED:
-                            # Don't speak immediately — wait for the
-                            # remote to say "hello?" first (handled in
-                            # the listen loop). Arm the fallback timer
-                            # so a silent line eventually gets opened
-                            # by us. The task is fire-and-forget; the
-                            # ``already_spoke`` latch makes it a no-op
-                            # if the listen loop got in first.
-                            asyncio.create_task(_wait_then_open())
-                        if event.status in (CallStatus.HUNG_UP, CallStatus.FAILED):
-                            log.info(
-                                "status_loop: terminal status %s — setting stop",
-                                event.status.value,
-                            )
-                            stop.set()
-                            return
-                    elif isinstance(event, DtmfEvent):
-                        await _record_turn("them", f"(DTMF pressed: {event.digit})")
-                    elif isinstance(event, CallErrorEvent):
-                        log.warning("Call stream error: %s", event.message)
-                log.info("status_loop: events iterator exhausted (closed)")
-            except Exception:
-                log.exception("status loop crashed")
-                stop.set()
-
-        # ── listen loop: STT → think_and_speak on end-of-speech ───────
-
-        async def _listen_loop() -> None:
-            nonlocal already_spoke
-            if self._transcription is None:
-                # Degrade gracefully — call continues, brain speaks the
-                # opening + brief but won't get any responses back.
-                # Useful for voicemail / leave-a-message flows where
-                # transcription isn't strictly necessary.
-                log.warning("Transcription unavailable — call continues TTS-only")
-                record.outcome["transcription_available"] = False
-                return
-            try:
-                # Wrap mulaw-8k inbound bytes into PCM s16le-8k stream
-                # bytes; Deepgram is configured to expect linear16.
-                stt_stream = await self._transcription.open_stream(
-                    StreamConfig(
-                        format=TranscriptionAudioFormat(
-                            encoding=AudioEncoding.PCM_S16LE,
-                            sample_rate=8000,
-                            channels=1,
-                        ),
-                        interim_results=True,
-                        vad_events=True,
-                    )
-                )
-            except Exception:
-                # STT couldn't open. Don't terminate the call — the
-                # opening disclosure from the brain's CONNECTED handler
-                # already went out, and the user might still want to
-                # talk AT the remote even without transcription. The
-                # call ends when the remote hangs up or the watchdog
-                # fires.
-                log.exception("Failed to open transcription stream — call continues TTS-only")
-                record.outcome["transcription_available"] = False
-                record.failure_reason = "stt_open_failed"
-                return
-
-            # Local-VAD callback that the pump invokes when sustained
-            # energy is detected on the inbound stream. If we're
-            # currently speaking, cancel the TTS playback and drop
-            # whatever Telnyx has buffered for us. The brain's
-            # speech-cancelled / clear path is idempotent so it's
-            # safe to invoke multiple times within a single utterance.
-            def _on_local_vad_speech() -> None:
-                if not speaking.active:
-                    return
-                speaking.cancelled = True
-                # Use create_task because the callback runs from the
-                # synchronous body of _pump_audio_to_stt and we need
-                # to fire-and-forget the ws.send_text in audio_out.clear.
-                asyncio.create_task(session.audio_out.clear())
-                log.info("local VAD: barge-in cancelling in-flight TTS")
-
-            pump_task = asyncio.create_task(
-                _pump_audio_to_stt(
-                    session.audio_in,
-                    stt_stream,
-                    on_speech_detected=_on_local_vad_speech,
-                )
-            )
-            try:
-                last_final_at: float | None = None
-                async for ev in stt_stream.events():
-                    if stop.is_set():
-                        break
-                    if isinstance(ev, SpeechStarted):
-                        # Barge-in: if we're talking, cancel.
-                        if speaking.active:
-                            speaking.cancelled = True
-                            await session.audio_out.clear()
-                    elif isinstance(ev, FinalTranscript):
-                        text = ev.text.strip()
-                        if not text:
-                            continue
-                        # Latch the opener flag — the remote spoke
-                        # first, so the fallback timer's proactive
-                        # cold-open should NOT fire. ``_think_and_speak``
-                        # below produces the disclosure-plus-greeting
-                        # naturally as a reply to whatever they said.
-                        already_spoke = True
-                        await _record_turn("them", text)
-                        messages.append(
-                            Message(role=MessageRole.USER, content=text)
-                        )
-                        last_final_at = clock.now()
-                        await _think_and_speak()
-                    elif isinstance(ev, SpeechEnded):
-                        # Recorded already by FinalTranscript; nothing
-                        # extra here. Voicemail-detection heuristics
-                        # use the sustained-silence signal from the
-                        # status loop, not this single end.
-                        _ = last_final_at  # keep for future heuristics
-            except Exception:
-                # Mid-call STT crash: log + degrade. Don't terminate the
-                # call — opening greeting / brief execution may still be
-                # in flight via TTS, and forcing a hangup wastes that.
-                # The remote-hangup path or the watchdog will clean up.
-                log.exception("listen loop crashed — call continues TTS-only")
-                record.outcome["transcription_failed_midcall"] = True
-            finally:
-                pump_task.cancel()
-                try:
-                    await stt_stream.close()
-                except Exception:
-                    pass
-
-        # ── think_and_speak: one LLM turn → TTS → audio_out ───────────
-
-        async def _think_and_speak() -> None:
-            if self._ai is None or self._tts is None:
-                log.warning("AI or TTS missing — cannot respond")
-                return
-            # Drain any queued user-text-interventions; they ride as
-            # extra system notes so the LLM weighs them on this turn.
-            while not interventions.empty():
-                try:
-                    note = interventions.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                messages.append(
-                    Message(
-                        role=MessageRole.USER,
-                        content=f"(SYSTEM NOTE from your supervisor) {note}",
-                    )
-                )
-
-            response: AIResponse
-            try:
-                response = await self._ai.complete_one_shot(
-                    messages=messages,
-                    system_prompt=system_prompt,
-                    max_tokens=600,
-                    tools_override=brain_tool_provider.get_brain_tools(),
-                )
-            except Exception:
-                log.exception("LLM call failed")
-                return
-
-            # Diagnostic: log what the LLM wants to do on this turn.
-            # Helps catch tool-only responses (which we used to silently
-            # drop) and lets us spot when ``confirm_and_end`` / ``hang_up``
-            # got called without any spoken text.
-            log.info(
-                "LLM turn: text_chars=%d tools=%s",
-                len(response.message.content or ""),
-                [tc.tool_name for tc in response.message.tool_calls],
-            )
-
-            # We speak the LLM's text BEFORE dispatching its tool
-            # calls. The old order was tool-calls-first, which meant
-            # if the LLM emitted ``hang_up`` alongside its actual
-            # reply ("Yes, the sky is blue. Goodbye!" + ``hang_up``),
-            # the tool would fire and ``return`` before the answer
-            # ever made it to TTS — the remote got dead air, the
-            # call ended, and the chat log showed an
-            # answered-but-never-spoken outcome.
-            #
-            # All brain tools (``hang_up`` / ``confirm_and_end`` /
-            # ``escalate_to_user`` / ``note``) only need to fire
-            # AFTER whatever the LLM wanted to say on this turn. The
-            # tool-dispatch loop now runs at the bottom of this
-            # function, after the audio has been written to the
-            # carrier.
-            text = response.message.content.strip()
-            if not text and not response.message.tool_calls:
-                return
-
-            # Fallback for the misbehaving "tool-only" case. The brain
-            # tools are documented as bookkeeping that don't speak on
-            # their own; the LLM is supposed to put a spoken line in
-            # the message content alongside the tool. If it forgets
-            # (Sonnet does this occasionally even with the explicit
-            # rule), we'd otherwise dispatch the tool against dead air
-            # — the remote either hears a sudden hangup or sits in
-            # silence wondering if the line dropped.
-            #
-            # Generate a generic-but-safe fallback line for ``hang_up``
-            # / ``confirm_and_end`` so the call doesn't end silently.
-            # The note + escalate tools don't need a fallback (note is
-            # purely internal; escalate has its own audio handling
-            # further down the system).
-            if not text and response.message.tool_calls:
-                tool_names = {tc.tool_name for tc in response.message.tool_calls}
-                if "hang_up" in tool_names:
-                    text = "Thanks so much, have a great day!"
-                elif "confirm_and_end" in tool_names:
-                    # Find the summary arg and build a short readback
-                    # from it. Best-effort — the real fix is the LLM
-                    # following the rule, this is just a safety net.
-                    summary_args: dict[str, Any] = {}
-                    for tc in response.message.tool_calls:
-                        if tc.tool_name == "confirm_and_end":
-                            summary_args = tc.arguments.get("summary") or {}
-                            break
-                    if isinstance(summary_args, dict) and summary_args:
-                        bits = ", ".join(
-                            f"{k.replace('_', ' ')}: {v}"
-                            for k, v in summary_args.items()
-                        )
-                        text = f"Just to confirm — {bits}. Does that sound right?"
-                    else:
-                        text = "Just to confirm what we agreed on — does that sound right?"
-                if text:
-                    log.warning(
-                        "LLM emitted tool-only response; using fallback text: %r",
-                        text,
-                    )
-
-            messages.append(Message(role=MessageRole.ASSISTANT, content=text))
-            await _record_turn("us", text)
-
-            # Synthesize and write to the carrier. ``MULAW_8000`` lets
-            # ElevenLabs hand back carrier-ready bytes — no resample.
-            try:
-                # ``voice_id=""`` tells the TTS service to use its
-                # configured default voice (set in /settings under TTS).
-                # All other callers follow this pattern.
-                synth = await self._tts.synthesize(
-                    SynthesisRequest(
-                        text=text,
-                        voice_id="",
-                        output_format=TTSAudioFormat.MULAW_8000,
-                    )
-                )
-            except Exception:
-                log.exception("TTS synthesize failed")
-                return
-
-            # Diagnostic: are we getting actual ulaw bytes back? A
-            # short response, all-zeros prefix, or a header signature
-            # (RIFF / fLaC / OggS) all tell us the format-map fix
-            # wasn't enough.
-            audio = synth.audio
-            log.info(
-                "TTS synth complete — format=%s bytes=%d "
-                "first_8_hex=%s last_8_hex=%s zero_ratio=%.2f text_chars=%d",
-                synth.format,
-                len(audio),
-                audio[:8].hex(),
-                audio[-8:].hex() if len(audio) >= 8 else "",
-                (audio.count(b"\xff") + audio.count(b"\x7f")) / max(len(audio), 1),
-                len(text),
-            )
-
-            speaking.active = True
-            speaking.cancelled = False
-            generation = speaking.generation = speaking.generation + 1
-            try:
-                # Write in ~20ms chunks (160 bytes mulaw @ 8kHz mono)
-                # so barge-in cancel takes effect within that window.
-                chunk_size = 160
-                chunks_written = 0
-                for i in range(0, len(synth.audio), chunk_size):
-                    # Bail conditions, checked once per 20ms frame:
-                    # - barge-in / supersede signal from the listen loop
-                    # - the call itself is ending (was wasting up to
-                    #   12s of TTS into a dead WS on the last test
-                    #   because nothing here noticed the hangup)
-                    if (
-                        speaking.cancelled
-                        or generation != speaking.generation
-                        or stop.is_set()
-                    ):
-                        break
-                    await session.audio_out.write(synth.audio[i : i + chunk_size])
-                    chunks_written += 1
-                    # Realtime pacing so we don't blast the carrier
-                    # buffer (which can disable barge-in). 20ms.
-                    await asyncio.sleep(0.02)
-                log.info(
-                    "TTS playback done — chunks_written=%d bytes=%d "
-                    "wall_seconds≈%.2f (cancelled=%s)",
-                    chunks_written,
-                    chunks_written * chunk_size,
-                    chunks_written * 0.02,
-                    speaking.cancelled,
-                )
-            finally:
-                speaking.active = False
-
-            # Dispatch the LLM's tool calls now that the audio has
-            # been spoken. ``END_CONVERSATION`` / ``ESCALATE`` end the
-            # call cleanly — the remote heard the goodbye line before
-            # the line went dead.
-            ctx_after_speak = _make_brain_ctx()
-            for tc in response.message.tool_calls:
-                handled = await brain_tool_provider.handle_brain_tool(
-                    tc.tool_name, tc.arguments, ctx_after_speak
-                )
-                if handled in (
-                    BrainToolResult.END_CONVERSATION,
-                    BrainToolResult.ESCALATE,
-                ):
-                    stop.set()
-                    try:
-                        await session.hang_up()
-                    except Exception:
-                        log.debug("hang_up cleanup error", exc_info=True)
-                    return
-
-        # (brain tools have moved out of this function — see
-        # ``PhoneCallBrainToolProvider`` at module scope. The
-        # dispatch loop above invokes the provider's
-        # ``handle_brain_tool`` with a per-call ``ConversationContext``.)
-
-        # ── timeout watchdog: hard cap the call duration ──────────────
-
-        async def _watchdog() -> None:
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self._max_call_seconds)
-            except TimeoutError:
-                log.warning(
-                    "Call exceeded %ds cap — forcing hang up",
-                    self._max_call_seconds,
-                )
-                record.outcome["forced_hangup_reason"] = "max_duration_exceeded"
-                stop.set()
-                try:
-                    await session.hang_up()
-                except Exception:
-                    pass
-
-        # ── orchestrate the three loops ────────────────────────────────
-
-        log.info("_run_call: entering gather of status/listen/watchdog loops")
+        outcome: ConversationOutcome | None = None
         try:
-            results = await asyncio.gather(
-                _status_loop(),
-                _listen_loop(),
-                _watchdog(),
-                return_exceptions=True,
+            outcome = await self._voice_brain.run_conversation(
+                session, engine_config
             )
-            log.info(
-                "_run_call: gather returned — results=%s",
-                [type(r).__name__ if isinstance(r, BaseException) else "ok" for r in results],
-            )
+        except Exception:
+            log.exception("voice_brain.run_conversation crashed")
         finally:
-            log.info("_run_call: entering finally cleanup (status before=%s)", record.status)
-            # Always tell the carrier to terminate. If the brain exited
-            # cleanly through the remote-hangup path the backend's
-            # hang_up is already a no-op; if we exited because of an
-            # internal crash (transcription failure, LLM error, etc.)
-            # this is what stops Telnyx from keeping the call line open
-            # and billing for it.
-            try:
-                await session.hang_up()
-            except Exception:
-                log.debug("hang_up cleanup error", exc_info=True)
-
+            # Final cleanup — same shape as the old inline finally.
             record.ended_at = _now_iso()
             try:
                 started = datetime.fromisoformat(
@@ -1416,6 +980,10 @@ class PhoneCallService(Service):
                 record.duration_seconds = (ended - started).total_seconds()
             except Exception:
                 pass
+            if outcome is not None:
+                record.outcome.update(outcome.outcome)
+                if outcome.failure_reason:
+                    record.failure_reason = outcome.failure_reason
             if record.status not in (
                 CallStatus.HUNG_UP.value,
                 CallStatus.FAILED.value,
@@ -1716,103 +1284,11 @@ def _format_call_ended_summary(record: _CallRecord) -> str:
     return "\n".join(parts)
 
 
-class _MonotonicClock:
-    """Seconds-since-construction clock for transcript timestamps."""
+# (``_MonotonicClock`` and ``_pump_audio_to_stt`` moved into the
+# generic engine at ``gilbert.core.services.voice_brain``. The brain
+# uses its own clock for transcript timestamps and the same pump
+# helper for STT.)
 
-    def __init__(self) -> None:
-        self._start = asyncio.get_event_loop().time()
-
-    def now(self) -> float:
-        return asyncio.get_event_loop().time() - self._start
-
-
-async def _pump_audio_to_stt(
-    audio_in: Any,
-    stream: Any,
-    on_speech_detected: Any = None,
-) -> None:
-    """Read mulaw-8k chunks from the carrier and feed PCM-16 to the
-    transcriber. Decodes per-chunk so latency stays at the chunk
-    boundary instead of buffering.
-
-    Also runs a tiny local VAD on the PCM stream and calls
-    ``on_speech_detected()`` when sustained-energy speech is
-    detected. This is our fallback barge-in signal because Scribe
-    Realtime's server-side VAD only emits ``partial_transcript`` /
-    ``committed_transcript`` after the user pauses — useless during
-    a continuous user-and-Gilbert overlap where the user keeps
-    talking right through Gilbert's TTS.
-
-    ``audioop.ulaw2lin`` is deprecated in 3.13 but still functional.
-    Replace with ``soxr`` or a vendored C helper if it gets removed.
-    """
-    pump_count = 0
-    # Local VAD state — rolling RMS over the last N=10 chunks (200ms
-    # at 50fps). Threshold tuned for an 8 kHz mulaw → 16-bit PCM
-    # stream: silence RMS sits around 0-200, normal phone speech is
-    # 1500-6000. 800 is conservative — high enough to ignore line
-    # noise / breath / fans, low enough to catch a quiet "stop."
-    _VAD_RMS_THRESHOLD = 800
-    _VAD_WINDOW_FRAMES = 10
-    rms_window: list[int] = []
-    # Once we've fired the callback for one barge-in window, suppress
-    # further fires for this many frames so we don't spam it during
-    # a single user utterance. ~1s gap before we'd consider firing
-    # again (which only matters if the brain didn't actually
-    # cancel — the callback itself is idempotent, this is just for
-    # log hygiene).
-    suppress_until = 0
-    try:
-        async for chunk in audio_in:
-            pcm = audioop.ulaw2lin(chunk, 2)  # 8-bit µ-law → 16-bit PCM
-            await stream.send(pcm)
-            pump_count += 1
-
-            # Local VAD: track rolling RMS and fire the callback when
-            # sustained energy crosses the threshold. ``audioop.rms``
-            # is a single C call so this stays cheap.
-            try:
-                rms = audioop.rms(pcm, 2)
-            except Exception:
-                rms = 0
-            rms_window.append(rms)
-            if len(rms_window) > _VAD_WINDOW_FRAMES:
-                rms_window.pop(0)
-            if (
-                on_speech_detected is not None
-                and pump_count > suppress_until
-                and len(rms_window) >= _VAD_WINDOW_FRAMES
-                # Most of the window must be above threshold (>= 70%)
-                # — single-frame spikes are usually just clicks.
-                and sum(1 for r in rms_window if r > _VAD_RMS_THRESHOLD)
-                >= int(_VAD_WINDOW_FRAMES * 0.7)
-            ):
-                avg_rms = sum(rms_window) // len(rms_window)
-                logger.info(
-                    "local VAD: speech detected (avg_rms=%d over last %d frames)",
-                    avg_rms,
-                    _VAD_WINDOW_FRAMES,
-                )
-                try:
-                    on_speech_detected()
-                except Exception:
-                    logger.debug("on_speech_detected raised", exc_info=True)
-                # Suppress for ~1s so a continuous utterance doesn't
-                # log a new VAD event every chunk.
-                suppress_until = pump_count + 50
-
-            # Heartbeat: ~1/sec at the 50fps inbound cadence. Lets us
-            # tell at a glance whether the pump is keeping up with
-            # ingest during a TTS burst (if pump count falls behind
-            # the WS-route inbound count, we have a starvation
-            # problem and Scribe never sees the user's audio).
-            if pump_count % 50 == 0:
-                logger.info(
-                    "audio pump → Scribe: chunks_forwarded=%d",
-                    pump_count,
-                )
-    except Exception:
-        logger.debug("audio pump ended", exc_info=True)
 
 
 class PhoneCallBrainToolProvider:

@@ -409,9 +409,18 @@ class Gilbert:
 
         self.service_manager.register(AgentService())
 
-        # Phone calls — depends on tts + speech_to_text + ai_chat which
-        # are all already registered above. Requires a telephony backend
-        # registered by a plugin (currently only ``telnyx``).
+        # Voice-brain engine — generic conversation-loop driver. Phone
+        # calls (and the eventual wake-word voice-agent plugin) delegate
+        # the LLM-turn loop, STT pump, local-VAD barge-in, TTS pacing,
+        # and brain-tool dispatch to this single engine. Has to register
+        # BEFORE any modality wrapper that consumes ``voice_brain``.
+        from gilbert.core.services.voice_brain import VoiceBrainService
+
+        self.service_manager.register(VoiceBrainService())
+
+        # Phone calls — depends on voice_brain + tts + speech_to_text +
+        # ai_chat (all already registered above). Requires a telephony
+        # backend registered by a plugin (currently only ``telnyx``).
         from gilbert.core.services.phone_call import PhoneCallService
 
         self.service_manager.register(PhoneCallService())
