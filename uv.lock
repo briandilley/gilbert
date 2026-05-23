@@ -38,6 +38,7 @@ members = [
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
     "gilbert-plugin-openwakeword",
+    "gilbert-plugin-phone",
     "gilbert-plugin-plex",
     "gilbert-plugin-porcupine",
     "gilbert-plugin-pushover",
@@ -1073,6 +1074,7 @@ dependencies = [
     { name = "gilbert-plugin-openai-compatible" },
     { name = "gilbert-plugin-openrouter" },
     { name = "gilbert-plugin-openwakeword" },
+    { name = "gilbert-plugin-phone" },
     { name = "gilbert-plugin-plex" },
     { name = "gilbert-plugin-porcupine" },
     { name = "gilbert-plugin-pushover" },
@@ -1159,6 +1161,7 @@ requires-dist = [
     { name = "gilbert-plugin-openai-compatible", virtual = "std-plugins/openai-compatible" },
     { name = "gilbert-plugin-openrouter", virtual = "std-plugins/openrouter" },
     { name = "gilbert-plugin-openwakeword", virtual = "std-plugins/openwakeword" },
+    { name = "gilbert-plugin-phone", virtual = "std-plugins/phone" },
     { name = "gilbert-plugin-plex", virtual = "std-plugins/plex" },
     { name = "gilbert-plugin-porcupine", virtual = "std-plugins/porcupine" },
     { name = "gilbert-plugin-pushover", virtual = "std-plugins/pushover" },
@@ -1414,6 +1417,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "openwakeword", specifier = ">=0.6" }]
+
+[[package]]
+name = "gilbert-plugin-phone"
+version = "1.0.0"
+source = { virtual = "std-plugins/phone" }
 
 [[package]]
 name = "gilbert-plugin-plex"

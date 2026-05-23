@@ -418,12 +418,13 @@ class Gilbert:
 
         self.service_manager.register(VoiceBrainService())
 
-        # Phone calls — depends on voice_brain + tts + speech_to_text +
-        # ai_chat (all already registered above). Requires a telephony
-        # backend registered by a plugin (currently only ``telnyx``).
-        from gilbert.core.services.phone_call import PhoneCallService
-
-        self.service_manager.register(PhoneCallService())
+        # Phone calls — moved into a plugin (``std-plugins/phone/``).
+        # The plugin's ``setup`` registers ``PhoneCallService`` with
+        # this same service manager via ``context.services.register``.
+        # Carrier integration (Telnyx, eventually others) lives in
+        # ``std-plugins/telnyx/`` and registers its
+        # ``TelephonyBackend`` via the backend registry. Nothing for
+        # the composition root to do here anymore.
 
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
