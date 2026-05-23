@@ -77,6 +77,7 @@ dependencies = [
     "gilbert-plugin-sonos",
     "gilbert-plugin-tavily",
     "gilbert-plugin-telegram",
+    "gilbert-plugin-telnyx",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
     "gilbert-plugin-withings",
@@ -122,6 +123,7 @@ gilbert-plugin-slack = { workspace = true }
 gilbert-plugin-sonos = { workspace = true }
 gilbert-plugin-tavily = { workspace = true }
 gilbert-plugin-telegram = { workspace = true }
+gilbert-plugin-telnyx = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
 gilbert-plugin-withings = { workspace = true }

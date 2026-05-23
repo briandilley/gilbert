@@ -34,6 +34,7 @@ import { WarRoomPage } from "@/components/goals/WarRoomPage";
 import { PresencePage } from "@/components/presence/PresencePage";
 import { HealthPage } from "@/components/health/HealthPage";
 import { HealthAuditLogPage } from "@/components/health/HealthAuditLogPage";
+import { PhoneCallsPage } from "@/components/phone/PhoneCallsPage";
 import { usePluginRouteElements } from "@/components/PluginRoutes";
 
 export default function App() {
@@ -80,6 +81,8 @@ export default function App() {
           <Route path="/goals" element={<GoalsListPage />} />
           <Route path="/goals/:goalId" element={<WarRoomPage />} />
           <Route path="/presence" element={<PresencePage />} />
+          <Route path="/calls" element={<PhoneCallsPage />} />
+          <Route path="/calls/:callId" element={<PhoneCallsPage />} />
           <Route path="/account" element={<AccountPage />} />
           <Route path="/health" element={<HealthPage />} />
           <Route

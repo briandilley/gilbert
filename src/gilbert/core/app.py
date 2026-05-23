@@ -409,6 +409,13 @@ class Gilbert:
 
         self.service_manager.register(AgentService())
 
+        # Phone calls — depends on tts + speech_to_text + ai_chat which
+        # are all already registered above. Requires a telephony backend
+        # registered by a plugin (currently only ``telnyx``).
+        from gilbert.core.services.phone_call import PhoneCallService
+
+        self.service_manager.register(PhoneCallService())
+
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
         config_svc.register_factory("ai", self._factory_ai)

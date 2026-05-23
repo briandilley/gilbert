@@ -299,6 +299,21 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                # Nav entry only appears when the phone_call service is
+                # both registered AND enabled (``requires_capability``
+                # checks both). Disabled deployments stay hidden so
+                # users without Telnyx credentials don't see a dead
+                # link.
+                "key": "calls",
+                "label": "Calls",
+                "description": "Outbound calls Gilbert places on your behalf",
+                "url": "/calls",
+                "icon": "phone",
+                "required_role": "user",
+                "requires_capability": "phone_calls",
+                "items": [],
+            },
+            {
                 "key": "knowledge",
                 "label": "Knowledge",
                 "description": "Browse, search, and manage indexed documents",
