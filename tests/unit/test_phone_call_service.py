@@ -276,10 +276,13 @@ async def test_execute_tool_rejects_unknown_tool_name() -> None:
 @pytest.mark.asyncio
 async def test_execute_tool_requires_user_context() -> None:
     """The AI tool needs to know which user is placing the call (for
-    the concurrency cap + the record's ``user_id``). Without the
-    injected ``_user_ctx`` the call can't be attributed and we refuse."""
+    the concurrency cap + the record's ``user_id``). Without a user on
+    the async-local context (or with the SYSTEM placeholder) the call
+    can't be attributed and we refuse."""
     svc = PhoneCallService()
     svc._enabled = True
+    # No ``set_current_user`` call happened, so ``get_current_user``
+    # returns ``UserContext.SYSTEM`` — exactly the case we reject.
     with pytest.raises(ValueError, match="user"):
         await svc.execute_tool(
             "make_phone_call",

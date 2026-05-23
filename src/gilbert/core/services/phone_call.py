@@ -597,11 +597,18 @@ class PhoneCallService(Service):
     ) -> str | ToolOutput:
         if name != "make_phone_call":
             raise KeyError(name)
-        # User context is injected by the AI orchestrator into
-        # ``arguments['_user_ctx']`` for tools that need it. Fall back
-        # to the most-recently-active connection's user if absent.
-        ctx = arguments.get("_user_ctx")
-        if ctx is None:
+        # User context comes from the async-local set by the AI
+        # orchestrator in ``_execute_tool_calls`` right before
+        # invoking the provider. ``get_current_user`` returns
+        # ``UserContext.SYSTEM`` when nothing is set — we reject
+        # that case explicitly because a phone call without a real
+        # caller can't be attributed for the concurrency cap or the
+        # call record's ``user_id``.
+        from gilbert.interfaces.auth import UserContext
+        from gilbert.interfaces.context import get_current_user
+
+        ctx = get_current_user()
+        if ctx is UserContext.SYSTEM or not getattr(ctx, "user_id", ""):
             raise ValueError(
                 "make_phone_call must be invoked in the context of a user"
             )
@@ -613,7 +620,9 @@ class PhoneCallService(Service):
         try:
             call_id = await self.start_call(
                 user_id=str(getattr(ctx, "user_id", "")),
-                display_name=str(getattr(ctx, "display_name", "the user")),
+                display_name=str(
+                    getattr(ctx, "display_name", "") or "the user"
+                ),
                 to_number=to_number,
                 brief=brief,
                 callback_number=callback_number,
