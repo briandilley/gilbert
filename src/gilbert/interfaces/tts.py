@@ -1,6 +1,7 @@
 """Text-to-speech interface — convert text into audio."""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -168,3 +169,116 @@ class AICapableTTSBackend(Protocol):
         boundary with ``isinstance(ai, AISamplingProvider)``.
         """
         ...
+
+
+# ── Streaming TTS ────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TTSStreamConfig:
+    """Config for a bidirectional TTS session."""
+
+    voice_id: str
+    output_format: AudioFormat = AudioFormat.MP3
+    speed: float = 1.0
+    context: str = ""
+    sample_rate: int = 44100   # PCM-only; phone-friendly preset is 8000
+
+
+@dataclass(frozen=True)
+class TTSAudioChunk:
+    """Audio bytes emitted from a TTS stream."""
+    audio: bytes
+
+
+@dataclass(frozen=True)
+class TTSWordTiming:
+    """Word-level alignment metadata, if the backend reports it."""
+    word: str
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
+class TTSFlushed:
+    """Backend has finished synthesizing one flush boundary
+    (i.e. all text sent before the last flush has been rendered)."""
+    at_seconds: float
+
+
+@dataclass(frozen=True)
+class TTSStreamError:
+    """Recoverable or fatal error mid-stream."""
+    message: str
+    recoverable: bool = False
+
+
+TTSEvent = TTSAudioChunk | TTSWordTiming | TTSFlushed | TTSStreamError
+
+
+class TTSStream(ABC):
+    """A bidirectional TTS session opened by a backend.
+
+    Producer pushes text via ``send_text``; consumer reads
+    ``TTSEvent`` items from the ``events()`` async iterator.
+    ``flush()`` tells the backend to start synthesizing the
+    text buffered so far. ``close()`` signals end-of-input;
+    ``events()`` still drains any final events the backend
+    emits during shutdown.
+    """
+
+    @abstractmethod
+    async def send_text(self, text: str) -> None: ...
+
+    @abstractmethod
+    async def flush(self) -> None: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
+
+    @abstractmethod
+    def events(self) -> AsyncIterator[TTSEvent]: ...
+
+
+@runtime_checkable
+class StreamingTTSCapability(Protocol):
+    """Optional capability on a ``TTSBackend``: one-shot text in,
+    chunked audio out. Backends opt in by implementing
+    ``synthesize_stream``."""
+
+    def synthesize_stream(
+        self, request: SynthesisRequest,
+    ) -> AsyncIterator[bytes]: ...
+
+
+@runtime_checkable
+class BidirectionalTTSCapability(Protocol):
+    """Optional capability on a ``TTSBackend``: push-text /
+    read-audio session. Backends opt in by implementing
+    ``open_stream``."""
+
+    async def open_stream(self, config: TTSStreamConfig) -> "TTSStream": ...
+
+
+# ── Consumer-facing capability protocols (mirror the above on the
+#    service side so callers can depend on a Protocol, not the
+#    concrete ``TTSService``).
+
+
+@runtime_checkable
+class StreamingTTSProvider(Protocol):
+    def synthesize_stream(
+        self, request: SynthesisRequest,
+    ) -> AsyncIterator[bytes]: ...
+
+
+@runtime_checkable
+class BidirectionalTTSProvider(Protocol):
+    async def open_stream(self, config: TTSStreamConfig) -> "TTSStream": ...
+
+
+class TTSCapabilityError(RuntimeError):
+    """Raised when a caller requests a TTS capability the active
+    backend does not implement. Distinct from generic
+    ``RuntimeError`` so callers can ``except TTSCapabilityError``
+    and fall back to batch synthesis."""
