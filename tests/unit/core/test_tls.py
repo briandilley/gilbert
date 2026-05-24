@@ -44,7 +44,7 @@ def test_san_includes_localhost_and_loopback_ips(cert_paths: tuple[Path, Path]) 
     ensure_self_signed_cert(cert_path, key_path)
     cert = _load_cert(cert_path)
     san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-    dns_names = [n.value for n in san_ext.get_values_for_type(x509.DNSName)]
+    dns_names = list(san_ext.get_values_for_type(x509.DNSName))
     ip_strs = [str(ip) for ip in san_ext.get_values_for_type(x509.IPAddress)]
     assert "localhost" in dns_names
     assert "127.0.0.1" in ip_strs
@@ -58,7 +58,7 @@ def test_san_includes_hostname_and_outbound_ip(cert_paths: tuple[Path, Path]) ->
         ensure_self_signed_cert(cert_path, key_path)
     cert = _load_cert(cert_path)
     san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-    dns_names = [n.value for n in san.get_values_for_type(x509.DNSName)]
+    dns_names = list(san.get_values_for_type(x509.DNSName))
     ip_strs = [str(ip) for ip in san.get_values_for_type(x509.IPAddress)]
     assert "test-host" in dns_names
     assert "test-host.local" in dns_names
