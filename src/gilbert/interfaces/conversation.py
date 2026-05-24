@@ -373,6 +373,9 @@ class ConversationConfig:
     on_llm_turn: (
         Callable[[str, list[str]], Awaitable[None]] | None
     ) = None  # (text, tool_names)
+    on_speaking_done: (
+        Callable[[], Awaitable[None]] | None
+    ) = None  # fired after each TTS playback completes (engine quiet)
 
 
 # ── Outcome the engine returns ───────────────────────────────────────

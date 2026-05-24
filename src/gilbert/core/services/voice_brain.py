@@ -473,6 +473,18 @@ class VoiceBrainService(Service):
                     log.debug("audio_out.flush raised", exc_info=True)
             finally:
                 speaking.active = False
+            # End-of-utterance signal for the wrapper. Voice-agent uses
+            # this to reset its silence timer at the moment Gilbert
+            # quiets down rather than when he STARTS speaking (which is
+            # what the transcript-turn event fires at). Without this
+            # distinction, a 12-second LLM answer would let the
+            # 10-second silence elapse mid-sentence and drop the
+            # session into dormant while Gilbert was still talking.
+            if config.on_speaking_done is not None:
+                try:
+                    await config.on_speaking_done()
+                except Exception:
+                    log.debug("on_speaking_done callback raised", exc_info=True)
 
         async def _think_and_speak_via_chat(user_text: str) -> None:
             """LLM turn via ``AIProvider.chat()`` — the agentic loop
