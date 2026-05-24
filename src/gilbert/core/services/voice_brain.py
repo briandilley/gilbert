@@ -406,6 +406,14 @@ class VoiceBrainService(Service):
         # messages directly.
         chat_conv_id: str | None = None
 
+        # Flips to True after the first ``_think_and_speak_via_chat``
+        # call returns. We use this to suppress the filler ("hmm,
+        # let me check…") on the SPEAK_FIRST opener — no user is
+        # waiting yet, so a filler just delays the greeting, and
+        # cold-cache TTFB on the first chat() call almost always
+        # exceeds the filler threshold even for a trivial response.
+        opener_done = False
+
         async def _speak_text(text: str, *, fire_done_event: bool = True) -> None:
             """Synthesize ``text`` and write it to the session's audio
             out. Shared between both think-and-speak paths.
@@ -514,7 +522,7 @@ class VoiceBrainService(Service):
             are still working. The real response plays normally
             after chat() returns.
             """
-            nonlocal chat_conv_id
+            nonlocal chat_conv_id, opener_done
             if self._ai_chat is None:
                 log.warning("ai_chat AIProvider missing — cannot respond")
                 return
@@ -536,7 +544,8 @@ class VoiceBrainService(Service):
                 )
 
                 filler_enabled = (
-                    config.filler_threshold_seconds > 0.0
+                    opener_done
+                    and config.filler_threshold_seconds > 0.0
                     and bool(config.filler_phrases)
                 )
 
@@ -569,6 +578,9 @@ class VoiceBrainService(Service):
                         result = await chat_task
                 else:
                     result = await chat_task
+                # First turn (opener) just completed — future turns
+                # are eligible for the filler.
+                opener_done = True
             except Exception:
                 log.exception("ai.chat() failed")
                 return
