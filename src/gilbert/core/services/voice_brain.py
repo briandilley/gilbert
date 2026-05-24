@@ -579,6 +579,20 @@ class VoiceBrainService(Service):
                 log.warning("ai_chat AIProvider missing — cannot respond")
                 return
 
+            # Wrapper hook to prepend operator directives, system
+            # notes, etc. before each LLM call. Phone uses this to
+            # drain its intervene-text queue ("ask about the loaner
+            # again") so the brain sees the directive on its next
+            # turn. Returns the (possibly modified) user_text.
+            if config.mutate_user_text is not None:
+                try:
+                    user_text = await config.mutate_user_text(user_text)
+                except Exception:
+                    log.exception(
+                        "mutate_user_text callback raised; using "
+                        "original user_text"
+                    )
+
             ctx = _make_brain_ctx()
             set_current_conversation_ctx(ctx)
             try:

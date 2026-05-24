@@ -403,6 +403,17 @@ class ConversationConfig:
         Callable[[], Awaitable[None]] | None
     ) = None  # fired after each TTS playback completes (engine quiet)
 
+    # Hook to mutate the user_message before each ai.chat() call. The
+    # wrapper returns the (possibly-modified) text; the engine passes
+    # that to ai.chat. Phone uses this to prepend pending operator
+    # directives ("ask about the loaner again", "don't agree to
+    # Tuesday") as system notes the brain can act on. The directive
+    # takes effect on the NEXT user turn — for immediate action,
+    # use the engine's tool path (e.g. hang_up).
+    mutate_user_text: (
+        Callable[[str], Awaitable[str]] | None
+    ) = None
+
 
 # ── Outcome the engine returns ───────────────────────────────────────
 
