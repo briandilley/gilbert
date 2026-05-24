@@ -37,7 +37,9 @@ class _BatchOnlyBackend(TTSBackend):
 class _StreamingBackend(_BatchOnlyBackend):
     """Adds StreamingTTSCapability."""
 
-    chunks: list[bytes] = [b"AAA", b"BBB", b"CCC"]
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: list[bytes] = [b"AAA", b"BBB", b"CCC"]
 
     def synthesize_stream(self, request: SynthesisRequest) -> AsyncIterator[bytes]:
         chunks = self.chunks
