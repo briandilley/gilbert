@@ -542,17 +542,15 @@ class ConfigurationService(Service):
                             exc_info=True,
                         )
         elif source == "transcription.wake_word_backends":
-            svc = self._resolver.get_capability("speech_to_text")
-            if svc is not None:
-                backends = getattr(svc, "wake_word_backends", None)
-                if backends is not None:
-                    try:
-                        return sorted(backends.keys())
-                    except Exception:
-                        logger.debug(
-                            "transcription.wake_word_backends dynamic choices failed",
-                            exc_info=True,
-                        )
+            from gilbert.interfaces.transcription import WakeWordBackend
+
+            try:
+                return sorted(WakeWordBackend.registered_backends().keys())
+            except Exception:
+                logger.debug(
+                    "transcription.wake_word_backends dynamic choices failed",
+                    exc_info=True,
+                )
         elif source == "doorbells":
             from gilbert.interfaces.doorbell import AvailableDoorbellLister
 
