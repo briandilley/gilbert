@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { ConfigField } from "@/components/settings/ConfigField";
 import { useWsApi } from "@/hooks/useWsApi";
 import type { TaskList } from "@/types/tasks";
 import { AlertTriangle, Trash2 } from "lucide-react";
@@ -52,6 +53,8 @@ export function TaskListEditDrawer({ list, onClose, onSaved }: Props) {
   const [isDefault, setIsDefault] = useState(list?.is_default ?? false);
   const [forceDelete, setForceDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [backendActionResult, setBackendActionResult] = useState<string | null>(null);
+  const [backendActionRunning, setBackendActionRunning] = useState<string>("");
 
   useEffect(() => {
     if (!list) return;
@@ -64,6 +67,33 @@ export function TaskListEditDrawer({ list, onClose, onSaved }: Props) {
   }, [list]);
 
   const selectedBackend = backends.find((b) => b.name === backendName);
+
+  const runBackendAction = async (key: string) => {
+    setBackendActionResult(null);
+    setBackendActionRunning(key);
+    try {
+      const response = await api.invokeConfigAction("tasks", key, {
+        backend: backendName,
+        config: backendConfig,
+      });
+      const result = response.result;
+      const persistRaw = (result.data ?? {})["persist"];
+      if (persistRaw && typeof persistRaw === "object") {
+        setBackendConfig((prev) => ({
+          ...prev,
+          ...(persistRaw as Record<string, unknown>),
+        }));
+      }
+      if (result.open_url) {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
+      setBackendActionResult(result.message || result.status);
+    } catch (e) {
+      setBackendActionResult((e as Error).message || "Backend action failed");
+    } finally {
+      setBackendActionRunning("");
+    }
+  };
 
   const create = useMutation({
     mutationFn: () =>
@@ -168,42 +198,36 @@ export function TaskListEditDrawer({ list, onClose, onSaved }: Props) {
                 Backend configuration
               </div>
               {selectedBackend.config_params.map((p) => (
-                <div key={p.key}>
-                  <Label htmlFor={`bc-${p.key}`}>{p.key}</Label>
-                  {p.multiline ? (
-                    <textarea
-                      id={`bc-${p.key}`}
-                      value={String(backendConfig[p.key] ?? "")}
-                      onChange={(e) =>
-                        setBackendConfig({
-                          ...backendConfig,
-                          [p.key]: e.target.value,
-                        })
-                      }
-                      rows={4}
-                      className="w-full border rounded-md px-3 py-2 text-sm bg-background font-mono"
-                      placeholder={p.sensitive ? "********" : ""}
-                    />
-                  ) : (
-                    <Input
-                      id={`bc-${p.key}`}
-                      type={p.sensitive ? "password" : "text"}
-                      value={String(backendConfig[p.key] ?? "")}
-                      onChange={(e) =>
-                        setBackendConfig({
-                          ...backendConfig,
-                          [p.key]: e.target.value,
-                        })
-                      }
-                    />
-                  )}
-                  {p.description && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {p.description}
-                    </p>
-                  )}
-                </div>
+                <ConfigField
+                  key={p.key}
+                  param={p}
+                  value={backendConfig[p.key] ?? p.default}
+                  onChange={(key, value) =>
+                    setBackendConfig({ ...backendConfig, [key]: value })
+                  }
+                />
               ))}
+              {(selectedBackend.actions ?? []).filter((a) => !a.hidden).length > 0 && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {(selectedBackend.actions ?? [])
+                    .filter((a) => !a.hidden)
+                    .map((a) => (
+                      <Button
+                        key={a.key}
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => runBackendAction(a.key)}
+                        disabled={backendActionRunning === a.key}
+                      >
+                        {backendActionRunning === a.key ? "Running..." : a.label}
+                      </Button>
+                    ))}
+                </div>
+              )}
+              {backendActionResult && (
+                <p className="text-xs text-muted-foreground">{backendActionResult}</p>
+              )}
             </div>
           )}
 
@@ -332,4 +356,3 @@ export function TaskListEditDrawer({ list, onClose, onSaved }: Props) {
     </Sheet>
   );
 }
-

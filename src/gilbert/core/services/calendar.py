@@ -25,14 +25,14 @@ import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
-    invoke_backend_action,
+    invoke_backend_action_from_payload,
 )
 from gilbert.core.services._ui_blocks import build_preview_output, confirm_or_execute
 from gilbert.interfaces.auth import UserContext
@@ -134,7 +134,7 @@ class CalendarService(Service):
         # Service-level config (defaults match config_params).
         self._enabled: bool = False
         self._default_lookahead_days: int = 14
-        self._cache_back_hours: int = 2
+        self._cache_back_hours: int = 168
         self._upcoming_announce_minutes: int = 15
         self._aggregation_timeout_sec: int = 10
         self._mutate_publish_dedup_sec: int = 60
@@ -399,11 +399,10 @@ class CalendarService(Service):
                 type=ToolParameterType.INTEGER,
                 description=(
                     "How many hours into the past the cache retains events. "
-                    "Wide enough to answer 'what was my last meeting' for a "
-                    "few hours after it ends; narrow enough to keep cache "
-                    "size bounded."
+                    "Wide enough for the weekly agenda to show current-week "
+                    "history; narrow enough to keep cache size bounded."
                 ),
-                default=2,
+                default=168,
             ),
             ConfigParam(
                 key="upcoming_announce_minutes",
@@ -466,7 +465,7 @@ class CalendarService(Service):
     def _apply_config(self, section: dict[str, Any]) -> None:
         self._enabled = bool(section.get("enabled", False))
         self._default_lookahead_days = int(section.get("default_event_lookahead_days", 14) or 14)
-        self._cache_back_hours = int(section.get("cache_back_hours", 2) or 2)
+        self._cache_back_hours = int(section.get("cache_back_hours", 168) or 168)
         self._upcoming_announce_minutes = int(section.get("upcoming_announce_minutes", 15) or 15)
         self._aggregation_timeout_sec = int(section.get("aggregation_timeout_sec", 10) or 10)
         self._mutate_publish_dedup_sec = int(section.get("mutate_publish_dedup_sec", 60) or 60)
@@ -489,7 +488,12 @@ class CalendarService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(None, key, payload)
+        return await invoke_backend_action_from_payload(
+            registry=CalendarBackend.registered_backends(),
+            current_backend=None,
+            key=key,
+            payload=payload,
+        )
 
     # ── Authorization helpers ────────────────────────────────────────
 
@@ -827,8 +831,18 @@ class CalendarService(Service):
             await probe.initialize(settings)
             try:
                 calendars = await probe.list_calendars()
+                if account.calendar_id:
+                    now = datetime.now(UTC)
+                    await probe.list_events(
+                        account.calendar_id,
+                        now - timedelta(minutes=5),
+                        now + timedelta(days=1),
+                        max_results=1,
+                        single_events=True,
+                    )
             finally:
                 await probe.close()
+            await self._mark_account_healthy(account)
             return {"ok": True, "calendars": calendars}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -909,6 +923,26 @@ class CalendarService(Service):
                 "last_error": account.last_error,
             },
         )
+
+    async def _mark_account_healthy(self, account: CalendarAccount) -> None:
+        if account.health == "ok" and not account.last_error and not account.last_error_at:
+            return
+        account.health = "ok"
+        account.last_error = ""
+        account.last_error_at = ""
+        await self._storage.put(
+            _ACCOUNTS_COLLECTION,
+            account.id,
+            account.to_dict(),
+        )
+        await self._refresh_cache()
+        await self._publish_health_changed(account)
+
+    @staticmethod
+    def _event_for_account(account: CalendarAccount, evt: CalendarEvent) -> CalendarEvent:
+        if evt.account_id == account.id:
+            return evt
+        return replace(evt, account_id=account.id)
 
     # ── Polling ──────────────────────────────────────────────────────
 
@@ -1072,17 +1106,7 @@ class CalendarService(Service):
         runtime.next_poll_allowed_at = 0.0
 
         # Health recovery — flip back to ok if it was unhealthy.
-        if account.health != "ok":
-            account.health = "ok"
-            account.last_error = ""
-            account.last_error_at = ""
-            await self._storage.put(
-                _ACCOUNTS_COLLECTION,
-                account.id,
-                account.to_dict(),
-            )
-            await self._refresh_cache()
-            await self._publish_health_changed(account)
+        await self._mark_account_healthy(account)
 
         # Upcoming announcements.
         await self._emit_upcoming_for_account(account, fresh)
@@ -1770,6 +1794,7 @@ class CalendarService(Service):
         request.start = self._localize_naive(request.start, account.timezone)
         request.end = self._localize_naive(request.end, account.timezone)
         evt = await runtime.backend.create_event(account.calendar_id, request)
+        evt = self._event_for_account(account, evt)
         self._record_mutate_publish(account_id, evt.event_id)
         await self._publish_event_change("calendar.event.created", account, evt)
         return evt
@@ -1814,6 +1839,7 @@ class CalendarService(Service):
             )
         except CalendarBackendConflictError:
             raise
+        evt = self._event_for_account(account, evt)
         if evt.recurring_event_id is not None:
             logger.info(
                 "calendar.update_event on recurring instance (account=%s event=%s series=%s)",
@@ -3356,6 +3382,7 @@ class CalendarService(Service):
                 return self._err(frame, str(exc), 500)
         if evt is None:
             return self._err(frame, "Event not found", 404)
+        evt = self._event_for_account(account, evt)
         return {
             "type": "calendar.events.get.result",
             "ref": frame.get("id"),
@@ -3544,11 +3571,31 @@ class CalendarService(Service):
                 }
                 for p in cls.backend_config_params()
             ]
+            actions = []
+            try:
+                probe = cls()
+                raw_actions = probe.backend_actions() if hasattr(probe, "backend_actions") else []
+                actions = [
+                    {
+                        "key": a.key,
+                        "label": a.label,
+                        "description": a.description,
+                        "backend_action": True,
+                        "backend": name,
+                        "confirm": a.confirm,
+                        "required_role": a.required_role,
+                        "hidden": a.hidden,
+                    }
+                    for a in raw_actions
+                ]
+            except Exception:
+                actions = []
             backends.append(
                 {
                     "name": name,
                     "display_name": (cls.display_name or name.replace("_", " ").title()),
                     "config_params": params,
+                    "actions": actions,
                 }
             )
         return {

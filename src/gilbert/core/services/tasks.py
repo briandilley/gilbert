@@ -34,10 +34,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gilbert.interfaces.context import get_current_user
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
-    invoke_backend_action,
+    invoke_backend_action_from_payload,
 )
 from gilbert.core.services._ui_blocks import confirm_or_execute
 from gilbert.interfaces.ai import AISamplingProvider, Message, MessageRole
@@ -47,6 +46,7 @@ from gilbert.interfaces.configuration import (
     ConfigActionResult,
     ConfigParam,
 )
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -703,7 +703,12 @@ class TasksService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(None, key, payload)
+        return await invoke_backend_action_from_payload(
+            registry=TaskBackend.registered_backends(),
+            current_backend=None,
+            key=key,
+            payload=payload,
+        )
 
     # ── Internal: authorization helpers ──────────────────────────────
 
@@ -3931,7 +3936,26 @@ class TasksService(Service):
                 }
                 for p in cls.backend_config_params()
             ]
-            backends.append({"name": name, "config_params": params})
+            actions = []
+            try:
+                probe = cls()
+                raw_actions = probe.backend_actions() if hasattr(probe, "backend_actions") else []
+                actions = [
+                    {
+                        "key": a.key,
+                        "label": a.label,
+                        "description": a.description,
+                        "backend_action": True,
+                        "backend": name,
+                        "confirm": a.confirm,
+                        "required_role": a.required_role,
+                        "hidden": a.hidden,
+                    }
+                    for a in raw_actions
+                ]
+            except Exception:
+                actions = []
+            backends.append({"name": name, "config_params": params, "actions": actions})
         return {
             "type": "tasks.backends.list.result",
             "ref": frame.get("id"),

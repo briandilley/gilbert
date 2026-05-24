@@ -59,7 +59,7 @@ The `.gilbert/` directory is gitignored — your API keys, database, and logs st
 At minimum, before Gilbert is useful, open the Settings UI and configure:
 
 - **AI** → select the `anthropic` backend and enter your API key (`sk-ant-…`).
-- **Whatever plugins you care about** — e.g. Sonos speakers (discovery is automatic), Google Workspace (OAuth flow), UniFi presence (host + credentials), and so on. Each plugin's settings page has a **Test connection** button to verify credentials before you commit to them.
+- **Whatever plugins you care about** — e.g. Sonos speakers (discovery is automatic), Google personal-account or Workspace backends, UniFi presence (host + credentials), and so on. Each plugin's settings page has a **Test connection** button to verify credentials before you commit to them.
 
 ### Run
 

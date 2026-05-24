@@ -1,4 +1,4 @@
-import type { ConfigParamMeta } from "@/types/config";
+import type { ConfigActionMeta, ConfigParamMeta } from "@/types/config";
 
 // ── TaskList ─────────────────────────────────────────────────────────
 
@@ -31,6 +31,7 @@ export interface TaskList {
 export interface TaskBackendInfo {
   name: string;
   config_params: ConfigParamMeta[];
+  actions?: ConfigActionMeta[];
 }
 
 // ── Task ────────────────────────────────────────────────────────────
@@ -63,4 +64,3 @@ export interface Task {
   sync_status: SyncStatus;
   last_push_error: string;
 }
-

@@ -1,4 +1,4 @@
-import type { ConfigParamMeta } from "@/types/config";
+import type { ConfigActionMeta, ConfigParamMeta } from "@/types/config";
 
 // ── Mailbox ─────────────────────────────────────────────────────
 
@@ -24,6 +24,7 @@ export interface InboxMailbox {
 export interface EmailBackendInfo {
   name: string;
   config_params: ConfigParamMeta[];
+  actions?: ConfigActionMeta[];
 }
 
 // ── Stats ───────────────────────────────────────────────────────

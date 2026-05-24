@@ -1802,6 +1802,57 @@ async def test_conversation_saved_to_storage(
     assert conv_calls[0][0][1] == conv_id
 
 
+async def test_invalid_slash_command_arguments_return_chat_error(
+    ai_service: AIService,
+    resolver: ServiceResolver,
+) -> None:
+    """Slash parser errors should become assistant replies, not WS 500s."""
+
+    provider = StubToolProviderService(
+        tools=[
+            ToolDefinition(
+                name="lookup",
+                slash_command="lookup",
+                description="Lookup a place.",
+                parameters=[
+                    ToolParameter(
+                        name="query",
+                        type=ToolParameterType.STRING,
+                        description="Place query",
+                    ),
+                    ToolParameter(
+                        name="count",
+                        type=ToolParameterType.INTEGER,
+                        description="Maximum results",
+                        required=False,
+                    ),
+                ],
+            )
+        ],
+        results={"lookup": "should not execute"},
+    )
+
+    def get_all(cap: str) -> list[Any]:
+        if cap == "ai_tools":
+            return [provider]
+        return []
+
+    resolver.get_all = get_all  # type: ignore[method-assign]
+    await ai_service.start(resolver)
+
+    result = await ai_service.chat("/lookup Los Angeles")
+
+    assert result.response_text.startswith("Invalid value for 'count'")
+    assert result.tool_usage == [
+        {
+            "tool_name": "lookup",
+            "is_error": True,
+            "arguments": {},
+            "result": result.response_text,
+        }
+    ]
+
+
 # --- History Truncation ---
 
 

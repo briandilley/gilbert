@@ -127,3 +127,50 @@ async def invoke_backend_action(
             message=f"Backend doesn't support action '{key}'",
         )
     return await backend.invoke_backend_action(key, payload)
+
+
+async def invoke_backend_action_from_payload(
+    *,
+    registry: dict[str, type],
+    current_backend: Any,
+    key: str,
+    payload: dict[str, Any],
+) -> ConfigActionResult:
+    """Invoke a backend action using payload-selected unsaved backend config.
+
+    Resource editors can call service-level ``ConfigAction`` entries
+    before a mailbox/account/list exists. The payload supplies
+    ``backend`` and optional ``config``; this helper instantiates that
+    backend, initializes it when needed, and forwards the action.
+    """
+
+    backend_name = str(payload.get("backend") or "")
+    config = payload.get("config")
+    if backend_name:
+        cls = registry.get(backend_name)
+        if cls is None:
+            return ConfigActionResult(
+                status="error",
+                message=f"Unknown backend '{backend_name}'",
+            )
+        backend = cls()
+    else:
+        backend = current_backend
+
+    if backend is None:
+        return ConfigActionResult(
+            status="error",
+            message="No backend selected for this action.",
+        )
+    if not isinstance(backend, BackendActionProvider):
+        return ConfigActionResult(
+            status="error",
+            message=f"Backend doesn't support action '{key}'",
+        )
+
+    if isinstance(config, dict) and key == "test_connection":
+        initialize = getattr(backend, "initialize", None)
+        if callable(initialize):
+            await initialize(config)
+
+    return await backend.invoke_backend_action(key, payload)

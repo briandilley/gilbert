@@ -172,7 +172,9 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
         [action.key]: { status: "running", message: "", followup: "" },
       }));
       try {
-        const resp = await api.invokeConfigAction(section.namespace, invokeKey);
+        const resp = await api.invokeConfigAction(section.namespace, invokeKey, {
+          values: merged,
+        });
         const result: ConfigActionResult = resp.result;
 
         const persistRaw = (result.data ?? {})["persist"];
@@ -223,7 +225,7 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
         }));
       }
     },
-    [api, section.namespace, sectionState],
+    [api, merged, section.namespace, sectionState],
   );
 
   // Split params into groups
@@ -492,7 +494,7 @@ function ActionsBlock({
   hasChanges,
 }: ActionsBlockProps) {
   const visible = actions.filter(
-    (a) => !a.hidden && (!a.backend || a.backend === backendName),
+    (a) => !a.hidden && (!a.backend || !backendName || a.backend === backendName),
   );
   if (visible.length === 0) return null;
 

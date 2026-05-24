@@ -1,4 +1,4 @@
-import type { ConfigParamMeta } from "@/types/config";
+import type { ConfigActionMeta, ConfigParamMeta } from "@/types/config";
 
 // ── Account ─────────────────────────────────────────────────────
 
@@ -33,6 +33,7 @@ export interface CalendarBackendInfo {
   name: string;
   display_name: string;
   config_params: ConfigParamMeta[];
+  actions?: ConfigActionMeta[];
 }
 
 // ── Event ────────────────────────────────────────────────────────
@@ -97,4 +98,3 @@ export interface EventDraft {
   all_day?: boolean;
   send_invites?: boolean;
 }
-

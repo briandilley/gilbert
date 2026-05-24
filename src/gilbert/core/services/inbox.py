@@ -24,10 +24,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gilbert.interfaces.context import get_current_user
 from gilbert.core.services._backend_actions import (
     all_backend_actions,
-    invoke_backend_action,
+    invoke_backend_action_from_payload,
 )
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
@@ -35,6 +34,7 @@ from gilbert.interfaces.configuration import (
     ConfigActionResult,
     ConfigParam,
 )
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.email import (
     EmailAddress,
     EmailAttachment,
@@ -448,7 +448,12 @@ class InboxService(Service):
         key: str,
         payload: dict[str, Any],
     ) -> ConfigActionResult:
-        return await invoke_backend_action(None, key, payload)
+        return await invoke_backend_action_from_payload(
+            registry=EmailBackend.registered_backends(),
+            current_backend=None,
+            key=key,
+            payload=payload,
+        )
 
     # ── Internal: authorization helpers ──────────────────────────────
 
@@ -2531,7 +2536,26 @@ class InboxService(Service):
                 }
                 for p in cls.backend_config_params()
             ]
-            backends.append({"name": name, "config_params": params})
+            actions = []
+            try:
+                probe = cls()
+                raw_actions = probe.backend_actions() if hasattr(probe, "backend_actions") else []
+                actions = [
+                    {
+                        "key": a.key,
+                        "label": a.label,
+                        "description": a.description,
+                        "backend_action": True,
+                        "backend": name,
+                        "confirm": a.confirm,
+                        "required_role": a.required_role,
+                        "hidden": a.hidden,
+                    }
+                    for a in raw_actions
+                ]
+            except Exception:
+                actions = []
+            backends.append({"name": name, "config_params": params, "actions": actions})
         return {
             "type": "inbox.backends.list.result",
             "ref": frame.get("id"),

@@ -28,7 +28,9 @@ Indexes: `calendar_accounts(owner_user_id)`,
 `calendar_event_announcements(account_id, start_iso)`. The fetch and
 trim windows for `calendar_events` are deliberately **identical**
 (`now − cache_back_hours .. now + default_event_lookahead_days`) so the
-cache never holds rows the next poll wouldn't return.
+cache never holds rows the next poll wouldn't return. The default
+`cache_back_hours` is 168 hours so the weekly agenda can display the
+current week's history without requiring a separate historical fetch.
 
 **`start` / `end` vs `start_utc_iso` / `end_utc_iso`** — `start` and
 `end` are the original-tz ISO strings (e.g. `"2026-05-09T22:00:00-08:00"`)
