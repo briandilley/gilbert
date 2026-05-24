@@ -1731,6 +1731,7 @@ async def test_ws_events_create_happy_path(sqlite_storage: SQLiteStorage) -> Non
     out = await svc._ws_events_create(conn, frame)
     assert out["type"] == "calendar.events.create.result"
     assert out["event"]["title"] == "Hello"
+    assert out["event"]["account_id"] == account.id
 
 
 @pytest.mark.asyncio

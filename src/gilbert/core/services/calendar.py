@@ -25,7 +25,7 @@ import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -938,6 +938,12 @@ class CalendarService(Service):
         await self._refresh_cache()
         await self._publish_health_changed(account)
 
+    @staticmethod
+    def _event_for_account(account: CalendarAccount, evt: CalendarEvent) -> CalendarEvent:
+        if evt.account_id == account.id:
+            return evt
+        return replace(evt, account_id=account.id)
+
     # ── Polling ──────────────────────────────────────────────────────
 
     def _make_poll_callback(
@@ -1788,6 +1794,7 @@ class CalendarService(Service):
         request.start = self._localize_naive(request.start, account.timezone)
         request.end = self._localize_naive(request.end, account.timezone)
         evt = await runtime.backend.create_event(account.calendar_id, request)
+        evt = self._event_for_account(account, evt)
         self._record_mutate_publish(account_id, evt.event_id)
         await self._publish_event_change("calendar.event.created", account, evt)
         return evt
@@ -1832,6 +1839,7 @@ class CalendarService(Service):
             )
         except CalendarBackendConflictError:
             raise
+        evt = self._event_for_account(account, evt)
         if evt.recurring_event_id is not None:
             logger.info(
                 "calendar.update_event on recurring instance (account=%s event=%s series=%s)",
@@ -3374,6 +3382,7 @@ class CalendarService(Service):
                 return self._err(frame, str(exc), 500)
         if evt is None:
             return self._err(frame, "Event not found", 404)
+        evt = self._event_for_account(account, evt)
         return {
             "type": "calendar.events.get.result",
             "ref": frame.get("id"),
