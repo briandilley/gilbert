@@ -115,7 +115,7 @@ class _Speaking:
     whether a brand-new inbound speech burst should cancel an
     in-flight TTS playback."""
 
-    __slots__ = ("active", "cancelled", "generation")
+    __slots__ = ("active", "cancelled", "generation", "cancel_event")
 
     def __init__(self) -> None:
         self.active = False
@@ -124,6 +124,12 @@ class _Speaking:
         # from an old utterance can't poison the next one. Compared
         # against a per-loop snapshot in the TTS chunk-writer.
         self.generation = 0
+        # Wakes a sleeping wait-for-playback the moment a barge-in
+        # cancellation fires, instead of letting the engine sleep
+        # for the full estimated duration before noticing. Re-created
+        # at the start of each ``_speak_text`` so a stale signal
+        # from a prior utterance can't fire on a new one.
+        self.cancel_event: asyncio.Event = asyncio.Event()
 
 
 # ── Monotonic clock for per-conversation timestamps ──────────────────
@@ -482,6 +488,9 @@ class VoiceBrainService(Service):
             )
             speaking.active = True
             speaking.cancelled = False
+            # Fresh cancel event per utterance so a barge-in signal
+            # from a previous utterance can't fire on this one.
+            speaking.cancel_event = asyncio.Event()
             generation = speaking.generation = speaking.generation + 1
             spoke_at_all = True
             write_start = asyncio.get_event_loop().time()
@@ -552,19 +561,38 @@ class VoiceBrainService(Service):
                     log.info(
                         "TTS waiting for browser playback — "
                         "estimated %.1fs total, %.1fs elapsed, "
-                        "sleeping %.1fs before on_speaking_done",
+                        "sleeping up to %.1fs before on_speaking_done",
                         synth_duration,
                         elapsed,
                         remaining,
                     )
+                    # Race the playback estimate against a barge-in
+                    # cancellation. Without this, an interrupt
+                    # ("Oh.", "Stop.") arrives while we're snoozing
+                    # for the full estimated duration — the user
+                    # hears Gilbert finish his sentence before
+                    # responding to their interjection. Waking on
+                    # cancel_event lets ``on_speaking_done`` fire
+                    # right away (timer resets, dormant countdown
+                    # starts) AND lets the listen-loop's
+                    # _think_and_speak call proceed without
+                    # waiting for a stale TTS to "finish."
                     try:
-                        await asyncio.sleep(remaining)
+                        await asyncio.wait_for(
+                            speaking.cancel_event.wait(),
+                            timeout=remaining,
+                        )
+                        log.info(
+                            "TTS playback wait cancelled by barge-in"
+                        )
+                    except TimeoutError:
+                        # Normal completion — playback estimate
+                        # elapsed without a cancel.
+                        pass
                     except asyncio.CancelledError:
                         # The conversation was being torn down
                         # while we waited — fall through and let
-                        # the caller handle teardown. on_speaking_done
-                        # below will still fire so callbacks aren't
-                        # silently lost.
+                        # the caller handle teardown.
                         pass
             # End-of-utterance signal for the wrapper. Voice-agent uses
             # this to reset its silence timer at the moment Gilbert
@@ -1050,6 +1078,7 @@ class VoiceBrainService(Service):
                 if not speaking.active:
                     return
                 speaking.cancelled = True
+                speaking.cancel_event.set()
                 asyncio.create_task(session.audio_out.clear())
                 log.info("local VAD: barge-in cancelling in-flight TTS")
 
@@ -1167,6 +1196,7 @@ class VoiceBrainService(Service):
                             remote_started_talking = True
                             if speaking.active:
                                 speaking.cancelled = True
+                                speaking.cancel_event.set()
                                 await session.audio_out.clear()
                         elif isinstance(ev, PartialTranscript):
                             # Scribe is mid-transcribing the user.
@@ -1300,6 +1330,7 @@ class VoiceBrainService(Service):
                 # finishes his current sentence.
                 if speaking.active:
                     speaking.cancelled = True
+                    speaking.cancel_event.set()
                     try:
                         await session.audio_out.clear()
                     except Exception:
