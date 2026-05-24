@@ -380,6 +380,17 @@ class ConversationConfig:
     filler_threshold_seconds: float = 0.0
     filler_phrases: list[str] = field(default_factory=list)
 
+    # Spoken if the LLM calls a hang-up tool (ctx.outcome
+    # ["end_requested"]) without including any final text for
+    # Gilbert to say. Without a fallback the call drops with dead
+    # air → dial tone, which is rude on phone (and weird on voice
+    # agent). The wrapper picks a random one and the engine speaks
+    # it before triggering session.end_session().
+    #
+    # Empty list = the engine does nothing extra (current behaviour
+    # if you opt out). Phone and voice-agent both populate this.
+    default_goodbye_phrases: list[str] = field(default_factory=list)
+
     # External pause signal for the engine's STT lifecycle. When the
     # wrapper sets this Event, the engine closes its open STT stream
     # and cancels the audio pump (so it isn't paying ElevenLabs Scribe

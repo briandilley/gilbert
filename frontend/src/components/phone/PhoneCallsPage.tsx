@@ -332,8 +332,15 @@ function TranscriptRow({ turn }: { turn: PhoneCallTranscriptTurn }) {
   // Three visual lanes — Gilbert (signal color), remote (foreground),
   // system notes (muted). Mirrors the chat transcript vocabulary so
   // anyone reading both pages reads them the same way.
+  //
+  // Layout note: each speaker line is its own block element so
+  // copy-paste preserves line breaks between turns (flex sibling
+  // boundaries don't add whitespace to the clipboard, but block
+  // boundaries do). The speaker label includes a literal colon +
+  // space so a paste reads "Them: Hello?" instead of "ThemHello?".
   const isUs = turn.who === "us";
   const isSystem = turn.who === "system" || turn.who === "user_intervention";
+  const label = isUs ? "Gilbert" : isSystem ? "system" : "Them";
   return (
     <div className="flex gap-2 items-start">
       <span
@@ -346,7 +353,11 @@ function TranscriptRow({ turn }: { turn: PhoneCallTranscriptTurn }) {
               : "text-foreground",
         )}
       >
-        {isUs ? "Gilbert" : isSystem ? "system" : "Them"}
+        {/* Explicit visible colon — without it the speaker and
+            message land next to each other in clipboard text
+            ("ThemHello?"). sr-only / pseudo-element tricks are
+            unreliable across browsers for copy. */}
+        {label}:
       </span>
       <span
         className={cn(

@@ -623,18 +623,37 @@ class VoiceBrainService(Service):
                         # synth+play, which itself takes ~1-2s; by
                         # the time it finishes, chat_task may
                         # already be done.
-                        filler = random.choice(config.filler_phrases)
-                        log.info(
-                            "LLM slow (>%.1fs) — speaking filler %r",
-                            config.filler_threshold_seconds,
-                            filler,
-                        )
-                        await _record_turn("us", filler)
-                        # fire_done_event=False so the silence
-                        # monitor doesn't think we're done talking
-                        # — the real answer still has to play.
-                        await _speak_text(filler, fire_done_event=False)
-                        result = await chat_task
+                        #
+                        # Race-guard: wait_for's timeout fires when
+                        # the timer expires, but scheduling can let
+                        # chat_task actually finish a few ms before
+                        # we get woken up. In that case we'd speak
+                        # a filler AFTER the LLM was already done —
+                        # particularly bad when the LLM called
+                        # hang_up with no text (the filler becomes
+                        # Gilbert's only utterance before the call
+                        # drops). Skip the filler if chat_task is
+                        # already done by the time we observe the
+                        # timeout.
+                        if chat_task.done():
+                            log.debug(
+                                "filler suppressed — chat_task "
+                                "completed during timeout window"
+                            )
+                            result = chat_task.result()
+                        else:
+                            filler = random.choice(config.filler_phrases)
+                            log.info(
+                                "LLM slow (>%.1fs) — speaking filler %r",
+                                config.filler_threshold_seconds,
+                                filler,
+                            )
+                            await _record_turn("us", filler)
+                            # fire_done_event=False so the silence
+                            # monitor doesn't think we're done talking
+                            # — the real answer still has to play.
+                            await _speak_text(filler, fire_done_event=False)
+                            result = await chat_task
                 else:
                     result = await chat_task
                 # First turn (opener) just completed — future turns
@@ -669,11 +688,30 @@ class VoiceBrainService(Service):
                 await _record_turn("us", text)
                 await _speak_text(text)
 
-            # Tools (e.g. ``end_conversation``) set this flag through
-            # the ContextVar-shared ``ConversationContext``. Inspecting
-            # the outcome dict after the chat() call lets the engine
-            # terminate cleanly.
+            # Tools (e.g. ``end_conversation``, ``hang_up``) set
+            # this flag through the ContextVar-shared
+            # ``ConversationContext``. Inspecting the outcome dict
+            # after the chat() call lets the engine terminate
+            # cleanly.
             if ctx.outcome.get("end_requested"):
+                # Fallback goodbye — if the LLM called a hang-up
+                # tool but didn't bother to generate any goodbye
+                # text first (it's instructed to, but doesn't
+                # always comply), speak a default phrase so the
+                # remote / user doesn't get dead air → dial tone.
+                # Skip if Gilbert already said something in the
+                # final turn (his goodbye is presumably in ``text``).
+                if not text and config.default_goodbye_phrases:
+                    goodbye = random.choice(
+                        config.default_goodbye_phrases
+                    )
+                    log.info(
+                        "end-requested with no final text — "
+                        "speaking default goodbye %r",
+                        goodbye,
+                    )
+                    await _record_turn("us", goodbye)
+                    await _speak_text(goodbye)
                 outcome.update(ctx.outcome)
                 log.info("brain tool requested end-of-conversation")
                 stop.set()
