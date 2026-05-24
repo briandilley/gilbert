@@ -113,11 +113,21 @@ class LoggingConfig(BaseModel):
     loggers: dict[str, str] = {}
 
 
+class TlsConfig(BaseModel):
+    """TLS / HTTPS configuration."""
+
+    enabled: bool = True
+    https_port: int = 8443
+    cert_path: str = ".gilbert/credentials/tls.crt"
+    key_path: str = ".gilbert/credentials/tls.key"
+
+
 class WebConfig(BaseModel):
     """Web server configuration."""
 
     host: str = "0.0.0.0"
-    port: int = 8765
+    port: int = 8000
+    tls: TlsConfig = TlsConfig()
 
 
 class TunnelConfig(BaseConfig):

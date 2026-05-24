@@ -20,6 +20,16 @@ logging:
 web:
   host: "0.0.0.0"
   port: 8000
+  # HTTPS on a self-signed cert so phones / other LAN browsers can
+  # unlock getUserMedia (mic). Disable by setting enabled: false in
+  # .gilbert/config.yaml if you terminate TLS elsewhere. Cert files
+  # auto-generated on first boot; delete them and restart to force
+  # regeneration (e.g. after the host IP changes).
+  tls:
+    enabled: true
+    https_port: 8443
+    cert_path: .gilbert/credentials/tls.crt
+    key_path: .gilbert/credentials/tls.key
 
 plugins:
   # Directories scanned for plugins at startup. Each subdirectory with
