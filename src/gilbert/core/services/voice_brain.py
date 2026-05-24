@@ -705,6 +705,18 @@ class VoiceBrainService(Service):
                                 "completed during timeout window"
                             )
                             result = chat_task.result()
+                        elif ctx.outcome.get("_skip_filler"):
+                            # A tool that ran inside chat() set this
+                            # flag because it knows the LLM is about
+                            # to wrap up imminently and a filler would
+                            # be awkward (e.g. phone's confirm_and_end
+                            # is almost always followed by hang_up on
+                            # the very next round). Just wait quietly.
+                            log.info(
+                                "filler suppressed — tool set "
+                                "_skip_filler on ctx.outcome"
+                            )
+                            result = await chat_task
                         else:
                             filler = random.choice(config.filler_phrases)
                             log.info(

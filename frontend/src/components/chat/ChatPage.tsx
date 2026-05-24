@@ -1406,6 +1406,16 @@ export function ChatPage() {
                 : undefined
             }
             typingConversationId={isShared ? activeConvId : null}
+            // Persist in-progress drafts across navigation. Per-user
+            // AND per-conversation so different rooms don't share a
+            // draft. When ``activeConvId`` is null (no conversation
+            // selected — a fresh "new chat") the draft scopes to a
+            // single "new chat" slot per user.
+            draftKey={
+              user?.user_id
+                ? `chat:draft:${user.user_id}:${activeConvId ?? "new"}`
+                : null
+            }
           />
         )}
 

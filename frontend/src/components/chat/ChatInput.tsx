@@ -121,6 +121,12 @@ interface ChatInputProps {
    *  shared rooms only — in personal chats the only listener would
    *  be the typer themselves, so we suppress the broadcast. */
   typingConversationId?: string | null;
+  /** localStorage key used to persist the in-progress draft across
+   *  navigation (e.g. user types, navigates to /calls, comes back
+   *  to /chat — the draft should still be there). Scoped per-
+   *  conversation so swapping rooms doesn't leak a stale draft.
+   *  Pass ``null`` to disable persistence for this mount. */
+  draftKey?: string | null;
 }
 
 const readAsBase64 = (blob: Blob): Promise<string> =>
@@ -406,6 +412,7 @@ export function ChatInput({
   onModelChange,
   mentionableMembers,
   typingConversationId,
+  draftKey,
 }: ChatInputProps) {
   // The textarea stays editable even while Gilbert is thinking so the
   // user can start drafting their next message. ``sending`` only
@@ -420,7 +427,47 @@ export function ChatInput({
   // into ``handleInput`` below and ``flushStop`` into ``handleSend``.
   const { notifyTyping: notifyTypingRaw, flushStop: flushTypingStop } =
     useTypingBroadcast(typingConversationId ?? null, Boolean(typingConversationId));
-  const [message, setMessage] = useState("");
+  // Initialize from localStorage so a draft typed before navigating
+  // away survives the round-trip. ``draftKey`` is conversation-scoped
+  // so swapping rooms doesn't show another room's draft.
+  const [message, setMessage] = useState<string>(() => {
+    if (!draftKey) return "";
+    try {
+      return window.localStorage.getItem(draftKey) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  // Persist on every change. Clear the key when the field empties
+  // (after send, after manual clear) so we don't leave stale drafts
+  // around — getItem returning empty/null is the same as no draft.
+  useEffect(() => {
+    if (!draftKey) return;
+    try {
+      if (message) {
+        window.localStorage.setItem(draftKey, message);
+      } else {
+        window.localStorage.removeItem(draftKey);
+      }
+    } catch {
+      // ignore quota / privacy-mode errors — best-effort.
+    }
+  }, [draftKey, message]);
+  // When draftKey changes (user switched conversations), reload the
+  // draft for the new conversation. Without this we'd carry the
+  // previous room's draft into the new one because ``useState``'s
+  // initializer only runs on first mount.
+  useEffect(() => {
+    if (!draftKey) {
+      setMessage("");
+      return;
+    }
+    try {
+      setMessage(window.localStorage.getItem(draftKey) ?? "");
+    } catch {
+      setMessage("");
+    }
+  }, [draftKey]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   // Mention picker state — separate index from the slash picker so the
   // two never share an active row when both could theoretically fire
