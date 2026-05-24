@@ -26,6 +26,7 @@ dependencies = [
     "markdown>=3.5",
     "pyjwt[crypto]>=2.12.1",
     "aiohttp>=3.13.5",
+    "cryptography>=44.0.0",
     # feedparser parses RSS 2.0 / Atom 1.0 — both open standards, no
     # vendor-specific behavior. ~150 KB on disk, BSD-licensed,
     # stdlib-only transitive deps. Justified in
