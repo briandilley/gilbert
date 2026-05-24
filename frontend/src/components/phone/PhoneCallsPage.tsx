@@ -353,11 +353,14 @@ function TranscriptRow({ turn }: { turn: PhoneCallTranscriptTurn }) {
               : "text-foreground",
         )}
       >
-        {/* Explicit visible colon — without it the speaker and
-            message land next to each other in clipboard text
-            ("ThemHello?"). sr-only / pseudo-element tricks are
-            unreliable across browsers for copy. */}
-        {label}:
+        {/* Explicit colon AND space — without the space the paste
+            comes out as "Them:Hello?". JSX whitespace inside a
+            tag's text node is preserved as-is, but the visual
+            ``flex gap-2`` between the two spans only affects
+            layout; the clipboard doesn't see it. The string-
+            literal form ensures the trailing space survives JSX
+            tokenization. */}
+        {`${label}: `}
       </span>
       <span
         className={cn(

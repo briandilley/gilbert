@@ -55,6 +55,7 @@ from gilbert.interfaces.transcription import (
     AudioFormat as TranscriptionAudioFormat,
     FinalTranscript,
     SpeechEnded,
+    PartialTranscript,
     SpeechStarted,
     StreamConfig,
     StreamingTranscriber,
@@ -369,6 +370,18 @@ class VoiceBrainService(Service):
         # the fallback timer or the listen-loop reacting to inbound
         # speech). Used by the WAIT_FOR_REMOTE opening policy's latch.
         already_spoke = False
+        # Set True the moment STT shows ANY voice activity from the
+        # remote — partial transcript, final transcript, or Scribe's
+        # SpeechStarted signal. The WAIT_FOR_REMOTE fallback timer
+        # checks this before firing the proactive opener so we don't
+        # double-greet when Scribe takes >fallback_timeout_seconds
+        # to commit the user's first utterance. Symptom without
+        # this flag: phone call answered, remote says "Hello?",
+        # Scribe takes 8s to commit it, fallback fires at 4s and
+        # speaks the opener, THEN listen-loop responds to "Hello?"
+        # with another greeting — caller hears Gilbert greet twice
+        # back-to-back.
+        remote_started_talking = False
 
         # ── helpers — none of these touch persistence ─────────────────
 
@@ -944,19 +957,31 @@ class VoiceBrainService(Service):
             await _think_and_speak(opener_cue if config.use_full_ai_service else None)
 
         async def _wait_then_open() -> None:
-            """Fallback for WAIT_FOR_REMOTE: cold-open after timeout."""
+            """Fallback for WAIT_FOR_REMOTE: cold-open after timeout
+            UNLESS the remote has started talking. If Scribe has
+            seen voice activity by now we let the listen loop
+            handle the response — opening proactively here would
+            stack a duplicate greeting in front of the listen-loop's
+            response."""
             try:
                 await asyncio.sleep(
                     config.opening_policy.fallback_timeout_seconds
                 )
             except asyncio.CancelledError:
                 return
-            if not already_spoke and not stop.is_set():
+            if already_spoke or stop.is_set():
+                return
+            if remote_started_talking:
                 log.info(
-                    "opening: remote silent %.1fs after active — speaking proactively",
-                    config.opening_policy.fallback_timeout_seconds,
+                    "opening: fallback skipped — remote is talking, "
+                    "letting listen loop handle the response"
                 )
-                await _open_proactively()
+                return
+            log.info(
+                "opening: remote silent %.1fs after active — speaking proactively",
+                config.opening_policy.fallback_timeout_seconds,
+            )
+            await _open_proactively()
 
         # ── three loops ───────────────────────────────────────────────
 
@@ -1006,7 +1031,7 @@ class VoiceBrainService(Service):
                 stop.set()
 
         async def _listen_loop() -> None:
-            nonlocal already_spoke
+            nonlocal already_spoke, remote_started_talking
             if self._transcription is None:
                 log.warning("Transcription unavailable — conversation continues TTS-only")
                 outcome["transcription_available"] = False
@@ -1135,15 +1160,26 @@ class VoiceBrainService(Service):
                         if isinstance(ev, SpeechStarted):
                             # Scribe-emitted barge-in signal — same
                             # handling as the local-VAD path.
-                            # Idempotent.
+                            # Idempotent. Also marks remote-active so
+                            # the WAIT_FOR_REMOTE opener fallback
+                            # won't fire on top of an in-flight
+                            # response.
+                            remote_started_talking = True
                             if speaking.active:
                                 speaking.cancelled = True
                                 await session.audio_out.clear()
+                        elif isinstance(ev, PartialTranscript):
+                            # Scribe is mid-transcribing the user.
+                            # Flip the remote-active flag so the
+                            # opener fallback doesn't fire while
+                            # we're already mid-listen.
+                            remote_started_talking = True
                         elif isinstance(ev, FinalTranscript):
                             text = ev.text.strip()
                             if not text:
                                 continue
                             already_spoke = True
+                            remote_started_talking = True
                             await _record_turn("them", text)
                             # Phone-call path: append to the engine's
                             # messages list; complete_one_shot will see it.
