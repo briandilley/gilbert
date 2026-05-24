@@ -268,6 +268,13 @@ class TTSService(Service):
         return await invoke_backend_action(self._backend, key, payload)
 
     async def stop(self) -> None:
+        # Tear down any open WS streaming sessions before closing the
+        # backend — otherwise pump tasks would call into a closed backend
+        # and the close callbacks would race with backend.close().
+        async with self._sessions_guard:
+            session_ids = list(self._sessions.keys())
+        for sid in session_ids:
+            await self._close_session(sid)
         if self._backend is not None:
             await self._backend.close()
 

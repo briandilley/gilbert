@@ -348,3 +348,18 @@ async def test_start_stream_bidirectional_no_capability_returns_error_response()
     })
     assert res.get("ok") is False
     assert "bidirectional" in res.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_sessions():
+    svc = _make_svc_with_bidi()
+    conn = _FakeConn()
+    res = await svc._handle_start_stream(conn, {
+        "type": "tts.start_stream", "mode": "bidirectional",
+        "format": "mp3", "voice_id": "v1",
+    })
+    sid = res["session_id"]
+    assert sid in svc._sessions
+    await svc.stop()
+    # All sessions gone after stop().
+    assert svc._sessions == {}
