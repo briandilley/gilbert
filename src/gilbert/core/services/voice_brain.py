@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import audioop
 import logging
+import random
 from typing import Any
 
 from gilbert.interfaces.ai import (
@@ -492,6 +493,13 @@ class VoiceBrainService(Service):
             MCP, agent dispatch, scheduler, etc.). The ContextVar
             is set so brain-tool ToolProviders (voice-agent's
             end_conversation, etc.) can find the active session.
+
+            If ``config.filler_threshold_seconds`` > 0 and ``chat()``
+            doesn't return within that window, the engine speaks one
+            of ``config.filler_phrases`` ("hmm, let me check") via
+            TTS so the user knows we heard them while tools / LLM
+            are still working. The real response plays normally
+            after chat() returns.
             """
             nonlocal chat_conv_id
             if self._ai_chat is None:
@@ -501,14 +509,52 @@ class VoiceBrainService(Service):
             ctx = _make_brain_ctx()
             set_current_conversation_ctx(ctx)
             try:
-                result = await self._ai_chat.chat(
-                    user_message=user_text,
-                    conversation_id=chat_conv_id,
-                    system_prompt=config.system_prompt,
+                # Kick chat() off as a task so we can race a filler
+                # timer against it. ``asyncio.shield`` keeps
+                # ``wait_for``'s timeout from cancelling the chat
+                # itself — we only want the timeout to *notice*
+                # slowness, not abort the LLM mid-run.
+                chat_task: asyncio.Task[Any] = asyncio.create_task(
+                    self._ai_chat.chat(
+                        user_message=user_text,
+                        conversation_id=chat_conv_id,
+                        system_prompt=config.system_prompt,
+                    )
                 )
+
+                filler_enabled = (
+                    config.filler_threshold_seconds > 0.0
+                    and bool(config.filler_phrases)
+                )
+
+                result: Any
+                if filler_enabled:
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.shield(chat_task),
+                            timeout=config.filler_threshold_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        # LLM hasn't returned in time — speak a
+                        # filler, record it as a turn (so the
+                        # transcript shows what the user heard),
+                        # then await the real result. The filler is
+                        # synth+play, which itself takes ~1-2s; by
+                        # the time it finishes, chat_task may
+                        # already be done.
+                        filler = random.choice(config.filler_phrases)
+                        log.info(
+                            "LLM slow (>%.1fs) — speaking filler %r",
+                            config.filler_threshold_seconds,
+                            filler,
+                        )
+                        await _record_turn("us", filler)
+                        await _speak_text(filler)
+                        result = await chat_task
+                else:
+                    result = await chat_task
             except Exception:
                 log.exception("ai.chat() failed")
-                set_current_conversation_ctx(None)
                 return
             finally:
                 set_current_conversation_ctx(None)

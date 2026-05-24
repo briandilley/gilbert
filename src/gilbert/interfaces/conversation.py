@@ -357,6 +357,21 @@ class ConversationConfig:
     # "(SYSTEM) call answered" cue + the disclosure-line example.
     priming_messages: list[Any] = field(default_factory=list)
 
+    # Conversational filler ("hmm, let me check…") played while the LLM
+    # is thinking. The engine kicks off the chat() call, waits up to
+    # ``filler_threshold_seconds`` for it to return, and if it hasn't,
+    # speaks a randomly-chosen phrase from ``filler_phrases`` before
+    # awaiting the real result. This only kicks in on the
+    # ``use_full_ai_service=True`` path (the chat() agentic loop with
+    # tool calls) — the complete_one_shot path is single-round and
+    # rarely slow enough to need a filler.
+    #
+    # Set ``filler_threshold_seconds`` to 0.0 OR pass an empty list for
+    # ``filler_phrases`` to disable. Both default off so existing
+    # consumers (phone) don't pick up the behaviour by accident.
+    filler_threshold_seconds: float = 0.0
+    filler_phrases: list[str] = field(default_factory=list)
+
     # ── Observability callbacks (all optional) ───────────────────────
     #
     # The engine invokes these as the conversation progresses. Wrappers
