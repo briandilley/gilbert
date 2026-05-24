@@ -352,6 +352,14 @@ class ConversationConfig:
     # dispatches via the ``BrainToolProvider`` callback.
     use_full_ai_service: bool = False
 
+    # Tag passed through to ``ai.chat(source=…)`` so the saved
+    # conversation entity carries it. The chat list filters out
+    # non-empty sources (voice_agent, phone_call, agent), keeping
+    # the chat sidebar to actual chats instead of every transient
+    # voice session leaving a record. Empty string (default) saves
+    # as a regular chat conversation.
+    source: str = ""
+
     # Optional priming messages prepended to the message list before the
     # first LLM turn. Phone-call wrapper uses this to inject the
     # "(SYSTEM) call answered" cue + the disclosure-line example.

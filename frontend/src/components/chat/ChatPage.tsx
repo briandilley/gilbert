@@ -458,6 +458,39 @@ export function ChatPage() {
     setSearchParams({}, { replace: true });
   }, [searchParams, connected, loadConversation, setSearchParams]);
 
+  // Restore the most-recently-opened conversation on mount when
+  // there's no deep-link to honour. Scoped per-user so multi-tenant
+  // setups don't cross-pollinate. The key is also user-scoped via
+  // ``user.user_id`` so signing in as a different user doesn't pop
+  // open the previous user's last chat (which can fail the
+  // ``loadConversation`` permission check anyway).
+  const STORAGE_KEY = user?.user_id
+    ? `chat:lastActiveConvId:${user.user_id}`
+    : null;
+  const restoredOnceRef = useRef(false);
+  useEffect(() => {
+    if (!connected || restoredOnceRef.current || !STORAGE_KEY) return;
+    if (searchParams.get("conversation")) return; // deep-link wins
+    const last = window.localStorage.getItem(STORAGE_KEY);
+    if (!last) {
+      restoredOnceRef.current = true;
+      return;
+    }
+    restoredOnceRef.current = true;
+    loadConversation(last);
+  }, [connected, STORAGE_KEY, searchParams, loadConversation]);
+
+  // Persist the active conversation id whenever it changes so the
+  // restore-on-mount effect above has something to read.
+  useEffect(() => {
+    if (!STORAGE_KEY) return;
+    if (activeConvId) {
+      window.localStorage.setItem(STORAGE_KEY, activeConvId);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  }, [activeConvId, STORAGE_KEY]);
+
   const handleSend = useCallback(
     async (message: string, attachments: FileAttachment[] = []) => {
       // Insert a streaming placeholder turn at the bottom of the list.

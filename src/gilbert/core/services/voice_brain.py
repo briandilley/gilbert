@@ -598,6 +598,7 @@ class VoiceBrainService(Service):
                         user_message=user_text,
                         conversation_id=chat_conv_id,
                         system_prompt=config.system_prompt,
+                        source=config.source,
                     )
                 )
 
