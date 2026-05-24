@@ -38,7 +38,10 @@ _PUBLIC_EXACT = (
     "/auth/session",
     "/auth/me",
     "/api/auth/methods",
+    "/api/tls/info",
+    "/api/tls/cert.crt",
     "/screens",
+    "/setup-https",
     "/health",
 )
 _PUBLIC_PREFIXES = (

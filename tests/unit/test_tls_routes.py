@@ -70,3 +70,13 @@ def test_key_file_is_not_served(cert_on_disk: CertInfo) -> None:
     client = TestClient(_make_app(cert_on_disk))
     for path in ("/api/tls/tls.key", "/api/tls/key", "/api/tls/private", "/api/tls/cert.key"):
         assert client.get(path).status_code == 404
+
+
+def test_cert_routes_are_in_auth_allowlist() -> None:
+    """If these aren't in the allowlist, the auth middleware
+    redirects pre-auth requests away from the cert routes, which
+    defeats the whole point."""
+    from gilbert.web.auth import _PUBLIC_EXACT
+    assert "/api/tls/cert.crt" in _PUBLIC_EXACT
+    assert "/api/tls/info" in _PUBLIC_EXACT
+    assert "/setup-https" in _PUBLIC_EXACT
