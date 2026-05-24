@@ -72,14 +72,17 @@ dependencies = [
     "gilbert-plugin-openrouter",
     "gilbert-plugin-plex",
     "gilbert-plugin-porcupine",
+    "gilbert-plugin-phone",
     "gilbert-plugin-pushover",
     "gilbert-plugin-qwen",
     "gilbert-plugin-slack",
     "gilbert-plugin-sonos",
     "gilbert-plugin-tavily",
     "gilbert-plugin-telegram",
+    "gilbert-plugin-telnyx",
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
+    "gilbert-plugin-voice-agent",
     "gilbert-plugin-withings",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
@@ -116,6 +119,7 @@ gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
 gilbert-plugin-openwakeword = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
+gilbert-plugin-phone = { workspace = true }
 gilbert-plugin-plex = { workspace = true }
 gilbert-plugin-pushover = { workspace = true }
 gilbert-plugin-porcupine = { workspace = true }
@@ -124,8 +128,10 @@ gilbert-plugin-slack = { workspace = true }
 gilbert-plugin-sonos = { workspace = true }
 gilbert-plugin-tavily = { workspace = true }
 gilbert-plugin-telegram = { workspace = true }
+gilbert-plugin-telnyx = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
+gilbert-plugin-voice-agent = { workspace = true }
 gilbert-plugin-withings = { workspace = true }
 gilbert-plugin-xai = { workspace = true }
 

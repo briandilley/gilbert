@@ -49,6 +49,16 @@ _PUBLIC_PREFIXES = (
     "/api/share/",
     "/api/mcp",
     "/output/",
+    # Telnyx delivers call-control webhooks + media-stream WebSockets to
+    # ``/api/telnyx/webhook`` and ``/api/telnyx/media``. The carrier
+    # can't carry a Gilbert session cookie or bearer token — auth is
+    # handled inside the handlers via the ``webhook_token`` Gilbert
+    # stamps onto each ``place_call`` (call_control_id + the custom
+    # parameter the media-WS start frame echoes). Without this exempt
+    # entry the auth middleware redirects every Telnyx POST to
+    # ``/auth/login``, the webhook body never reaches our handler, and
+    # ``call.answered`` events never advance the call to CONNECTED.
+    "/api/telnyx/",
 )
 
 

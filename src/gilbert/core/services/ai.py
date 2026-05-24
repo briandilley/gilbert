@@ -2092,6 +2092,7 @@ class AIService(Service):
         between_rounds_callback: Any = None,
         mid_round_interrupt: Callable[[], bool] | None = None,
         should_stop_callback: Callable[[], bool] | None = None,
+        source: str = "",
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -2198,6 +2199,7 @@ class AIService(Service):
                 conversation_id,
                 messages,
                 user_ctx=user_ctx,
+                source=source,
             )
             return ChatTurnResult(
                 response_text=error_text,
@@ -2815,6 +2817,7 @@ class AIService(Service):
             messages,
             user_ctx,
             ui_blocks=ui_block_dicts,
+            source=source,
         )
         if was_interrupted:
             await asyncio.shield(save_coro)
@@ -3859,6 +3862,7 @@ class AIService(Service):
                 conversation_id,
                 messages,
                 user_ctx=user_ctx,
+                source=source,
             )
             return ChatTurnResult(
                 response_text=error_text,
@@ -4157,8 +4161,17 @@ class AIService(Service):
         messages: list[Message],
         user_ctx: UserContext | None = None,
         ui_blocks: list[dict[str, Any]] | None = None,
+        source: str = "",
     ) -> None:
-        """Persist a conversation to storage with optional user ownership."""
+        """Persist a conversation to storage with optional user ownership.
+
+        ``source`` tags the conversation's origin (e.g. "voice_agent",
+        "phone_call") so the chat list can filter out non-chat
+        conversations. Set on first save and preserved on subsequent
+        ones — voice/phone sessions create their own entity_store
+        records anyway, so showing the chat() history-blob in the
+        chat list is just noise.
+        """
         if self._storage is None:
             return
         # Load existing data to preserve fields like title
@@ -4170,6 +4183,11 @@ class AIService(Service):
         }
         if user_ctx is not None and user_ctx.user_id != "system":
             data["user_id"] = user_ctx.user_id
+        # Stamp the source on first save (or carry it forward — never
+        # overwrite with empty so a re-save after deserialization
+        # doesn't strip the tag).
+        if source and not existing.get("source"):
+            data["source"] = source
 
         # Merge new UI blocks with any existing ones
         if ui_blocks:
@@ -4178,6 +4196,87 @@ class AIService(Service):
             data["ui_blocks"] = existing_blocks
 
         await self._storage.put(_COLLECTION, conv_id, data)
+
+    async def append_assistant_message(
+        self,
+        conversation_id: str,
+        content: str,
+    ) -> None:
+        """Append a synthetic ASSISTANT message to a conversation.
+
+        Used by services that deliver async outcomes back into the chat
+        the user was in when they triggered an action — currently only
+        ``PhoneCallService`` posts "call ended with outcome X" when a
+        call wraps so the next AI turn doesn't hallucinate the call as
+        still active.
+
+        Implements the ``ConversationMessagePoster`` protocol. Best-effort:
+        silently no-ops on missing storage / unknown conversation rather
+        than raising — the originating service has no useful fallback if
+        this fails, and a hard error here would mask the actual outcome
+        we're trying to surface.
+        """
+        if self._storage is None or not conversation_id:
+            return
+        try:
+            existing = await self._storage.get(_COLLECTION, conversation_id)
+        except Exception:
+            logger.debug(
+                "append_assistant_message: storage.get failed for %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return
+        if existing is None:
+            logger.debug(
+                "append_assistant_message: conversation %s not found",
+                conversation_id,
+            )
+            return
+        messages_raw: list[dict[str, Any]] = existing.get("messages") or []
+        new_row = {
+            "role": MessageRole.ASSISTANT.value,
+            "content": content,
+        }
+        messages_raw.append(new_row)
+        existing["messages"] = messages_raw
+        existing["updated_at"] = datetime.now(UTC).isoformat()
+        try:
+            await self._storage.put(_COLLECTION, conversation_id, existing)
+        except Exception:
+            logger.debug(
+                "append_assistant_message: storage.put failed for %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return
+        # Publish so the SPA refreshes if the user has the conversation
+        # open. ``chat.message.created`` is what the chat list + active
+        # turn renderers already listen for; same event the normal
+        # message-write path uses.
+        if self._resolver is None:
+            return
+        bus_svc = self._resolver.get_capability("event_bus")
+        from gilbert.interfaces.events import EventBusProvider
+
+        if isinstance(bus_svc, EventBusProvider):
+            await bus_svc.bus.publish(
+                Event(
+                    event_type="chat.message.created",
+                    source="ai_service",
+                    data={
+                        "conversation_id": conversation_id,
+                        "author_id": "gilbert",
+                        "author_name": "Gilbert",
+                        "content": content,
+                        "user_message": "",
+                        "attachments": [],
+                        "user_attachments": [],
+                        "ui_blocks": [],
+                        "mentioned_user_ids": [],
+                    },
+                )
+            )
 
     async def list_conversations(
         self, user_id: str | None = None, limit: int = 50
@@ -4198,9 +4297,13 @@ class AIService(Service):
         )
         # Exclude shared conversations — those are listed separately.
         # Can't use NEQ filter because shared=None (missing field) doesn't match.
+        # Also exclude non-chat sources (agent runs, voice-agent
+        # sessions, phone calls) — those have their own dedicated UI
+        # and would just clutter the chat list with throwaway records.
+        _EXCLUDED_SOURCES = {"agent", "voice_agent", "phone_call"}
         return [
             c for c in results
-            if not c.get("shared") and c.get("source") != "agent"
+            if not c.get("shared") and c.get("source") not in _EXCLUDED_SOURCES
         ][:limit]
 
     async def list_shared_conversations(

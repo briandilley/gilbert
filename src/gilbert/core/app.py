@@ -409,6 +409,23 @@ class Gilbert:
 
         self.service_manager.register(AgentService())
 
+        # Voice-brain engine — generic conversation-loop driver. Phone
+        # calls (and the eventual wake-word voice-agent plugin) delegate
+        # the LLM-turn loop, STT pump, local-VAD barge-in, TTS pacing,
+        # and brain-tool dispatch to this single engine. Has to register
+        # BEFORE any modality wrapper that consumes ``voice_brain``.
+        from gilbert.core.services.voice_brain import VoiceBrainService
+
+        self.service_manager.register(VoiceBrainService())
+
+        # Phone calls — moved into a plugin (``std-plugins/phone/``).
+        # The plugin's ``setup`` registers ``PhoneCallService`` with
+        # this same service manager via ``context.services.register``.
+        # Carrier integration (Telnyx, eventually others) lives in
+        # ``std-plugins/telnyx/`` and registers its
+        # ``TelephonyBackend`` via the backend registry. Nothing for
+        # the composition root to do here anymore.
+
         # 8. Register factories for hot-swap support
         config_svc.register_factory("tts", self._factory_tts)
         config_svc.register_factory("ai", self._factory_ai)

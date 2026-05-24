@@ -24,6 +24,11 @@ class AudioFormat(StrEnum):
     WAV = "wav"
     OGG = "ogg"
     PCM = "pcm"
+    # Telephony format: 8 kHz, mono, 8-bit µ-law (G.711).
+    # ElevenLabs exposes this as ``ulaw_8000`` and Telnyx Media
+    # Streams uses this verbatim. Selecting MULAW_8000 routes the
+    # synthesis straight to the carrier without re-encoding.
+    MULAW_8000 = "mulaw_8000"
 
 
 def generate_pcm_silence(seconds: float) -> bytes:

@@ -237,6 +237,19 @@ class WsConnection:
             return True
         return event.data.get("user_id") == self.user_id
 
+    def can_see_voice_agent_event(self, event: Event) -> bool:
+        """Content-level filter for voice-agent events.
+
+        ``voice_agent.transcript_turn`` (and any future ``voice_agent.*``
+        server-initiated frame) carries a ``user_id`` for the user
+        whose voice session it belongs to. Other users' connections
+        don't see these — even admins broadly subscribed shouldn't
+        see another user's conversation transcript live.
+        """
+        if not event.event_type.startswith("voice_agent."):
+            return True
+        return event.data.get("user_id") == self.user_id
+
     def can_see_chat_read_aloud_event(self, event: Event) -> bool:
         """Deliver chat.read_aloud.* events only to the matching user's
         own connections (so other tabs of that user stay in sync without
@@ -569,6 +582,8 @@ class WsConnectionManager:
             if not conn.can_see_feed_event(event):
                 continue
             if not conn.can_see_speaker_browser_event(event):
+                continue
+            if not conn.can_see_voice_agent_event(event):
                 continue
             if not conn.can_see_chat_read_aloud_event(event):
                 continue
