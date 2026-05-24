@@ -178,20 +178,26 @@ async def _pump_audio_to_stt(
     pump_count = 0
     logger.info("audio pump: starting (input_is_mulaw=%s)", input_is_mulaw)
     # Local VAD state — rolling RMS over the last N=10 chunks (200ms
-    # at 50fps). Threshold tuned for an 8 kHz mulaw → 16-bit PCM
-    # stream: silence RMS sits around 0-200, normal phone speech is
-    # 1500-6000. 800 is conservative — high enough to ignore line
-    # noise / breath / fans, low enough to catch a quiet "stop."
+    # at phone's 50fps; ~850ms at voice-agent's ~85ms chunks).
+    # Threshold tuned for an 8 kHz mulaw → 16-bit PCM stream: silence
+    # RMS sits around 0-200, normal phone speech is 1500-6000. 800 is
+    # conservative — high enough to ignore line noise / breath / fans,
+    # low enough to catch a quiet "stop."
     _VAD_RMS_THRESHOLD = 800
     _VAD_WINDOW_FRAMES = 10
     rms_window: list[int] = []
-    # Once we've fired the callback for one barge-in window, suppress
-    # further fires for this many frames so we don't spam it during
-    # a single user utterance. ~1s gap before we'd consider firing
-    # again (which only matters if the brain didn't actually
-    # cancel — the callback itself is idempotent, this is just for
-    # log hygiene).
-    suppress_until = 0
+    # NOTE on suppression: we used to debounce the callback for 50
+    # frames after firing ("don't spam during one utterance"). That
+    # was correct for phone (50 frames at 50fps = 1s) but disastrous
+    # for voice-agent (50 frames at ~12fps ≈ 4s). When VAD happened
+    # to fire in the brief gap between a filler clip ending and the
+    # real answer starting, the handler bailed (speaking.active=False)
+    # AND suppression kicked in — so even though the user kept
+    # talking for the entire 6s of the real answer, no further VAD
+    # trigger fired. Instead, dedupe LOGGING in the handler itself
+    # (check speaking.cancelled) and let the pump call the callback
+    # every detection. Setting speaking.cancelled the first time is
+    # idempotent; subsequent calls are no-ops.
     try:
         async for chunk in audio_in:
             # Phone-call sessions yield mulaw 8 kHz (carrier wire
@@ -210,22 +216,20 @@ async def _pump_audio_to_stt(
                 rms_window.pop(0)
             if (
                 on_speech_detected is not None
-                and pump_count > suppress_until
                 and len(rms_window) >= _VAD_WINDOW_FRAMES
                 and sum(1 for r in rms_window if r > _VAD_RMS_THRESHOLD)
                 >= int(_VAD_WINDOW_FRAMES * 0.7)
             ):
-                avg_rms = sum(rms_window) // len(rms_window)
-                logger.info(
-                    "local VAD: speech detected (avg_rms=%d over last %d frames)",
-                    avg_rms,
-                    _VAD_WINDOW_FRAMES,
-                )
+                # No pump-level suppression — the handler dedupes
+                # internally and we want every chance to fire so
+                # that a barge-in attempt landing right at the start
+                # of a new TTS clip doesn't get suppressed for 4s.
+                # Logging dedup happens in the handler so we don't
+                # spam the journal on a single long utterance.
                 try:
                     on_speech_detected()
                 except Exception:
                     logger.debug("on_speech_detected raised", exc_info=True)
-                suppress_until = pump_count + 50
 
             # Heartbeat: ~1/sec at the 50fps inbound cadence. Confirms
             # the pump is keeping up with ingest during a TTS burst.
@@ -1096,6 +1100,8 @@ class VoiceBrainService(Service):
             def _on_local_vad_speech() -> None:
                 if not speaking.active:
                     return
+                if speaking.cancelled:
+                    return  # already cancelled this utterance
                 speaking.cancelled = True
                 speaking.cancel_event.set()
                 asyncio.create_task(session.audio_out.clear())
