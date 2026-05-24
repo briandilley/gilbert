@@ -494,78 +494,90 @@ class VoiceBrainService(Service):
             generation = speaking.generation = speaking.generation + 1
             spoke_at_all = True
             write_start = asyncio.get_event_loop().time()
+            # NOTE: ``speaking.active = False`` is set in the OUTER
+            # finally that wraps both the write loop AND the wait-
+            # for-browser-playback sleep. Setting it False at the
+            # end of the write loop (the old shape) defeated barge-
+            # in for voice-agent: the chunk-write loop completes in
+            # microseconds (no pacing for browser), so by the time
+            # the user interrupts mid-playback, speaking.active was
+            # already False and the VAD / SpeechStarted handlers
+            # bailed silently — the playback finished its full
+            # estimated duration before the listen-loop got around
+            # to processing the interrupt transcript.
             try:
-                chunk_size = 160
-                chunks_written = 0
-                pace = 0.02 if config.tts_realtime_pacing else 0.0
-                for i in range(0, len(audio), chunk_size):
-                    if (
-                        speaking.cancelled
-                        or generation != speaking.generation
-                        or stop.is_set()
-                    ):
-                        break
-                    await session.audio_out.write(audio[i : i + chunk_size])
-                    chunks_written += 1
-                    if pace > 0:
-                        await asyncio.sleep(pace)
-                log.info(
-                    "TTS playback done — chunks_written=%d bytes=%d "
-                    "wall_seconds≈%.2f (cancelled=%s pace=%.3fs)",
-                    chunks_written,
-                    chunks_written * chunk_size,
-                    chunks_written * pace,
-                    speaking.cancelled,
-                    pace,
-                )
                 try:
-                    await session.audio_out.flush()
-                except Exception:
-                    log.debug("audio_out.flush raised", exc_info=True)
-            finally:
-                speaking.active = False
-            # When tts_realtime_pacing is False (voice-agent / browser
-            # sessions), the loop above writes every chunk back-to-back
-            # without sleeping — Browser plays the whole clip in one
-            # shot from a data URL, and pacing it at 20ms/chunk would
-            # stretch a 22s clip into 44s of buffering. But that means
-            # ``on_speaking_done`` fires the moment we dispatch the
-            # play event, NOT when the browser actually finishes
-            # playing. The voice-agent silence monitor then arms its
-            # dormancy countdown 10-15s too early and dropped the
-            # session into dormant WHILE Gilbert was mid-sentence on
-            # long answers. Fix: estimate playback duration from the
-            # text length (ElevenLabs paces ~10 chars/sec for normal
-            # speech) and sleep for the remainder before firing
-            # ``on_speaking_done``. Cancelled / barge-in skips the
-            # wait — the user is talking, the silence timer's about
-            # to reset anyway. Realtime-paced (phone) sessions
-            # already wait the right amount via the chunk-sleep so
-            # this is effectively a no-op for them.
-            if (
-                not speaking.cancelled
-                and not stop.is_set()
-                and not config.tts_realtime_pacing
-            ):
-                # ~10 chars/sec is what ElevenLabs naturally hits;
-                # use 9 to err slightly long so a quick answer
-                # doesn't trip dormant immediately on a borderline
-                # case. Min 1s so tiny clips (the "hmm" filler)
-                # still get a small wait.
-                synth_duration = synth.duration_seconds
-                if synth_duration is None:
-                    synth_duration = max(1.0, len(text) / 9.0)
-                elapsed = asyncio.get_event_loop().time() - write_start
-                remaining = synth_duration - elapsed
-                if remaining > 0.05:
+                    chunk_size = 160
+                    chunks_written = 0
+                    pace = 0.02 if config.tts_realtime_pacing else 0.0
+                    for i in range(0, len(audio), chunk_size):
+                        if (
+                            speaking.cancelled
+                            or generation != speaking.generation
+                            or stop.is_set()
+                        ):
+                            break
+                        await session.audio_out.write(audio[i : i + chunk_size])
+                        chunks_written += 1
+                        if pace > 0:
+                            await asyncio.sleep(pace)
                     log.info(
-                        "TTS waiting for browser playback — "
-                        "estimated %.1fs total, %.1fs elapsed, "
-                        "sleeping up to %.1fs before on_speaking_done",
-                        synth_duration,
-                        elapsed,
-                        remaining,
+                        "TTS playback done — chunks_written=%d bytes=%d "
+                        "wall_seconds≈%.2f (cancelled=%s pace=%.3fs)",
+                        chunks_written,
+                        chunks_written * chunk_size,
+                        chunks_written * pace,
+                        speaking.cancelled,
+                        pace,
                     )
+                    try:
+                        await session.audio_out.flush()
+                    except Exception:
+                        log.debug("audio_out.flush raised", exc_info=True)
+                except Exception:
+                    log.exception("TTS write loop crashed")
+                # When tts_realtime_pacing is False (voice-agent / browser
+                # sessions), the loop above writes every chunk back-to-back
+                # without sleeping — Browser plays the whole clip in one
+                # shot from a data URL, and pacing it at 20ms/chunk would
+                # stretch a 22s clip into 44s of buffering. But that means
+                # ``on_speaking_done`` fires the moment we dispatch the
+                # play event, NOT when the browser actually finishes
+                # playing. The voice-agent silence monitor then arms its
+                # dormancy countdown 10-15s too early and dropped the
+                # session into dormant WHILE Gilbert was mid-sentence on
+                # long answers. Fix: estimate playback duration from the
+                # text length (ElevenLabs paces ~10 chars/sec for normal
+                # speech) and sleep for the remainder before firing
+                # ``on_speaking_done``. Cancelled / barge-in skips the
+                # wait — the user is talking, the silence timer's about
+                # to reset anyway. Realtime-paced (phone) sessions
+                # already wait the right amount via the chunk-sleep so
+                # this is effectively a no-op for them.
+                if (
+                    not speaking.cancelled
+                    and not stop.is_set()
+                    and not config.tts_realtime_pacing
+                ):
+                    # ~10 chars/sec is what ElevenLabs naturally hits;
+                    # use 9 to err slightly long so a quick answer
+                    # doesn't trip dormant immediately on a borderline
+                    # case. Min 1s so tiny clips (the "hmm" filler)
+                    # still get a small wait.
+                    synth_duration = synth.duration_seconds
+                    if synth_duration is None:
+                        synth_duration = max(1.0, len(text) / 9.0)
+                    elapsed = asyncio.get_event_loop().time() - write_start
+                    remaining = synth_duration - elapsed
+                    if remaining > 0.05:
+                        log.info(
+                            "TTS waiting for browser playback — "
+                            "estimated %.1fs total, %.1fs elapsed, "
+                            "sleeping up to %.1fs before on_speaking_done",
+                            synth_duration,
+                            elapsed,
+                            remaining,
+                        )
                     # Race the playback estimate against a barge-in
                     # cancellation. Without this, an interrupt
                     # ("Oh.", "Stop.") arrives while we're snoozing
@@ -594,6 +606,13 @@ class VoiceBrainService(Service):
                         # while we waited — fall through and let
                         # the caller handle teardown.
                         pass
+            finally:
+                # Mark idle only AFTER the playback wait. The
+                # barge-in handlers gate on speaking.active and
+                # bail silently when it's False, so leaving it
+                # True throughout the wait is what makes the
+                # interrupt path actually work.
+                speaking.active = False
             # End-of-utterance signal for the wrapper. Voice-agent uses
             # this to reset its silence timer at the moment Gilbert
             # quiets down rather than when he STARTS speaking (which is
