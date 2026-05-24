@@ -6,8 +6,8 @@ from fastapi import Depends, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import RedirectResponse, Response
 
-from gilbert.interfaces.context import set_current_user
 from gilbert.interfaces.auth import GuestPolicy, UserContext
+from gilbert.interfaces.context import set_current_user
 
 # Paths that bypass authentication when the visitor is unauthenticated.
 # Used both for tunnel access (always login-required) and for local
@@ -39,6 +39,7 @@ _PUBLIC_EXACT = (
     "/auth/me",
     "/api/auth/methods",
     "/screens",
+    "/health",
 )
 _PUBLIC_PREFIXES = (
     "/auth/login/",

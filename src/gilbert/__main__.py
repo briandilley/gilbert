@@ -5,12 +5,18 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import uvicorn
+from fastapi import FastAPI
 
 from gilbert.config import DATA_DIR
 from gilbert.core.app import Gilbert
 from gilbert.web import create_app
+
+if TYPE_CHECKING:
+    from gilbert.core.tls import CertInfo
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +33,32 @@ RESTART_EXIT_CODE = 75
 
 # Track signal count for force-exit
 _signal_count = 0
+
+
+def _build_http_server(web_app: FastAPI, gilbert: Gilbert) -> uvicorn.Server:
+    cfg = uvicorn.Config(
+        web_app,
+        host=gilbert.config.web.host,
+        port=gilbert.config.web.port,
+        log_level="info",
+        timeout_graceful_shutdown=10,
+    )
+    return uvicorn.Server(cfg)
+
+
+def _build_https_server(
+    web_app: FastAPI, gilbert: Gilbert, cert_info: "CertInfo"
+) -> uvicorn.Server:
+    cfg = uvicorn.Config(
+        web_app,
+        host=gilbert.config.web.host,
+        port=gilbert.config.web.tls.https_port,
+        log_level="info",
+        timeout_graceful_shutdown=10,
+        ssl_certfile=str(cert_info.cert_path),
+        ssl_keyfile=str(cert_info.key_path),
+    )
+    return uvicorn.Server(cfg)
 
 
 def _write_pid() -> None:
@@ -49,33 +81,45 @@ async def main() -> None:
     await gilbert.start()
     _write_pid()
 
-    web_app = create_app(gilbert)
+    web_app: FastAPI = create_app(gilbert)
 
-    uv_config = uvicorn.Config(
-        web_app,
-        host=gilbert.config.web.host,
-        port=gilbert.config.web.port,
-        log_level="info",
-        # Cap how long uvicorn waits for in-flight requests + active
-        # WebSocket connections to drain before forcing a close. Without
-        # this uvicorn waits forever (its default), which means a single
-        # idle WS client can stretch shutdown to systemd's hard kill
-        # timeout. 10s is plenty for normal request finalization and
-        # short enough that a routine restart feels instant.
-        timeout_graceful_shutdown=10,
-    )
-    server = uvicorn.Server(uv_config)
+    servers: list[uvicorn.Server] = [_build_http_server(web_app, gilbert)]
 
-    # Disable uvicorn's own signal handling — we manage it ourselves.
+    if gilbert.config.web.tls.enabled:
+        try:
+            from gilbert.core.tls import ensure_self_signed_cert
+
+            cert_info = ensure_self_signed_cert(
+                Path(gilbert.config.web.tls.cert_path),
+                Path(gilbert.config.web.tls.key_path),
+            )
+            web_app.state.tls_info = cert_info
+            servers.append(_build_https_server(web_app, gilbert, cert_info))
+            logger.info(
+                "HTTPS on https://%s:%d (cert valid until %s, SAN: %s)",
+                gilbert.config.web.host,
+                gilbert.config.web.tls.https_port,
+                cert_info.not_valid_after.date(),
+                ", ".join(cert_info.san_entries),
+            )
+        except Exception:
+            logger.exception("Failed to set up TLS — running HTTP-only")
+
+    # Disable uvicorn's own signal handling on every server; we manage it.
     # ``install_signal_handlers`` is a private-ish uvicorn API that
     # exists on ``Server`` at runtime but isn't in the type stubs.
-    server.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
+    for s in servers:
+        s.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
 
     # Wire the shutdown hook so ``Gilbert.request_restart()`` can
-    # actually stop the server. Setting ``should_exit`` is the same
-    # lever the SIGINT handler uses below — this lets services request
+    # actually stop the servers. Setting ``should_exit`` is the same
+    # lever the signal handler uses below — this lets services request
     # a clean exit through the normal uvicorn path.
-    gilbert.set_shutdown_callback(lambda: setattr(server, "should_exit", True))
+    def _shutdown() -> None:
+        for s in servers:
+            s.should_exit = True
+
+    gilbert.set_shutdown_callback(_shutdown)
 
     def _handle_signal(signum: int, frame: object) -> None:
         global _signal_count
@@ -85,13 +129,14 @@ async def main() -> None:
             _remove_pid()
             os._exit(1)
         logger.info("Shutdown signal received — press Ctrl+C again to force quit")
-        server.should_exit = True
+        for s in servers:
+            s.should_exit = True
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
     try:
-        await server.serve()
+        await asyncio.gather(*(s.serve() for s in servers))
     finally:
         await gilbert.stop()
         _remove_pid()
