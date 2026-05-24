@@ -406,9 +406,22 @@ class VoiceBrainService(Service):
         # messages directly.
         chat_conv_id: str | None = None
 
-        async def _speak_text(text: str) -> None:
+        async def _speak_text(text: str, *, fire_done_event: bool = True) -> None:
             """Synthesize ``text`` and write it to the session's audio
-            out. Shared between both think-and-speak paths."""
+            out. Shared between both think-and-speak paths.
+
+            ``fire_done_event`` controls whether ``on_speaking_done``
+            is invoked at end-of-playback. The voice-agent wrapper
+            uses that callback to arm the dormant-silence countdown
+            ("Gilbert finished talking, user's turn now"). For the
+            engine-driven filler ("hmm, let me check…") that fires
+            DURING LLM thinking, we explicitly suppress the callback
+            because we're NOT done responding — the real answer
+            still has to play after the chat() task completes. If
+            we fired the callback at the filler's end, the silence
+            monitor would arm during LLM thinking and trip dormant
+            mid-response.
+            """
             nonlocal spoke_at_all
             if not text or self._tts is None:
                 return
@@ -481,7 +494,7 @@ class VoiceBrainService(Service):
             # distinction, a 12-second LLM answer would let the
             # 10-second silence elapse mid-sentence and drop the
             # session into dormant while Gilbert was still talking.
-            if config.on_speaking_done is not None:
+            if fire_done_event and config.on_speaking_done is not None:
                 try:
                     await config.on_speaking_done()
                 except Exception:
@@ -549,7 +562,10 @@ class VoiceBrainService(Service):
                             filler,
                         )
                         await _record_turn("us", filler)
-                        await _speak_text(filler)
+                        # fire_done_event=False so the silence
+                        # monitor doesn't think we're done talking
+                        # — the real answer still has to play.
+                        await _speak_text(filler, fire_done_event=False)
                         result = await chat_task
                 else:
                     result = await chat_task
