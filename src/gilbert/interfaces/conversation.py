@@ -372,6 +372,17 @@ class ConversationConfig:
     filler_threshold_seconds: float = 0.0
     filler_phrases: list[str] = field(default_factory=list)
 
+    # External pause signal for the engine's STT lifecycle. When the
+    # wrapper sets this Event, the engine closes its open STT stream
+    # and cancels the audio pump (so it isn't paying ElevenLabs Scribe
+    # to listen to nothing). When the wrapper clears the Event, the
+    # engine opens a fresh STT stream and resumes pumping. The
+    # voice-agent plugin uses this for its wake-word "dormant" mode:
+    # set on dormant, clear on wake. ``None`` means "no pause
+    # mechanism" — the engine opens STT once and leaves it open for
+    # the conversation lifetime (the existing phone-call behaviour).
+    listening_paused: Any = None  # asyncio.Event | None
+
     # ── Observability callbacks (all optional) ───────────────────────
     #
     # The engine invokes these as the conversation progresses. Wrappers

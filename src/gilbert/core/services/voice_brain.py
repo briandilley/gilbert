@@ -906,20 +906,6 @@ class VoiceBrainService(Service):
                 sample_rate=8000,
                 channels=1,
             )
-            try:
-                stt_stream = await self._transcription.open_stream(
-                    StreamConfig(
-                        format=stt_fmt,
-                        interim_results=True,
-                        vad_events=True,
-                    )
-                )
-            except Exception:
-                log.exception(
-                    "Failed to open transcription stream — conversation continues TTS-only"
-                )
-                outcome["transcription_available"] = False
-                return
 
             def _on_local_vad_speech() -> None:
                 if not speaking.active:
@@ -938,88 +924,174 @@ class VoiceBrainService(Service):
                 != AudioEncoding.PCM_S16LE
             )
 
-            pump_task = asyncio.create_task(
-                _pump_audio_to_stt(
-                    session.audio_in,
-                    stt_stream,
-                    on_speech_detected=_on_local_vad_speech,
-                    input_is_mulaw=input_is_mulaw,
-                )
-            )
+            # Outer pause/resume loop: opens STT, processes events
+            # until either ``stop`` (terminal) or
+            # ``listening_paused`` (transient — wrapper signalled
+            # dormancy, e.g. wake-word mode) fires, then loops back
+            # to wait for resume + re-open on the next iteration.
+            # Without this the engine paid ElevenLabs Scribe per
+            # second of stream even while the user was dormant
+            # waiting for "Hey Gilbert" — Scribe also dropped the
+            # WS after ~15s of idle audio, leaving the engine
+            # unable to transcribe ever again after a single
+            # dormancy.
+            pause_event: asyncio.Event | None = config.listening_paused
 
-            # When ``stop`` fires, close the STT stream so the
-            # ``async for ev in stt_stream.events()`` loop unblocks.
-            # Without this the listen loop sits forever on the
-            # underlying WS recv() and never exits — which means
-            # ``asyncio.gather(...)`` never returns, the engine's
-            # finally never runs, and the wrapper's session_ended
-            # event never publishes. User-visible symptom: brain
-            # said goodbye + recorded "end_conversation", but the
-            # SPA never flipped back to idle because the close
-            # signal stayed pending.
-            async def _close_stt_on_stop() -> None:
-                await stop.wait()
-                try:
-                    await stt_stream.close()
-                except Exception:
-                    log.debug("close-on-stop failed", exc_info=True)
-
-            stop_watcher = asyncio.create_task(_close_stt_on_stop())
-
-            try:
-                async for ev in stt_stream.events():
+            while not stop.is_set():
+                # If the wrapper signalled pause, sit out the
+                # dormant period before opening any new STT stream.
+                # We wait for either resume (event clears) or
+                # terminal stop. ``asyncio.Event.wait`` doesn't
+                # support a "wait until cleared" operation
+                # directly, so we poll the flag with short sleeps.
+                if pause_event is not None and pause_event.is_set():
+                    log.info("listen loop: paused (no STT stream open)")
+                    while pause_event.is_set() and not stop.is_set():
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=0.5)
+                        except TimeoutError:
+                            pass
                     if stop.is_set():
                         break
-                    if isinstance(ev, SpeechStarted):
-                        # Scribe-emitted barge-in signal — same handling
-                        # as the local-VAD path. Idempotent.
-                        if speaking.active:
-                            speaking.cancelled = True
-                            await session.audio_out.clear()
-                    elif isinstance(ev, FinalTranscript):
-                        text = ev.text.strip()
-                        if not text:
-                            continue
-                        already_spoke = True
-                        await _record_turn("them", text)
-                        # Phone-call path: append to the engine's
-                        # messages list; complete_one_shot will see it.
-                        # Voice-agent path: ai.chat() takes the user
-                        # text directly via the ``_think_and_speak``
-                        # arg — no engine-side messages list needed.
-                        if not config.use_full_ai_service:
-                            messages.append(
-                                Message(role=MessageRole.USER, content=text)
-                            )
-                        await _think_and_speak(text)
-                    elif isinstance(ev, SpeechEnded):
-                        pass
-            except Exception:
-                log.exception(
-                    "listen loop crashed — conversation continues TTS-only"
-                )
-                outcome["transcription_failed_midcall"] = True
-            else:
-                # Async-for completed without an exception — Scribe's
-                # events iterator returned. Usually means the WS
-                # closed (idle timeout, server-side close, our own
-                # close-on-stop). Worth logging because if this
-                # happens mid-session, the brain can't process any
-                # more user transcripts and we silently lose the
-                # ability to converse.
-                log.warning(
-                    "listen loop: STT events iterator returned — "
-                    "transcripts will no longer reach the brain (stop=%s)",
-                    stop.is_set(),
-                )
-                outcome["stt_stream_closed_midcall"] = not stop.is_set()
-            finally:
-                pump_task.cancel()
-                stop_watcher.cancel()
+                    log.info("listen loop: resuming — reopening STT stream")
+
                 try:
-                    await stt_stream.close()
+                    stt_stream = await self._transcription.open_stream(
+                        StreamConfig(
+                            format=stt_fmt,
+                            interim_results=True,
+                            vad_events=True,
+                        )
+                    )
                 except Exception:
-                    pass
+                    log.exception(
+                        "Failed to open transcription stream — "
+                        "conversation continues TTS-only"
+                    )
+                    outcome["transcription_available"] = False
+                    return
+
+                pump_task = asyncio.create_task(
+                    _pump_audio_to_stt(
+                        session.audio_in,
+                        stt_stream,
+                        on_speech_detected=_on_local_vad_speech,
+                        input_is_mulaw=input_is_mulaw,
+                    )
+                )
+
+                # Watcher closes the STT stream when stop fires OR
+                # when the pause event fires, so the
+                # ``async for ev in stt_stream.events()`` loop
+                # below unblocks promptly. Without this the listen
+                # loop sits forever on the underlying WS recv()
+                # whenever the wrapper requests a pause, defeating
+                # the entire purpose of the close/reopen mechanic.
+                async def _close_stt_on_signal() -> None:
+                    stop_task = asyncio.create_task(stop.wait())
+                    waits = [stop_task]
+                    if pause_event is not None:
+                        pause_task = asyncio.create_task(pause_event.wait())
+                        waits.append(pause_task)
+                    try:
+                        await asyncio.wait(
+                            waits, return_when=asyncio.FIRST_COMPLETED
+                        )
+                    finally:
+                        for w in waits:
+                            w.cancel()
+                    try:
+                        await stt_stream.close()
+                    except Exception:
+                        log.debug(
+                            "close-on-signal failed", exc_info=True
+                        )
+
+                stop_watcher = asyncio.create_task(_close_stt_on_signal())
+
+                try:
+                    async for ev in stt_stream.events():
+                        if stop.is_set():
+                            break
+                        if (
+                            pause_event is not None
+                            and pause_event.is_set()
+                        ):
+                            break
+                        if isinstance(ev, SpeechStarted):
+                            # Scribe-emitted barge-in signal — same
+                            # handling as the local-VAD path.
+                            # Idempotent.
+                            if speaking.active:
+                                speaking.cancelled = True
+                                await session.audio_out.clear()
+                        elif isinstance(ev, FinalTranscript):
+                            text = ev.text.strip()
+                            if not text:
+                                continue
+                            already_spoke = True
+                            await _record_turn("them", text)
+                            # Phone-call path: append to the engine's
+                            # messages list; complete_one_shot will see it.
+                            # Voice-agent path: ai.chat() takes the user
+                            # text directly via the ``_think_and_speak``
+                            # arg — no engine-side messages list needed.
+                            if not config.use_full_ai_service:
+                                messages.append(
+                                    Message(
+                                        role=MessageRole.USER, content=text
+                                    )
+                                )
+                            await _think_and_speak(text)
+                        elif isinstance(ev, SpeechEnded):
+                            pass
+                except Exception:
+                    log.exception(
+                        "listen loop crashed — conversation continues TTS-only"
+                    )
+                    outcome["transcription_failed_midcall"] = True
+                    # Don't try to reopen on an unexpected crash;
+                    # leave the conversation in TTS-only mode and
+                    # exit the outer loop. Otherwise a persistently
+                    # failing backend would churn forever.
+                    pump_task.cancel()
+                    stop_watcher.cancel()
+                    try:
+                        await stt_stream.close()
+                    except Exception:
+                        pass
+                    return
+                else:
+                    # Async-for completed without an exception.
+                    # Two normal causes:
+                    #   1) stop fired (terminal close) — we'll
+                    #      exit the outer while loop next check.
+                    #   2) pause_event fired — we'll loop back,
+                    #      wait for resume, and reopen.
+                    # Unexpected close (Scribe idle timeout,
+                    # network blip) shows up as stop=False AND
+                    # pause=False; log it loudly because that
+                    # used to silently break the conversation.
+                    if stop.is_set():
+                        pass
+                    elif pause_event is not None and pause_event.is_set():
+                        log.info(
+                            "listen loop: STT closed (pause requested)"
+                        )
+                    else:
+                        log.warning(
+                            "listen loop: STT events iterator "
+                            "returned unexpectedly — will attempt "
+                            "to reopen (stop=False pause=False)"
+                        )
+                        outcome["stt_stream_closed_midcall"] = True
+                finally:
+                    pump_task.cancel()
+                    stop_watcher.cancel()
+                    try:
+                        await stt_stream.close()
+                    except Exception:
+                        pass
 
         async def _watchdog() -> None:
             try:
