@@ -840,6 +840,26 @@ class VoiceBrainService(Service):
                     input_is_mulaw=input_is_mulaw,
                 )
             )
+
+            # When ``stop`` fires, close the STT stream so the
+            # ``async for ev in stt_stream.events()`` loop unblocks.
+            # Without this the listen loop sits forever on the
+            # underlying WS recv() and never exits — which means
+            # ``asyncio.gather(...)`` never returns, the engine's
+            # finally never runs, and the wrapper's session_ended
+            # event never publishes. User-visible symptom: brain
+            # said goodbye + recorded "end_conversation", but the
+            # SPA never flipped back to idle because the close
+            # signal stayed pending.
+            async def _close_stt_on_stop() -> None:
+                await stop.wait()
+                try:
+                    await stt_stream.close()
+                except Exception:
+                    log.debug("close-on-stop failed", exc_info=True)
+
+            stop_watcher = asyncio.create_task(_close_stt_on_stop())
+
             try:
                 async for ev in stt_stream.events():
                     if stop.is_set():
@@ -875,6 +895,7 @@ class VoiceBrainService(Service):
                 outcome["transcription_failed_midcall"] = True
             finally:
                 pump_task.cancel()
+                stop_watcher.cancel()
                 try:
                     await stt_stream.close()
                 except Exception:
