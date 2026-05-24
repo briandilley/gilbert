@@ -2172,6 +2172,7 @@ class AIService(Service):
                     messages,
                     conversation_id,
                     user_ctx,
+                    source,
                 )
             # Unknown slash command — store the attempt and return an
             # actionable error without invoking the AI.
@@ -3821,6 +3822,7 @@ class AIService(Service):
         messages: list[Message],
         conversation_id: str,
         user_ctx: UserContext | None,
+        source: str = "",
     ) -> ChatTurnResult:
         """Parse, execute, and persist a slash command.
 
