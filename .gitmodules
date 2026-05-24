@@ -1,12 +1,4 @@
 [submodule "std-plugins"]
 	path = std-plugins
-	# URL + branch BOTH temporarily point at our fork's feature
-	# branch while the conversation-engine refactor is in flight.
-	# ``gilbert.sh``'s startup ``git submodule update --init
-	# --recursive --remote`` reads both from here and force-checks-
-	# out that HEAD on every start — leaving the upstream URL and
-	# ``main`` would yank the submodule back to briandilley/main
-	# and undo the in-progress plugin work. Flip both back when the
-	# feature merges.
-	url = https://github.com/jereanon/gilbert-plugins.git
-	branch = feature/telnyx-telephony
+	url = https://github.com/briandilley/gilbert-plugins.git
+	branch = main
