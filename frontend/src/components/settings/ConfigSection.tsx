@@ -55,6 +55,7 @@ function backendGroups(
   params: ConfigParamMeta[],
   singleBackendName: string,
   hasBackendSelector: boolean,
+  merged: Record<string, unknown>,
 ): { label: string; params: ConfigParamMeta[] }[] {
   if (hasBackendSelector) {
     const label = singleBackendName
@@ -76,6 +77,7 @@ function backendGroups(
     let isNested = false;
     let groupKey = parts[0];
     let groupLabel = parts[0];
+    let multiRole: { role: string; name: string } | null = null;
     if (parts[0] === "backends" && parts.length >= 3) {
       isNested = true;
       groupKey = `${parts[0]}.${parts[1]}`;
@@ -87,9 +89,20 @@ function backendGroups(
       // backend slot belongs to when one provider implements multiple
       // roles (e.g. ElevenLabs Scribe is both batch and streaming).
       groupLabel = `${humanize(parts[0])} · ${humanize(parts[2])}`;
+      multiRole = { role: parts[0], name: parts[2] };
     }
     if (seen.has(groupKey)) continue;
     seen.add(groupKey);
+    // Multi-role aggregators (transcription's batch/streaming/wake_word)
+    // emit every registered backend's params. Hide every backend group
+    // whose name doesn't match the currently selected ``<role>.default``
+    // so users only see settings for the backend they actually picked.
+    if (multiRole) {
+      const selected = merged[`${multiRole.role}.default`];
+      if (typeof selected === "string" && selected !== "" && selected !== multiRole.name) {
+        continue;
+      }
+    }
     groups.push({
       label: isNested && groupLabel.includes(" · ") ? groupLabel : humanize(groupLabel),
       params: params.filter(
@@ -354,6 +367,7 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
                   backendSettingsParams,
                   backendName,
                   !!backendParam,
+                  merged,
                 ).map((group) => {
                   const enableParam = group.params.find((p) =>
                     p.key.endsWith(".enabled"),

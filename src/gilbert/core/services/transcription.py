@@ -174,6 +174,19 @@ class TranscriptionService(Service):
                 default=wake_choices[0] if wake_choices else "",
                 choices=wake_choices,
             ),
+            ConfigParam(
+                key="wake_word.sensitivity",
+                type=ToolParameterType.NUMBER,
+                description=(
+                    "Default wake-word detection sensitivity (0..1). "
+                    "Higher fires more often, lower requires a cleaner "
+                    "match. Applies to whichever wake-word backend is "
+                    "active. Used by consumers (voice-agent, …) when "
+                    "they ask the transcription service to open a "
+                    "detector."
+                ),
+                default=0.5,
+            ),
         ]
 
         # Per-backend settings flattened into dotted keys, one block per role.
