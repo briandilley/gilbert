@@ -359,6 +359,12 @@ class VoiceBrainService(Service):
         failure_reason = ""
         spoke_at_all = False
         clock = _MonotonicClock()
+        # Serializes ``_think_and_speak`` invocations across all
+        # triggers — STT-driven (listen loop) and wrapper-injected
+        # (synthetic-turn loop). Without this, an operator directive
+        # arriving while the LLM is mid-chat would fire a parallel
+        # ai.chat() call and double-speak responses.
+        think_speak_lock = asyncio.Lock()
         # Track whether the opening utterance has happened (either via
         # the fallback timer or the listen-loop reacting to inbound
         # speech). Used by the WAIT_FOR_REMOTE opening policy's latch.
@@ -579,20 +585,6 @@ class VoiceBrainService(Service):
                 log.warning("ai_chat AIProvider missing — cannot respond")
                 return
 
-            # Wrapper hook to prepend operator directives, system
-            # notes, etc. before each LLM call. Phone uses this to
-            # drain its intervene-text queue ("ask about the loaner
-            # again") so the brain sees the directive on its next
-            # turn. Returns the (possibly modified) user_text.
-            if config.mutate_user_text is not None:
-                try:
-                    user_text = await config.mutate_user_text(user_text)
-                except Exception:
-                    log.exception(
-                        "mutate_user_text callback raised; using "
-                        "original user_text"
-                    )
-
             ctx = _make_brain_ctx()
             set_current_conversation_ctx(ctx)
             try:
@@ -690,7 +682,24 @@ class VoiceBrainService(Service):
                     log.debug("end_session cleanup error", exc_info=True)
 
         async def _think_and_speak(user_text: str | None = None) -> None:
-            """One LLM turn → optional speech → optional tool dispatch."""
+            """One LLM turn → optional speech → optional tool dispatch.
+
+            Acquires ``think_speak_lock`` for the entire turn so STT-
+            driven calls (from the listen loop) and synthetic-turn
+            calls (from the wrapper-injected queue) can't run in
+            parallel — that would race two concurrent ai.chat()
+            invocations and double-speak responses.
+            """
+            async with think_speak_lock:
+                await _think_and_speak_inner(user_text)
+
+        async def _think_and_speak_inner(
+            user_text: str | None = None
+        ) -> None:
+            """Lock-free body of ``_think_and_speak`` — split out so
+            paths that already hold the lock can call without
+            re-acquiring (none currently, but the split keeps the
+            recursion-safety contract explicit)."""
             nonlocal spoke_at_all
             if self._ai is None or self._tts is None:
                 log.warning("AI or TTS missing — cannot respond")
@@ -1176,15 +1185,75 @@ class VoiceBrainService(Service):
                 except Exception:
                     pass
 
+        async def _synthetic_turn_loop() -> None:
+            """Watch the wrapper-injected synthetic-turn queue and
+            run ``_think_and_speak`` for each entry. Used by phone's
+            'Direct Gilbert' textbox so operator directives interrupt
+            mid-call instead of queueing until the remote next
+            speaks.
+
+            Barge-in: if Gilbert is mid-TTS when a directive
+            arrives, we set ``speaking.cancelled`` and clear
+            audio_out BEFORE awaiting the think_speak_lock. The
+            in-flight ``_speak_text`` notices the cancellation,
+            breaks out of its chunk-write loop, releases the lock,
+            and we're free to run the directive.
+            """
+            queue = config.inject_synthetic_user_turn_queue
+            if queue is None:
+                return
+            log.info("synthetic_turn_loop: armed")
+            while not stop.is_set():
+                try:
+                    text = await asyncio.wait_for(
+                        queue.get(), timeout=0.5
+                    )
+                except TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    return
+                if stop.is_set():
+                    break
+                log.info(
+                    "synthetic_turn_loop: dispatching injected turn "
+                    "(chars=%d, in-flight TTS=%s)",
+                    len(text),
+                    speaking.active,
+                )
+                # Barge-in: cancel any current TTS so the directive
+                # takes effect immediately instead of after Gilbert
+                # finishes his current sentence.
+                if speaking.active:
+                    speaking.cancelled = True
+                    try:
+                        await session.audio_out.clear()
+                    except Exception:
+                        log.debug(
+                            "synthetic_turn: audio_out.clear raised",
+                            exc_info=True,
+                        )
+                try:
+                    await _think_and_speak(text)
+                except Exception:
+                    log.exception(
+                        "synthetic_turn: _think_and_speak failed for "
+                        "injected text=%r",
+                        text[:80],
+                    )
+
         # ── orchestrate ───────────────────────────────────────────────
 
         started_at = clock.now()
-        log.info("voice_brain: entering gather of status/listen/watchdog loops")
+        log.info(
+            "voice_brain: entering gather of status/listen/watchdog/"
+            "synthetic loops"
+        )
         try:
             results = await asyncio.gather(
                 _status_loop(),
                 _listen_loop(),
                 _watchdog(),
+                _synthetic_turn_loop(),
                 return_exceptions=True,
             )
             log.info(

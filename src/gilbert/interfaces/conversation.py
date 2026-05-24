@@ -403,16 +403,24 @@ class ConversationConfig:
         Callable[[], Awaitable[None]] | None
     ) = None  # fired after each TTS playback completes (engine quiet)
 
-    # Hook to mutate the user_message before each ai.chat() call. The
-    # wrapper returns the (possibly-modified) text; the engine passes
-    # that to ai.chat. Phone uses this to prepend pending operator
-    # directives ("ask about the loaner again", "don't agree to
-    # Tuesday") as system notes the brain can act on. The directive
-    # takes effect on the NEXT user turn — for immediate action,
-    # use the engine's tool path (e.g. hang_up).
-    mutate_user_text: (
-        Callable[[str], Awaitable[str]] | None
-    ) = None
+    # Queue the engine watches in parallel with STT for synthetic
+    # user turns the wrapper injects out-of-band — operator
+    # directives, scheduled prompts, "are you still there?" nudges.
+    # Each text pulled from the queue is treated as if the remote
+    # just spoke that text: any in-flight TTS is cancelled
+    # (barge-in style), then ``_think_and_speak`` runs with the
+    # text as user_message. A lock serializes synthetic turns
+    # against in-flight STT-driven turns so they don't clash.
+    #
+    # Phone uses this for the SPA's 'Direct Gilbert' textbox so
+    # operator directives take effect IMMEDIATELY instead of
+    # queueing until the remote next speaks.
+    #
+    # The wrapper is responsible for framing the text so the LLM
+    # knows it's a system-side injection, not the remote talking
+    # (e.g. wrap with "(OPERATOR DIRECTIVE: …)" — the engine
+    # doesn't add any such marker itself).
+    inject_synthetic_user_turn_queue: Any = None  # asyncio.Queue[str] | None
 
 
 # ── Outcome the engine returns ───────────────────────────────────────
