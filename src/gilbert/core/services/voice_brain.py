@@ -168,6 +168,7 @@ async def _pump_audio_to_stt(
     Replace with ``soxr`` or a vendored C helper if it gets removed.
     """
     pump_count = 0
+    logger.info("audio pump: starting (input_is_mulaw=%s)", input_is_mulaw)
     # Local VAD state — rolling RMS over the last N=10 chunks (200ms
     # at 50fps). Threshold tuned for an 8 kHz mulaw → 16-bit PCM
     # stream: silence RMS sits around 0-200, normal phone speech is
@@ -239,8 +240,27 @@ async def _pump_audio_to_stt(
                     peak_rms,
                     _VAD_RMS_THRESHOLD,
                 )
+    except asyncio.CancelledError:
+        logger.info("audio pump: cancelled after %d chunks", pump_count)
+        raise
     except Exception:
-        logger.debug("audio pump ended", exc_info=True)
+        # Promoted from DEBUG to WARNING — the pump silently dying
+        # on a Scribe disconnect would leave the listen_loop unable
+        # to recover and the user-visible symptom is "voice agent
+        # stuck — no transcripts ever come back."
+        logger.warning(
+            "audio pump: ended unexpectedly after %d chunks (likely "
+            "Scribe stream closed; the listen_loop will end on its "
+            "own when the events iterator returns)",
+            pump_count,
+            exc_info=True,
+        )
+    else:
+        logger.info(
+            "audio pump: ended cleanly after %d chunks (audio_in "
+            "iterator exhausted)",
+            pump_count,
+        )
 
 
 # ── The engine service ───────────────────────────────────────────────
@@ -893,6 +913,20 @@ class VoiceBrainService(Service):
                     "listen loop crashed — conversation continues TTS-only"
                 )
                 outcome["transcription_failed_midcall"] = True
+            else:
+                # Async-for completed without an exception — Scribe's
+                # events iterator returned. Usually means the WS
+                # closed (idle timeout, server-side close, our own
+                # close-on-stop). Worth logging because if this
+                # happens mid-session, the brain can't process any
+                # more user transcripts and we silently lose the
+                # ability to converse.
+                log.warning(
+                    "listen loop: STT events iterator returned — "
+                    "transcripts will no longer reach the brain (stop=%s)",
+                    stop.is_set(),
+                )
+                outcome["stt_stream_closed_midcall"] = not stop.is_set()
             finally:
                 pump_task.cancel()
                 stop_watcher.cancel()
