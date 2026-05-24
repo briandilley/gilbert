@@ -8,7 +8,7 @@
 > and you need to setup service for my 2026 Audi RS6, purchased in December of
 > 2025. It has a recall for a backup camera, and I'm getting an error message
 > on the screen that says 'Faulty right turn signal.' I'd like to bring it in
-> sometime next week, in the morning. They can call me back at 704-641-1948 if
+> sometime next week, in the morning. They can call me back at 555-123-4567 if
 > they have any questions, but I'd like you to make the appointment. I need a
 > loaner if possible!"
 
@@ -25,7 +25,7 @@ and intervene by text or voice if the call gets stuck.
 | **MVP scope** | **Full two-way conversation** | Voicemail-only would be a fork; the conversation loop is the hard part anyway. |
 | **Supervision** | **Live transcript + intervene** (text + voice) | The receptionist-confusion long-tail is too risky for fire-and-forget. |
 | **STT** | reuse `transcription` service | Deepgram or ElevenLabs Scribe streaming — already wired into a `TranscriptionBackend` ABC. |
-| **TTS** | reuse `tts` service | ElevenLabs Flash 2.5 streaming — already configured on meridian. |
+| **TTS** | reuse `tts` service | ElevenLabs Flash 2.5 streaming — already configured. |
 | **LLM** | reuse `ai_chat` service | Same Claude/whoever the user has set. Tooling already exists. |
 
 ## Architecture sketch
@@ -146,10 +146,10 @@ async def _run_call(session, brief):
 ```json
 {
   "_id": "call_2026_05_23_abc123",
-  "user_id": "usr_jeremy",
+  "user_id": "usr_example",
   "to_number": "+13035550100",
-  "from_number": "+17046411948",
-  "callback_number": "+17046411948",
+  "from_number": "+15551234567",
+  "callback_number": "+15551234567",
   "brief": "Setup service for my 2026 Audi RS6, recall + faulty turn signal…",
   "status": "completed",
   "started_at": "2026-05-23T15:30:12Z",
@@ -185,7 +185,7 @@ async def _run_call(session, brief):
 | **Barge-in / talking over them** | Listen for start-of-speech on the inbound stream while we're outputting; cancel `audio_out` writes immediately. Telnyx supports `clear` to drop our buffered audio. |
 | **Voicemail detection** | Heuristics: silence > 6s after pickup, classic "leave a message after the beep" phrasing, beep tone detection. On detect, switch to a one-shot prepared message + hang up. |
 | **IVR menus** | LLM has `send_dtmf(digits)` tool. Prompt: "If you hear a menu, navigate it. If unclear, press 0 or stay silent for operator." |
-| **"Are you a robot?"** | Disclose: "Yes, I'm an automated assistant calling on behalf of Jeremy. I can take notes and confirm appointment details — would you prefer Jeremy call back directly?" |
+| **"Are you a robot?"** | Disclose: "Yes, I'm an automated assistant calling on behalf of `{the user}`. I can take notes and confirm appointment details — would you prefer they call back directly?" |
 | **Hallucinated commitments** | Strong system prompt: "Never confirm a time the receptionist hasn't offered. Read back times verbatim before agreeing." Confirmation step at end-of-call. |
 | **Legal disclosure (CO is one-party recording, but federal AI-call rules tightened in 2024)** | Disclose AI status in the opening greeting. Optional: append "this call may be recorded" if the user opts in. Both controlled by a per-user policy in settings. |
 | **Misunderstood appointment** | End-of-call `confirm_and_end` tool reads the structured outcome back. User notification includes the structured outcome with a "looks wrong" button that opens the chat for follow-up. |
