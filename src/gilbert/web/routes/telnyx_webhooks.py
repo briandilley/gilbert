@@ -28,6 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
+from gilbert.interfaces.messaging import MessagingWebhookEndpoint
 from gilbert.interfaces.telephony import TelnyxWebhookEndpoint
 
 logger = logging.getLogger(__name__)
@@ -286,3 +287,60 @@ def _safe_loads(raw: str) -> dict[str, Any]:
         return out if isinstance(out, dict) else {}
     except Exception:
         return {}
+
+
+# ── Messaging webhook ────────────────────────────────────────────────
+#
+# Telnyx's Messaging API posts events to whichever Webhook URL is
+# configured on the Messaging Profile. We give it
+# ``<public-url>/api/telnyx/messages/webhook`` (see
+# ``TelnyxMessaging.backend_config_params()`` description for the
+# operator-facing setup).
+#
+# Routing is parallel to the voice webhook above: resolve the
+# ``telnyx_messaging_webhook`` capability off the live Gilbert app and
+# hand the JSON to it. The messaging plugin (NOT this route) parses
+# Telnyx's payload shape into a ``Message`` and dispatches via the
+# inbound deliverer it bound at startup.
+
+
+def _get_messaging_endpoint(
+    state: Any,
+) -> MessagingWebhookEndpoint | None:
+    gilbert = getattr(state, "gilbert", None)
+    if gilbert is None:
+        return None
+    svc = gilbert.service_manager.get_capability("telnyx_messaging_webhook")
+    if svc is None or not isinstance(svc, MessagingWebhookEndpoint):
+        return None
+    return svc
+
+
+@router.post("/messages/webhook")
+async def telnyx_messages_webhook(request: Request) -> dict[str, str]:
+    """Receive a Telnyx messaging webhook (``message.received``,
+    ``message.sent``, ``message.finalized``).
+
+    Same 200-on-everything contract the voice webhook follows —
+    Telnyx retries on non-2xx and we'd rather log an internal bug
+    than back up their queue."""
+    endpoint = _get_messaging_endpoint(request.app.state)
+    if endpoint is None:
+        logger.warning(
+            "Telnyx messaging webhook arrived but plugin isn't loaded"
+        )
+        return {"status": "no_plugin"}
+
+    try:
+        payload = await request.json()
+    except Exception:
+        logger.warning("Telnyx messaging webhook with non-JSON body")
+        return {"status": "bad_request"}
+
+    try:
+        await endpoint.deliver_webhook_event(payload)
+    except Exception:
+        logger.exception("Telnyx messaging webhook dispatch failed")
+        return {"status": "error"}
+
+    return {"status": "ok"}
