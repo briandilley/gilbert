@@ -286,8 +286,6 @@ class HealthService(Service):
     the injected tool args.
     """
 
-    slash_namespace = "health"
-
     def __init__(self) -> None:
         self._storage: StorageBackend | None = None
         self._event_bus: Any = None

@@ -423,7 +423,6 @@ class MediaLibraryService(Service):
 
     config_namespace = "media_library"
     config_category = "Media"
-    slash_namespace = "media"
 
     def __init__(self) -> None:
         self._enabled: bool = False
@@ -2979,7 +2978,7 @@ class MediaLibraryService(Service):
         if self.supports_now_playing:
             tools.append(
                 ToolDefinition(
-                    name="now_playing",
+                    name="media_now_playing",
                     slash_group="media",
                     slash_command="now",
                     slash_help="What's playing now: /media now [client]",
@@ -3223,7 +3222,7 @@ class MediaLibraryService(Service):
             return await self._tool_recently_added(arguments)
         if name == "continue_watching":
             return await self._tool_continue_watching(arguments)
-        if name == "now_playing":
+        if name in {"media_now_playing", "now_playing"}:
             return await self._tool_now_playing(arguments)
         if name == "playback_control":
             return await self._tool_playback_control(arguments)

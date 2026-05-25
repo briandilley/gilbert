@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gilbert.core.services.ai import AIService
+from gilbert.core.services.health import HealthService
+from gilbert.core.services.media_library import MediaLibraryService
 from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import (
@@ -513,6 +515,85 @@ def test_grouped_dispatch_with_namespace() -> None:
     cmds = svc._slash_commands_for_user(user_ctx)
 
     assert "currev.radio start" in cmds
+
+
+def test_media_library_slash_commands_use_single_media_prefix() -> None:
+    """Media library is a core service, so grouped slash commands should
+    register as /media clients, not /media.media clients."""
+    acl = _StubACL()
+    svc = _make_service(acl)
+    media = MediaLibraryService()
+    media._enabled = True
+    svc._resolver = _resolver_with([media])
+
+    user_ctx = UserContext(
+        user_id="u1",
+        email="u1@example.com",
+        display_name="User",
+        roles=frozenset({"user"}),
+    )
+    cmds = svc._slash_commands_for_user(user_ctx)
+
+    assert "media clients" in cmds
+    assert "media.media clients" not in cmds
+
+
+def test_health_slash_commands_use_single_health_prefix() -> None:
+    """Health is a core service with grouped slash commands, so commands
+    should register as /health links, not /health.health links."""
+    acl = _StubACL()
+    svc = _make_service(acl)
+    health = HealthService()
+    health._enabled = True
+    svc._resolver = _resolver_with([health])
+
+    user_ctx = UserContext(
+        user_id="u1",
+        email="u1@example.com",
+        display_name="User",
+        roles=frozenset({"user"}),
+    )
+    cmds = svc._slash_commands_for_user(user_ctx)
+
+    assert "health links" in cmds
+    assert "health.health links" not in cmds
+
+
+def test_media_now_slash_survives_music_now_playing_tool_collision() -> None:
+    """Music and media both have a "now playing" concept, but both slash
+    commands must remain callable."""
+    acl = _StubACL()
+    svc = _make_service(acl)
+    media = MediaLibraryService()
+    media._enabled = True
+
+    class _NowPlayingBackend:
+        supports_now_playing = True
+        supports_continue_watching = False
+        supports_recently_added = False
+        supports_seek = False
+        supports_next_episode = False
+
+    media._backends = {"plex": _NowPlayingBackend()}  # type: ignore[assignment]
+    music_now = ToolDefinition(
+        name="now_playing",
+        slash_group="music",
+        slash_command="now",
+        description="Music now playing.",
+        required_role="everyone",
+    )
+    svc._resolver = _resolver_with([_CoreToolService([music_now]), media])
+
+    user_ctx = UserContext(
+        user_id="u1",
+        email="u1@example.com",
+        display_name="User",
+        roles=frozenset({"user"}),
+    )
+    cmds = svc._slash_commands_for_user(user_ctx)
+
+    assert "music now" in cmds
+    assert "media now" in cmds
 
 
 # --- slash.commands.list RPC handler ---------------------------------
