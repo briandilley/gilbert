@@ -50,6 +50,16 @@ def _merge_plugin_nav(gilbert: Any, nav_groups: list[dict[str, Any]]) -> None:
             "required_role": item.get("required_role", "user"),
             "items": [],  # leaf
         }
+        # Propagate gating fields onto the synthesized group so the
+        # leaf-branch of ``_visible_async`` (which inspects the group
+        # itself when ``items`` is empty) can hide the entry when the
+        # underlying service is missing / disabled. Without this, a
+        # plugin route whose owning service was toggled off in Settings
+        # → Services still left a dead top-level nav entry that landed
+        # on a blank page (the route is gated, the nav is not).
+        for gating in ("requires_capability", "requires_user_health_data"):
+            if gating in item:
+                new_group[gating] = item[gating]
         nav_groups.append(new_group)
         by_key[new_key] = new_group
 

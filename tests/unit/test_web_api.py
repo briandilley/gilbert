@@ -323,6 +323,118 @@ async def test_route_with_requires_capability_visible_when_service_enabled(
     assert any(i["label"] == "Andon FM" for i in media["items"])
 
 
+async def test_toplevel_route_hidden_when_service_disabled(
+    service: WebApiService,
+) -> None:
+    """Sibling of ``test_route_with_requires_capability_hidden_when_service_disabled``
+    but for the case where the route has NO ``nav_parent_group`` —
+    it synthesizes a NEW top-level entry instead of slotting into
+    an existing group like Media.
+
+    Regression: when synthesizing the new group from the item, the
+    nav-merge logic copied label/url/icon/required_role but NOT
+    ``requires_capability``. The resulting leaf had no gating
+    field, so ``_visible(group)`` returned True even when the
+    underlying service was disabled — leaving a dead top-level
+    nav entry that landed on a blank page. Voice-agent's ``/voice``
+    route hit this whenever the service was toggled off in
+    Settings → Services.
+    """
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="voice-agent")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/voice",
+                    panel_id="voice_agent.page",
+                    label="Voice",
+                    icon="mic",
+                    required_role="user",
+                    requires_capability="voice_agent",
+                    add_to_nav=True,
+                    # ``nav_parent_group=""`` (default) → synthesize
+                    # a new top-level group from the route itself.
+                    # This is the path the bug lived on.
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-voice-off"})
+
+    assert result is not None
+    voice = next((g for g in result["nav"] if g["key"] == "voice"), None)
+    assert voice is None, (
+        "Synthesized top-level route entry must stay hidden when the "
+        "route's required capability isn't live (service disabled)"
+    )
+
+
+async def test_toplevel_route_visible_when_service_enabled(
+    service: WebApiService,
+) -> None:
+    """Mirror of the disabled-case above — when a service advertising
+    the required capability IS enabled, the synthesized top-level
+    nav entry appears."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="voice-agent")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/voice",
+                    panel_id="voice_agent.page",
+                    label="Voice",
+                    icon="mic",
+                    required_role="user",
+                    requires_capability="voice_agent",
+                    add_to_nav=True,
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    class _ServiceManagerWithCap:
+        def __init__(self, acl: Any | None) -> None:
+            self._acl = acl
+
+        def get_by_capability(self, cap: str) -> Any | None:
+            if cap == "access_control":
+                return self._acl
+            if cap == "voice_agent":
+                return SimpleNamespace(enabled=True)
+            return None
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.service_manager = _ServiceManagerWithCap(_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-voice-on"})
+
+    assert result is not None
+    voice = next((g for g in result["nav"] if g["key"] == "voice"), None)
+    assert voice is not None
+    assert voice["url"] == "/voice"
+
+
 async def test_dashboard_group_default_url_skips_action_only_items(
     service: WebApiService,
 ) -> None:
