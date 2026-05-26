@@ -63,6 +63,16 @@ _PUBLIC_PREFIXES = (
     # ``/auth/login``, the webhook body never reaches our handler, and
     # ``call.answered`` events never advance the call to CONNECTED.
     "/api/telnyx/",
+    # Mentra Cloud POSTs ``session_request`` / ``stop_request`` webhooks
+    # to ``/api/mentra/webhook`` when a user launches the Gilbert app
+    # from their phone. Same posture as Telnyx — no session cookie /
+    # bearer header on the inbound request; auth is the ``apiKey``
+    # the plugin validates in the WS handshake on the back-channel
+    # we dial. Without this exempt entry the cloud's webhook gets
+    # 302'd to the login page and the WebSocket back-channel never
+    # opens, so the glasses sit forever in "Connecting…" with no
+    # diagnostic that surfaces in Gilbert's logs.
+    "/api/mentra/",
 )
 
 
