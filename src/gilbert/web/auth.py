@@ -41,6 +41,9 @@ _PUBLIC_EXACT = (
     "/api/tls/info",
     "/api/tls/cert.crt",
     "/screens",
+    # ``/screens/info`` is the public {enabled, allow_guest_screens} probe the
+    # login + screens pages fetch before authenticating to decide their UI.
+    "/screens/info",
     "/setup-https",
     "/health",
 )

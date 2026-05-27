@@ -36,6 +36,28 @@ class FakeResolver:
         return [svc] if svc else []
 
 
+class FakeConfig:
+    """Minimal ConfigurationReader for tests."""
+
+    def __init__(self, sections: dict[str, dict[str, Any]]) -> None:
+        self._sections = sections
+
+    def get(self, path: str) -> Any:
+        ns, _, key = path.partition(".")
+        return self._sections.get(ns, {}).get(key)
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return self._sections.get(namespace, {})
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self._sections.get(namespace, {})
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        ns, _, key = path.partition(".")
+        self._sections.setdefault(ns, {})[key] = value
+        return self._sections[ns]
+
+
 @pytest.fixture
 def service() -> ScreenService:
     svc = ScreenService()
@@ -141,15 +163,6 @@ class TestScreenRegistry:
         assert service.get_screen("shop screen") is not None
         assert service.get_screen("nonexistent") is None
 
-    def test_default_url(self, service: ScreenService) -> None:
-        service.connect("Test", default_url="https://example.com")
-        screens = service.list_screens()
-        assert screens[0]["default_url"] == "https://example.com"
-
-    def test_empty_default_url_is_none(self, service: ScreenService) -> None:
-        screen = service.connect("Test", default_url="")
-        assert screen.default_url is None
-
 
 # ── Push methods ─────���───────────────────────────────────────
 
@@ -173,15 +186,10 @@ class TestPushMethods:
         result = service.push_clear("test")
         assert result is True
         msg = screen.queue.get_nowait()
+        assert msg.startswith("event: clear")
         data = json.loads(msg.split("data: ")[1].split("\n")[0])
         assert data["type"] == "clear"
-
-    def test_push_clear_with_default_url(self, service: ScreenService) -> None:
-        screen = service.connect("Test", default_url="https://example.com")
-        service.push_clear("test")
-        msg = screen.queue.get_nowait()
-        data = json.loads(msg.split("data: ")[1].split("\n")[0])
-        assert data["default_url"] == "https://example.com"
+        assert "default_url" not in data
 
     def test_push_document(self, service: ScreenService) -> None:
         screen = service.connect("Test")
@@ -215,9 +223,44 @@ class TestPushMethods:
         screen = service.connect("Test")
         service.push_error("test", "Not found")
         msg = screen.queue.get_nowait()
+        # The server-pushed error uses the ``show_error`` event name so it
+        # never aliases EventSource's native transport ``error`` event.
+        assert msg.startswith("event: show_error")
         data = json.loads(msg.split("data: ")[1].split("\n")[0])
-        assert data["type"] == "error"
+        assert data["type"] == "show_error"
         assert data["message"] == "Not found"
+
+
+# ── Configuration ────────────────────────────────────────────
+
+
+class TestConfig:
+    def test_allow_guest_screens_default_false(self, service: ScreenService) -> None:
+        assert service.allow_guest_screens is False
+
+    def test_config_params_includes_allow_guest_screens(self, service: ScreenService) -> None:
+        keys = {p.key for p in service.config_params()}
+        assert "allow_guest_screens" in keys
+
+    @pytest.mark.asyncio
+    async def test_on_config_changed_toggles_allow_guest_screens(
+        self, service: ScreenService
+    ) -> None:
+        await service.on_config_changed({"allow_guest_screens": True})
+        assert service.allow_guest_screens is True
+        await service.on_config_changed({"allow_guest_screens": False})
+        assert service.allow_guest_screens is False
+
+    @pytest.mark.asyncio
+    async def test_start_loads_allow_guest_screens(self, tmp_path: Path) -> None:
+        svc = ScreenService()
+        resolver = FakeResolver()
+        resolver.capabilities["configuration"] = FakeConfig(
+            {"screens": {"enabled": True, "allow_guest_screens": True}}
+        )
+        await svc.start(resolver)
+        assert svc.enabled is True
+        assert svc.allow_guest_screens is True
 
 
 # ── Temp file management ─────────────────────────────────────

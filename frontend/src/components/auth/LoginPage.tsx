@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { fetchLoginMethods, loginLocal } from "@/api/auth";
+import { fetchScreensInfo } from "@/api/screens";
 import {
   Card,
   CardContent,
@@ -27,6 +28,11 @@ export function LoginPage() {
   const { data: methods } = useQuery({
     queryKey: ["auth-methods"],
     queryFn: fetchLoginMethods,
+  });
+
+  const { data: screensInfo } = useQuery({
+    queryKey: ["screens-info"],
+    queryFn: fetchScreensInfo,
   });
 
   const formMethods = methods?.filter((m) => m.method === "form") ?? [];
@@ -110,6 +116,16 @@ export function LoginPage() {
               {method.display_name}
             </Button>
           ))}
+
+          {screensInfo?.enabled && screensInfo.allow_guest_screens && (
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => navigate("/screens")}
+            >
+              Set up a screen
+            </Button>
+          )}
         </CardContent>
       </Card>
     </div>

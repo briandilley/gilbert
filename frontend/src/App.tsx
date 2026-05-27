@@ -43,6 +43,10 @@ export default function App() {
     <Routes>
       <Route path="/auth/login" element={<LoginPage />} />
       <Route path="/setup-https" element={<SetupHttpsPage />} />
+      {/* Screens render full-screen with their own slim title bar and manage
+          their own auth gating (guest setup is opt-in), so they live outside
+          ProtectedRoute / AppShell. */}
+      <Route path="/screens" element={<ScreensPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/" element={<DashboardPage />} />
@@ -69,7 +73,6 @@ export default function App() {
           <Route path="/plugins" element={<PluginsPage />} />
           <Route path="/proposals" element={<ProposalsPage />} />
           <Route path="/system" element={<SystemPage />} />
-          <Route path="/screens" element={<ScreensPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/notifications" element={<NotificationsPage />} />
           <Route

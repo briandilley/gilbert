@@ -8,6 +8,7 @@ service inspector, entity browser).
 import logging
 from typing import Any
 
+from gilbert.interfaces.screens import GuestScreenPolicy
 from gilbert.interfaces.service import Service, ServiceEnumerator, ServiceInfo, ServiceResolver
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,18 @@ class WebApiService(Service):
                 "cards": [],
                 "nav": [],
             }
+
+        # The Screens nav item widens to ``everyone`` when guest screens are
+        # allowed — local guests (who only get nav when the global guest
+        # policy is on) can then reach screen setup. Otherwise it's a normal
+        # logged-in entry. ``requires_capability`` still hides it when the
+        # service is disabled.
+        screens_svc = gilbert.service_manager.get_by_capability("screen_display")
+        screens_role = (
+            "everyone"
+            if isinstance(screens_svc, GuestScreenPolicy) and screens_svc.allow_guest_screens
+            else "user"
+        )
 
         # Menu structure: each top-level entry is either a leaf (no
         # ``items``) or a group with child items. The group's ``url``
@@ -499,6 +512,14 @@ class WebApiService(Service):
                         "icon": "user-check",
                         "required_role": "admin",
                         "requires_capability": "presence",
+                    },
+                    {
+                        "label": "Screens",
+                        "description": "Remote display screens",
+                        "url": "/screens",
+                        "icon": "monitor",
+                        "required_role": screens_role,
+                        "requires_capability": "screen_display",
                     },
                     {
                         "label": "Restart",

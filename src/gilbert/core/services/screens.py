@@ -64,7 +64,6 @@ class ConnectedScreen:
 
     name: str
     key: str  # normalized lowercase key
-    default_url: str | None = None
     connected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
 
@@ -111,6 +110,7 @@ class ScreenService(Service):
 
     def __init__(self) -> None:
         self._enabled: bool = False
+        self._allow_guest_screens: bool = False
         self._screens: dict[str, ConnectedScreen] = {}
         self._tmp_dir: Path | None = None
         self._files: dict[str, TempFile] = {}
@@ -155,6 +155,7 @@ class ScreenService(Service):
                 section = config_svc.get_section(self.config_namespace)
                 self._ttl = int(section.get("tmp_ttl_seconds", 1800))
                 self._cleanup_interval = int(section.get("cleanup_interval_seconds", 300))
+                self._allow_guest_screens = bool(section.get("allow_guest_screens", False))
 
         # Create temp directory
         self._tmp_dir = Path(".gilbert/output/screens")
@@ -200,11 +201,31 @@ class ScreenService(Service):
                 description="Interval between cleanup runs (seconds).",
                 default=300,
             ),
+            ConfigParam(
+                key="allow_guest_screens",
+                type=ToolParameterType.BOOLEAN,
+                description=(
+                    "Allow setting up a screen without logging in. When on, the "
+                    "/screens page and SSE stream are reachable by unauthenticated "
+                    "visitors, and a 'Set up a screen' button appears on the login page."
+                ),
+                default=False,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._ttl = int(config.get("tmp_ttl_seconds", self._ttl))
         self._cleanup_interval = int(config.get("cleanup_interval_seconds", self._cleanup_interval))
+        self._allow_guest_screens = bool(config.get("allow_guest_screens", self._allow_guest_screens))
+
+    @property
+    def allow_guest_screens(self) -> bool:
+        """Whether unauthenticated visitors may set up a screen.
+
+        Read by the web layer (route gate, ``/screens/info``, nav) via the
+        ``GuestScreenPolicy`` protocol.
+        """
+        return self._allow_guest_screens
 
     @property
     def _knowledge(self) -> Any:
@@ -215,7 +236,7 @@ class ScreenService(Service):
 
     # ── Screen Registry ─────────────────────────────────────────
 
-    def connect(self, name: str, default_url: str | None = None) -> ConnectedScreen:
+    def connect(self, name: str) -> ConnectedScreen:
         """Register a screen. Replaces any existing screen with the same key."""
         key = _normalize(name)
         existing = self._screens.get(key)
@@ -223,7 +244,7 @@ class ScreenService(Service):
             existing.queue.put_nowait(_SENTINEL)
             logger.info("Screen replaced: %s", name)
 
-        screen = ConnectedScreen(name=name.strip(), key=key, default_url=default_url or None)
+        screen = ConnectedScreen(name=name.strip(), key=key)
         self._screens[key] = screen
         logger.info("Screen connected: %s (key=%s)", screen.name, key)
 
@@ -266,8 +287,6 @@ class ScreenService(Service):
                 "key": s.key,
                 "connected_at": s.connected_at.isoformat(),
             }
-            if s.default_url:
-                info["default_url"] = s.default_url
             result.append(info)
         return result
 
@@ -363,10 +382,7 @@ class ScreenService(Service):
         if not screen:
             return False
 
-        data: dict[str, Any] = {"type": "clear"}
-        if screen.default_url:
-            data["default_url"] = screen.default_url
-        screen.queue.put_nowait(_sse_event("clear", data))
+        screen.queue.put_nowait(_sse_event("clear", {"type": "clear"}))
         logger.info("Screen push clear: %s", screen.name)
         return True
 
@@ -380,12 +396,18 @@ class ScreenService(Service):
         return True
 
     def push_error(self, screen_name: str, message: str) -> bool:
-        """Push an error message to a screen (auto-dismisses)."""
+        """Push an error message to a screen (auto-dismisses).
+
+        Emitted as the ``show_error`` SSE event — not ``error`` — so it never
+        aliases EventSource's native transport ``error`` event on the client.
+        """
         screen = self.get_screen(screen_name)
         if not screen:
             return False
 
-        screen.queue.put_nowait(_sse_event("error", {"type": "error", "message": message}))
+        screen.queue.put_nowait(
+            _sse_event("show_error", {"type": "show_error", "message": message})
+        )
         logger.info("Screen push error: %s -> %s", message, screen.name)
         return True
 
