@@ -2,7 +2,7 @@
 
 An AI-powered assistant for home and business automation. Gilbert combines a modular, interface-driven architecture with an agentic AI core — giving it the ability to control speakers, greet people at the door, manage email, spin up a radio DJ, expose its tools over MCP, and much more, all orchestrated through natural conversation or automated event-driven workflows.
 
-Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, local Whisper speech-to-text, MCP transports); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
+Everything in Gilbert is an abstraction. Swap your AI provider, your speaker system, your presence detector, or your storage backend without touching a single line of business logic. The core ships with only vendor-free backends (local auth, local filesystem documents, local + browser speaker playback, local Whisper speech-to-text, internal-URL via sslip.io, MCP transports); every third-party integration — Anthropic, Sonos, Google, UniFi, ElevenLabs, Tavily, Slack, ngrok, Tesseract — is a **plugin**. Plugins live in a separate [gilbert-plugins](https://github.com/briandilley/gilbert-plugins) repo that's included as a git submodule at `std-plugins/`, and new plugins can be added at runtime from any GitHub URL.
 
 Gilbert is a **multi-user system from the ground up** — every piece of state (mailboxes, chat history, documents, MCP servers, scheduled jobs) is owned by a specific user, shared via roles and per-collection ACLs, and gated by a role-based access control layer that consistently applies across the web UI, chat, tools, events, and the MCP endpoint.
 
@@ -127,6 +127,7 @@ Out of the box — once the `std-plugins` submodule is initialized — Gilbert p
 - **External notification fan-out** — every notification persisted by the Notifications service is also dispatched, on a per-user opt-in basis, to external push providers via the `push_notifications` service. Users add "notification routes" on `/account/notifications` (`ntfy`, `pushover`, `discord-webhook`, and `telegram` plugins ship out of the box) with per-route urgency floors, source allow/deny lists, and tz-aware quiet hours. The fan-out runs through a bounded queue + worker pool so a slow provider can never back-pressure the in-app dispatcher; URGENT-failure exhaustion escalates to an in-app `push_failure` notification so operators see drops without re-implementing alerting.
 - **OCR** — the `tesseract` plugin extracts text from images locally (no network, no API key) for document indexing and vision workflows.
 - **Public tunnel** — the `ngrok` plugin provides a public HTTPS URL so OAuth callbacks (Google login, Slack Socket Mode) work behind NAT.
+- **Internal URL (LAN OAuth)** — the core internal-URL service hands OAuth flows a LAN-reachable DNS hostname via [sslip.io](https://sslip.io) (`192-168-1-50.sslip.io` → that IP), so providers that reject raw IP redirect URIs (e.g. Google) work without a public tunnel. Auto-detects the host's outbound IP; the Google auth backend's `callback_url_source` picks `tunnel`, `internal_url`, or the request origin. Vendor-free, no API key.
 - **Slack bridge** — the `slack` plugin connects a Socket Mode bot so users can chat with Gilbert from Slack DMs and mentions, with the same tool access as the web UI.
 - **MCP (Model Context Protocol)** — Gilbert is both an **MCP client** (connect to external MCP servers, per-server RBAC, OAuth 2.1 support, stdio + streamable HTTP + SSE transports, with the external tools merged into Gilbert's own AI pipeline) and an **MCP server** (expose Gilbert's own tools to external agents like Claude Desktop or Cursor over a bearer-authenticated endpoint at `/api/mcp`, with per-client owner identity and AI profile filtering).
 - **Remote screens** — push content (PDFs, images, HTML) to browser-based displays via SSE (core).
@@ -183,6 +184,7 @@ WebSearchBackend     →  tavily plugin → TavilySearch
 WeatherBackend       →  open-meteo plugin → OpenMeteoWeather
 OCRBackend           →  tesseract plugin → TesseractOCR
 TunnelBackend        →  ngrok plugin → NgrokTunnel
+InternalUrlBackend   →  core (SslipInternalUrlBackend — LAN hostname for OAuth redirects)
 MCPBackend           →  core (stdio, http, sse, browser — consume external MCP servers)
 StorageBackend       →  core → SQLiteStorage
 ```

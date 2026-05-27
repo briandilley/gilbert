@@ -14,6 +14,7 @@ from gilbert.config import AuthConfig
 from gilbert.interfaces.auth import (
     AuthBackend,
     AuthInfo,
+    InternalUrlAwareAuthBackend,
     LoginMethod,
     TunnelAwareAuthBackend,
     UserBackendAware,
@@ -111,6 +112,7 @@ class AuthService(Service):
         self._allow_guests = bool(auth_section.get("allow_guests", True))
 
         tunnel = resolver.get_capability("tunnel")
+        internal_url = resolver.get_capability("internal_url")
         registry = AuthBackend.registered_backends()
 
         for name, cls in registry.items():
@@ -132,6 +134,8 @@ class AuthService(Service):
             await instance.initialize(sub)
             if tunnel is not None and isinstance(instance, TunnelAwareAuthBackend):
                 instance.set_tunnel(tunnel)
+            if internal_url is not None and isinstance(instance, InternalUrlAwareAuthBackend):
+                instance.set_internal_url(internal_url)
             self._backends[name] = instance
 
         logger.info(

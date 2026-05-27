@@ -205,6 +205,12 @@ class Gilbert:
 
         self.service_manager.register(TunnelService())
 
+        # 6f. Internal-URL service (before auth, as Google OAuth can use it
+        # for LAN-only redirect hostnames via sslip.io).
+        from gilbert.core.services.internal_url import InternalUrlService
+
+        self.service_manager.register(InternalUrlService())
+
         # 7. Authentication (always enabled, backends created internally)
         self.service_manager.register(AuthService(self.config.auth))
 

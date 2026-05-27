@@ -52,7 +52,7 @@ def test_san_includes_hostname_and_outbound_ip(cert_paths: tuple[Path, Path]) ->
     cert_path, key_path = cert_paths
     with patch("gilbert.core.tls.socket.gethostname", return_value="test-host"), \
          patch("gilbert.core.tls.socket.getaddrinfo", return_value=[]), \
-         patch("gilbert.core.tls._detect_outbound_ip", return_value="192.168.1.42"):
+         patch("gilbert.core.tls.detect_outbound_ip", return_value="192.168.1.42"):
         ensure_self_signed_cert(cert_path, key_path)
     cert = _load_cert(cert_path)
     san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value

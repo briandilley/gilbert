@@ -138,6 +138,14 @@ class TunnelConfig(BaseConfig):
     settings: dict[str, Any] = {}
 
 
+class InternalUrlConfig(BaseConfig):
+    """LAN-reachable hostname configuration (sslip.io, etc.)."""
+
+    enabled: bool = False
+    backend: str = "sslip"
+    settings: dict[str, Any] = {}
+
+
 class TTSConfig(BaseConfig):
     """Text-to-speech configuration."""
 
@@ -313,6 +321,7 @@ class GilbertConfig(BaseConfig):
     ai: AIConfig = AIConfig()
     auth: AuthConfig = AuthConfig()
     tunnel: TunnelConfig = TunnelConfig()
+    internal_url: InternalUrlConfig = InternalUrlConfig()
     knowledge: KnowledgeConfig = KnowledgeConfig()
     presence: PresenceConfig = PresenceConfig()
     doorbell: DoorbellConfig = DoorbellConfig()

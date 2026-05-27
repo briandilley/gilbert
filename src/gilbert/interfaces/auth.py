@@ -214,6 +214,22 @@ class TunnelAwareAuthBackend(Protocol):
 
 
 @runtime_checkable
+class InternalUrlAwareAuthBackend(Protocol):
+    """Protocol for auth backends that can use a LAN-only hostname for
+    OAuth redirects.
+
+    Parallel to ``TunnelAwareAuthBackend`` but for the ``internal_url``
+    capability (sslip.io etc.): the redirect hostname resolves to Gilbert
+    on the LAN only. The AuthService injects an ``InternalUrlProvider``
+    after ``initialize()`` on any backend that satisfies this protocol.
+    """
+
+    def set_internal_url(self, provider: Any) -> None:
+        """Receive the internal-URL provider for building LAN callback URLs."""
+        ...
+
+
+@runtime_checkable
 class OAuthLoginBackend(Protocol):
     """Protocol for auth backends that drive a redirect-based external
     login flow (OAuth2 authorization code grant, or anything shaped

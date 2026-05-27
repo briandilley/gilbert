@@ -156,6 +156,87 @@ async def auth_service_with_provider(
     return svc
 
 
+# --- Provider injection (tunnel / internal_url) ---
+
+
+class _InjectableBackend(AuthBackend):
+    """OAuth-style backend that records tunnel / internal-URL injection."""
+
+    backend_name = ""  # registered manually per-test to avoid global leak
+
+    def __init__(self) -> None:
+        self.received_tunnel: Any = None
+        self.received_internal_url: Any = None
+
+    @property
+    def provider_type(self) -> str:
+        return "probe"
+
+    async def initialize(self, config: dict[str, Any]) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    def get_login_method(self) -> LoginMethod:
+        return LoginMethod(provider_type="probe", display_name="Probe", method="redirect")
+
+    async def authenticate(self, credentials: dict[str, Any]) -> AuthInfo | None:
+        return None
+
+    def set_tunnel(self, tunnel: Any) -> None:
+        self.received_tunnel = tunnel
+
+    def set_internal_url(self, provider: Any) -> None:
+        self.received_internal_url = provider
+
+
+class _StubConfig(Service):
+    def __init__(self, sections: dict[str, Any]) -> None:
+        self._sections = sections
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="configuration", capabilities=frozenset({"configuration"}))
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return dict(self._sections.get(namespace, {}))
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
+async def test_internal_url_and_tunnel_injected_into_oauth_backend(
+    sqlite_storage: StorageBackend, user_service: UserService
+) -> None:
+    tunnel = object()
+    internal_url = object()
+    caps: dict[str, Any] = {
+        "users": user_service,
+        "entity_storage": StubStorageService(sqlite_storage),
+        "configuration": _StubConfig({"auth": {"probe": {"enabled": True}}}),
+        "tunnel": tunnel,
+        "internal_url": internal_url,
+    }
+    svc = AuthService(AuthConfig(enabled=True, providers=[], session_ttl_seconds=3600))
+
+    AuthBackend._registry["probe"] = _InjectableBackend
+    try:
+        await svc.start(StubResolver(caps))
+    finally:
+        AuthBackend._registry.pop("probe", None)
+
+    backend = svc._backends["probe"]
+    assert isinstance(backend, _InjectableBackend)
+    assert backend.received_tunnel is tunnel
+    assert backend.received_internal_url is internal_url
+
+
 # --- Tests ---
 
 

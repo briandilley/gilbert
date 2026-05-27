@@ -24,6 +24,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from gilbert.interfaces.net import detect_outbound_ip
+
 logger = logging.getLogger(__name__)
 
 # Regenerate if the existing cert expires within this window.
@@ -184,7 +186,7 @@ def _build_san_list() -> tuple[list[x509.GeneralName], list[str]]:
     except OSError:
         pass
 
-    outbound = _detect_outbound_ip()
+    outbound = detect_outbound_ip()
     if outbound is not None:
         try:
             addr = ip_address(outbound)
@@ -197,19 +199,6 @@ def _build_san_list() -> tuple[list[x509.GeneralName], list[str]]:
     sans.extend(x509.IPAddress(a) for a in ip_addrs)
     san_strings = dns_names + [str(a) for a in ip_addrs]
     return sans, san_strings
-
-
-def _detect_outbound_ip() -> str | None:
-    """Return the primary outbound IPv4 the OS would use for an external
-    destination, without actually sending any traffic."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.connect(("8.8.8.8", 53))
-        return str(sock.getsockname()[0])
-    except OSError:
-        return None
-    finally:
-        sock.close()
 
 
 def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
