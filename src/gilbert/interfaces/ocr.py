@@ -1,9 +1,30 @@
 """OCR backend interface — text extraction from images."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
+
+
+@runtime_checkable
+class OCRProvider(Protocol):
+    """Capability protocol for cross-service OCR access.
+
+    Plugins (notably the Mentra glasses plugin's camera tool) resolve
+    this via ``resolver.get_capability("ocr")`` and ``isinstance``-
+    check against ``OCRProvider`` rather than importing the concrete
+    ``OCRService`` class. Mirrors the shape of ``VisionProvider``.
+
+    Minimal surface — just the one method consumers actually use. If
+    a backend has richer features (per-region results, confidence
+    scores, etc.) they live on the concrete backend and are accessible
+    via the ``ocr`` service's full API, not this capability protocol.
+    """
+
+    async def extract_text(self, image_bytes: bytes) -> str:
+        """Return text extracted from the image bytes. Empty string
+        on failure (no exception)."""
+        ...
 
 
 class OCRBackend(ABC):
