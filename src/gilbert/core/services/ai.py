@@ -2262,10 +2262,16 @@ class AIService(Service):
                                     tools_by_name[tname] = all_tools[tname]
                             tool_defs = [defn for _, defn in tools_by_name.values()]
 
-        # Resolve system prompt — always prepend current date/time
+        # Resolve system prompt. The datetime context used to be
+        # prepended here; it's now injected onto the last user message
+        # below so the system prompt stays byte-identical across
+        # consecutive calls within a 5-minute window — which is what
+        # makes Anthropic prompt caching pay off. See
+        # ``_messages_with_datetime_context`` for the user-turn
+        # injection.
         date_ctx = self._current_datetime_context()
         if system_prompt is not None:
-            effective_prompt = f"{date_ctx}\n\n{system_prompt}"
+            effective_prompt = system_prompt
         else:
             effective_prompt = await self._build_system_prompt(
                 user_ctx=user_ctx,
@@ -2423,8 +2429,18 @@ class AIService(Service):
                 if conv_state:
                     round_prompt += f"\n\n{self._format_state_for_context(conv_state)}"
 
+                # Inject the current date/time onto the last user
+                # message of THIS request. Doing it here (not on the
+                # persisted history) keeps disk content clean while
+                # still giving the model the date awareness it used to
+                # get from the system prompt. The system prompt is now
+                # cache-stable across the 5-minute window.
+                round_messages = self._messages_with_datetime_context(
+                    truncated, date_ctx
+                )
+
                 request = AIRequest(
-                    messages=truncated,
+                    messages=round_messages,
                     system_prompt=round_prompt,
                     tools=tool_defs if tool_defs else [],
                     model=resolved_model,
@@ -2877,6 +2893,50 @@ class AIService(Service):
         yesterday = (now - timedelta(days=1)).strftime("%A, %B %d, %Y")
         return f"Current date and time: {today} at {time_str}. Yesterday was {yesterday}."
 
+    @staticmethod
+    def _messages_with_datetime_context(
+        messages: list[Message],
+        date_ctx: str,
+    ) -> list[Message]:
+        """Return a fresh message list with ``date_ctx`` prepended to
+        the last user turn.
+
+        Why not in the system prompt? Because the system prompt is a
+        prime cache candidate, and its content needs to be byte-stable
+        across the 5-minute cache window. The datetime changes every
+        minute — putting it in the system prompt would invalidate the
+        cache on every call, AND pay the 1.25× cache-write penalty
+        every time. Moving it to the user turn keeps system + tools +
+        history all static and cacheable; the model still gets full
+        date awareness because it reads user-turn content as input
+        context, same as the system prompt.
+
+        Returns a NEW list with a NEW copy of the last user message
+        — never mutates the input. ``messages`` is also the persisted
+        conversation history; mutating it here would write the
+        ephemeral datetime block to disk, where it doesn't belong.
+        """
+        if not messages or not date_ctx:
+            return list(messages)
+        # Find the last user message — skip past trailing assistant /
+        # tool / system messages. Use ``replace`` to copy with overrides
+        # so any future Message fields are preserved without touching
+        # this helper.
+        from dataclasses import replace as _dc_replace
+
+        for idx in range(len(messages) - 1, -1, -1):
+            msg = messages[idx]
+            if msg.role == MessageRole.USER:
+                existing = msg.content or ""
+                new_content = f"{date_ctx}\n\n{existing}" if existing else date_ctx
+                new_msg = _dc_replace(msg, content=new_content)
+                return [*messages[:idx], new_msg, *messages[idx + 1 :]]
+        # No user message in the list — caller is doing something
+        # unusual (e.g. agent loop with only system messages).
+        # Return unchanged; date awareness for that edge case isn't
+        # worth bending the message shape.
+        return list(messages)
+
     async def _build_known_users_block(
         self,
         user_ctx: UserContext,
@@ -2940,11 +3000,18 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         conversation_id: str | None = None,
     ) -> str:
-        """Build the full system prompt: soul, identity layers, user memories, and active skills."""
-        parts: list[str] = []
+        """Build the full system prompt: soul, identity layers, user memories, and active skills.
 
-        # Always inject current date/time first
-        parts.append(self._current_datetime_context())
+        Deliberately does NOT include the current date/time —
+        ``_current_datetime_context`` minute-changes invalidate
+        Anthropic's prompt cache on every call. The datetime moved
+        onto the last user message (see
+        ``_messages_with_datetime_context``) so the system prompt
+        stays byte-identical across consecutive calls within a
+        5-minute window. The model still sees the date in the user
+        turn, which it treats the same as a system-turn statement.
+        """
+        parts: list[str] = []
 
         if self._system_prompt:
             parts.append(self._system_prompt)

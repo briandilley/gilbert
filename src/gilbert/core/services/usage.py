@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from gilbert.interfaces.ai import TokenUsage
@@ -129,12 +129,30 @@ class UsageService(Service):
     def __init__(self) -> None:
         self._storage: StorageBackend | None = None
         self._overrides: dict[str, dict[str, ModelPricing]] = {}
+        # Rolling cache-savings telemetry. Every ``_rolling_log_every``
+        # recorded rounds, we emit one INFO log summarizing the
+        # window's cache hit ratio + dollars saved. Lives entirely in
+        # memory — restarts reset the window, which is fine since the
+        # persisted ``ai_token_usage`` records are the canonical
+        # source. The rolling log is a "live signal in journalctl"
+        # supplement, not the audit trail.
+        self._rolling_log_every: int = 25
+        self._rolling_window: list[dict[str, float]] = []
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="usage",
             capabilities=frozenset(
-                {"usage_reporting", "usage_recording", "ws_handlers"}
+                {
+                    "usage_reporting",
+                    "usage_recording",
+                    "ws_handlers",
+                    # ``ai_cost_savings`` — exposed so the LLM can answer
+                    # "how much have we saved on AI costs today?" mid-
+                    # conversation without the operator having to open
+                    # the dashboard. Same plumbing as feeds / mentra.
+                    "ai_tools",
+                }
             ),
             requires=frozenset({"entity_storage"}),
             optional=frozenset({"configuration"}),
@@ -182,6 +200,25 @@ class UsageService(Service):
         return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
+        params: list[ConfigParam] = [
+            ConfigParam(
+                key="rolling_log_every",
+                type=ToolParameterType.INTEGER,
+                description=(
+                    "Emit one INFO log summarizing cache hit rate + "
+                    "dollars saved every N recorded rounds. Set to 0 "
+                    "to disable. Default 25 — gives ~5 minutes between "
+                    "lines under typical load, frequent enough to see "
+                    "caching take effect, sparse enough to not flood "
+                    "journalctl."
+                ),
+                default=25,
+            ),
+        ]
+        params.extend(self._pricing_config_params())
+        return params
+
+    def _pricing_config_params(self) -> list[ConfigParam]:
         """One numeric form field per (backend, model, rate-field).
 
         Fields are generated from ``_DEFAULT_PRICING`` so adding a model to
@@ -252,6 +289,13 @@ class UsageService(Service):
         their real IDs via ``_DEFAULT_PRICING``, and build a fresh override
         table. Missing or unparseable values fall through to the defaults.
         """
+        # Rolling-log knob — outside the pricing subtree so operators
+        # can tune it without touching prices. 0 disables.
+        try:
+            self._rolling_log_every = max(0, int(config.get("rolling_log_every", 25)))
+        except (TypeError, ValueError):
+            self._rolling_log_every = 25
+
         pricing_cfg = config.get("pricing")
         if not isinstance(pricing_cfg, dict):
             self._overrides = {}
@@ -325,6 +369,42 @@ class UsageService(Service):
         ) / 1_000_000.0
         return round(cost, 6)
 
+    def compute_naive_cost(
+        self,
+        *,
+        backend: str,
+        model: str,
+        usage: TokenUsage,
+    ) -> float:
+        """Counterfactual cost — what this round would have cost with
+        prompt caching OFF. Every cache_creation + cache_read token is
+        treated as a regular uncached input token at ``input_per_mtok``.
+
+        This is the baseline reporting subtracts ``compute_cost`` from
+        to surface "saved by prompt caching" in dollars. Returns
+        ``0.0`` when pricing is unknown — caller can treat a zero
+        result as "no comparison available" rather than "we saved
+        nothing", since the actual recorded cost would also be zero.
+        """
+        pricing = self._resolve_pricing(backend, model)
+        if pricing is None:
+            return 0.0
+        # Treat the SUM of input + cache_creation + cache_read as if
+        # every token had been billed at the uncached input rate.
+        # That's exactly what we'd have paid before caching: those
+        # cached tokens are still tokens we sent to Anthropic, just
+        # billed at a discount.
+        total_input_equivalent = (
+            usage.input_tokens
+            + usage.cache_creation_tokens
+            + usage.cache_read_tokens
+        )
+        cost = (
+            total_input_equivalent * pricing.input_per_mtok
+            + usage.output_tokens * pricing.output_per_mtok
+        ) / 1_000_000.0
+        return round(cost, 6)
+
     # --- Recording ---------------------------------------------------
 
     async def record_round(
@@ -342,6 +422,14 @@ class UsageService(Service):
         invocation_source: str = "chat",
     ) -> UsageRecord:
         cost = self.compute_cost(backend=backend, model=model, usage=usage)
+        # Record both costs so historical "what did caching save us"
+        # queries don't need to re-derive pricing — pricing may have
+        # changed between record-time and report-time. Storing the
+        # counterfactual at write-time makes the savings number stable
+        # and immune to ConfigParam edits later.
+        naive_cost = self.compute_naive_cost(
+            backend=backend, model=model, usage=usage
+        )
         record = UsageRecord(
             timestamp=datetime.now(UTC),
             user_id=user_ctx.user_id,
@@ -355,6 +443,7 @@ class UsageService(Service):
             cache_creation_tokens=usage.cache_creation_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cost_usd=cost,
+            naive_cost_usd=naive_cost,
             tool_names=tuple(tool_names),
             stop_reason=stop_reason,
             round_num=round_num,
@@ -375,7 +464,71 @@ class UsageService(Service):
                     conversation_id,
                     exc,
                 )
+        self._track_rolling(record)
         return record
+
+    def _track_rolling(self, record: UsageRecord) -> None:
+        """Add this round to the in-memory rolling window. Every Nth
+        round emits one INFO line summarizing the window so journalctl
+        gets a live "is caching working?" signal without anyone needing
+        to query the DB. Cheap — single dict append + a counter check.
+        """
+        # Defensive: an out-of-band call (e.g. a fake recorder in a
+        # test) might leave this unset. Default to "off".
+        every = self._rolling_log_every
+        if every <= 0:
+            return
+        self._rolling_window.append(
+            {
+                "input_tokens": float(record.input_tokens),
+                "output_tokens": float(record.output_tokens),
+                "cache_creation_tokens": float(record.cache_creation_tokens),
+                "cache_read_tokens": float(record.cache_read_tokens),
+                "cost_usd": float(record.cost_usd),
+                "naive_cost_usd": float(record.naive_cost_usd),
+            }
+        )
+        if len(self._rolling_window) < every:
+            return
+
+        window = self._rolling_window
+        self._rolling_window = []
+
+        total_cost = sum(r["cost_usd"] for r in window)
+        total_naive = sum(r["naive_cost_usd"] for r in window)
+        savings = max(0.0, total_naive - total_cost)
+        total_input = sum(
+            r["input_tokens"]
+            + r["cache_creation_tokens"]
+            + r["cache_read_tokens"]
+            for r in window
+        )
+        if total_input <= 0:
+            return  # all-output rounds — nothing meaningful to report
+        read_pct = round(
+            100 * sum(r["cache_read_tokens"] for r in window) / total_input
+        )
+        write_pct = round(
+            100 * sum(r["cache_creation_tokens"] for r in window) / total_input
+        )
+        uncached_pct = 100 - read_pct - write_pct
+        savings_pct = (
+            round(100 * savings / total_naive) if total_naive > 0 else 0
+        )
+
+        logger.info(
+            "AI cost rolling window (last %d rounds): paid $%.4f vs "
+            "$%.4f naive — saved $%.4f (%d%%); cache %d%% read / "
+            "%d%% write / %d%% uncached",
+            every,
+            total_cost,
+            total_naive,
+            savings,
+            savings_pct,
+            read_pct,
+            write_pct,
+            uncached_pct,
+        )
 
     # --- Querying ----------------------------------------------------
 
@@ -507,6 +660,141 @@ class UsageService(Service):
             "invocation_sources": [{"source": s} for s in sorted(sources)],
         }
 
+    # --- Tool surface ───────────────────────────────────────────────
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "usage"
+
+    def get_tools(self, user_ctx: Any = None) -> list[Any]:
+        from gilbert.interfaces.tools import (
+            ToolDefinition,
+            ToolParameter,
+            ToolParameterType,
+        )
+
+        return [
+            ToolDefinition(
+                name="ai_cost_savings",
+                slash_group="usage",
+                slash_command="savings",
+                slash_help=(
+                    "Show how much prompt-caching has saved on AI costs "
+                    "for a time window (default: today)."
+                ),
+                description=(
+                    "Report AI token-cost savings from prompt caching. "
+                    "Returns: total rounds, what we paid, what we would "
+                    "have paid without caching, dollars saved, and the "
+                    "cache hit rate. USE THIS when the user asks 'how "
+                    "much have we saved?', 'is caching working?', "
+                    "'what's our AI bill look like today?', or any "
+                    "variation. Voice-friendly summary by default. "
+                    "Window defaults to today; pass 'since_hours' for "
+                    "the last N hours, or 'all_time' for cumulative."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="since_hours",
+                        type=ToolParameterType.INTEGER,
+                        description=(
+                            "Look back N hours from now. Omit for "
+                            "'today so far' (midnight UTC → now)."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="all_time",
+                        type=ToolParameterType.BOOLEAN,
+                        description=(
+                            "When true, ignore time window and report "
+                            "savings across every recorded round."
+                        ),
+                        required=False,
+                        default=False,
+                    ),
+                    ToolParameter(
+                        name="by_model",
+                        type=ToolParameterType.BOOLEAN,
+                        description=(
+                            "When true, break down savings per "
+                            "(backend, model). Default is overall total."
+                        ),
+                        required=False,
+                        default=False,
+                    ),
+                ],
+                required_role="user",
+            ),
+        ]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name != "ai_cost_savings":
+            raise KeyError(f"usage has no tool {name!r}")
+        return await self._tool_ai_cost_savings(arguments)
+
+    async def _tool_ai_cost_savings(self, arguments: dict[str, Any]) -> str:
+        """Build the time window, run a usage query, format a TTS-friendly
+        summary. Returns one or two short paragraphs the LLM can read out
+        without further synthesis."""
+        all_time = bool(arguments.get("all_time", False))
+        by_model = bool(arguments.get("by_model", False))
+        since_hours_raw = arguments.get("since_hours")
+        since_hours: int | None = None
+        if since_hours_raw is not None:
+            try:
+                since_hours = max(1, int(since_hours_raw))
+            except (TypeError, ValueError):
+                since_hours = None
+
+        now = datetime.now(UTC)
+        if all_time:
+            start: datetime | None = None
+            window_label = "all-time"
+        elif since_hours is not None:
+            start = now.replace(microsecond=0) - _hours(since_hours)
+            window_label = f"last {since_hours}h"
+        else:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            window_label = "today"
+
+        group_by: tuple[str, ...] = (
+            ("backend", "model") if by_model else ()
+        )
+        rows = await self.query_usage(
+            UsageQuery(start=start, end=None, group_by=group_by)
+        )
+
+        if not rows:
+            return (
+                f"No AI usage recorded {window_label}. "
+                "Either nothing has run yet or the usage service "
+                "isn't persisting records."
+            )
+
+        if not by_model:
+            agg = _sum_aggregates(rows)
+            return _format_savings_paragraph(agg, window_label)
+
+        # by_model: one short paragraph per model, sorted by actual cost.
+        rows_sorted = sorted(rows, key=lambda a: a.cost_usd, reverse=True)
+        chunks = [
+            _format_savings_paragraph(
+                a,
+                window_label,
+                model_label=(
+                    f"{a.dimensions.get('backend', '?')}/"
+                    f"{a.dimensions.get('model', '?')}"
+                ),
+            )
+            for a in rows_sorted
+        ]
+        total = _sum_aggregates(rows)
+        chunks.append(
+            _format_savings_paragraph(total, window_label, model_label="total")
+        )
+        return "\n\n".join(chunks)
+
     # --- WS handlers -------------------------------------------------
 
     def get_ws_handlers(self) -> dict[str, Any]:
@@ -592,6 +880,7 @@ def _record_to_dict(record: UsageRecord) -> dict[str, Any]:
         "cache_creation_tokens": record.cache_creation_tokens,
         "cache_read_tokens": record.cache_read_tokens,
         "cost_usd": record.cost_usd,
+        "naive_cost_usd": record.naive_cost_usd,
         "tool_names": list(record.tool_names),
         "stop_reason": record.stop_reason,
         "round_num": record.round_num,
@@ -599,8 +888,116 @@ def _record_to_dict(record: UsageRecord) -> dict[str, Any]:
     }
 
 
+def _hours(n: int) -> timedelta:
+    """Tiny helper — ``timedelta(hours=...)`` reads worse inline."""
+    return timedelta(hours=n)
+
+
+def _sum_aggregates(aggregates: list[UsageAggregate]) -> UsageAggregate:
+    """Collapse a list of UsageAggregate rows into a single grand total.
+
+    Used by the savings tool when reporting "by model" — each
+    per-model row already comes from ``query_usage``; this gives us
+    the bottom-line total alongside the breakdown without an extra
+    query.
+    """
+    total_cost = sum(a.cost_usd for a in aggregates)
+    total_naive = sum(a.naive_cost_usd for a in aggregates)
+    return UsageAggregate(
+        dimensions={},
+        rounds=sum(a.rounds for a in aggregates),
+        input_tokens=sum(a.input_tokens for a in aggregates),
+        output_tokens=sum(a.output_tokens for a in aggregates),
+        cache_creation_tokens=sum(a.cache_creation_tokens for a in aggregates),
+        cache_read_tokens=sum(a.cache_read_tokens for a in aggregates),
+        cost_usd=total_cost,
+        naive_cost_usd=total_naive,
+        savings_usd=max(0.0, total_naive - total_cost),
+    )
+
+
+def _format_savings_paragraph(
+    agg: UsageAggregate,
+    window_label: str,
+    *,
+    model_label: str = "",
+) -> str:
+    """Render one UsageAggregate as a TTS-friendly summary.
+
+    The shape is deliberately one paragraph (no bullets, no tables)
+    so it survives the voice-brain → TTS pipeline cleanly. Numbers are
+    rounded to dollars-and-cents at the high end and to half-cents
+    when costs are low so we don't say "saved zero dollars" when the
+    real answer is "saved 3 cents".
+    """
+    total_input = (
+        agg.input_tokens + agg.cache_creation_tokens + agg.cache_read_tokens
+    )
+    if total_input == 0:
+        # Edge case: only output tokens (an empty-prompt round?) — no
+        # input to cache, nothing to report on. Shouldn't happen in
+        # practice but we shouldn't divide by zero either.
+        return (
+            f"No input tokens recorded for {model_label or 'AI calls'} "
+            f"{window_label}, so there's nothing to compare on caching."
+        )
+    cache_hit_pct = round(100 * agg.cache_read_tokens / total_input)
+    cache_write_pct = round(100 * agg.cache_creation_tokens / total_input)
+    uncached_pct = 100 - cache_hit_pct - cache_write_pct
+
+    if agg.naive_cost_usd >= 1.0 or agg.cost_usd >= 1.0:
+        actual_str = f"${agg.cost_usd:.2f}"
+        naive_str = f"${agg.naive_cost_usd:.2f}"
+        saved_str = f"${agg.savings_usd:.2f}"
+    else:
+        # Sub-dollar: show cents at higher precision.
+        actual_str = f"${agg.cost_usd:.4f}"
+        naive_str = f"${agg.naive_cost_usd:.4f}"
+        saved_str = f"${agg.savings_usd:.4f}"
+
+    if agg.naive_cost_usd > 0:
+        savings_pct = round(100 * agg.savings_usd / agg.naive_cost_usd)
+    else:
+        savings_pct = 0
+
+    label_prefix = f"{model_label.capitalize()}: " if model_label else ""
+
+    if agg.cache_read_tokens == 0 and agg.cache_creation_tokens == 0:
+        return (
+            f"{label_prefix}For {window_label}, {agg.rounds} AI "
+            f"round{'s' if agg.rounds != 1 else ''} cost {actual_str}. "
+            f"Prompt caching hasn't fired yet — no cached tokens "
+            f"recorded, so savings are $0.00 so far."
+        )
+    return (
+        f"{label_prefix}For {window_label}, {agg.rounds} AI "
+        f"round{'s' if agg.rounds != 1 else ''} cost {actual_str} with "
+        f"prompt caching, versus {naive_str} we'd have paid without it "
+        f"— saved {saved_str} ({savings_pct}%). Cache hit rate "
+        f"{cache_hit_pct}% read, {cache_write_pct}% write, "
+        f"{uncached_pct}% uncached."
+    )
+
+
+def _naive_cost_of_row(row: dict[str, Any]) -> float:
+    """Read ``naive_cost_usd`` from a stored row, falling back to
+    ``cost_usd`` when the field is absent — older entities written
+    before this field existed had zero cache tokens, so ``cost_usd``
+    equals what the counterfactual would have produced. Without this
+    fallback, historical totals would understate baseline cost and
+    the "saved by caching" delta would be artificially inflated for
+    backfill windows that span the deploy.
+    """
+    raw = row.get("naive_cost_usd")
+    if raw is None:
+        return float(row.get("cost_usd", 0.0) or 0.0)
+    return float(raw or 0.0)
+
+
 def _row_to_aggregate(row: dict[str, Any]) -> UsageAggregate:
     """Wrap one raw entity row as an ungrouped ``UsageAggregate``."""
+    cost = float(row.get("cost_usd", 0.0) or 0.0)
+    naive_cost = _naive_cost_of_row(row)
     return UsageAggregate(
         dimensions={
             "timestamp": str(row.get("timestamp") or ""),
@@ -619,7 +1016,9 @@ def _row_to_aggregate(row: dict[str, Any]) -> UsageAggregate:
         output_tokens=int(row.get("output_tokens", 0) or 0),
         cache_creation_tokens=int(row.get("cache_creation_tokens", 0) or 0),
         cache_read_tokens=int(row.get("cache_read_tokens", 0) or 0),
-        cost_usd=float(row.get("cost_usd", 0.0) or 0.0),
+        cost_usd=cost,
+        naive_cost_usd=naive_cost,
+        savings_usd=max(0.0, naive_cost - cost),
     )
 
 
@@ -662,6 +1061,8 @@ def _aggregate_rows(
             dim_templates.append(dim)
             row_keys.append("|".join(key_parts))
 
+        row_cost = float(row.get("cost_usd", 0.0) or 0.0)
+        row_naive = _naive_cost_of_row(row)
         for key, dim in zip(row_keys, dim_templates, strict=False):
             tup = tuple(key.split("|"))
             existing = buckets.get(tup)
@@ -673,9 +1074,13 @@ def _aggregate_rows(
                     output_tokens=int(row.get("output_tokens", 0) or 0),
                     cache_creation_tokens=int(row.get("cache_creation_tokens", 0) or 0),
                     cache_read_tokens=int(row.get("cache_read_tokens", 0) or 0),
-                    cost_usd=float(row.get("cost_usd", 0.0) or 0.0),
+                    cost_usd=row_cost,
+                    naive_cost_usd=row_naive,
+                    savings_usd=max(0.0, row_naive - row_cost),
                 )
             else:
+                new_cost = existing.cost_usd + row_cost
+                new_naive = existing.naive_cost_usd + row_naive
                 buckets[tup] = UsageAggregate(
                     dimensions=existing.dimensions,
                     rounds=existing.rounds + 1,
@@ -687,8 +1092,9 @@ def _aggregate_rows(
                     + int(row.get("cache_creation_tokens", 0) or 0),
                     cache_read_tokens=existing.cache_read_tokens
                     + int(row.get("cache_read_tokens", 0) or 0),
-                    cost_usd=existing.cost_usd
-                    + float(row.get("cost_usd", 0.0) or 0.0),
+                    cost_usd=new_cost,
+                    naive_cost_usd=new_naive,
+                    savings_usd=max(0.0, new_naive - new_cost),
                 )
 
     return sorted(
@@ -707,6 +1113,8 @@ def _aggregate_to_dict(agg: UsageAggregate) -> dict[str, Any]:
         "cache_creation_tokens": agg.cache_creation_tokens,
         "cache_read_tokens": agg.cache_read_tokens,
         "cost_usd": round(agg.cost_usd, 6),
+        "naive_cost_usd": round(agg.naive_cost_usd, 6),
+        "savings_usd": round(agg.savings_usd, 6),
     }
 
 

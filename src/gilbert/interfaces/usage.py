@@ -16,6 +16,15 @@ class UsageRecord:
 
     Written by ``UsageRecorder.record_round`` and returned (flattened to
     dicts) from ``UsageProvider.query_usage``.
+
+    ``naive_cost_usd`` is the counterfactual cost — what this round
+    would have cost with prompt caching OFF (every cached token billed
+    at the model's uncached input rate). Older records written before
+    prompt caching shipped have ``naive_cost_usd == cost_usd`` since
+    their ``cache_creation_tokens`` / ``cache_read_tokens`` are zero;
+    when the record is missing the field entirely (older entities in
+    the DB), readers fall back to ``cost_usd`` so historical totals
+    aren't artificially low. ``savings = naive_cost_usd - cost_usd``.
     """
 
     timestamp: datetime
@@ -30,6 +39,7 @@ class UsageRecord:
     cache_creation_tokens: int
     cache_read_tokens: int
     cost_usd: float
+    naive_cost_usd: float = 0.0
     tool_names: tuple[str, ...] = ()
     stop_reason: str = ""
     round_num: int = 0
@@ -79,6 +89,20 @@ class UsageAggregate:
     ``dimensions`` is keyed by the ``group_by`` fields requested. A raw
     (ungrouped) query returns one ``UsageAggregate`` per matching round
     with the individual ``UsageRecord`` fields copied into ``dimensions``.
+
+    ``naive_cost_usd`` is the counterfactual: what this row would have
+    cost if every cached token (``cache_creation_tokens`` +
+    ``cache_read_tokens``) were billed at the model's full
+    ``input_per_mtok`` rate. ``savings_usd`` is the dollar delta
+    (``naive_cost_usd - cost_usd``) — positive when prompt caching is
+    helping, zero before caching is enabled, never negative in practice
+    (the cache-write surcharge is real but smaller than uncached input
+    on any reasonable hit rate).
+
+    These are derived fields so adding them is wire-additive — old
+    consumers that don't read them are unaffected. The reporting tool
+    + the slash command use them to surface "savings since deploy" as
+    the objective success metric for prompt caching.
     """
 
     dimensions: dict[str, str] = field(default_factory=dict)
@@ -88,6 +112,8 @@ class UsageAggregate:
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
     cost_usd: float = 0.0
+    naive_cost_usd: float = 0.0
+    savings_usd: float = 0.0
 
 
 @runtime_checkable
@@ -139,6 +165,24 @@ class UsagePricingProvider(Protocol):
         usage: TokenUsage,
     ) -> float:
         """Return USD cost for this round given the pricing table."""
+        ...
+
+    def compute_naive_cost(
+        self,
+        *,
+        backend: str,
+        model: str,
+        usage: TokenUsage,
+    ) -> float:
+        """Counterfactual: what this round would have cost with caching
+        OFF — every ``cache_creation_tokens`` / ``cache_read_tokens``
+        token billed at the model's ``input_per_mtok`` rate.
+
+        Used by reporting to surface "dollars saved by prompt caching":
+        ``savings = compute_naive_cost(...) - compute_cost(...)``. Returns
+        ``0.0`` when pricing is unknown (same fail-quiet contract as
+        ``compute_cost``).
+        """
         ...
 
 

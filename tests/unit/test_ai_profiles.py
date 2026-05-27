@@ -708,20 +708,26 @@ class TestDateTimeContext:
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         assert any(d in result for d in days)
 
-    async def test_default_prompt_includes_date(
+    async def test_default_prompt_does_not_include_date(
         self,
         ai_svc: AIService,
     ) -> None:
-        """_build_system_prompt should start with the date context."""
+        """Datetime context used to live at the front of the system
+        prompt; it moved to the last user message so the system prompt
+        stays byte-stable across the Anthropic cache window. This is
+        the pin: putting the datetime back into the system prompt
+        would silently destroy prompt caching savings."""
         prompt = await ai_svc._build_system_prompt()
-        assert prompt.startswith("Current date and time:")
+        assert "Current date and time" not in prompt
 
-    async def test_custom_prompt_includes_date(
+    async def test_custom_prompt_keeps_date_off_system_and_on_user_turn(
         self,
         ai_svc: AIService,
         stub_backend: StubAIBackend,
     ) -> None:
-        """When a custom system_prompt is provided, date context is prepended."""
+        """Same move when a caller passes their own system_prompt:
+        the system prompt the backend receives must NOT carry the
+        datetime, and the last user message MUST."""
         stub_backend.queue_response(
             AIResponse(
                 message=Message(role=MessageRole.ASSISTANT, content="ok"),
@@ -736,9 +742,15 @@ class TestDateTimeContext:
         )
 
         assert len(stub_backend.requests) == 1
-        system_prompt = stub_backend.requests[0].system_prompt
-        assert system_prompt.startswith("Current date and time:")
-        assert "You are a sales agent." in system_prompt
+        req = stub_backend.requests[0]
+        assert "Current date and time" not in req.system_prompt
+        assert "You are a sales agent." in req.system_prompt
+        # User message carries the datetime as a prefix.
+        assert any(
+            "Current date and time" in m.content
+            for m in req.messages
+            if m.role == MessageRole.USER
+        )
 
     async def test_date_context_contains_timezone(self) -> None:
         """Should contain a timezone abbreviation (PDT, PST, or UTC)."""

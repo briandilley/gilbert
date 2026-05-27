@@ -403,9 +403,15 @@ async def test_chat_simple_response(
     req = stub_backend.requests[0]
     assert "You are a test assistant." in req.system_prompt
     assert "You are Gilbert" in req.system_prompt
+    # The datetime context used to live in the system prompt — moved
+    # to the last user turn so the system prompt stays byte-stable
+    # across the Anthropic cache window. The user message now carries
+    # a datetime prefix; the original text is still in there.
+    assert "Current date and time" not in req.system_prompt
     assert len(req.messages) == 1
     assert req.messages[0].role == MessageRole.USER
-    assert req.messages[0].content == "Hi"
+    assert req.messages[0].content.endswith("Hi")
+    assert "Current date and time" in req.messages[0].content
 
 
 async def test_chat_interrupted_by_user_cancellation(

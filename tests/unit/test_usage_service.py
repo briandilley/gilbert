@@ -516,3 +516,351 @@ def test_aggregate_rows_sums_tokens_and_costs() -> None:
     assert agg.input_tokens == 300
     assert agg.output_tokens == 125
     assert agg.cost_usd == pytest.approx(0.03, abs=1e-6)
+
+
+# --- Cache savings ---------------------------------------------------------
+#
+# The whole reason this test block exists: prompt caching is the cost win.
+# These tests pin the math so a future refactor can't quietly break the
+# success-measure we report to the operator.
+
+
+def test_compute_naive_cost_treats_all_input_as_uncached() -> None:
+    """Naive cost is what we would have paid with caching OFF. Every
+    cached token (read + write) gets billed at the model's uncached
+    ``input_per_mtok`` rate as if it had never been cached."""
+    service = UsageService()
+    # Sonnet 4: input=$3, cache_read=$0.30, cache_creation=$3.75 per Mtok.
+    naive = service.compute_naive_cost(
+        backend="anthropic",
+        model="claude-sonnet-4-20250514",
+        usage=TokenUsage(
+            input_tokens=1_000,
+            output_tokens=500,
+            cache_creation_tokens=2_000,
+            cache_read_tokens=27_000,
+        ),
+    )
+    # (1k + 2k + 27k) * $3/M + 500 * $15/M = 30k * 3e-6 + 500 * 15e-6
+    #                                      = 0.09 + 0.0075 = 0.0975
+    assert naive == pytest.approx(0.0975, abs=1e-6)
+
+
+def test_compute_naive_cost_unknown_pricing_returns_zero() -> None:
+    """Same fail-quiet contract as compute_cost — unknown backend or
+    model returns 0.0 so the savings report doesn't go negative for
+    edge cases."""
+    service = UsageService()
+    naive = service.compute_naive_cost(
+        backend="madeup",
+        model="not-real",
+        usage=TokenUsage(input_tokens=1000, output_tokens=10),
+    )
+    assert naive == 0.0
+
+
+def test_compute_naive_cost_equals_compute_cost_when_no_caching() -> None:
+    """Sanity check for records written before caching was enabled —
+    if there are no cache tokens, naive cost must equal actual cost,
+    otherwise we'd report fake savings for historical traffic."""
+    service = UsageService()
+    usage = TokenUsage(input_tokens=5_000, output_tokens=200)
+    actual = service.compute_cost(
+        backend="anthropic", model="claude-sonnet-4-20250514", usage=usage
+    )
+    naive = service.compute_naive_cost(
+        backend="anthropic", model="claude-sonnet-4-20250514", usage=usage
+    )
+    assert actual == pytest.approx(naive, abs=1e-9)
+
+
+def test_record_round_writes_both_costs() -> None:
+    """The record persists naive_cost_usd alongside cost_usd so the
+    savings number is stable across pricing edits done later via the
+    Settings UI."""
+    import asyncio
+
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+
+    record = asyncio.run(
+        service.record_round(
+            user_ctx=UserContext.SYSTEM,
+            conversation_id="c1",
+            profile="default",
+            backend="anthropic",
+            model="claude-sonnet-4-20250514",
+            usage=TokenUsage(
+                input_tokens=1_000,
+                output_tokens=200,
+                cache_creation_tokens=500,
+                cache_read_tokens=10_000,
+            ),
+            tool_names=[],
+            stop_reason="end_turn",
+            round_num=0,
+        )
+    )
+    assert record.naive_cost_usd > record.cost_usd
+    # Persisted on the entity too — not just the in-memory dataclass.
+    raw = list(storage._data[USAGE_COLLECTION].values())[0]
+    assert "naive_cost_usd" in raw
+    assert raw["naive_cost_usd"] == pytest.approx(record.naive_cost_usd, abs=1e-9)
+
+
+def test_aggregate_rows_carries_savings() -> None:
+    """The savings field on UsageAggregate is what the SPA dashboard
+    and slash command read. Aggregation must sum naive_cost_usd
+    alongside cost_usd, then derive savings = naive - actual."""
+    rows = [
+        {
+            "user_id": "u1",
+            "user_name": "Alice",
+            "backend": "anthropic",
+            "model": "m",
+            "profile": "p",
+            "conversation_id": "c",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 1_000,
+            "cost_usd": 0.003,       # what we paid
+            "naive_cost_usd": 0.01,  # what we'd have paid
+            "tool_names": [],
+            "timestamp": "2026-04-19T10:00:00",
+            "date": "2026-04-19",
+            "invocation_source": "chat",
+        },
+        {
+            "user_id": "u1",
+            "user_name": "Alice",
+            "backend": "anthropic",
+            "model": "m",
+            "profile": "p",
+            "conversation_id": "c",
+            "input_tokens": 200,
+            "output_tokens": 75,
+            "cache_creation_tokens": 100,
+            "cache_read_tokens": 0,
+            "cost_usd": 0.02,
+            "naive_cost_usd": 0.025,
+            "tool_names": [],
+            "timestamp": "2026-04-19T10:00:00",
+            "date": "2026-04-19",
+            "invocation_source": "chat",
+        },
+    ]
+    aggs = _aggregate_rows(rows, ("user_id",))
+    assert len(aggs) == 1
+    agg = aggs[0]
+    assert agg.cost_usd == pytest.approx(0.023, abs=1e-6)
+    assert agg.naive_cost_usd == pytest.approx(0.035, abs=1e-6)
+    assert agg.savings_usd == pytest.approx(0.012, abs=1e-6)
+
+
+def test_aggregate_rows_handles_legacy_rows_without_naive_cost() -> None:
+    """Records written before naive_cost_usd existed (and before
+    prompt caching shipped) have neither the field nor any cache
+    tokens. Aggregation must fall back to cost_usd so historical
+    totals aren't undercounted (which would inflate the savings
+    number for any window that crosses the deploy)."""
+    legacy = {
+        "user_id": "u1",
+        "user_name": "Alice",
+        "backend": "anthropic",
+        "model": "m",
+        "profile": "p",
+        "conversation_id": "c",
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "cost_usd": 0.01,
+        # NO naive_cost_usd — older row
+        "tool_names": [],
+        "timestamp": "2026-04-19T10:00:00",
+        "date": "2026-04-19",
+        "invocation_source": "chat",
+    }
+    aggs = _aggregate_rows([legacy], ("user_id",))
+    agg = aggs[0]
+    assert agg.cost_usd == pytest.approx(0.01, abs=1e-6)
+    assert agg.naive_cost_usd == pytest.approx(0.01, abs=1e-6)
+    assert agg.savings_usd == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_ai_cost_savings_tool_reports_zero_when_no_caching() -> None:
+    """Before prompt caching is enabled, all rounds have
+    cache_creation_tokens=0 and cache_read_tokens=0. The tool must
+    say so explicitly rather than reporting a misleadingly-formatted
+    "saved $0" — that's the signal that caching isn't firing yet."""
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+    await service.record_round(
+        user_ctx=UserContext.SYSTEM,
+        conversation_id="c1",
+        profile="default",
+        backend="anthropic",
+        model="claude-sonnet-4-20250514",
+        usage=TokenUsage(input_tokens=5_000, output_tokens=200),
+        tool_names=[],
+        stop_reason="end_turn",
+        round_num=0,
+    )
+    result = await service.execute_tool(
+        "ai_cost_savings", {"all_time": True}
+    )
+    lower = result.lower()
+    assert "prompt caching hasn't fired yet" in lower
+    assert "$0.00" in result
+
+
+@pytest.mark.asyncio
+async def test_ai_cost_savings_tool_reports_dollars_saved_when_caching_fires() -> None:
+    """When records show cache_read_tokens > 0, the tool reports
+    actual vs naive cost, dollars saved, savings percent, and the
+    cache hit-rate breakdown. This is the moneymaker test."""
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+    # Big hit-rate scenario — 90% cache read, 5% write, 5% uncached.
+    await service.record_round(
+        user_ctx=UserContext.SYSTEM,
+        conversation_id="c1",
+        profile="default",
+        backend="anthropic",
+        model="claude-sonnet-4-20250514",
+        usage=TokenUsage(
+            input_tokens=500,
+            output_tokens=100,
+            cache_creation_tokens=500,
+            cache_read_tokens=9_000,
+        ),
+        tool_names=[],
+        stop_reason="end_turn",
+        round_num=0,
+    )
+    result = await service.execute_tool(
+        "ai_cost_savings", {"all_time": True}
+    )
+    lower = result.lower()
+    # Should report a non-zero dollar saved.
+    assert "saved $" in lower
+    # Should report cache hit breakdown — read percent dominates.
+    assert "90% read" in lower
+    # Should NOT claim caching hasn't fired.
+    assert "hasn't fired" not in lower
+
+
+@pytest.mark.asyncio
+async def test_ai_cost_savings_tool_by_model_breaks_down() -> None:
+    """When by_model=True, the report includes per-model rows plus a
+    total. Useful when a deployment mixes Sonnet and Opus and wants
+    to see which model is benefiting most."""
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+    for model, in_tok, read_tok in (
+        ("claude-sonnet-4-20250514", 100, 5_000),
+        ("claude-opus-4-20250514", 100, 5_000),
+    ):
+        await service.record_round(
+            user_ctx=UserContext.SYSTEM,
+            conversation_id="c1",
+            profile="default",
+            backend="anthropic",
+            model=model,
+            usage=TokenUsage(
+                input_tokens=in_tok,
+                output_tokens=50,
+                cache_read_tokens=read_tok,
+            ),
+            tool_names=[],
+            stop_reason="end_turn",
+            round_num=0,
+        )
+    result = await service.execute_tool(
+        "ai_cost_savings", {"all_time": True, "by_model": True}
+    )
+    assert "claude-sonnet-4-20250514" in result.lower()
+    assert "claude-opus-4-20250514" in result.lower()
+    assert "total:" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_rolling_log_fires_every_n_rounds(caplog: pytest.LogCaptureFixture) -> None:
+    """Every Nth round, an INFO line summarising the window must
+    appear in the gilbert.core.services.usage logger. The Nth round
+    triggers the log; the (N+1)th starts a fresh window. This is the
+    operator's "is caching firing?" signal in journalctl."""
+    import logging
+
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+    service._rolling_log_every = 3  # small N so the test is fast
+
+    async def _emit_round(read_tokens: int) -> None:
+        await service.record_round(
+            user_ctx=UserContext.SYSTEM,
+            conversation_id="c",
+            profile="default",
+            backend="anthropic",
+            model="claude-sonnet-4-20250514",
+            usage=TokenUsage(
+                input_tokens=100,
+                output_tokens=20,
+                cache_read_tokens=read_tokens,
+            ),
+            tool_names=[],
+            stop_reason="end_turn",
+            round_num=0,
+        )
+
+    with caplog.at_level(logging.INFO, logger="gilbert.core.services.usage"):
+        await _emit_round(0)
+        await _emit_round(0)
+        # No log yet — only 2 rounds.
+        rolling_lines = [
+            r for r in caplog.records if "AI cost rolling window" in r.message
+        ]
+        assert rolling_lines == []
+        await _emit_round(900)
+        # The 3rd round triggers the log.
+        rolling_lines = [
+            r for r in caplog.records if "AI cost rolling window" in r.message
+        ]
+        assert len(rolling_lines) == 1
+        msg = rolling_lines[0].getMessage()
+        assert "last 3 rounds" in msg
+        assert "saved $" in msg
+
+
+@pytest.mark.asyncio
+async def test_rolling_log_disabled_when_every_is_zero() -> None:
+    """Setting rolling_log_every=0 (or via config) disables the log
+    entirely — useful for tests / single-user installs where the
+    journalctl noise isn't worth the signal. With it off, the window
+    never accumulates rounds, so memory stays bounded too."""
+    storage = _StubStorage()
+    service = UsageService()
+    service._storage = storage
+    service._rolling_log_every = 0
+
+    for _ in range(50):
+        await service.record_round(
+            user_ctx=UserContext.SYSTEM,
+            conversation_id="c",
+            profile="default",
+            backend="anthropic",
+            model="claude-sonnet-4-20250514",
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+            tool_names=[],
+            stop_reason="end_turn",
+            round_num=0,
+        )
+    # Window never accumulates anything when every=0.
+    assert service._rolling_window == []
