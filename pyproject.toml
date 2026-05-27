@@ -49,6 +49,7 @@ dependencies = [
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-code-conduit",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
@@ -98,6 +99,7 @@ gilbert-plugin-apple-health = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }
 gilbert-plugin-browser = { workspace = true }
+gilbert-plugin-code-conduit = { workspace = true }
 gilbert-plugin-deepgram = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
 gilbert-plugin-discord-webhook = { workspace = true }

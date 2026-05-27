@@ -17,6 +17,7 @@ members = [
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-code-conduit",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
@@ -1322,6 +1323,7 @@ dependencies = [
     { name = "gilbert-plugin-arr" },
     { name = "gilbert-plugin-bedrock" },
     { name = "gilbert-plugin-browser" },
+    { name = "gilbert-plugin-code-conduit" },
     { name = "gilbert-plugin-deepgram" },
     { name = "gilbert-plugin-deepseek" },
     { name = "gilbert-plugin-discord-webhook" },
@@ -1411,6 +1413,7 @@ requires-dist = [
     { name = "gilbert-plugin-arr", virtual = "std-plugins/arr" },
     { name = "gilbert-plugin-bedrock", virtual = "std-plugins/bedrock" },
     { name = "gilbert-plugin-browser", virtual = "std-plugins/browser" },
+    { name = "gilbert-plugin-code-conduit", virtual = "std-plugins/code-conduit" },
     { name = "gilbert-plugin-deepgram", virtual = "std-plugins/deepgram" },
     { name = "gilbert-plugin-deepseek", virtual = "std-plugins/deepseek" },
     { name = "gilbert-plugin-discord-webhook", virtual = "std-plugins/discord-webhook" },
@@ -1542,6 +1545,11 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "playwright", specifier = ">=1.45" },
 ]
+
+[[package]]
+name = "gilbert-plugin-code-conduit"
+version = "0.1.0"
+source = { virtual = "std-plugins/code-conduit" }
 
 [[package]]
 name = "gilbert-plugin-deepgram"
