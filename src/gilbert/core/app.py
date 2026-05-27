@@ -226,6 +226,16 @@ class Gilbert:
 
         self.service_manager.register(AudioOutputService())
 
+        # Audio-blob cache (short-lived HTTPS-fetchable bytes). Used by
+        # plugins whose external cloud audio routers fetch ``audioUrl``
+        # server-side (Mentra Cloud being the first consumer) — the
+        # plugin's AudioSink registers the engine-synthesized MP3 here
+        # and hands the resulting ``/api/audio-blob/<id>`` URL across.
+        # Always-on, no config.
+        from gilbert.core.services.audio_blob_store import AudioBlobStoreService
+
+        self.service_manager.register(AudioBlobStoreService())
+
         from gilbert.core.services.system_datetime import SystemDatetimeService
 
         self.service_manager.register(SystemDatetimeService())

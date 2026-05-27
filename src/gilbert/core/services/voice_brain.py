@@ -52,16 +52,20 @@ from gilbert.interfaces.conversation import (
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.transcription import (
     AudioEncoding,
-    AudioFormat as TranscriptionAudioFormat,
     FinalTranscript,
-    SpeechEnded,
     PartialTranscript,
+    SpeechEnded,
     SpeechStarted,
     StreamConfig,
     StreamingTranscriber,
 )
+from gilbert.interfaces.transcription import (
+    AudioFormat as TranscriptionAudioFormat,
+)
 from gilbert.interfaces.tts import (
     AudioFormat as TTSAudioFormat,
+)
+from gilbert.interfaces.tts import (
     SynthesisRequest,
     TTSProvider,
 )
@@ -679,7 +683,7 @@ class VoiceBrainService(Service):
                             asyncio.shield(chat_task),
                             timeout=config.filler_threshold_seconds,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # LLM hasn't returned in time — speak a
                         # filler, record it as a turn (so the
                         # transcript shows what the user heard),
@@ -1099,6 +1103,17 @@ class VoiceBrainService(Service):
                 log.warning("Transcription unavailable — conversation continues TTS-only")
                 outcome["transcription_available"] = False
                 return
+            if config.disable_internal_stt:
+                # Wrapper has its own STT source and feeds turns via
+                # ``inject_synthetic_user_turn_queue``. The engine
+                # skips its Scribe loop entirely — no audio pump, no
+                # local VAD, no per-second Scribe charges.
+                log.info(
+                    "Internal STT disabled by config — engine driven "
+                    "by inject_synthetic_user_turn_queue only"
+                )
+                outcome["transcription_available"] = False
+                return
             # Pick the STT input format. Phone calls leave
             # ``stt_audio_format`` unset → 8 kHz PCM (carrier rate).
             # Voice-agent / browser sessions configure 16 kHz because
@@ -1108,6 +1123,14 @@ class VoiceBrainService(Service):
                 sample_rate=8000,
                 channels=1,
             )
+
+            # Speaker-classification state for the optional diarization
+            # filter (``config.diarize_speakers``). ``"" `` (empty
+            # label) means the backend isn't populating speaker_label
+            # for this transcript — we treat those as user and let
+            # them through, matching legacy behaviour when diarization
+            # is off entirely.
+            speaker_class: dict[str, str] = {}  # speaker_label -> "user" | "gilbert"
 
             def _on_local_vad_speech() -> None:
                 if not speaking.active:
@@ -1166,6 +1189,16 @@ class VoiceBrainService(Service):
                             format=stt_fmt,
                             interim_results=True,
                             vad_events=True,
+                            # Speaker labels. Backends that support
+                            # diarization populate
+                            # ``FinalTranscript.speaker_label``; the
+                            # classifier below uses those to drop
+                            # Gilbert's own voice echoing through the
+                            # mic. Backends that don't support it
+                            # leave the field empty and the
+                            # classifier short-circuits (every
+                            # transcript dispatches as before).
+                            diarize=config.diarize_speakers,
                         )
                     )
                 except Exception:
@@ -1245,6 +1278,49 @@ class VoiceBrainService(Service):
                             text = ev.text.strip()
                             if not text:
                                 continue
+                            # Speaker-id-aware echo suppression. When
+                            # diarize_speakers is on and the backend
+                            # populated ``speaker_label``, classify
+                            # each new label "first seen" — the engine
+                            # knows EXACTLY when Gilbert is talking
+                            # (``speaking.active``) so anything heard
+                            # while Gilbert is speaking is, by
+                            # construction, Gilbert's own voice
+                            # echoing back through the mic. Gilbert-
+                            # classed speakers get dropped for the
+                            # remainder of the session; user-classed
+                            # speakers flow through regardless of
+                            # speaking.active → BARGE-IN STILL WORKS
+                            # for confirmed users.
+                            #
+                            # Empty speaker_label (backend doesn't
+                            # support diarization, or the flag is
+                            # off) short-circuits — same as legacy
+                            # behaviour where every transcript
+                            # dispatches.
+                            label = ev.speaker_label or ""
+                            if config.diarize_speakers and label:
+                                known = speaker_class.get(label, "")
+                                if not known:
+                                    known = (
+                                        "gilbert" if speaking.active else "user"
+                                    )
+                                    speaker_class[label] = known
+                                    log.info(
+                                        "diarization: new speaker_label=%r "
+                                        "classified as %r (speaking.active=%s)",
+                                        label,
+                                        known,
+                                        speaking.active,
+                                    )
+                                if known == "gilbert":
+                                    log.info(
+                                        "diarization: dropping Gilbert-class "
+                                        "transcript (speaker_label=%r text=%r)",
+                                        label,
+                                        text[:80],
+                                    )
+                                    continue
                             already_spoke = True
                             remote_started_talking = True
                             await _record_turn("them", text)

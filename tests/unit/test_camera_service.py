@@ -528,7 +528,9 @@ async def test_annotation_off_path_when_label_not_in_vision_enabled_labels(
     vision_calls: list[bytes] = []
 
     class _Vision:
-        async def describe_image(self, b: bytes, m: str) -> str:
+        async def describe_image(
+            self, b: bytes, m: str, *, prompt: str = ""
+        ) -> str:
             vision_calls.append(b)
             return "should not be called"
 
@@ -567,7 +569,9 @@ async def test_annotation_runs_with_vision_provider(
     )
 
     class _Vision:
-        async def describe_image(self, b: bytes, m: str) -> str:
+        async def describe_image(
+            self, b: bytes, m: str, *, prompt: str = ""
+        ) -> str:
             return "a brown box on the porch"
 
     _register_fake("fake8", lambda: {"events": [ev]})
@@ -600,7 +604,9 @@ async def test_annotation_lock_prevents_duplicate(
     call_count = 0
 
     class _Vision:
-        async def describe_image(self, b: bytes, m: str) -> str:
+        async def describe_image(
+            self, b: bytes, m: str, *, prompt: str = ""
+        ) -> str:
             nonlocal call_count
             call_count += 1
             await asyncio.sleep(0.05)
@@ -1207,7 +1213,9 @@ async def test_vision_semaphore_caps_cross_event_parallelism(
     peak_in_flight = 0
 
     class _SlowVision:
-        async def describe_image(self, b: bytes, m: str) -> str:
+        async def describe_image(
+            self, b: bytes, m: str, *, prompt: str = ""
+        ) -> str:
             nonlocal in_flight, peak_in_flight
             in_flight += 1
             peak_in_flight = max(peak_in_flight, in_flight)

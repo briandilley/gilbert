@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 # image-heavy and eligible for OCR/Vision enrichment.
 _SPARSE_TEXT_THRESHOLD = 50
 
+# Domain-specific prompt for PDF knowledge indexing. The vision
+# backend's default prompt is general-purpose ("describe what's in
+# this image") which is wrong for technical-document pages — we want
+# strict information extraction from pinout tables, wiring diagrams,
+# specs, etc., not natural-language scene narration. We pin our own
+# prompt here so this caller's behavior is independent of how the
+# operator tunes Settings → Vision → Prompt for other consumers
+# (smart-glasses scene description, surveillance cameras, etc.).
+_PDF_PAGE_VISION_PROMPT = (
+    "Extract ALL technical content from this page image as plain "
+    "structured text. Include: pinout tables, wiring diagrams, "
+    "connector assignments, component specifications, part numbers, "
+    "voltage/current ratings, communication protocols, dimensions, "
+    "torque specs, and any other technical data. Reproduce tables as "
+    "aligned text columns. Label diagram elements clearly (e.g., "
+    "'Pin 1: CAN_H, Pin 2: CAN_L'). Do NOT describe the visual "
+    "layout — extract the information content only. If the page "
+    "contains no technical content, respond with an empty string."
+)
+
 
 def extract_text(
     content: DocumentContent,
@@ -197,13 +217,26 @@ def _run_vision_sync(vision: VisionService, png_bytes: bytes) -> str:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, vision.describe_image(png_bytes, "image/png"))
+                future = pool.submit(
+                    asyncio.run,
+                    vision.describe_image(
+                        png_bytes, "image/png", prompt=_PDF_PAGE_VISION_PROMPT
+                    ),
+                )
                 return future.result(timeout=60)
         else:
-            return loop.run_until_complete(vision.describe_image(png_bytes, "image/png"))
+            return loop.run_until_complete(
+                vision.describe_image(
+                    png_bytes, "image/png", prompt=_PDF_PAGE_VISION_PROMPT
+                )
+            )
     except Exception:
         # Simplest fallback: just run it directly
-        return asyncio.run(vision.describe_image(png_bytes, "image/png"))
+        return asyncio.run(
+            vision.describe_image(
+                png_bytes, "image/png", prompt=_PDF_PAGE_VISION_PROMPT
+            )
+        )
 
 
 def _extract_word(

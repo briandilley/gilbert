@@ -30,6 +30,8 @@ members = [
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-kokoro",
     "gilbert-plugin-lutron-radiora",
+    "gilbert-plugin-mentra",
+    "gilbert-plugin-messaging",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ntfy",
@@ -1657,6 +1659,28 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pylutron", specifier = ">=0.4.1" }]
+
+[[package]]
+name = "gilbert-plugin-mentra"
+version = "0.1.0"
+source = { virtual = "std-plugins/mentra" }
+dependencies = [
+    { name = "certifi" },
+    { name = "httpx" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "certifi", specifier = ">=2024.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "websockets", specifier = ">=12.0" },
+]
+
+[[package]]
+name = "gilbert-plugin-messaging"
+version = "1.0.0"
+source = { virtual = "std-plugins/messaging" }
 
 [[package]]
 name = "gilbert-plugin-mistral"

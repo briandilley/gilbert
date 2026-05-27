@@ -63,6 +63,36 @@ _PUBLIC_PREFIXES = (
     # ``/auth/login``, the webhook body never reaches our handler, and
     # ``call.answered`` events never advance the call to CONNECTED.
     "/api/telnyx/",
+    # Mentra Cloud POSTs ``session_request`` / ``stop_request`` webhooks
+    # to ``/api/mentra/webhook`` when a user launches the Gilbert app
+    # from their phone. Same posture as Telnyx — no session cookie /
+    # bearer header on the inbound request; auth is the ``apiKey``
+    # the plugin validates in the WS handshake on the back-channel
+    # we dial. Without this exempt entry the cloud's webhook gets
+    # 302'd to the login page and the WebSocket back-channel never
+    # opens, so the glasses sit forever in "Connecting…" with no
+    # diagnostic that surfaces in Gilbert's logs.
+    "/api/mentra/",
+    # ``/api/tts`` is the public TTS endpoint Mentra Cloud fetches
+    # when a Mentra app calls ``session.audio.speak(text)`` — the SDK
+    # builds ``<app-server-url>/api/tts?text=...`` and Mentra Cloud
+    # GETs that URL to retrieve audio bytes. Cloud can't carry a
+    # Gilbert session cookie; without this exempt the auth
+    # middleware 302s every TTS fetch to the login page, the cloud
+    # gets an HTML response, plays garbage / silence, and the user
+    # hears nothing. (The endpoint itself is rate-limited and
+    # cost-sensitive — every GET runs a real TTS synthesis through
+    # ElevenLabs / Kokoro / etc. — but the auth is handled
+    # in-route, not at the middleware layer.)
+    "/api/tts",
+    # Same posture as ``/api/tts``: ``/api/audio-blob/<id>`` is the
+    # short-lived public URL plugins use to expose engine-synthesized
+    # audio bytes to external cloud audio routers (Mentra Cloud's
+    # server-side fetcher being the first consumer). The blob id
+    # itself is a random uuid with a ~60s TTL — that's the auth.
+    # Without the exempt entry the cloud's GET 302s to login and
+    # the user hears silence.
+    "/api/audio-blob/",
 )
 
 

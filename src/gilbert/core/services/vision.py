@@ -143,8 +143,21 @@ class VisionService(Service):
         """Whether the vision backend is ready."""
         return self._backend is not None and self._backend.available
 
-    async def describe_image(self, image_bytes: bytes, media_type: str) -> str:
-        """Analyze an image and return a text description."""
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        media_type: str,
+        *,
+        prompt: str = "",
+    ) -> str:
+        """Analyze an image and return a text description.
+
+        ``prompt`` is forwarded to the backend — empty means "use the
+        backend's configured default prompt". See ``VisionProvider``
+        for the rationale.
+        """
         if self._backend is None:
             raise RuntimeError("Vision service is not enabled")
-        return await self._backend.describe_image(image_bytes, media_type)
+        return await self._backend.describe_image(
+            image_bytes, media_type, prompt=prompt
+        )
