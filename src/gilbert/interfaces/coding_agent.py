@@ -267,6 +267,41 @@ class CodingAgentBackend(ABC):
 
 
 @runtime_checkable
+class CodingConduitInboundEndpoint(Protocol):
+    """Capability for push-style inbound channels — the side of
+    the conduit where the coding agent (or its host process)
+    actively notifies Gilbert that something happened.
+
+    OpenCode uses a pull model: Gilbert subscribes to the daemon's
+    SSE stream via ``CodingAgentBackend.stream_events`` and the
+    daemon emits events into the connection. Claude Code is the
+    inverse — it runs as a CLI in the user's terminal with no
+    long-lived listener Gilbert can attach to, but it CAN fire
+    shell commands via the ``Stop`` / ``Notification`` hooks in
+    ``~/.claude/settings.json``. Those hooks POST to a Gilbert
+    webhook, which then calls into this protocol to feed the
+    event back through the same ring buffer / bus / notification
+    fan-out the pull path uses.
+
+    The web route lives in core (``web/routes/code_conduit_webhook.py``)
+    because plugins can't register their own FastAPI routes yet —
+    same pattern as ``mentra_webhooks.py``. Auth is a shared
+    secret configured in the plugin's settings; the route validates
+    the header before calling this method.
+    """
+
+    async def deliver_inbound_event(
+        self,
+        *,
+        event: CodingAgentEvent,
+    ) -> None:
+        """Accept a webhook-delivered event and fan it out through
+        the same path that pull-style events take (ring buffer +
+        bus publish + user notification)."""
+        ...
+
+
+@runtime_checkable
 class CodingConduitProvider(Protocol):
     """Capability protocol for "relay a message to the coding agent."
 

@@ -63,6 +63,14 @@ _PUBLIC_PREFIXES = (
     # ``/auth/login``, the webhook body never reaches our handler, and
     # ``call.answered`` events never advance the call to CONNECTED.
     "/api/telnyx/",
+    # Code-conduit's inbound webhook receives push-style coding-
+    # agent events (Claude Code stop hooks, custom CI scripts) that
+    # can't carry a Gilbert session cookie. Auth is the shared
+    # secret in the ``X-Code-Conduit-Secret`` header, validated by
+    # the service via ``hmac.compare_digest``. Without this exempt
+    # entry the inbound POST gets 302'd to the login page and the
+    # caller sees HTML instead of a JSON ack.
+    "/api/code-conduit/",
 )
 
 

@@ -72,6 +72,9 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     from gilbert.web.routes.health import api_router as health_api_router
     from gilbert.web.routes.health import webhook_router as health_webhook_router
     from gilbert.web.routes.inbox import router as inbox_router
+    from gilbert.web.routes.code_conduit_webhook import (
+        router as code_conduit_router,
+    )
     from gilbert.web.routes.mcp import mcp_asgi_endpoint
     from gilbert.web.routes.screens import router as screens_router
     from gilbert.web.routes.share import router as share_router
@@ -94,6 +97,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     app.include_router(health_api_router)
     app.include_router(health_webhook_router)
     app.include_router(inbox_router)
+    app.include_router(code_conduit_router)
     app.include_router(screens_router)
     app.include_router(share_router)
     app.include_router(telnyx_router)
