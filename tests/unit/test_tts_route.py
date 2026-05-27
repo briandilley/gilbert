@@ -57,7 +57,9 @@ def _make_app(tts: Any | None) -> FastAPI:
 
     class _SM:
         def get_capability(self, name: str) -> Any:
-            if name == "tts":
+            # TTSService advertises capability ``text_to_speech``;
+            # see ``src/gilbert/core/services/tts.py``.
+            if name == "text_to_speech":
                 return tts
             return None
 

@@ -41,11 +41,16 @@ router = APIRouter()
 
 
 def _get_tts(state: Any) -> TTSProvider | None:
-    """Resolve the ``tts`` capability off the live Gilbert app."""
+    """Resolve the ``text_to_speech`` capability off the live Gilbert app.
+
+    The TTS service advertises capability name ``text_to_speech``
+    (see ``core/services/tts.py``) — not ``tts``. The same name is
+    used by every other consumer (speaker, doorbell, phone, greeting).
+    """
     gilbert = getattr(state, "gilbert", None)
     if gilbert is None:
         return None
-    svc = gilbert.service_manager.get_capability("tts")
+    svc = gilbert.service_manager.get_capability("text_to_speech")
     if svc is None or not isinstance(svc, TTSProvider):
         return None
     return svc
