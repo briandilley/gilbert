@@ -44,10 +44,73 @@ Design notes:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from gilbert.interfaces.configuration import ConfigParam
+
+# Severity buckets a ``CodingAgentEvent`` falls into. Tighter than a
+# free-form string because consumers (voice-brain, push, frontend
+# feed) need to make routing decisions on it without parsing the
+# detail blob. See the docstring on ``CodingAgentEvent.kind`` for
+# what each one means.
+EVENT_KIND_DONE = "done"
+EVENT_KIND_ERROR = "error"
+EVENT_KIND_ATTENTION = "attention"
+EVENT_KIND_INFO = "info"
+
+
+@dataclass(frozen=True)
+class CodingAgentEvent:
+    """One inbound event from the coding agent — Gilbert's "the
+    coder did a thing" signal.
+
+    Generic by design: each backend (OpenCode, Claude Code, ...)
+    translates its native event format into this shape so the
+    service layer above doesn't have to learn N different
+    protocols. Backends are intentionally minimal — they map
+    *what kind* of event happened; consumers decide *what to do*
+    about it (TTS interrupt vs. silent log vs. push notification
+    vs. SPA feed entry).
+
+    Field ``kind`` is the routing knob. Four buckets:
+
+    - ``"done"`` — the agent finished a task and is back to
+      waiting for input. The single most useful notification:
+      "Claude finished the test suite." Consumers typically
+      surface this when the voice loop is idle so it doesn't
+      interrupt an in-progress conversation.
+    - ``"error"`` — the agent or runtime errored. Worth
+      interrupting for — the user usually needs to step in.
+    - ``"attention"`` — the agent is blocked waiting for the
+      user (permission prompt, ambiguous instruction, missing
+      input). Worth interrupting for — the user needs to answer.
+    - ``"info"`` — everything else (tool calls, token deltas,
+      diagnostics, installation pings). Default-silent;
+      surfaces in the activity feed but not via TTS.
+
+    ``summary`` is the voice-friendly one-liner the TTS layer
+    will speak. ``detail`` is the longer string the SPA feed
+    renders. Keep ``summary`` under ~80 chars so it fits a
+    glasses-display line and doesn't blow up TTS latency.
+    """
+
+    session_id: str = ""
+    project_path: str = ""
+    kind: str = EVENT_KIND_INFO
+    summary: str = ""
+    detail: str = ""
+    timestamp: str = ""
+    """ISO-8601 timestamp string from the backend, or ``""`` when
+    unavailable. Same string-typed rationale as
+    ``CodingAgentSession.last_updated``."""
+    raw_type: str = ""
+    """The backend's native event-type name (e.g. OpenCode's
+    ``session.idle``). Carried through so the SPA feed / debug
+    webview can render the raw type alongside the normalized
+    ``kind`` — useful when an unknown event was bucketed into
+    ``info`` and the operator wants to know what fell through."""
 
 
 @dataclass(frozen=True)
@@ -174,6 +237,26 @@ class CodingAgentBackend(ABC):
         """List recent sessions, most-recent first. Filter by
         ``project_path`` when set. Empty when the backend isn't
         ready or has no sessions."""
+        ...
+
+    @abstractmethod
+    def stream_events(self) -> AsyncIterator[CodingAgentEvent]:
+        """Yield inbound events as the agent emits them — Gilbert's
+        notification source.
+
+        Implementations are expected to handle reconnect themselves
+        (network blips, daemon restart) so a single ``async for``
+        loop on the service side stays alive across transient
+        failures. Yielding stops only on ``close()`` /
+        ``asyncio.CancelledError``.
+
+        Backends that have no inbound channel (e.g. a future
+        subprocess-only Claude Code wrapper before the stop-hook
+        webhook lands) should yield nothing and never raise — the
+        service must not crash because one backend lacks the
+        feature. Use ``async def`` + an empty body that just awaits
+        a never-fires event, OR yield zero times then return.
+        """
         ...
 
     @property
