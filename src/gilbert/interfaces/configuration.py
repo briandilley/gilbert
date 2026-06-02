@@ -85,6 +85,17 @@ class ConfigAction:
     ``followup_action`` that points at the hidden one, so the same
     button re-labels to 'Continue' without the followup key needing to
     exist on the settings page as its own button."""
+    inline_after_param: str = ""
+    """When set, render this action button inline directly beneath the
+    named ``ConfigParam.key`` (in the same backend group) instead of
+    in the global Actions block at the bottom of the section. Useful
+    when the action operates on or refreshes a specific param's data
+    (e.g. a 'Refresh model list' button anchored to the model
+    dropdown). For backend actions, the key is matched against the
+    bare param key — the consumer (frontend) is responsible for
+    matching it against the fully-qualified ``backends.<name>.<key>``
+    form. Actions with this set are filtered out of the global
+    Actions block."""
 
 
 @dataclass(frozen=True)

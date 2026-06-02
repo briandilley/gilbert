@@ -41,6 +41,11 @@ export interface ConfigActionMeta {
   confirm: string;
   required_role: string;
   hidden: boolean;
+  /** When non-empty, the Settings UI renders this action inline directly
+   *  beneath the named ConfigParam.key (matched against the bare param
+   *  key for backend params — i.e. the trailing segment of
+   *  ``backends.<backend>.<key>``) instead of in the global Actions block. */
+  inline_after_param?: string;
 }
 
 export interface ConfigActionResult {

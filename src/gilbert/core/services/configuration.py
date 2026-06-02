@@ -480,6 +480,7 @@ class ConfigurationService(Service):
             "confirm": a.confirm,
             "required_role": a.required_role,
             "hidden": a.hidden,
+            "inline_after_param": a.inline_after_param,
         }
 
     def _serialize_action_result(self, r: ConfigActionResult) -> dict[str, Any]:

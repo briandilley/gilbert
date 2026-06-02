@@ -161,6 +161,40 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
     [sectionState],
   );
 
+  /** Bare-key for matching inline actions: a backend param keyed
+   *  ``backends.<name>.<bare>`` matches an action with
+   *  ``inline_after_param === bare`` AND ``backend === name``.
+   *  Service-level params match by their full key. Multi-role
+   *  aggregators (``<role>.backends.<name>.<bare>``) are matched
+   *  identically — the bare segment + backend name pair. */
+  const inlineActionsForParam = useCallback(
+    (paramKey: string): ConfigActionMeta[] => {
+      const parts = paramKey.split(".");
+      let bare = paramKey;
+      let backend = "";
+      if (parts[0] === "backends" && parts.length >= 3) {
+        backend = parts[1];
+        bare = parts.slice(2).join(".");
+      } else if (parts.length >= 4 && parts[1] === "backends") {
+        backend = parts[2];
+        bare = parts.slice(3).join(".");
+      }
+      return (section.actions ?? []).filter((a) => {
+        if (a.hidden) return false;
+        if (!a.inline_after_param) return false;
+        if (a.inline_after_param !== bare) return false;
+        // Backend-scoped action must match this param's backend; if
+        // either side has no backend, match on bare key alone (i.e.
+        // a service-level action anchored to a service-level param).
+        if (a.backend && backend && a.backend !== backend) return false;
+        if (a.backend && !backend) return false;
+        if (!a.backend && backend) return false;
+        return true;
+      });
+    },
+    [section.actions],
+  );
+
   const runAction = useCallback(
     async (action: ConfigActionMeta, keyOverride?: string) => {
       if (action.confirm && !keyOverride) {
@@ -310,11 +344,14 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
       {expanded && (
         <CardContent className="py-4 space-y-4">
           {enabledParam && (
-            <ConfigField
+            <FieldWithInlineActions
               param={enabledParam}
               value={merged["enabled"]}
               onChange={handleFieldChange}
               namespace={section.namespace}
+              inlineActions={inlineActionsForParam(enabledParam.key)}
+              actionStates={actionStates}
+              runAction={runAction}
             />
           )}
 
@@ -323,12 +360,15 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
               {serviceParams.length > 0 && (
                 <div className="space-y-4">
                   {serviceParams.map((p) => (
-                    <ConfigField
+                    <FieldWithInlineActions
                       key={p.key}
                       param={p}
                       value={merged[p.key]}
                       onChange={handleFieldChange}
                       namespace={section.namespace}
+                      inlineActions={inlineActionsForParam(p.key)}
+                      actionStates={actionStates}
+                      runAction={runAction}
                     />
                   ))}
                 </div>
@@ -355,11 +395,14 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
               )}
 
               {backendParam && (
-                <ConfigField
+                <FieldWithInlineActions
                   param={backendParam}
                   value={merged["backend"]}
                   onChange={handleFieldChange}
                   namespace={section.namespace}
+                  inlineActions={inlineActionsForParam(backendParam.key)}
+                  actionStates={actionStates}
+                  runAction={runAction}
                 />
               )}
 
@@ -388,21 +431,27 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
                       </CardHeader>
                       <CardContent className="space-y-3">
                         {enableParam && (
-                          <ConfigField
+                          <FieldWithInlineActions
                             param={enableParam}
                             value={getValue(enableParam.key)}
                             onChange={handleFieldChange}
                             namespace={section.namespace}
+                            inlineActions={inlineActionsForParam(enableParam.key)}
+                            actionStates={actionStates}
+                            runAction={runAction}
                           />
                         )}
                         {isEnabled &&
                           otherParams.map((p) => (
-                            <ConfigField
+                            <FieldWithInlineActions
                               key={p.key}
                               param={p}
                               value={getValue(p.key)}
                               onChange={handleFieldChange}
                               namespace={section.namespace}
+                              inlineActions={inlineActionsForParam(p.key)}
+                              actionStates={actionStates}
+                              runAction={runAction}
                             />
                           ))}
                       </CardContent>
@@ -493,8 +542,14 @@ function ActionsBlock({
   hasBackendChangeUnsaved,
   hasChanges,
 }: ActionsBlockProps) {
+  // Actions with ``inline_after_param`` set render inline beneath
+  // their anchor param (see FieldWithInlineActions). Don't double-
+  // render them in the global Actions block.
   const visible = actions.filter(
-    (a) => !a.hidden && (!a.backend || !backendName || a.backend === backendName),
+    (a) =>
+      !a.hidden &&
+      !a.inline_after_param &&
+      (!a.backend || !backendName || a.backend === backendName),
   );
   if (visible.length === 0) return null;
 
@@ -564,6 +619,102 @@ function ActionsBlock({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Per-param inline actions — for ConfigActions that declare
+// ``inline_after_param``. Each anchor renders its ConfigField, then
+// a tight row of action buttons + status messages directly beneath
+// it (instead of getting buried in the global Actions block).
+// ──────────────────────────────────────────────────────────────────
+
+interface FieldWithInlineActionsProps {
+  param: ConfigParamMeta;
+  value: unknown;
+  onChange: (key: string, value: unknown) => void;
+  namespace: string;
+  inlineActions: ConfigActionMeta[];
+  actionStates: Record<string, ActionUIState>;
+  runAction: (action: ConfigActionMeta, keyOverride?: string) => Promise<void>;
+}
+
+function FieldWithInlineActions({
+  param,
+  value,
+  onChange,
+  namespace,
+  inlineActions,
+  actionStates,
+  runAction,
+}: FieldWithInlineActionsProps) {
+  return (
+    <div className="space-y-2">
+      <ConfigField
+        param={param}
+        value={value}
+        onChange={onChange}
+        namespace={namespace}
+      />
+      {inlineActions.length > 0 && (
+        <div className="space-y-1 pl-0.5">
+          {inlineActions.map((action) => (
+            <InlineActionRow
+              key={action.key}
+              action={action}
+              state={actionStates[action.key]}
+              runAction={runAction}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface InlineActionRowProps {
+  action: ConfigActionMeta;
+  state: ActionUIState | undefined;
+  runAction: (action: ConfigActionMeta, keyOverride?: string) => Promise<void>;
+}
+
+function InlineActionRow({ action, state, runAction }: InlineActionRowProps) {
+  const running = state?.status === "running";
+  const pending = state?.status === "pending";
+  const isFollowup = pending && !!state?.followup;
+  const nextKey = isFollowup ? state.followup : action.key;
+  const label = isFollowup ? "Continue" : action.label;
+  const statusColor =
+    state?.status === "error"
+      ? "text-destructive"
+      : state?.status === "ok"
+        ? "text-success"
+        : state?.status === "pending"
+          ? "text-warning"
+          : "text-muted-foreground";
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={running}
+        onClick={() => runAction(action, isFollowup ? nextKey : undefined)}
+      >
+        {isFollowup ? <ExternalLinkIcon /> : <ZapIcon />}
+        {running ? "Running…" : label}
+      </Button>
+      {action.description && !state && (
+        <span className="text-xs text-muted-foreground">
+          {action.description}
+        </span>
+      )}
+      {state?.message && (
+        <span className={cn("text-xs font-mono", statusColor)}>
+          {state.message}
+        </span>
+      )}
     </div>
   );
 }
