@@ -84,6 +84,7 @@ dependencies = [
     "gilbert-plugin-tesseract",
     "gilbert-plugin-unifi",
     "gilbert-plugin-voice-agent",
+    "gilbert-plugin-web-push",
     "gilbert-plugin-withings",
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
@@ -133,6 +134,7 @@ gilbert-plugin-telnyx = { workspace = true }
 gilbert-plugin-tesseract = { workspace = true }
 gilbert-plugin-unifi = { workspace = true }
 gilbert-plugin-voice-agent = { workspace = true }
+gilbert-plugin-web-push = { workspace = true }
 gilbert-plugin-withings = { workspace = true }
 gilbert-plugin-xai = { workspace = true }
 

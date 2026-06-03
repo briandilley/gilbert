@@ -6,6 +6,7 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { WebSocketProvider } from "@/hooks/useWebSocket";
 import { PresenceProvider } from "@/hooks/usePresence";
 import App from "@/App";
+import { PwaUpdatePrompt } from "@/components/PwaUpdatePrompt";
 import "@/index.css";
 // Side-effect import: register every plugin's UI panels with the
 // per-slot registry before any page renders. Adding a plugin's UI
@@ -29,6 +30,10 @@ createRoot(document.getElementById("root")!).render(
           <WebSocketProvider>
             <PresenceProvider>
               <App />
+              {/* Floating "Update available" toast for the PWA. The
+                  service worker is registered inside this component so
+                  registration is a side-effect of mounting it. */}
+              <PwaUpdatePrompt />
             </PresenceProvider>
           </WebSocketProvider>
         </AuthProvider>
