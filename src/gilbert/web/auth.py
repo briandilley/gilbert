@@ -46,11 +46,26 @@ _PUBLIC_EXACT = (
     "/screens/info",
     "/setup-https",
     "/health",
+    # PWA manifest + service worker. The browser fetches these
+    # during the initial page load — often *before* the user has
+    # authenticated (the login page itself includes
+    # ``<link rel="manifest">`` and an SW registration on the way
+    # in). Without these exempts the manifest 302s to /auth/login
+    # and the browser refuses to register the SW or surface the
+    # install prompt.
+    "/manifest.webmanifest",
+    "/sw.js",
+    "/sw.js.map",
+    "/registerSW.js",
 )
 _PUBLIC_PREFIXES = (
     "/auth/login/",
     "/assets/",
     "/static/",
+    # PWA icons referenced from the manifest. Same posture as the
+    # manifest itself — fetched during install prompts and the
+    # iOS apple-touch-icon scrape, before auth.
+    "/icons/",
     "/screens/stream",
     "/screens/tmp/",
     "/api/share/",
