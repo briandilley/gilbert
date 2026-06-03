@@ -139,7 +139,29 @@ def create_app(gilbert: Gilbert) -> FastAPI:
 
         @app.get("/{full_path:path}")
         async def spa_fallback(request: Request, full_path: str) -> Response:
-            """Serve the SPA index.html for all unmatched routes."""
+            """Serve the SPA — real files first, ``index.html`` for unmatched.
+
+            vite-plugin-pwa emits root-level files alongside ``index.html``
+            (``manifest.webmanifest``, ``sw.js``, ``registerSW.js``, …) plus
+            the ``icons/`` subdirectory referenced from the manifest. The
+            fallback must serve any extant file out of ``_SPA_DIR`` before
+            falling through to ``index.html`` — otherwise the manifest
+            comes back as text/html (the SPA shell), the browser refuses
+            to register the SW, and the install prompt never appears.
+
+            The path is normalized against ``_SPA_DIR`` to refuse any
+            ``..`` traversal — only files that resolve *inside* the SPA
+            directory are served.
+            """
+            if full_path:
+                candidate = (_SPA_DIR / full_path).resolve()
+                try:
+                    candidate.relative_to(_SPA_DIR.resolve())
+                except ValueError:
+                    # Traversal — pretend it doesn't exist.
+                    candidate = None  # type: ignore[assignment]
+                if candidate is not None and candidate.is_file():
+                    return FileResponse(str(candidate))
             index = _SPA_DIR / "index.html"
             if index.exists():
                 return FileResponse(str(index), media_type="text/html")
