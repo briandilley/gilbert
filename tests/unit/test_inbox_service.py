@@ -1032,6 +1032,172 @@ class TestOutbox:
             e.event_type == "inbox.outbox.failed" for e in event_bus_svc.bus.published
         )
 
+    @pytest.mark.asyncio
+    async def test_reclaim_orphaned_sending_resets_to_pending(
+        self,
+        inbox_service: InboxService,
+    ) -> None:
+        """A row stuck in SENDING across a crash/restart must be flipped
+        back to PENDING by the boot sweep so the next tick picks it up.
+
+        Without this, _outbox_tick's status=PENDING filter strands the
+        row forever — the exact failure that left three sales-agent
+        replies pinned for hours/days. Producers only ever set SENDING
+        inside _send_outbox_row, so any SENDING row at process-start
+        time is by definition orphaned by a previous process.
+        """
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+
+        # Drop a row straight into storage in SENDING state — mimic what
+        # _send_outbox_row writes between L1347 and L1384 when the
+        # process is killed mid-send.
+        assert inbox_service._storage is not None
+        stuck_id = "out_orphan"
+        await inbox_service._storage.put(
+            "inbox_outbox",
+            stuck_id,
+            {
+                "id": stuck_id,
+                "_id": stuck_id,
+                "mailbox_id": mb.id,
+                "created_by_user_id": "owner",
+                "status": OutboxStatus.SENDING.value,
+                "send_at": "2026-06-01T16:00:00+00:00",  # old
+                "retry_count": 0,
+                "draft": {
+                    "to": [{"email": "x@y.z", "name": ""}],
+                    "subject": "stranded",
+                    "body_html": "<p>x</p>",
+                    "body_text": "x",
+                },
+            },
+        )
+
+        # A control row also exists in PENDING — it should NOT be touched.
+        pending_id = "out_fresh"
+        await inbox_service._storage.put(
+            "inbox_outbox",
+            pending_id,
+            {
+                "id": pending_id,
+                "_id": pending_id,
+                "mailbox_id": mb.id,
+                "created_by_user_id": "owner",
+                "status": OutboxStatus.PENDING.value,
+                "send_at": "2027-01-01T00:00:00+00:00",  # future
+                "retry_count": 0,
+                "draft": {
+                    "to": [{"email": "y@y.z", "name": ""}],
+                    "subject": "fresh",
+                    "body_html": "<p>y</p>",
+                    "body_text": "y",
+                },
+            },
+        )
+
+        before = datetime.now(UTC)
+        await inbox_service._reclaim_orphaned_sending()
+
+        revived = await inbox_service._storage.get("inbox_outbox", stuck_id)
+        assert revived["status"] == OutboxStatus.PENDING.value
+        assert revived["retry_count"] == 1
+        # send_at refreshed to "now" so the next tick picks it up
+        # immediately rather than re-checking the long-stale timestamp.
+        assert datetime.fromisoformat(revived["send_at"]) >= before
+        assert "reclaimed" in (revived.get("error") or "").lower()
+
+        untouched = await inbox_service._storage.get("inbox_outbox", pending_id)
+        assert untouched["status"] == OutboxStatus.PENDING.value
+        assert untouched["retry_count"] == 0
+        assert untouched["send_at"] == "2027-01-01T00:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_reclaim_orphaned_sending_promotes_to_failed_after_max_retries(
+        self,
+        inbox_service: InboxService,
+    ) -> None:
+        """If a row keeps getting stranded across restarts and has
+        already burned its retry budget, the sweep flips it to FAILED
+        instead of looping forever. Mirrors the >=MAX cap that
+        ``_send_outbox_row``'s transient-retry path applies."""
+        from gilbert.core.services.inbox import _OUTBOX_MAX_RETRIES
+
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, FakeEmailBackend())
+        assert inbox_service._storage is not None
+
+        stuck_id = "out_exhausted"
+        await inbox_service._storage.put(
+            "inbox_outbox",
+            stuck_id,
+            {
+                "id": stuck_id,
+                "_id": stuck_id,
+                "mailbox_id": mb.id,
+                "created_by_user_id": "owner",
+                "status": OutboxStatus.SENDING.value,
+                "send_at": "2026-06-01T16:00:00+00:00",
+                "retry_count": _OUTBOX_MAX_RETRIES - 1,  # one more bump pushes over
+                "draft": {
+                    "to": [{"email": "x@y.z", "name": ""}],
+                    "subject": "x",
+                    "body_html": "<p>x</p>",
+                    "body_text": "x",
+                },
+            },
+        )
+
+        await inbox_service._reclaim_orphaned_sending()
+
+        row = await inbox_service._storage.get("inbox_outbox", stuck_id)
+        assert row["status"] == OutboxStatus.FAILED.value
+        assert row["retry_count"] == _OUTBOX_MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_reclaim_then_tick_actually_sends(
+        self,
+        inbox_service: InboxService,
+        event_bus_svc: FakeEventBusService,
+    ) -> None:
+        """End-to-end: a stranded SENDING row, after reclaim, gets
+        delivered on the very next outbox tick. This is the behaviour
+        the user actually cares about — not just that the row is
+        flipped, but that the message goes out."""
+        backend = FakeEmailBackend()
+        mb = _make_mailbox()
+        await _attach_runtime(inbox_service, mb, backend)
+        assert inbox_service._storage is not None
+
+        stuck_id = "out_recoverable"
+        await inbox_service._storage.put(
+            "inbox_outbox",
+            stuck_id,
+            {
+                "id": stuck_id,
+                "_id": stuck_id,
+                "mailbox_id": mb.id,
+                "created_by_user_id": "owner",
+                "status": OutboxStatus.SENDING.value,
+                "send_at": "2026-06-01T16:00:00+00:00",
+                "retry_count": 0,
+                "draft": {
+                    "to": [{"email": "x@y.z", "name": ""}],
+                    "subject": "stranded reply",
+                    "body_html": "<p>x</p>",
+                    "body_text": "x",
+                },
+            },
+        )
+
+        await inbox_service._reclaim_orphaned_sending()
+        await inbox_service._outbox_tick()
+
+        assert len(backend.sent) == 1
+        assert backend.sent[0]["subject"] == "stranded reply"
+        row = await inbox_service._storage.get("inbox_outbox", stuck_id)
+        assert row["status"] == OutboxStatus.SENT.value
+
 
 # ── AI tool shape ─────────────────────────────────────────────────
 

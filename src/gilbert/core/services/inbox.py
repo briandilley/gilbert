@@ -284,6 +284,12 @@ class InboxService(Service):
             system=True,
         )
 
+        # Any row sitting in SENDING right now is by definition orphaned
+        # by a previous process — this process can't have just transitioned
+        # one (we're still booting). Reclaim them before the tick starts
+        # so they don't sit stranded forever.
+        await self._reclaim_orphaned_sending()
+
         # Outbox tick runs forever while service is enabled.
         self._scheduler.add_job(
             name="inbox-outbox-tick",
@@ -1302,6 +1308,80 @@ class InboxService(Service):
             error=(str(row["error"]) if row.get("error") else None),
             retry_count=int(row.get("retry_count", 0) or 0),
         )
+
+    async def _reclaim_orphaned_sending(self) -> None:
+        """Reset outbox rows orphaned in SENDING across a process death.
+
+        ``_send_outbox_row`` flips status to SENDING, calls the backend,
+        then flips to SENT/FAILED. If the process is killed mid-call
+        (Ctrl-C, OOM, crash, even a clean restart for code updates) the
+        row never advances and ``_outbox_tick``'s ``status == PENDING``
+        filter ignores it forever — the message is silently stranded.
+
+        At process start nothing can legitimately be SENDING (the current
+        process hasn't started its tick yet), so every such row is by
+        definition orphaned. Bump retry_count and re-queue at "now" so
+        the next tick re-attempts; once a row has used its full retry
+        budget, mark it FAILED so we don't loop forever on a poison
+        message.
+
+        Caveat: this can produce a duplicate send when the orphaning
+        crash happened *after* ``backend.send()`` returned but *before*
+        the status flip landed. The window is small and the failure
+        mode is a duplicate follow-up email — preferable to leaving
+        sends permanently stranded. True idempotency would require
+        pre-stamping the backend message id onto the outbox row, which
+        is a bigger lift.
+        """
+        if self._storage is None:
+            return
+
+        orphaned = await self._storage.query(
+            Query(
+                collection=_OUTBOX_COLLECTION,
+                filters=[
+                    Filter(
+                        field="status",
+                        op=FilterOp.EQ,
+                        value=OutboxStatus.SENDING.value,
+                    ),
+                ],
+            )
+        )
+        if not orphaned:
+            return
+
+        now_iso = datetime.now(UTC).isoformat()
+        for row in orphaned:
+            outbox_id = str(row.get("_id") or row.get("id") or "")
+            if not outbox_id:
+                continue
+
+            retry_count = int(row.get("retry_count", 0) or 0) + 1
+            row["retry_count"] = retry_count
+            row["error"] = (
+                "orphaned in SENDING across restart; reclaimed on boot"
+            )
+
+            if retry_count >= _OUTBOX_MAX_RETRIES:
+                row["status"] = OutboxStatus.FAILED.value
+                logger.warning(
+                    "Outbox %s exhausted reclaim retries (%d); marking FAILED",
+                    outbox_id,
+                    retry_count,
+                )
+            else:
+                row["status"] = OutboxStatus.PENDING.value
+                row["send_at"] = now_iso
+                logger.warning(
+                    "Outbox %s reclaimed from SENDING after crash/restart "
+                    "(retry %d/%d); next tick will re-attempt",
+                    outbox_id,
+                    retry_count,
+                    _OUTBOX_MAX_RETRIES,
+                )
+
+            await self._storage.put(_OUTBOX_COLLECTION, outbox_id, row)
 
     async def _outbox_tick(self) -> None:
         """Flush pending outbox entries whose send_at is due."""
