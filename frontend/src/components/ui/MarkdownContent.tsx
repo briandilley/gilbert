@@ -91,6 +91,72 @@ const marked = new Marked(
 );
 marked.use({ extensions: [mentionExtension] });
 
+/**
+ * True when the ``href`` points to a host other than this SPA's
+ * origin. Bare-relative URLs (``/foo``, ``./bar``, ``#anchor``) are
+ * always treated as internal so in-app navigation keeps the tab.
+ *
+ * Non-http(s) schemes (``mailto:``, ``tel:``, ``sms:``, ``magnet:``,
+ * etc.) are treated as external because:
+ *
+ * 1. The OS-level handler the scheme triggers shouldn't navigate
+ *    Gilbert's tab away even on failure.
+ * 2. If the user has no handler registered, the browser's default
+ *    behaviour for an in-tab navigation to an unsupported scheme
+ *    is implementation-defined — opening in a fresh tab makes the
+ *    failure mode visible without trashing the SPA's state.
+ *
+ * Malformed URLs that ``new URL`` can't parse fall back to
+ * "internal" — the link almost certainly won't navigate anyway and
+ * we'd rather not flag user-intended in-app paths as external.
+ */
+function isExternalHref(href: string | null | undefined): boolean {
+  if (!href) return false;
+  const trimmed = href.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("#")) return false;
+  try {
+    const url = new URL(trimmed, window.location.origin);
+    return url.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+// One-shot global hook on DOMPurify: every ``<a>`` whose href
+// resolves to a different origin gets ``target="_blank"`` +
+// ``rel="noopener noreferrer"`` so clicking it pops a new tab
+// instead of navigating away from the SPA (which would tear down
+// the WebSocket, dump in-flight chat state, kill any in-progress
+// voice session, and generally feel broken). Same-origin links
+// stay on the current tab so internal navigation (``/settings``,
+// ``/chats/...``) still does the right thing.
+//
+// Registered as a global hook (not per-sanitize) because DOMPurify
+// hooks are module-level by design and re-registering on every
+// render would compound them. Guarded so HMR / re-imports don't
+// install duplicates.
+declare global {
+  // eslint-disable-next-line no-var
+  var __gilbertExternalLinkHookInstalled: boolean | undefined;
+}
+
+if (!globalThis.__gilbertExternalLinkHookInstalled) {
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (!(node instanceof Element)) return;
+    if (node.tagName !== "A") return;
+    const href = node.getAttribute("href");
+    if (!isExternalHref(href)) return;
+    node.setAttribute("target", "_blank");
+    // ``noopener`` blocks ``window.opener`` access (reverse tabnabbing);
+    // ``noreferrer`` strips Referer so the destination can't trivially
+    // log Gilbert's URL. Both are standard practice for ``_blank``
+    // anchors and have no cost when the destination is benign.
+    node.setAttribute("rel", "noopener noreferrer");
+  });
+  globalThis.__gilbertExternalLinkHookInstalled = true;
+}
+
 interface MarkdownContentProps {
   content: string;
   className?: string;
