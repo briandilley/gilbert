@@ -114,6 +114,7 @@ gilbert-plugin-hk-webhook = { workspace = true }
 gilbert-plugin-kokoro = { workspace = true }
 gilbert-plugin-lutron-radiora = { workspace = true }
 gilbert-plugin-mistral = { workspace = true }
+gilbert-plugin-model-manager = { workspace = true }
 gilbert-plugin-ngrok = { workspace = true }
 gilbert-plugin-ntfy = { workspace = true }
 gilbert-plugin-ollama = { workspace = true }
