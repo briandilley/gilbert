@@ -36,7 +36,9 @@ __all__ = [
     "MODEL_TIERS",
     "Message",
     "MessageRole",
+    "ModelConfig",
     "ModelInfo",
+    "PerModelConfigProvider",
     "SharedConversationProvider",
     "StopReason",
     "StreamEvent",
@@ -160,12 +162,22 @@ class Message:
 
 @dataclass(frozen=True)
 class AIRequest:
-    """Parameters for a single AI backend call."""
+    """Parameters for a single AI backend call.
+
+    ``temperature`` / ``max_tokens`` are the **resolved** generation
+    settings for this call (see ``ModelConfig`` and the layered resolution
+    in ``AIService``). They are **optional**: ``None`` means "use the
+    backend's own default," so backends that predate per-model config keep
+    working unchanged — a backend applies whichever fields it is handed and
+    falls back to its built-in default for the rest.
+    """
 
     messages: list[Message]
     system_prompt: str = ""
     tools: list[ToolDefinition] = field(default_factory=list)
     model: str = ""
+    temperature: float | None = None
+    max_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -268,7 +280,14 @@ class AIBackendCapabilities:
 
 @dataclass
 class AIContextProfile:
-    """Named profile controlling tools, backend, and model for an AI interaction."""
+    """Named profile controlling tools, backend, and model for an AI interaction.
+
+    ``temperature`` / ``max_tokens`` are **optional** generation overrides.
+    They sit one layer above per-model config in the resolution order
+    (*backend default ← per-model ← profile ← per-call override*): a
+    concrete value here overrides the per-model default, while ``None``
+    means "fall through to the per-model / backend default."
+    """
 
     name: str
     description: str = ""
@@ -277,6 +296,29 @@ class AIContextProfile:
     tool_roles: dict[str, str] = field(default_factory=dict)
     backend: str = ""
     model: str = ""
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Per-``(backend, model)`` admin config owned by ``AIService`` (ADR-0019).
+
+    Bundles an ``enabled`` flag (governs whether the model appears in
+    ``available_models()`` / the chat picker) with generation defaults that
+    feed the layered resolution *backend default ← per-model ← profile ←
+    per-call override*. Every generation field is optional; ``None`` means
+    "this layer does not set a value," so the backend keeps using its own
+    default. A model with no stored ``ModelConfig`` behaves as the default:
+    ``enabled=True`` and every generation field unset.
+    """
+
+    backend: str
+    model: str
+    enabled: bool = True
+    temperature: float | None = None
+    max_tokens: int | None = None
+    context_window: int | None = None
 
 
 class AIBackend(ABC):
@@ -518,6 +560,35 @@ class AIModelProvider(Protocol):
 
     def get_enabled_models(self) -> list[ModelInfo]:
         """Return the models currently enabled on the active backend."""
+        ...
+
+
+@runtime_checkable
+class PerModelConfigProvider(Protocol):
+    """Protocol for reading/writing per-``(backend, model)`` config (ADR-0019).
+
+    ``AIService`` owns the per-model config store and exposes it through
+    this capability so other services/plugins (e.g. the local-model
+    manager) can read and write generation defaults + the ``enabled`` flag
+    without reaching into the AI service's storage. Config is admin-global,
+    not per-user.
+    """
+
+    async def get_model_config(self, backend: str, model: str) -> ModelConfig:
+        """Return the stored config for ``(backend, model)``.
+
+        Returns a default ``ModelConfig`` (``enabled=True``, all generation
+        fields ``None``) when nothing has been stored for that pair, so
+        callers never have to special-case "no record."
+        """
+        ...
+
+    async def set_model_config(self, cfg: ModelConfig) -> None:
+        """Create or update the config for ``cfg.backend`` / ``cfg.model``."""
+        ...
+
+    async def list_model_configs(self) -> list[ModelConfig]:
+        """Return every stored per-model config."""
         ...
 
 

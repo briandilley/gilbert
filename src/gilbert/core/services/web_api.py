@@ -424,6 +424,13 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Model Config",
+                        "description": "Per-model generation defaults & enabled toggle",
+                        "url": "/security/model-config",
+                        "icon": "sliders",
+                        "required_role": "admin",
+                    },
+                    {
                         "label": "Collections",
                         "description": "Per-collection ACLs",
                         "url": "/security/collections",

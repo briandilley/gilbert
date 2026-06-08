@@ -8,6 +8,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { RolesList } from "./RolesList";
 import { ToolPermissions } from "./ToolPermissions";
 import { AIProfiles } from "./AIProfiles";
+import { ModelConfigEditor } from "./ModelConfigEditor";
 import { UserRoles } from "./UserRoles";
 import { CollectionACLs } from "./CollectionACLs";
 import { EventVisibility } from "./EventVisibility";
@@ -21,6 +22,7 @@ export function RolesPage() {
       <Route path="roles" element={<RolesList />} />
       <Route path="tools" element={<ToolPermissions />} />
       <Route path="profiles" element={<AIProfiles />} />
+      <Route path="model-config" element={<ModelConfigEditor />} />
       <Route path="collections" element={<CollectionACLs />} />
       <Route path="events" element={<EventVisibility />} />
       <Route path="rpc" element={<RpcPermissions />} />

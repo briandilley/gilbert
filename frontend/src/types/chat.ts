@@ -17,6 +17,38 @@ export interface ModelsListResult {
   backends: BackendModels[];
 }
 
+// ── Per-model config (ADR-0019) ──────────────────────────────────────
+// Admin-global generation defaults + an enabled flag for each
+// (backend, model) pair. ``null`` on a generation field means "unset" —
+// the layered resolver falls through to the backend's own default.
+
+export interface ModelConfigEntry {
+  id: string;
+  name: string;
+  enabled: boolean;
+  temperature: number | null;
+  max_tokens: number | null;
+  context_window: number | null;
+}
+
+export interface BackendModelConfigs {
+  name: string;
+  models: ModelConfigEntry[];
+}
+
+export interface ModelConfigListResult {
+  backends: BackendModelConfigs[];
+}
+
+export interface ModelConfigInput {
+  backend: string;
+  model: string;
+  enabled: boolean;
+  temperature: number | null;
+  max_tokens: number | null;
+  context_window: number | null;
+}
+
 export interface ModelPreference {
   backend: string;
   model: string;
