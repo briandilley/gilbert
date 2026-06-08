@@ -28,6 +28,7 @@ import {
   CalendarIcon,
   HeartPulseIcon,
   TargetIcon,
+  GaugeIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -62,6 +63,7 @@ const ICONS: Record<string, LucideIcon> = {
   "calendar": CalendarIcon,
   "heart-pulse": HeartPulseIcon,
   "target": TargetIcon,
+  "gauge": GaugeIcon,
 };
 
 export function groupIconFor(name: string): LucideIcon | undefined {

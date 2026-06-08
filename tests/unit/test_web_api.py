@@ -130,6 +130,78 @@ async def test_dashboard_admin_sees_restart_menu_item(
     assert "url" not in restart
 
 
+async def test_model_config_is_in_system_group(service: WebApiService) -> None:
+    """The Model Config entry lives under System (moved from Security)."""
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    conn = _make_conn(gilbert, user_level=0)  # admin
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-mc"})
+    assert result is not None
+    nav = result["nav"]
+
+    def labels(group_key: str) -> list[str]:
+        group = next((g for g in nav if g["key"] == group_key), None)
+        return [i.get("label") for i in (group["items"] if group else [])]
+
+    assert "Model Config" in labels("system")
+    assert "Model Config" not in labels("security")
+
+
+async def test_restart_is_last_item_in_system_group(
+    service: WebApiService,
+) -> None:
+    """The Restart action must be the final item in the System group — even
+    with Model Config (and any plugin items) merged in above it."""
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    conn = _make_conn(gilbert, user_level=0)  # admin
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-last"})
+    assert result is not None
+    system = next(g for g in result["nav"] if g["key"] == "system")
+    assert system["items"][-1].get("action") == "restart_host"
+
+
+async def test_model_config_follows_models_in_system(
+    service: WebApiService,
+) -> None:
+    """When the model-manager plugin contributes the "Models" route into the
+    System group, "Model Config" is repositioned to immediately follow it (a
+    natural pair), and Restart still ends up last."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _ModelsPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="model-manager")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/models",
+                    panel_id="model_manager.page",
+                    label="Models",
+                    icon="package",
+                    required_role="admin",
+                    add_to_nav=True,
+                    nav_parent_group="system",
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [SimpleNamespace(plugin=_ModelsPlugin())]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-models"})
+    assert result is not None
+    system = next(g for g in result["nav"] if g["key"] == "system")
+    labels = [i.get("label") for i in system["items"]]
+    assert "Models" in labels and "Model Config" in labels
+    assert labels.index("Model Config") == labels.index("Models") + 1
+    assert system["items"][-1].get("action") == "restart_host"
+
+
 async def test_dashboard_non_admin_does_not_see_restart(
     service: WebApiService,
 ) -> None:

@@ -424,13 +424,6 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
-                        "label": "Model Config",
-                        "description": "Per-model generation defaults & enabled toggle",
-                        "url": "/security/model-config",
-                        "icon": "sliders",
-                        "required_role": "admin",
-                    },
-                    {
                         "label": "Collections",
                         "description": "Per-collection ACLs",
                         "url": "/security/collections",
@@ -466,6 +459,13 @@ class WebApiService(Service):
                         "description": "Service configuration",
                         "url": "/settings",
                         "icon": "sliders",
+                        "required_role": "admin",
+                    },
+                    {
+                        "label": "Model Config",
+                        "description": "Per-model generation defaults & enabled toggle",
+                        "url": "/security/model-config",
+                        "icon": "gauge",
                         "required_role": "admin",
                     },
                     {
@@ -555,6 +555,39 @@ class WebApiService(Service):
         for i, g in enumerate(nav_groups):
             if g.get("key") == "system":
                 nav_groups.append(nav_groups.pop(i))
+                sys_items = g.get("items") or []
+                # Place "Model Config" immediately after the (plugin-contributed)
+                # "Models" entry — they're a natural pair. ``Models`` is merged
+                # in by ``_merge_plugin_nav`` above, so this must run after the
+                # merge. When the model-manager plugin is absent, Model Config
+                # keeps its static fallback position.
+                models_idx = next(
+                    (k for k, it in enumerate(sys_items) if it.get("url") == "/models"),
+                    None,
+                )
+                if models_idx is not None:
+                    cfg_idx = next(
+                        (
+                            k
+                            for k, it in enumerate(sys_items)
+                            if it.get("url") == "/security/model-config"
+                        ),
+                        None,
+                    )
+                    if cfg_idx is not None:
+                        cfg_item = sys_items.pop(cfg_idx)
+                        # Re-find Models after the pop (its index may have shifted).
+                        models_idx = next(
+                            k for k, it in enumerate(sys_items) if it.get("url") == "/models"
+                        )
+                        sys_items.insert(models_idx + 1, cfg_item)
+                # Keep the Restart action dead last — plugin items (and the move
+                # above) would otherwise leave something after it, and "restart
+                # the host" should always be the final entry.
+                for j, item in enumerate(sys_items):
+                    if item.get("action") == "restart_host":
+                        sys_items.append(sys_items.pop(j))
+                        break
                 break
 
         acl = gilbert.service_manager.get_by_capability("access_control")
