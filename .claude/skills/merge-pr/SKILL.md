@@ -91,6 +91,17 @@ Invoke the `validate-architecture` skill in **audit mode** over the current tree
 
 If the audit finds violations, stop and report. Same rule as tests: do not auto-fix as part of the merge. The user decides whether to push fixes onto the PR branch or proceed anyway.
 
+### 7b. Build the frontend (when the PR touches it)
+
+`uv run pytest` does **not** build the SPA, so a TypeScript or bundler break sails straight through. If the merged tree touched any frontend source — `frontend/**`, `std-plugins/*/frontend/**`, any `*.ts` / `*.tsx`, `tsconfig*.json`, `package.json` / `package-lock.json` — **or** it bumped the `std-plugins` submodule (a pointer bump can change plugin frontends), build the SPA:
+
+```bash
+npm install                       # repo root; no-op when node_modules is current, REQUIRED when stale
+( cd frontend && npm run build )  # tsc -b && vite build
+```
+
+The `npm install` is mandatory **first**: a missing/stale `node_modules` makes the build fail on unrelated pre-existing errors (e.g. `virtual:pwa-register` / `workbox-*` "cannot find module"), which is a false negative, not a real break. Only a failure *after* a clean install is a real break — then stop and report it verbatim (same rule as tests: do not auto-fix during the merge). Skip this step entirely for a diff that touches no frontend files and no submodule pointer.
+
 ### 8. Squash-merge on GitHub
 
 Only reached if tests and audit are clean.
@@ -120,11 +131,12 @@ One-paragraph summary:
 - PR # and title, the squash commit SHA (`git log -1 --format=%H` on main).
 - Test result (count or "all passed").
 - Audit result ("clean" or N violations resolved before merge).
+- Frontend build result ("built" or "skipped — no frontend/submodule changes").
 - Branches deleted.
 
 ## Failure handling
 
-- If steps 4–7 fail, leave the working tree on the PR branch unless the user said to abort. Don't merge on GitHub. Don't auto-fix. Report and wait.
+- If steps 4–7b fail, leave the working tree on the PR branch unless the user said to abort. Don't merge on GitHub. Don't auto-fix. Report and wait.
 - Never `git push --force`, never bypass branch protection, never use `--admin` on `gh pr merge` without an explicit user request.
 - If `gh` is not authenticated (`gh auth status` fails), stop and tell the user to run `gh auth login` themselves with the `!` prefix.
 
