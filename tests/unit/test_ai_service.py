@@ -3722,6 +3722,100 @@ async def test_per_model_generation_params_reach_request(
     assert req.max_tokens == 2048
 
 
+async def test_per_model_context_window_resolved_onto_request(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """A per-model ``context_window`` lands on the ``AIRequest`` the backend
+    receives, so a local runtime (Ollama) can load the model with the right
+    ``num_ctx`` instead of the daemon default that 400s large prompts."""
+    from gilbert.interfaces.ai import ModelConfig
+
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="m1", context_window=32768)
+    )
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.chat("hi", model="m1")
+
+    req = stub_backend.requests[0]
+    assert req.context_window == 32768
+
+
+def test_fit_to_context_window_drops_oldest_messages() -> None:
+    """Oldest messages are dropped until the estimated prompt fits the window;
+    the final (current) turn is always kept."""
+    svc = AIService()
+    big = "x" * 4000  # ~1000 tokens each by the char/4 estimate
+    messages = [
+        Message(role=MessageRole.USER, content=big),
+        Message(role=MessageRole.ASSISTANT, content=big),
+        Message(role=MessageRole.USER, content="latest question"),
+    ]
+    # A 1024 window can't hold either ~1000-token history turn alongside the
+    # reply reserve + margin, so both are dropped; the latest turn survives.
+    kept = svc._fit_to_context_window(
+        messages,
+        system_prompt="",
+        tools=[],
+        context_window=1024,
+        max_tokens=256,
+    )
+    assert kept == [messages[-1]]
+
+
+def test_fit_to_context_window_keeps_all_when_it_fits() -> None:
+    """A short history under the window is returned untouched."""
+    svc = AIService()
+    messages = [
+        Message(role=MessageRole.USER, content="short a"),
+        Message(role=MessageRole.ASSISTANT, content="short b"),
+        Message(role=MessageRole.USER, content="short c"),
+    ]
+    kept = svc._fit_to_context_window(
+        messages,
+        system_prompt="sys",
+        tools=[],
+        context_window=8192,
+        max_tokens=1024,
+    )
+    assert kept == messages
+
+
+def test_fit_to_context_window_never_leads_with_tool_result() -> None:
+    """If trimming would leave a TOOL_RESULT first (orphaned from its
+    assistant call), that leading orphan is dropped too."""
+    from gilbert.interfaces.tools import ToolResult
+
+    svc = AIService()
+    big = "x" * 4000
+    messages = [
+        Message(role=MessageRole.USER, content=big),
+        Message(
+            role=MessageRole.TOOL_RESULT,
+            tool_results=[ToolResult(tool_call_id="c1", content=big)],
+        ),
+        Message(role=MessageRole.USER, content="latest"),
+    ]
+    kept = svc._fit_to_context_window(
+        messages,
+        system_prompt="",
+        tools=[],
+        context_window=2048,
+        max_tokens=256,
+    )
+    assert kept and kept[0].role != MessageRole.TOOL_RESULT
+    assert kept[-1] == messages[-1]
+
+
 async def test_profile_overrides_per_model_generation_params(
     ai_service: AIService,
     stub_backend: StubAIBackend,

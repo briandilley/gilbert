@@ -82,6 +82,18 @@ _CHAT_SPEECH_COLLECTION = "chat_speech_prefs"
 _COMPRESSION_STATE_KEY = "compression"
 _COMPRESSION_CONFIG_KEY = "compression_config"
 
+# Context-window fitting (see ``_fit_to_context_window``). These bound a
+# coarse char/4 token estimate used only to keep a local runtime from being
+# handed a prompt larger than the context it loaded with — never for billing.
+_CHARS_PER_TOKEN = 4
+"""Rough English chars-per-token ratio for the fitting estimate."""
+_PER_MESSAGE_OVERHEAD = 8
+"""Estimated framing tokens (role markers, delimiters) added per message."""
+_CONTEXT_FIT_MARGIN = 256
+"""Floor for the safety margin reserved below the window (also scales with it)."""
+_DEFAULT_OUTPUT_RESERVE = 1024
+"""Reply tokens to reserve when the call has no explicit ``max_tokens``."""
+
 
 class _GilbertAuthor:
     """Synthetic 'author' for notifications fired on Gilbert's behalf.
@@ -2058,8 +2070,8 @@ class AIService(Service):
         profile: AIContextProfile | None,
         call_temperature: float | None,
         call_max_tokens: float | None,
-    ) -> tuple[float | None, int | None]:
-        """Resolve ``temperature`` / ``max_tokens`` across config layers.
+    ) -> tuple[float | None, int | None, int | None]:
+        """Resolve ``temperature`` / ``max_tokens`` / ``context_window``.
 
         Order (lowest → highest priority): backend default (``None``) ←
         per-model ← profile ← per-call override. ``None`` at any layer means
@@ -2067,6 +2079,10 @@ class AIService(Service):
         higher-priority ``None``. Concretely each result is the first
         non-``None`` of ``[call, profile, per_model]``; ``None`` when every
         layer is unset, so the backend keeps its own default.
+
+        ``context_window`` only has a per-model layer today (no profile/call
+        override), but is resolved here alongside the others so call sites have
+        a single source of truth for the layered generation settings.
         """
         profile_temp = profile.temperature if profile is not None else None
         profile_max = profile.max_tokens if profile is not None else None
@@ -2083,7 +2099,11 @@ class AIService(Service):
                 max_tokens = int(layer_mt)
                 break
 
-        return temperature, max_tokens
+        context_window: int | None = (
+            int(per_model.context_window) if per_model.context_window is not None else None
+        )
+
+        return temperature, max_tokens, context_window
 
     # --- Backend + model resolution ---
 
@@ -2203,19 +2223,33 @@ class AIService(Service):
         # ``max_tokens`` here is the explicit call-override; there is no
         # call-level temperature for one-shot completions.
         per_model = await self.get_model_config(self._backend_key(backend), model)
-        resolved_temperature, resolved_max_tokens = self._resolve_generation_params(
+        (
+            resolved_temperature,
+            resolved_max_tokens,
+            resolved_context_window,
+        ) = self._resolve_generation_params(
             per_model,
             profile,
             call_temperature=None,
             call_max_tokens=max_tokens,
         )
+        completion_messages = list(messages)
+        if resolved_context_window is not None:
+            completion_messages = self._fit_to_context_window(
+                completion_messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                context_window=resolved_context_window,
+                max_tokens=resolved_max_tokens,
+            )
         request = AIRequest(
-            messages=list(messages),
+            messages=completion_messages,
             system_prompt=system_prompt,
             tools=tools,
             model=model,
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
+            context_window=resolved_context_window,
         )
         response = await backend.generate(request)
         if max_tokens is not None and response.usage is not None:
@@ -2423,7 +2457,11 @@ class AIService(Service):
         _per_model_cfg = await self.get_model_config(
             self._backend_key(resolved_backend), resolved_model
         )
-        resolved_temperature, resolved_max_tokens = self._resolve_generation_params(
+        (
+            resolved_temperature,
+            resolved_max_tokens,
+            resolved_context_window,
+        ) = self._resolve_generation_params(
             _per_model_cfg,
             profile,
             call_temperature=None,
@@ -2631,6 +2669,20 @@ class AIService(Service):
                     truncated, date_ctx
                 )
 
+                # When the resolved model has an explicit context window (local
+                # runtimes like Ollama, seeded on pull), drop the oldest
+                # messages so the prompt fits — otherwise the backend hands the
+                # daemon a request larger than the loaded window and it 400s.
+                # No-op for models with no context_window (hosted backends).
+                if resolved_context_window is not None:
+                    round_messages = self._fit_to_context_window(
+                        round_messages,
+                        system_prompt=round_prompt,
+                        tools=tool_defs if tool_defs else [],
+                        context_window=resolved_context_window,
+                        max_tokens=resolved_max_tokens,
+                    )
+
                 request = AIRequest(
                     messages=round_messages,
                     system_prompt=round_prompt,
@@ -2638,6 +2690,7 @@ class AIService(Service):
                     model=resolved_model,
                     temperature=resolved_temperature,
                     max_tokens=resolved_max_tokens,
+                    context_window=resolved_context_window,
                 )
 
                 # Drive the backend via ``generate_stream``. For backends that
@@ -5263,6 +5316,82 @@ class AIService(Service):
                 break
 
         return tail
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Coarse token estimate (~``_CHARS_PER_TOKEN`` chars/token).
+
+        Deliberately approximate — exact counts would need each model's own
+        tokenizer, which Gilbert doesn't ship. Used only by
+        ``_fit_to_context_window`` to keep a local runtime's prompt under its
+        loaded context size; never for billing or hard guarantees.
+        """
+        if not text:
+            return 0
+        return (len(text) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+    def _fit_to_context_window(
+        self,
+        messages: list[Message],
+        *,
+        system_prompt: str,
+        tools: list[ToolDefinition],
+        context_window: int,
+        max_tokens: int | None,
+    ) -> list[Message]:
+        """Drop the oldest messages until the estimated prompt fits the window.
+
+        Only invoked when the resolved model carries an explicit
+        ``context_window`` (local runtimes like Ollama, seeded on pull) —
+        hosted backends pass ``None`` and skip this entirely. The estimate is
+        a coarse char/4 heuristic (see ``_estimate_tokens``); a safety margin
+        absorbs estimate error and chat-template framing the estimate can't
+        see. We reserve room for the model's reply (``max_tokens`` when set,
+        else ``_DEFAULT_OUTPUT_RESERVE``).
+
+        The final message (the current user turn) is always kept. If trimming
+        would leave a tool result as the first message — which providers reject
+        as an orphaned result — that leading orphan is dropped too.
+        """
+        if not messages:
+            return messages
+
+        reply_reserve = max_tokens if max_tokens is not None else _DEFAULT_OUTPUT_RESERVE
+        margin = max(_CONTEXT_FIT_MARGIN, context_window // 20)
+        input_budget = context_window - reply_reserve - margin
+        if input_budget <= 0:
+            # Window too small to even reserve a reply — send just the latest
+            # turn and let the backend surface any hard failure honestly.
+            return messages[-1:]
+
+        fixed = self._estimate_tokens(system_prompt)
+        for tool in tools:
+            fixed += self._estimate_tokens(tool.name)
+            fixed += self._estimate_tokens(tool.description)
+            fixed += self._estimate_tokens(_json.dumps(tool.to_json_schema(), default=str))
+
+        def message_tokens(msg: Message) -> int:
+            total = self._estimate_tokens(msg.content or "")
+            for tc in msg.tool_calls:
+                total += self._estimate_tokens(tc.tool_name)
+                total += self._estimate_tokens(_json.dumps(tc.arguments, default=str))
+            for tr in msg.tool_results:
+                total += self._estimate_tokens(tr.content or "")
+            return total + _PER_MESSAGE_OVERHEAD
+
+        per_message = [message_tokens(m) for m in messages]
+        total = fixed + sum(per_message)
+
+        start = 0
+        # Drop oldest-first, but never the final (current) message.
+        while total > input_budget and start < len(messages) - 1:
+            total -= per_message[start]
+            start += 1
+
+        kept = messages[start:]
+        while len(kept) > 1 and kept[0].role == MessageRole.TOOL_RESULT:
+            kept = kept[1:]
+        return kept
 
     # --- ToolProvider protocol ---
 

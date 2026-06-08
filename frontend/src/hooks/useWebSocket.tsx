@@ -80,16 +80,20 @@ const DEFAULT_TIMEOUT = 15_000;
 // actually dead" backstop.
 const LONG_TIMEOUT = 600_000; // 10 minutes
 
-/** Frame types that need a longer timeout (AI thinking). */
+/** Frame types that need a longer timeout (AI thinking). Callers with their
+ *  own long operations pass an explicit timeout to ``rpc()`` instead of
+ *  adding their type here, so core stays free of feature/plugin specifics. */
 const LONG_TIMEOUT_TYPES = new Set([
   "chat.message.send",
   "chat.form.submit",
   "config.prompt.author",
 ]);
 
-/** Bus events whose arrival means an AI turn is still progressing.
- *  Any pending long-timeout RPC on the same conversation gets its
- *  deadline pushed back when one of these fires. */
+/** Bus event types whose arrival means a *conversation's* AI turn is still
+ *  progressing — a matching pending RPC (same conversation) gets its deadline
+ *  pushed back. (A second, generic keepalive path — any event carrying a
+ *  ``data.ref`` that names a pending RPC — is handled separately and needs no
+ *  entry here.) */
 const KEEPALIVE_EVENT_TYPES = new Set([
   "chat.stream.text_delta",
   "chat.stream.round_complete",
@@ -333,6 +337,29 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             // out, as long as the backend is actively reporting
             // progress. If progress stops for the full budget, the
             // backstop kicks in.
+            const resetDeadline = (pendingId: string, pending: PendingRpc) => {
+              clearTimeout(pending.timer);
+              pending.timer = setTimeout(() => {
+                pendingRef.current.delete(pendingId);
+                pending.reject(new ApiError(408, "RPC timeout"));
+              }, pending.timeoutMs);
+            };
+
+            // Generic keepalive: any event carrying a ``data.ref`` that names a
+            // pending RPC pushes that RPC's deadline back. Lets any
+            // feature/plugin keep its own long-running RPC alive by emitting
+            // progress events (e.g. a multi-minute model pull) — no core
+            // knowledge of the specific RPC type required.
+            const eventRef =
+              typeof event.data.ref === "string" ? event.data.ref : undefined;
+            if (eventRef) {
+              const pending = pendingRef.current.get(eventRef);
+              if (pending) resetDeadline(eventRef, pending);
+            }
+
+            // Conversation keepalive: an AI stream/tool event resets any
+            // in-flight RPC on the same conversation, so a long agentic turn
+            // that's actively reporting progress doesn't falsely time out.
             if (KEEPALIVE_EVENT_TYPES.has(event.event_type)) {
               const eventConvId =
                 typeof event.data.conversation_id === "string"
@@ -341,11 +368,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (eventConvId) {
                 for (const [pendingId, pending] of pendingRef.current) {
                   if (pending.conversationId !== eventConvId) continue;
-                  clearTimeout(pending.timer);
-                  pending.timer = setTimeout(() => {
-                    pendingRef.current.delete(pendingId);
-                    pending.reject(new ApiError(408, "RPC timeout"));
-                  }, pending.timeoutMs);
+                  resetDeadline(pendingId, pending);
                 }
               }
             }

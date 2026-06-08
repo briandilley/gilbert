@@ -164,12 +164,20 @@ class Message:
 class AIRequest:
     """Parameters for a single AI backend call.
 
-    ``temperature`` / ``max_tokens`` are the **resolved** generation
-    settings for this call (see ``ModelConfig`` and the layered resolution
-    in ``AIService``). They are **optional**: ``None`` means "use the
-    backend's own default," so backends that predate per-model config keep
-    working unchanged — a backend applies whichever fields it is handed and
-    falls back to its built-in default for the rest.
+    ``temperature`` / ``max_tokens`` / ``context_window`` are the
+    **resolved** generation settings for this call (see ``ModelConfig`` and
+    the layered resolution in ``AIService``). They are **optional**: ``None``
+    means "use the backend's own default," so backends that predate per-model
+    config keep working unchanged — a backend applies whichever fields it is
+    handed and falls back to its built-in default for the rest.
+
+    ``context_window`` is the model's total token window for this call. Most
+    hosted backends ignore it (the provider fixes the window per model), but
+    local runtimes that load a model with a caller-chosen context size — Ollama
+    being the motivating case, where it maps to ``options.num_ctx`` — must
+    honour it, otherwise the model loads at the daemon default (often 4096) and
+    rejects any prompt larger than that. ``AIService`` also uses it to trim
+    history to fit before the call.
     """
 
     messages: list[Message]
@@ -178,6 +186,7 @@ class AIRequest:
     model: str = ""
     temperature: float | None = None
     max_tokens: int | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)
