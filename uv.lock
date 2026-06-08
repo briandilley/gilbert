@@ -33,6 +33,7 @@ members = [
     "gilbert-plugin-mentra",
     "gilbert-plugin-messaging",
     "gilbert-plugin-mistral",
+    "gilbert-plugin-model-manager",
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ntfy",
     "gilbert-plugin-ollama",
@@ -1693,6 +1694,11 @@ source = { virtual = "std-plugins/messaging" }
 name = "gilbert-plugin-mistral"
 version = "1.0.0"
 source = { virtual = "std-plugins/mistral" }
+
+[[package]]
+name = "gilbert-plugin-model-manager"
+version = "1.0.0"
+source = { virtual = "std-plugins/model-manager" }
 
 [[package]]
 name = "gilbert-plugin-ngrok"
