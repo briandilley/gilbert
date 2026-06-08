@@ -86,6 +86,14 @@ class HostResourcesBackend(ABC):
     backend_name: str = ""
     """Short identifier used to select the backend (e.g., ``"local"``)."""
 
+    priority: int = 0
+    """Selection priority. The service prefers the highest-priority backend
+    that is :meth:`is_available`. The built-in ``local`` backend is ``0`` —
+    the always-available floor — so a richer optional backend (e.g. one that
+    shells out to an external detector) sets a higher value to be preferred
+    when its prerequisites are present, and is simply skipped when they're
+    not, falling back to ``local``."""
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if cls.backend_name:
@@ -95,6 +103,18 @@ class HostResourcesBackend(ABC):
     def registered_backends(cls) -> dict[str, type[HostResourcesBackend]]:
         """Return ``{name: class}`` for all registered backends."""
         return dict(cls._registry)
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Whether this backend can run on the host right now.
+
+        The built-in probes are always available (psutil + best-effort
+        nvidia-smi). A backend that depends on an optional external tool
+        overrides this — typically a cheap ``shutil.which(...)`` check — so
+        the service can fall back to a lower-priority backend when the tool
+        is absent. Must be cheap and never raise.
+        """
+        return True
 
     @abstractmethod
     async def probe(self) -> HostResources:

@@ -29,6 +29,7 @@ members = [
     "gilbert-plugin-hk-webhook",
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-kokoro",
+    "gilbert-plugin-llmfit",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mentra",
     "gilbert-plugin-messaging",
@@ -1338,6 +1339,7 @@ dependencies = [
     { name = "gilbert-plugin-hk-webhook" },
     { name = "gilbert-plugin-jellyfin" },
     { name = "gilbert-plugin-kokoro" },
+    { name = "gilbert-plugin-llmfit" },
     { name = "gilbert-plugin-lutron-radiora" },
     { name = "gilbert-plugin-mistral" },
     { name = "gilbert-plugin-ngrok" },
@@ -1430,6 +1432,7 @@ requires-dist = [
     { name = "gilbert-plugin-hk-webhook", virtual = "std-plugins/hk-webhook" },
     { name = "gilbert-plugin-jellyfin", virtual = "std-plugins/jellyfin" },
     { name = "gilbert-plugin-kokoro", virtual = "std-plugins/kokoro" },
+    { name = "gilbert-plugin-llmfit", virtual = "std-plugins/llmfit" },
     { name = "gilbert-plugin-lutron-radiora", virtual = "std-plugins/lutron-radiora" },
     { name = "gilbert-plugin-mistral", virtual = "std-plugins/mistral" },
     { name = "gilbert-plugin-ngrok", virtual = "std-plugins/ngrok" },
@@ -1656,6 +1659,11 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "torch", specifier = ">=2.4" },
 ]
+
+[[package]]
+name = "gilbert-plugin-llmfit"
+version = "1.0.0"
+source = { virtual = "std-plugins/llmfit" }
 
 [[package]]
 name = "gilbert-plugin-lutron-radiora"

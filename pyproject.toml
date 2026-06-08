@@ -61,6 +61,7 @@ dependencies = [
     "gilbert-plugin-guess-that-song",
     "gilbert-plugin-hk-webhook",
     "gilbert-plugin-kokoro",
+    "gilbert-plugin-llmfit",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mistral",
     "gilbert-plugin-ngrok",
@@ -112,6 +113,7 @@ gilbert-plugin-groq = { workspace = true }
 gilbert-plugin-guess-that-song = { workspace = true }
 gilbert-plugin-hk-webhook = { workspace = true }
 gilbert-plugin-kokoro = { workspace = true }
+gilbert-plugin-llmfit = { workspace = true }
 gilbert-plugin-lutron-radiora = { workspace = true }
 gilbert-plugin-mistral = { workspace = true }
 gilbert-plugin-model-manager = { workspace = true }

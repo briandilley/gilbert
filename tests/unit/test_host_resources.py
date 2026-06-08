@@ -172,6 +172,69 @@ class _StubResolver(ServiceResolver):
         return []
 
 
+def test_local_backend_default_priority_and_availability() -> None:
+    """The built-in ``local`` backend is the always-available selection floor
+    (priority 0) — a richer optional backend outranks it when present."""
+    assert LocalHostResources.priority == 0
+    assert LocalHostResources.is_available() is True
+
+
+class _HighPrioAvailable(_StubBackend):
+    """A higher-priority backend that reports itself available."""
+
+    priority = 10
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+
+class _HighPrioUnavailable(HostResourcesBackend):
+    """A higher-priority backend whose external tool is absent. Returns a
+    distinct snapshot so a wrong selection would be detectable."""
+
+    priority = 10
+    _OTHER = HostResources(total_ram_bytes=999, available_ram_bytes=999)
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return False
+
+    async def probe(self) -> HostResources:
+        return self._OTHER
+
+
+@pytest.mark.asyncio
+async def test_service_prefers_highest_priority_available_backend() -> None:
+    """When a higher-priority backend is available, the service picks it over
+    the always-available ``local`` floor."""
+    svc = HostResourcesService()
+    with patch.object(
+        HostResourcesBackend,
+        "registered_backends",
+        classmethod(lambda cls: {"local": LocalHostResources, "hi": _HighPrioAvailable}),
+    ):
+        await svc.start(_StubResolver())
+    result = await svc.get_host_resources()
+    assert result is _StubBackend._SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_service_falls_back_when_high_priority_unavailable() -> None:
+    """A higher-priority backend that isn't available (its external tool is
+    missing) is skipped; the service falls back to a lower-priority one."""
+    svc = HostResourcesService()
+    with patch.object(
+        HostResourcesBackend,
+        "registered_backends",
+        classmethod(lambda cls: {"local": _StubBackend, "hi": _HighPrioUnavailable}),
+    ):
+        await svc.start(_StubResolver())
+    result = await svc.get_host_resources()
+    # _HighPrioUnavailable skipped → falls back to the stub registered as local.
+    assert result is _StubBackend._SENTINEL
+
+
 def test_service_advertises_host_resources_capability() -> None:
     info = HostResourcesService().service_info()
     assert info.name == "host_resources"

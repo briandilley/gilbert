@@ -37,12 +37,34 @@ class HostResourcesService(Service):
         )
 
     async def start(self, resolver: ServiceResolver) -> None:
-        backends = HostResourcesBackend.registered_backends()
-        backend_cls = backends.get("local")
+        backend_cls = self._select_backend(HostResourcesBackend.registered_backends())
         if backend_cls is None:
-            raise ValueError("Unknown host-resources backend: local")
+            raise ValueError("No available host-resources backend")
         self._backend = backend_cls()
-        logger.info("Host-resources service started")
+        logger.info(
+            "Host-resources service started (backend=%s)",
+            backend_cls.backend_name or backend_cls.__name__,
+        )
+
+    @staticmethod
+    def _select_backend(
+        backends: dict[str, type[HostResourcesBackend]],
+    ) -> type[HostResourcesBackend] | None:
+        """Pick the highest-priority backend that reports itself available.
+
+        Plugins register richer optional backends (e.g. ``llmfit`` for
+        multi-vendor GPU detection) at a higher ``priority`` than the
+        built-in ``local`` floor; when such a backend's external tool is
+        absent it returns ``is_available() is False`` and we fall back to the
+        next one down. Ties break by name for deterministic selection. The
+        registry is read at ``start()`` — after plugin ``setup()`` has run
+        (``app._load_plugins`` precedes ``start_all``), so plugin-registered
+        backends are visible here.
+        """
+        for _name, cls in sorted(backends.items(), key=lambda kv: (-kv[1].priority, kv[0])):
+            if cls.is_available():
+                return cls
+        return None
 
     # --- HostResourcesProvider ---
 
