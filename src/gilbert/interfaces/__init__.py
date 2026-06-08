@@ -31,6 +31,10 @@ from gilbert.interfaces.email import (
     EmailMessage,
 )
 from gilbert.interfaces.events import Event, EventBus, EventHandler
+from gilbert.interfaces.local_models import (
+    InstalledModel,
+    LocalModelRuntimeProvider,
+)
 from gilbert.interfaces.plugin import Plugin, PluginMeta
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import (
@@ -80,6 +84,8 @@ __all__ = [
     "Filter",
     "FilterOp",
     "IndexDefinition",
+    "InstalledModel",
+    "LocalModelRuntimeProvider",
     "Message",
     "MessageRole",
     "Plugin",
