@@ -3772,6 +3772,26 @@ def test_fit_to_context_window_drops_oldest_messages() -> None:
     assert kept == [messages[-1]]
 
 
+def test_message_reasoning_roundtrips_through_storage() -> None:
+    """A reasoning model's thinking persists on the assistant row so history
+    replay can reconstruct the thinking card."""
+    msg = Message(
+        role=MessageRole.ASSISTANT, content="the answer", reasoning="my thinking"
+    )
+    d = AIService._serialize_message(msg)
+    assert d["reasoning"] == "my thinking"
+    back = AIService._deserialize_message(d)
+    assert back.reasoning == "my thinking"
+    assert back.content == "the answer"
+
+
+def test_message_without_reasoning_omits_field() -> None:
+    """No reasoning ⇒ the field isn't written (back-compat with old rows)."""
+    d = AIService._serialize_message(Message(role=MessageRole.ASSISTANT, content="x"))
+    assert "reasoning" not in d
+    assert AIService._deserialize_message(d).reasoning == ""
+
+
 def test_fit_to_context_window_keeps_all_when_it_fits() -> None:
     """A short history under the window is returned untouched."""
     svc = AIService()
