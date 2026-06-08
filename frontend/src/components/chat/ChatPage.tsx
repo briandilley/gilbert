@@ -1153,6 +1153,11 @@ export function ChatPage() {
   }, []);
 
   useEventBus("chat.stream.text_delta", handleTextDelta);
+  // Reasoning models stream their thinking on a separate channel; it shares
+  // the round's reasoning buffer (the thinking card), same as narration text.
+  // The committed turn (from the RPC) separates thinking (round reasoning)
+  // from the answer (final_content).
+  useEventBus("chat.stream.reasoning", handleTextDelta);
   useEventBus("chat.stream.round_complete", handleRoundComplete);
   useEventBus("chat.stream.turn_complete", handleTurnComplete);
   useEventBus("chat.tool.started", handleToolStarted);

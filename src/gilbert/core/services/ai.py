@@ -2719,6 +2719,20 @@ class AIService(Service):
                                     "visible_to": stream_visible_to,
                                 },
                             )
+                    elif stream_ev.type == StreamEventType.REASONING_DELTA:
+                        # The model's thinking (reasoning models only). Streamed
+                        # on its own channel so the frontend can render it in the
+                        # thinking card distinct from the answer; the accumulated
+                        # text also rides on response.message.reasoning below.
+                        if stream_ev.text:
+                            await self._publish_event(
+                                "chat.stream.reasoning",
+                                {
+                                    "conversation_id": conversation_id,
+                                    "text": stream_ev.text,
+                                    "visible_to": stream_visible_to,
+                                },
+                            )
                     elif stream_ev.type == StreamEventType.MESSAGE_COMPLETE:
                         response = stream_ev.response
                     # TOOL_CALL_START / TOOL_CALL_DELTA / TOOL_CALL_END are
@@ -2802,7 +2816,11 @@ class AIService(Service):
                     # panel can render the reasoning as a caption next to
                     # each call. Persisted with the conversation so a reload
                     # reconstructs the same display.
-                    round_reasoning = response.message.content or ""
+                    # Prefer the model's actual thinking (reasoning models)
+                    # over the content preamble for the round's reasoning text.
+                    round_reasoning = (
+                        response.message.reasoning or response.message.content or ""
+                    )
                     round_tools: list[dict[str, Any]] = []
                     for tc, tr in zip(
                         response.message.tool_calls,
@@ -2946,6 +2964,17 @@ class AIService(Service):
                     continue
 
                 # END_TURN or any other terminal stop — normal completion.
+                # A reasoning model's final-answer thinking rides on
+                # response.message.reasoning; persist it as a tools-less round
+                # (no usage — that's tracked as the turn's final round) so the
+                # thinking shows in the card and survives history replay.
+                if response is not None and response.message.reasoning:
+                    turn_rounds.append(
+                        {
+                            "reasoning": response.message.reasoning,
+                            "tools": [],
+                        }
+                    )
                 break
             else:
                 logger.warning(
@@ -4835,6 +4864,8 @@ class AIService(Service):
     @staticmethod
     def _serialize_message(msg: Message) -> dict[str, Any]:
         d: dict[str, Any] = {"role": msg.role.value, "content": msg.content}
+        if msg.reasoning:
+            d["reasoning"] = msg.reasoning
         if msg.tool_calls:
             d["tool_calls"] = [
                 {
@@ -4960,6 +4991,7 @@ class AIService(Service):
         return Message(
             role=MessageRole(data["role"]),
             content=data.get("content", ""),
+            reasoning=data.get("reasoning", ""),
             tool_calls=tool_calls,
             tool_results=tool_results,
             author_id=data.get("author_id", ""),
@@ -7347,9 +7379,15 @@ class AIService(Service):
                 # carries both tool_calls and the marker. The marker
                 # is for the AI, not the UI.
                 row_interrupted = bool(row.get("interrupted"))
-                round_reasoning = (
-                    _strip_interrupt_marker(content) if row_interrupted else content
-                )
+                # Prefer the model's stored thinking (reasoning models) over the
+                # content preamble for the round's reasoning text.
+                row_reasoning = row.get("reasoning")
+                if isinstance(row_reasoning, str) and row_reasoning:
+                    round_reasoning = row_reasoning
+                else:
+                    round_reasoning = (
+                        _strip_interrupt_marker(content) if row_interrupted else content
+                    )
                 row_usage = row.get("usage")
                 round_usage = row_usage if isinstance(row_usage, dict) else None
                 if row_interrupted:
@@ -7403,8 +7441,13 @@ class AIService(Service):
                 continue
 
             # Assistant row WITHOUT tool_calls — this is the final
-            # answer for the current turn. Capture content + attachments
-            # and finalize.
+            # answer for the current turn. A reasoning model's final-answer
+            # thinking is stored on the row as ``reasoning`` (separate from the
+            # answer ``content``); surface it as a tools-less round so the
+            # thinking card shows it, matching the live committed shape.
+            final_reasoning = row.get("reasoning")
+            if isinstance(final_reasoning, str) and final_reasoning:
+                round_reasoning = final_reasoning
             finalize_round()
             # Strip the AI-facing interrupt sentinel from content before
             # setting final_content so the visible bubble only shows

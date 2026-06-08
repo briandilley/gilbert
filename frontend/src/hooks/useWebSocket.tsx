@@ -96,6 +96,7 @@ const LONG_TIMEOUT_TYPES = new Set([
  *  entry here.) */
 const KEEPALIVE_EVENT_TYPES = new Set([
   "chat.stream.text_delta",
+  "chat.stream.reasoning",
   "chat.stream.round_complete",
   "chat.tool.started",
   "chat.tool.completed",

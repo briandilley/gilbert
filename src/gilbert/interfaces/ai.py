@@ -158,6 +158,12 @@ class Message:
     # history replay can surface per-round metrics, and summed across
     # assistant rows to reconstruct ``ChatTurnResult.turn_usage`` totals.
     usage: dict[str, Any] | None = None
+    # The model's reasoning / thinking for this ASSISTANT row, when the
+    # backend exposes it as a channel distinct from ``content`` (Ollama
+    # ``think`` models, Anthropic extended thinking). Empty for backends or
+    # models that don't separate reasoning. Streamed live as
+    # ``REASONING_DELTA`` events; this is the final accumulated text.
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,6 +218,13 @@ class StreamEventType(StrEnum):
     TEXT_DELTA = "text_delta"
     """A chunk of assistant text arrived. Append ``StreamEvent.text`` to
     the live buffer; do not treat as a full message."""
+
+    REASONING_DELTA = "reasoning_delta"
+    """A chunk of the model's *reasoning* / thinking arrived (separate from
+    the answer). Carried in ``StreamEvent.text``. Emitted only by backends
+    that expose a distinct reasoning stream (e.g. Ollama ``think`` models,
+    Anthropic extended thinking); ordinary backends never emit it. The final
+    accumulated reasoning also lands on ``AIResponse.message.reasoning``."""
 
     TOOL_CALL_START = "tool_call_start"
     """The model began emitting a tool_use block. Carries the tool's
