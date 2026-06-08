@@ -89,6 +89,7 @@ dependencies = [
     "gilbert-plugin-xai",
     "mcp>=1.2.0",
     "faster-whisper>=1.2.1",
+    "psutil>=7.2.2",
 ]
 
 [tool.uv.sources]
@@ -261,5 +262,6 @@ dev = [
     "reportlab>=4.4.10",
     "types-markdown>=3.10.2.20260408",
     "types-openpyxl>=3.1.5.20260408",
+    "types-psutil>=7.2.2.20260518",
     "types-pyyaml>=6.0.12.20260408",
 ]
