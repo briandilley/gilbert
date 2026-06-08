@@ -15,6 +15,8 @@ import type {
   ConversationMember,
   FileAttachment,
   ModelsListResult,
+  ModelConfigListResult,
+  ModelConfigInput,
 } from "@/types/chat";
 import type { Role, ToolPermission, AIProfile, UserRoleAssignment, CollectionACL } from "@/types/roles";
 import type { DocumentNode, SearchResult } from "@/types/documents";
@@ -202,6 +204,16 @@ export function useWsApi() {
 
     listModels: () =>
       rpc<ModelsListResult>({ type: "chat.models.list" }),
+
+    // ── Per-model config (ADR-0019) ───────────────────────────────
+    // Admin-only: list every model from the enabled backends with its
+    // stored ModelConfig, and persist edits (enabled toggle + generation
+    // defaults). Backed by PerModelConfigProvider on the AI service.
+    listModelConfigs: () =>
+      rpc<ModelConfigListResult>({ type: "ai.model_config.list" }),
+
+    setModelConfig: (cfg: ModelConfigInput) =>
+      rpc<{ status: string }>({ type: "ai.model_config.set", ...cfg }),
 
     submitForm: (conversationId: string, blockId: string, values: Record<string, unknown>) =>
       rpc<ChatResponse>({ type: "chat.form.submit", conversation_id: conversationId, block_id: blockId, values }),

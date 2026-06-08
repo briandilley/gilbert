@@ -3546,3 +3546,303 @@ async def test_parallel_results_fan_in_to_next_round(
     assert ids == ["tc_a", "tc_b"]
     # And both results are genuine tool outputs, not error placeholders.
     assert all(not tr.is_error for tr in tool_result_msg.tool_results)
+
+
+# --- Per-model config (ADR-0019): storage roundtrip, layering, enabled filter ---
+
+
+def _inmemory_storage_service() -> tuple[StorageService, dict[str, dict[str, Any]]]:
+    """A StorageService backed by a real in-memory dict.
+
+    Per-model config persistence tests need to re-read what was written
+    (a plain AsyncMock returns ``None`` for every ``get``), so we back the
+    StorageBackend with a dict and implement get/put/query/delete.
+    """
+    store: dict[str, dict[str, Any]] = {}
+
+    async def _get(collection: str, key: str) -> Any:
+        return store.get(f"{collection}:{key}")
+
+    async def _put(collection: str, key: str, data: dict[str, Any]) -> None:
+        store[f"{collection}:{key}"] = data
+
+    async def _delete(collection: str, key: str) -> None:
+        store.pop(f"{collection}:{key}", None)
+
+    async def _query(query: Any) -> list[dict[str, Any]]:
+        prefix = f"{query.collection}:"
+        return [v for k, v in store.items() if k.startswith(prefix)]
+
+    backend = AsyncMock(spec=StorageBackend)
+    backend.get = AsyncMock(side_effect=_get)
+    backend.put = AsyncMock(side_effect=_put)
+    backend.delete = AsyncMock(side_effect=_delete)
+    backend.query = AsyncMock(side_effect=_query)
+    backend.ensure_index = AsyncMock()
+    return StorageService(backend), store
+
+
+def _resolver_for(storage_service: StorageService) -> ServiceResolver:
+    resolver = AsyncMock(spec=ServiceResolver)
+
+    def require_cap(cap: str) -> Any:
+        if cap == "entity_storage":
+            return storage_service
+        raise LookupError(cap)
+
+    def get_cap(cap: str) -> Any:
+        try:
+            return require_cap(cap)
+        except LookupError:
+            return None
+
+    resolver.require_capability = require_cap
+    resolver.get_capability = get_cap
+    resolver.get_all = lambda cap: []
+    return resolver
+
+
+def test_ai_service_advertises_per_model_config_capability(
+    ai_service: AIService,
+) -> None:
+    """The service advertises the ``ai_model_config`` capability and
+    satisfies the ``PerModelConfigProvider`` protocol."""
+    from gilbert.interfaces.ai import PerModelConfigProvider
+
+    info = ai_service.service_info()
+    assert "ai_model_config" in info.capabilities
+    assert isinstance(ai_service, PerModelConfigProvider)
+
+
+async def test_model_config_set_get_list_roundtrip_and_persists(
+    ai_service: AIService,
+) -> None:
+    """``set_model_config`` then ``get_model_config`` / ``list_model_configs``
+    reflect the value, and it persists (re-read from a fresh service that
+    loads from the same storage)."""
+    from gilbert.interfaces.ai import ModelConfig
+
+    storage_service, store = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    # Default for an unknown model: enabled, all generation fields None.
+    default = await ai_service.get_model_config("stub", "never-set")
+    assert default.enabled is True
+    assert default.temperature is None
+    assert default.max_tokens is None
+    assert default.context_window is None
+
+    cfg = ModelConfig(
+        backend="stub",
+        model="my-model",
+        enabled=False,
+        temperature=0.2,
+        max_tokens=4096,
+        context_window=32000,
+    )
+    await ai_service.set_model_config(cfg)
+
+    got = await ai_service.get_model_config("stub", "my-model")
+    assert got == cfg
+    listed = await ai_service.list_model_configs()
+    assert cfg in listed
+
+    # Persisted: a fresh AIService loading from the same storage sees it.
+    fresh = AIService()
+    fresh._backends = {"stub": StubAIBackend()}
+    fresh._enabled = True
+    await fresh.start(_resolver_for(storage_service))
+    reloaded = await fresh.get_model_config("stub", "my-model")
+    assert reloaded == cfg
+
+
+async def test_disabled_model_config_hides_model_from_available(
+    ai_service: AIService,
+) -> None:
+    """A model with ``ModelConfig(enabled=False)`` disappears from
+    ``get_enabled_models`` / ``get_backends_with_models``; a model with no
+    record (default) stays visible."""
+    from gilbert.interfaces.ai import ModelConfig, ModelInfo
+
+    class TwoModelBackend(StubAIBackend):
+        def available_models(self) -> list[ModelInfo]:
+            return [
+                ModelInfo(id="keep-me", name="Keep Me"),
+                ModelInfo(id="hide-me", name="Hide Me"),
+            ]
+
+    backend = TwoModelBackend()
+    ai_service._backends = {"stub": backend}
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    # Both visible before any config.
+    ids = {m.id for m in ai_service.get_enabled_models()}
+    assert ids == {"keep-me", "hide-me"}
+
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="hide-me", enabled=False)
+    )
+
+    ids = {m.id for m in ai_service.get_enabled_models()}
+    assert ids == {"keep-me"}  # disabled model dropped, default kept
+
+    # Same filtering applies to the per-backend listing used by the UI.
+    backends = ai_service.get_backends_with_models()
+    stub_models = {m["id"] for b in backends if b["name"] == "stub" for m in b["models"]}
+    assert stub_models == {"keep-me"}
+
+
+async def test_per_model_generation_params_reach_request(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """Per-model ``temperature`` / ``max_tokens`` are resolved onto the
+    ``AIRequest`` the backend receives (backend ← per-model layer)."""
+    from gilbert.interfaces.ai import ModelConfig
+
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="m1", temperature=0.33, max_tokens=2048)
+    )
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.chat("hi", model="m1")
+
+    req = stub_backend.requests[0]
+    assert req.model == "m1"
+    assert req.temperature == 0.33
+    assert req.max_tokens == 2048
+
+
+async def test_profile_overrides_per_model_generation_params(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """A profile's ``temperature`` / ``max_tokens`` win over the per-model
+    layer (per-model ← profile)."""
+    from gilbert.interfaces.ai import AIContextProfile, ModelConfig
+
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="m1", temperature=0.33, max_tokens=2048)
+    )
+    # A profile that pins the same backend/model plus its own generation
+    # overrides. ``set_profile`` persists + caches it.
+    await ai_service.set_profile(
+        AIContextProfile(
+            name="creative",
+            backend="stub",
+            model="m1",
+            temperature=0.9,
+            max_tokens=512,
+        )
+    )
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.chat("hi", ai_profile="creative")
+
+    req = stub_backend.requests[0]
+    assert req.temperature == 0.9  # profile beats per-model
+    assert req.max_tokens == 512
+
+
+async def test_profile_none_falls_through_to_per_model(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """A profile whose generation fields are ``None`` does NOT clobber the
+    per-model layer — ``None`` means 'unset', so per-model wins."""
+    from gilbert.interfaces.ai import AIContextProfile, ModelConfig
+
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="m1", temperature=0.33, max_tokens=2048)
+    )
+    await ai_service.set_profile(
+        AIContextProfile(name="plain", backend="stub", model="m1")
+    )
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.chat("hi", ai_profile="plain")
+
+    req = stub_backend.requests[0]
+    assert req.temperature == 0.33  # per-model survives a None profile layer
+    assert req.max_tokens == 2048
+
+
+async def test_no_config_leaves_request_params_none(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """With no per-model config and no profile override, the request's
+    generation fields stay ``None`` so the backend keeps its own default."""
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.chat("hi", model="unconfigured")
+
+    req = stub_backend.requests[0]
+    assert req.temperature is None
+    assert req.max_tokens is None
+
+
+async def test_complete_one_shot_max_tokens_is_call_override(
+    ai_service: AIService,
+    stub_backend: StubAIBackend,
+) -> None:
+    """``complete_one_shot``'s ``max_tokens`` param is the call-override —
+    it beats the per-model layer on the resolved request."""
+    from gilbert.interfaces.ai import ModelConfig
+
+    storage_service, _ = _inmemory_storage_service()
+    await ai_service.start(_resolver_for(storage_service))
+
+    # Per-model sets both; the call overrides max_tokens only, so
+    # temperature falls through to the per-model value.
+    await ai_service.set_model_config(
+        ModelConfig(backend="stub", model="", temperature=0.42, max_tokens=2048)
+    )
+
+    stub_backend.queue_response(
+        AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="ok"),
+            model="stub",
+        )
+    )
+    await ai_service.complete_one_shot(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        max_tokens=128,
+        tools_override=[],
+    )
+
+    req = stub_backend.requests[0]
+    assert req.max_tokens == 128  # call-override beats per-model
+    assert req.temperature == 0.42  # per-model survives (no call-override)

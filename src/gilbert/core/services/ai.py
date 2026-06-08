@@ -38,6 +38,7 @@ from gilbert.interfaces.ai import (
     FileAttachment,
     Message,
     MessageRole,
+    ModelConfig,
     ModelInfo,
     StopReason,
     StreamEventType,
@@ -76,6 +77,7 @@ ai_logger = logging.getLogger("gilbert.ai")
 _COLLECTION = "ai_conversations"
 _PROFILES_COLLECTION = "ai_profiles"
 _ASSIGNMENTS_COLLECTION = "ai_profile_assignments"
+_MODEL_CONFIG_COLLECTION = "ai_model_config"
 _CHAT_SPEECH_COLLECTION = "chat_speech_prefs"
 _COMPRESSION_STATE_KEY = "compression"
 _COMPRESSION_CONFIG_KEY = "compression_config"
@@ -1235,6 +1237,12 @@ class AIService(Service):
         # AI context profiles
         self._profiles: dict[str, AIContextProfile] = {}
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
+        # Per-(backend, model) admin config (ADR-0019), keyed by
+        # ``f"{backend}:{model}"``. Service-lifetime cache (config is
+        # admin-global, not per-user) populated in ``start()`` and kept in
+        # sync by ``set_model_config``. A missing key means defaults
+        # (enabled=True, all generation fields None).
+        self._model_configs: dict[str, ModelConfig] = {}
         self._default_profile: str = _DEFAULT_PROFILE
         self._chat_profile: str = "standard"
         self._chat_speech_voice: str = ""
@@ -1252,6 +1260,7 @@ class AIService(Service):
                 {
                     "ai_chat",
                     "ai_tools",
+                    "ai_model_config",
                     "ws_handlers",
                     "soul",
                     "identity",
@@ -1346,10 +1355,14 @@ class AIService(Service):
         # Load profiles and assignments
         await self._load_profiles()
 
+        # Load per-model config into the service-lifetime cache.
+        await self._load_model_configs()
+
         logger.info(
-            "AI service started (profiles=%d, assignments=%d)",
+            "AI service started (profiles=%d, assignments=%d, model_configs=%d)",
             len(self._profiles),
             len(self._assignments),
+            len(self._model_configs),
         )
 
     def _apply_config(self, section: dict[str, Any]) -> None:
@@ -1854,6 +1867,8 @@ class AIService(Service):
                     tool_roles=doc.get("tool_roles", {}),
                     backend=doc.get("backend", ""),
                     model=doc.get("model", ""),
+                    temperature=doc.get("temperature"),
+                    max_tokens=doc.get("max_tokens"),
                 )
 
         # Load assignments
@@ -1898,6 +1913,8 @@ class AIService(Service):
                     "tool_roles": profile.tool_roles,
                     "backend": profile.backend,
                     "model": profile.model,
+                    "temperature": profile.temperature,
+                    "max_tokens": profile.max_tokens,
                 },
             )
         self._profiles[profile.name] = profile
@@ -1942,17 +1959,153 @@ class AIService(Service):
         self._assignments.pop(call_name, None)
         logger.info("Call '%s' assignment cleared", call_name)
 
+    # --- Per-model config (PerModelConfigProvider, ADR-0019) ---
+
+    @staticmethod
+    def _model_config_key(backend: str, model: str) -> str:
+        """Storage / cache key for a ``(backend, model)`` pair."""
+        return f"{backend}:{model}"
+
+    def _backend_key(self, backend: AIBackend) -> str:
+        """Canonical name for a backend instance.
+
+        Per-model config (like ``get_enabled_models``) keys off the name a
+        backend is registered under in ``self._backends`` — the same string
+        the chat picker and profile dropdowns use. We map an instance back
+        to that key, falling back to ``backend_name`` for instances not in
+        the registry (defensive; shouldn't happen in production).
+        """
+        for name, inst in self._backends.items():
+            if inst is backend:
+                return name
+        return backend.backend_name
+
+    async def _load_model_configs(self) -> None:
+        """Reload per-model config from storage into the in-memory cache."""
+        self._model_configs = {}
+        if self._storage is None:
+            return
+        docs = await self._storage.query(Query(collection=_MODEL_CONFIG_COLLECTION))
+        for doc in docs:
+            backend = doc.get("backend", "")
+            model = doc.get("model", "")
+            if not backend:
+                continue
+            cfg = ModelConfig(
+                backend=backend,
+                model=model,
+                enabled=bool(doc.get("enabled", True)),
+                temperature=doc.get("temperature"),
+                max_tokens=doc.get("max_tokens"),
+                context_window=doc.get("context_window"),
+            )
+            self._model_configs[self._model_config_key(backend, model)] = cfg
+
+    async def get_model_config(self, backend: str, model: str) -> ModelConfig:
+        """Return the config for ``(backend, model)``, or a default.
+
+        Implements ``PerModelConfigProvider``. A pair with no stored record
+        resolves to ``ModelConfig(enabled=True, …=None)`` so callers never
+        special-case "no record."
+        """
+        cached = self._model_configs.get(self._model_config_key(backend, model))
+        if cached is not None:
+            return cached
+        return ModelConfig(backend=backend, model=model)
+
+    async def set_model_config(self, cfg: ModelConfig) -> None:
+        """Create or update a per-model config (cache + storage)."""
+        key = self._model_config_key(cfg.backend, cfg.model)
+        if self._storage is not None:
+            await self._storage.put(
+                _MODEL_CONFIG_COLLECTION,
+                key,
+                {
+                    "backend": cfg.backend,
+                    "model": cfg.model,
+                    "enabled": cfg.enabled,
+                    "temperature": cfg.temperature,
+                    "max_tokens": cfg.max_tokens,
+                    "context_window": cfg.context_window,
+                },
+            )
+        self._model_configs[key] = cfg
+        logger.info(
+            "Model config saved (%s:%s enabled=%s temp=%s max_tokens=%s)",
+            cfg.backend,
+            cfg.model,
+            cfg.enabled,
+            cfg.temperature,
+            cfg.max_tokens,
+        )
+
+    async def list_model_configs(self) -> list[ModelConfig]:
+        """Return every stored per-model config."""
+        return list(self._model_configs.values())
+
+    def _model_enabled(self, backend: str, model: str) -> bool:
+        """Whether ``(backend, model)`` is enabled per its cached config.
+
+        Default (no record) is ``True``. Sync so the model-listing methods
+        stay sync — that's the whole point of the service-lifetime cache.
+        """
+        cfg = self._model_configs.get(self._model_config_key(backend, model))
+        return True if cfg is None else cfg.enabled
+
+    @staticmethod
+    def _resolve_generation_params(
+        per_model: ModelConfig,
+        profile: AIContextProfile | None,
+        call_temperature: float | None,
+        call_max_tokens: float | None,
+    ) -> tuple[float | None, int | None]:
+        """Resolve ``temperature`` / ``max_tokens`` across config layers.
+
+        Order (lowest → highest priority): backend default (``None``) ←
+        per-model ← profile ← per-call override. ``None`` at any layer means
+        "unset" — a concrete value from a lower-priority layer wins over a
+        higher-priority ``None``. Concretely each result is the first
+        non-``None`` of ``[call, profile, per_model]``; ``None`` when every
+        layer is unset, so the backend keeps its own default.
+        """
+        profile_temp = profile.temperature if profile is not None else None
+        profile_max = profile.max_tokens if profile is not None else None
+
+        temperature: float | None = None
+        for layer in (call_temperature, profile_temp, per_model.temperature):
+            if layer is not None:
+                temperature = layer
+                break
+
+        max_tokens: int | None = None
+        for layer_mt in (call_max_tokens, profile_max, per_model.max_tokens):
+            if layer_mt is not None:
+                max_tokens = int(layer_mt)
+                break
+
+        return temperature, max_tokens
+
     # --- Backend + model resolution ---
 
     def get_enabled_models(self) -> list[ModelInfo]:
-        """Return models from all initialized backends."""
+        """Return models from all initialized backends.
+
+        Models whose per-model ``ModelConfig.enabled`` is ``False`` are
+        dropped; a model with no stored config (the default) stays visible.
+        """
         models: list[ModelInfo] = []
-        for backend in self._backends.values():
-            models.extend(backend.available_models())
+        for name, backend in self._backends.items():
+            for m in backend.available_models():
+                if self._model_enabled(name, m.id):
+                    models.append(m)
         return models
 
     def get_backends_with_models(self) -> list[dict[str, Any]]:
-        """Return per-backend model lists for the chat UI."""
+        """Return per-backend model lists for the chat UI.
+
+        Filters out per-model-disabled models (default = shown), mirroring
+        ``get_enabled_models`` so the chat picker only offers enabled ones.
+        """
         result: list[dict[str, Any]] = []
         for name, backend in self._backends.items():
             result.append({
@@ -1960,6 +2113,7 @@ class AIService(Service):
                 "models": [
                     {"id": m.id, "name": m.name, "description": m.description}
                     for m in backend.available_models()
+                    if self._model_enabled(name, m.id)
                 ],
             })
         return result
@@ -2045,11 +2199,23 @@ class AIService(Service):
             if profile is not None and profile.tool_mode != "include":
                 discovered = self._discover_tools(user_ctx=None, profile=profile)
                 tools = [td for _, td in discovered.values()]
+        # Layered generation params: backend ← per-model ← profile ← call.
+        # ``max_tokens`` here is the explicit call-override; there is no
+        # call-level temperature for one-shot completions.
+        per_model = await self.get_model_config(self._backend_key(backend), model)
+        resolved_temperature, resolved_max_tokens = self._resolve_generation_params(
+            per_model,
+            profile,
+            call_temperature=None,
+            call_max_tokens=max_tokens,
+        )
         request = AIRequest(
             messages=list(messages),
             system_prompt=system_prompt,
             tools=tools,
             model=model,
+            temperature=resolved_temperature,
+            max_tokens=resolved_max_tokens,
         )
         response = await backend.generate(request)
         if max_tokens is not None and response.usage is not None:
@@ -2248,6 +2414,21 @@ class AIService(Service):
             profile, backend_override, model
         )
         resolved_backend_name = resolved_backend.backend_name
+
+        # Layered generation params (backend ← per-model ← profile ← call).
+        # The public ``chat`` entry point carries no per-call temperature /
+        # max_tokens override, so the call layer is unset here; the profile
+        # and per-model layers still apply. Resolved once and reused for
+        # every round's request below.
+        _per_model_cfg = await self.get_model_config(
+            self._backend_key(resolved_backend), resolved_model
+        )
+        resolved_temperature, resolved_max_tokens = self._resolve_generation_params(
+            _per_model_cfg,
+            profile,
+            call_temperature=None,
+            call_max_tokens=None,
+        )
 
         # Discover and filter tools based on profile
         tools_by_name = self._discover_tools(user_ctx=user_ctx, profile=profile)
@@ -2455,6 +2636,8 @@ class AIService(Service):
                     system_prompt=round_prompt,
                     tools=tool_defs if tool_defs else [],
                     model=resolved_model,
+                    temperature=resolved_temperature,
+                    max_tokens=resolved_max_tokens,
                 )
 
                 # Drive the backend via ``generate_stream``. For backends that
@@ -6015,6 +6198,8 @@ class AIService(Service):
             "slash.commands.list": self._ws_slash_commands_list,
             "chat.models.list": self._ws_models_list,
             "ai.profiles.list": self._ws_profiles_list,
+            "ai.model_config.list": self._ws_model_config_list,
+            "ai.model_config.set": self._ws_model_config_set,
             "chat.read_aloud.get": self._ws_chat_read_aloud_get,
             "chat.read_aloud.set": self._ws_chat_read_aloud_set,
         }
@@ -6093,6 +6278,93 @@ class AIService(Service):
                 {"name": p.name, "description": p.description}
                 for p in self.list_profiles()
             ],
+        }
+
+    async def _ws_model_config_list(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return per-model config (ADR-0019) for the AI settings editor.
+
+        Lists every model from the enabled backends joined with its stored
+        ``ModelConfig`` (default when none stored), so admins can toggle
+        ``enabled`` and set generation defaults per model. Admin-only —
+        per-model config is admin-global, not per-user.
+        """
+        if "admin" not in conn.user_ctx.roles:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "admin role required",
+                "code": 403,
+            }
+        backends: list[dict[str, Any]] = []
+        for backend_entry in self.get_backends_with_models():
+            name = backend_entry["name"]
+            models: list[dict[str, Any]] = []
+            for m in backend_entry["models"]:
+                cfg = await self.get_model_config(name, m["id"])
+                models.append(
+                    {
+                        "id": m["id"],
+                        "name": m["name"],
+                        "enabled": cfg.enabled,
+                        "temperature": cfg.temperature,
+                        "max_tokens": cfg.max_tokens,
+                        "context_window": cfg.context_window,
+                    }
+                )
+            backends.append({"name": name, "models": models})
+        return {
+            "type": "ai.model_config.list.result",
+            "ref": frame.get("id"),
+            "backends": backends,
+        }
+
+    async def _ws_model_config_set(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Persist a per-model ``ModelConfig`` from the AI settings editor."""
+        if "admin" not in conn.user_ctx.roles:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "admin role required",
+                "code": 403,
+            }
+        backend = str(frame.get("backend") or "")
+        model = str(frame.get("model") or "")
+        if not backend:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "backend is required",
+                "code": 400,
+            }
+
+        def _opt_number(value: Any) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        temperature = _opt_number(frame.get("temperature"))
+        max_tokens_raw = _opt_number(frame.get("max_tokens"))
+        context_raw = _opt_number(frame.get("context_window"))
+        cfg = ModelConfig(
+            backend=backend,
+            model=model,
+            enabled=bool(frame.get("enabled", True)),
+            temperature=temperature,
+            max_tokens=int(max_tokens_raw) if max_tokens_raw is not None else None,
+            context_window=int(context_raw) if context_raw is not None else None,
+        )
+        await self.set_model_config(cfg)
+        return {
+            "type": "ai.model_config.set.result",
+            "ref": frame.get("id"),
+            "status": "ok",
         }
 
     async def _ws_chat_send(
