@@ -195,6 +195,16 @@ class Gilbert:
 
         self.service_manager.register(OCRService())
 
+        # 6c-bis. Host-resources service — host-global RAM/GPU/VRAM probe
+        # consumed by local-compute backends and the local-model manager.
+        # The side-effect import registers the vendor-free ``local``
+        # backend in ``HostResourcesBackend``'s registry; the composition
+        # root is the only place allowed to import ``integrations`` here.
+        import gilbert.integrations.host_resources  # noqa: F401
+        from gilbert.core.services.host_resources import HostResourcesService
+
+        self.service_manager.register(HostResourcesService())
+
         # 6d. Vision service
         from gilbert.core.services.vision import VisionService
 
