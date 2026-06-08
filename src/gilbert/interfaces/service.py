@@ -12,6 +12,30 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
+class EnablementDep:
+    """An *enablement* dependency on a named backend or service (ADR-0018).
+
+    Distinct from ``ServiceInfo.requires`` — which only orders startup
+    waves by published capability. An enablement dependency additionally
+    requires the prerequisite to be *enabled*: a service won't start until
+    the thing it depends on is actually on, and Gilbert never auto-enables
+    the prerequisite to satisfy the dependency.
+
+    - ``capability`` — the capability advertised by the service that owns
+      the prerequisite (e.g. ``"ai_chat"`` for the AI service). The owning
+      service must itself be started for the dependency to be evaluable.
+    - ``backend`` — when non-empty, names a backend the owning service must
+      report as enabled (e.g. ``"ollama"``); the owning service must
+      implement :class:`BackendEnablementProvider`. When empty, the
+      requirement is simply that the owning *service* is enabled (its
+      ``Service.enabled`` property is ``True``).
+    """
+
+    capability: str
+    backend: str = ""
+
+
+@dataclass(frozen=True)
 class ServiceInfo:
     """Static metadata a service declares about itself."""
 
@@ -25,6 +49,14 @@ class ServiceInfo:
     """If True, this service can be enabled/disabled via the Settings UI."""
     toggle_description: str = ""
     """Human-readable description shown in the Services toggle section."""
+    requires_enabled: tuple[EnablementDep, ...] = ()
+    """Enablement dependencies (ADR-0018).
+
+    Each entry names a backend/service that must be *enabled* before this
+    service may start. When any is unmet the service is left disabled with a
+    reason (see ``ServiceEnumerator.disabled_services``) rather than started
+    or marked failed. The prerequisite is never auto-enabled.
+    """
 
 
 class ServiceResolver(ABC):
@@ -120,6 +152,21 @@ def background_warmup(
 
 
 @runtime_checkable
+class BackendEnablementProvider(Protocol):
+    """Capability for asking a service whether a named backend is enabled.
+
+    Implemented by services that own a set of named backends (e.g. the AI
+    service owning ``ollama`` / ``anthropic`` / …). The enablement-dependency
+    mechanism (ADR-0018) and the enablement-aware ``doctor`` use this to
+    answer "is backend X enabled?" without coupling to a concrete service.
+    """
+
+    def is_backend_enabled(self, backend_name: str) -> bool:
+        """Return True if the named backend is currently enabled/active."""
+        ...
+
+
+@runtime_checkable
 class ServiceEnumerator(Protocol):
     """Protocol for enumerating and managing registered services.
 
@@ -135,6 +182,17 @@ class ServiceEnumerator(Protocol):
     @property
     def failed_services(self) -> set[str]:
         """Names of services that failed to start."""
+        ...
+
+    @property
+    def disabled_services(self) -> dict[str, str]:
+        """Services left disabled by an unmet enablement dependency.
+
+        Maps service name -> human-readable reason (naming the missing
+        prerequisite). Distinct from ``failed_services`` (which start was
+        attempted and raised): a disabled service was deliberately not
+        started because a prerequisite backend/service is off (ADR-0018).
+        """
         ...
 
     def get_service(self, name: str) -> Service | None:

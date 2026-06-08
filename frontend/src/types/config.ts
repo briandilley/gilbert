@@ -71,6 +71,12 @@ export interface ConfigSection {
   params: ConfigParamMeta[];
   values: Record<string, unknown>;
   actions?: ConfigActionMeta[];
+  /**
+   * On the synthetic ``_services`` section only: toggle-key -> reason for
+   * services blocked by an unmet enablement dependency (ADR-0018). The
+   * Services UI renders a "disabled — <reason>" badge for each.
+   */
+  disabled_services?: Record<string, string>;
 }
 
 export interface ConfigCategory {

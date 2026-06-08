@@ -24,6 +24,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import inspect
 import shlex
 import subprocess
 import sys
@@ -44,6 +45,56 @@ def _color(text: str, code: str) -> str:
     if not sys.stdout.isatty():
         return text
     return f"{code}{text}{_RESET}"
+
+
+def _load_merged_config() -> dict[str, Any]:
+    """Load the merged bootstrap config (defaults + overrides) the way the
+    app does. This is the *resolved* config handed to each plugin's
+    ``runtime_dependencies(config)`` so a plugin can return a dependency
+    only when the relevant backend/service is enabled (ADR-0008)."""
+    from gilbert.config import DEFAULT_CONFIG_PATH, OVERRIDE_CONFIG_PATH, _deep_merge
+
+    base: dict[str, Any] = {}
+    if DEFAULT_CONFIG_PATH.exists():
+        base = _load_yaml(DEFAULT_CONFIG_PATH)
+    overrides: dict[str, Any] = {}
+    if OVERRIDE_CONFIG_PATH.exists():
+        overrides = _load_yaml(OVERRIDE_CONFIG_PATH)
+    return _deep_merge(base, overrides)
+
+
+def _call_runtime_dependencies(
+    plugin: Plugin, config: dict[str, Any] | None
+) -> list[RuntimeDependency]:
+    """Call ``plugin.runtime_dependencies`` signature-robustly.
+
+    The base signature now accepts the resolved ``config`` (ADR-0008), but
+    existing overrides (e.g. in the std-plugins submodule, migrated later in
+    S4) still take no argument. Inspect the override's signature: pass the
+    config to overrides that accept a positional/keyword parameter, and call
+    zero-arg for those that don't — so both forms keep working.
+    """
+    func = plugin.runtime_dependencies
+    try:
+        sig = inspect.signature(func)
+        accepts_config = any(
+            p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+            for p in sig.parameters.values()
+        )
+    except (TypeError, ValueError):
+        # Couldn't introspect — fall back to the new signature.
+        accepts_config = True
+
+    if accepts_config:
+        return func(config)
+    return func()
 
 
 def _discover_plugins(only: set[str] | None = None) -> list[tuple[PluginManifest, Plugin]]:
@@ -138,6 +189,7 @@ def main() -> int:
 
     only = set(args.plugin) if args.plugin else None
 
+    merged_config = _load_merged_config()
     plugins = _discover_plugins(only=only)
     if not plugins:
         print(
@@ -153,7 +205,7 @@ def main() -> int:
     for _manifest, plugin in plugins:
         deps: list[RuntimeDependency]
         try:
-            deps = plugin.runtime_dependencies()
+            deps = _call_runtime_dependencies(plugin, merged_config)
         except Exception as exc:
             print(
                 _color(

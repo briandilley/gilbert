@@ -199,7 +199,7 @@ class Plugin(ABC):
         """Called when the plugin is unloaded. Clean up resources."""
         ...
 
-    def runtime_dependencies(self) -> list[RuntimeDependency]:
+    def runtime_dependencies(self, config: dict[str, Any] | None = None) -> list[RuntimeDependency]:
         """Declare external runtime dependencies the plugin needs.
 
         Override to declare non-pip deps (browser binaries, system
@@ -212,6 +212,17 @@ class Plugin(ABC):
         ``platform.system()`` to vary the shape of the returned list
         across OSes (e.g. ``apt-get install`` on Linux, ``brew
         install`` on macOS).
+
+        ``config`` is the **resolved plugin/backend config** that
+        ``doctor`` already loads (merged ``gilbert.yaml`` defaults +
+        overrides). Use it to return a dependency **only when the relevant
+        backend/service is enabled** (ADR-0008) — e.g. advertise the Ollama
+        daemon dep only when the ``ollama`` backend is enabled, so an
+        operator who doesn't use it isn't nagged. ``doctor`` instantiates
+        plugins without booting Gilbert, so the config is passed explicitly
+        and may be ``None`` (treat that as "no config available"). Overrides
+        that don't need the config may keep the zero-arg signature; ``doctor``
+        calls the hook signature-robustly.
         """
         return []
 

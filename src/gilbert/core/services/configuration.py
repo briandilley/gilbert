@@ -320,6 +320,12 @@ class ConfigurationService(Service):
         # Build the "Services" toggle section for toggleable services
         toggle_params: list[dict[str, Any]] = []
         toggle_values: dict[str, Any] = {}
+        # Services left disabled by an unmet enablement dependency (ADR-0018),
+        # re-keyed from service-name to the toggle key (config namespace) the
+        # Settings "Services" section uses, so the UI can render a
+        # "disabled — <reason>" badge next to the toggle.
+        disabled_by_name = sm.disabled_services
+        disabled_by_toggle: dict[str, str] = {}
 
         # Gather sections grouped by category
         all_services = sm.list_services()
@@ -340,6 +346,8 @@ class ConfigurationService(Service):
                 section = self.get_section_safe(ns)
                 enabled = section.get("enabled", False)
                 toggle_values[ns] = enabled
+                if name in disabled_by_name:
+                    disabled_by_toggle[ns] = disabled_by_name[name]
                 toggle_params.append(
                     self._serialize_param(
                         ConfigParam(
@@ -405,6 +413,9 @@ class ConfigurationService(Service):
                     "failed": False,
                     "params": toggle_params,
                     "values": toggle_values,
+                    # toggle-key -> reason for services blocked by an unmet
+                    # enablement dependency (ADR-0018).
+                    "disabled_services": disabled_by_toggle,
                 }
             ]
 

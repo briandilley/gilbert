@@ -281,6 +281,37 @@ async def test_reinit_backends_defaults_enabled_true(ai_service: AIService) -> N
         AIBackend._registry.pop("legacy_test", None)
 
 
+async def test_is_backend_enabled_reflects_initialized_backends(
+    ai_service: AIService,
+) -> None:
+    """``AIService.is_backend_enabled`` (BackendEnablementProvider) reports
+    True only for backends currently initialized in ``self._backends``.
+    This is the query the enablement-dependency mechanism uses to decide
+    whether a dependent (e.g. the model manager) may start."""
+    from gilbert.interfaces.service import BackendEnablementProvider
+
+    assert isinstance(ai_service, BackendEnablementProvider)
+
+    class EnabledBackend(StubAIBackend):
+        backend_name = "enabled_backend_test"
+
+    try:
+        ai_service._backends = {}
+        await ai_service._reinit_backends({"enabled_backend_test": {"api_key": "x"}})
+        assert ai_service.is_backend_enabled("enabled_backend_test") is True
+
+        # A backend disabled in config is dropped from ``_backends`` →
+        # is_backend_enabled must report False.
+        await ai_service._reinit_backends(
+            {"enabled_backend_test": {"api_key": "x", "enabled": False}}
+        )
+        assert ai_service.is_backend_enabled("enabled_backend_test") is False
+        # An unknown backend is never enabled.
+        assert ai_service.is_backend_enabled("does_not_exist") is False
+    finally:
+        AIBackend._registry.pop("enabled_backend_test", None)
+
+
 async def test_invoke_config_action_transient_init_for_disabled_backend(
     ai_service: AIService,
 ) -> None:
