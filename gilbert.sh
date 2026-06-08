@@ -558,30 +558,24 @@ frontend_is_up_to_date() {
     [ -z "$changed" ]
 }
 
-build_frontend() {
-    # Skip the build when the bundled SPA is already up to date with
-    # the source tree — a routine ``./gilbert.sh start`` with no
-    # frontend changes is the common case, and tsc -b + vite build
-    # costs ~16 seconds we don't need to pay.
-    if frontend_is_up_to_date; then
-        echo "Frontend bundle is up to date — skipping build."
-        echo "  (delete src/gilbert/web/spa/index.html to force a rebuild)"
-        return 0
-    fi
-
-    echo "Building frontend..."
+ensure_frontend_deps() {
+    # Install the npm workspace when node_modules is missing OR when the
+    # lockfile is newer than the sentinel npm writes inside node_modules
+    # on a successful install. The latter catches the case where someone
+    # bumps a dep (package.json + package-lock.json change) but
+    # node_modules is stale from a prior install — a build (or a bare
+    # ``tsc`` / ``npm run build``, e.g. the merge-pr frontend gate) would
+    # otherwise fail with a missing-package resolve error.
+    #
     # npm workspaces: install runs from the repo root so frontend AND
     # every plugin's frontend/ directory share a single node_modules
     # tree. Plugin TS files (under std-plugins/<name>/frontend/) can
     # then resolve react / @tanstack/react-query / etc. by walking up
     # to the repo-root node_modules — same way uv hoists Python deps
     # across plugin pyproject.toml workspace members.
-    # Reinstall when node_modules is missing OR when the lockfile is
-    # newer than the sentinel npm writes inside node_modules on a
-    # successful install. The latter catches the case where someone
-    # bumps a dep (package.json + package-lock.json change) but
-    # node_modules is stale from a prior install — the build would
-    # otherwise fail with a missing-package resolve error.
+    #
+    # The check is a cheap mtime comparison and a no-op once deps are
+    # current, so it's safe to run on every ``start``.
     local lock="$SCRIPT_DIR/package-lock.json"
     local installed_marker="$SCRIPT_DIR/node_modules/.package-lock.json"
     if [ ! -d "$SCRIPT_DIR/node_modules" ] \
@@ -595,6 +589,27 @@ build_frontend() {
         fi
         cd "$SCRIPT_DIR" && npm install
     fi
+}
+
+build_frontend() {
+    # Always ensure node_modules is present + current — even when we skip
+    # the bundle rebuild below — so a developer who runs
+    # ``./gilbert.sh start`` always has a working frontend toolchain (IDE,
+    # ``tsc``, the merge-pr build gate), not just when the SPA happens to
+    # need rebuilding.
+    ensure_frontend_deps
+
+    # Skip the build when the bundled SPA is already up to date with
+    # the source tree — a routine ``./gilbert.sh start`` with no
+    # frontend changes is the common case, and tsc -b + vite build
+    # costs ~16 seconds we don't need to pay.
+    if frontend_is_up_to_date; then
+        echo "Frontend bundle is up to date — skipping build."
+        echo "  (delete src/gilbert/web/spa/index.html to force a rebuild)"
+        return 0
+    fi
+
+    echo "Building frontend..."
     cd "$SCRIPT_DIR/frontend" && npm run build
     rm -rf "$SCRIPT_DIR/src/gilbert/web/spa"
     cp -r "$SCRIPT_DIR/frontend/dist" "$SCRIPT_DIR/src/gilbert/web/spa"
