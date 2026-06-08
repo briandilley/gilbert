@@ -1275,6 +1275,17 @@ class AIService(Service):
             return next(iter(self._backends.values()))
         raise RuntimeError("No AI backends initialized — service is disabled or not started")
 
+    def is_backend_enabled(self, backend_name: str) -> bool:
+        """Whether the named AI backend is currently enabled (initialized).
+
+        Implements ``BackendEnablementProvider`` so the enablement-dependency
+        mechanism (ADR-0018) and the enablement-aware ``doctor`` (ADR-0008)
+        can answer "is backend X enabled?". A backend is enabled exactly when
+        it is present in ``self._backends`` — ``_reinit_backends`` only keeps
+        a backend there while its config section has ``enabled`` truthy.
+        """
+        return backend_name in self._backends
+
     async def start(self, resolver: ServiceResolver) -> None:
         from gilbert.interfaces.storage import StorageProvider
 

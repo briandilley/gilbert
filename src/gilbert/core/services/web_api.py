@@ -841,10 +841,12 @@ class WebApiService(Service):
         if not isinstance(sm, ServiceEnumerator):
             return {"type": "system.services.list.result", "ref": frame.get("id"), "services": []}
 
+        disabled_services = sm.disabled_services
         for name, svc in sm.list_services().items():
             info = svc.service_info()
             started = name in sm.started_services
             failed = name in sm.failed_services
+            disabled_reason = disabled_services.get(name, "")
 
             entry: dict[str, Any] = {
                 "name": info.name,
@@ -855,6 +857,10 @@ class WebApiService(Service):
                 "events": sorted(info.events),
                 "started": started,
                 "failed": failed,
+                # Disabled by an unmet enablement dependency (ADR-0018):
+                # not started, but deliberately — not a failure.
+                "disabled": bool(disabled_reason),
+                "disabled_reason": disabled_reason,
                 "config_params": [],
                 "config_values": {},
                 "tools": [],

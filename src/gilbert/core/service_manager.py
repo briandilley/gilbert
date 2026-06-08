@@ -4,7 +4,12 @@ import asyncio
 import logging
 
 from gilbert.interfaces.events import Event, EventBus
-from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.service import (
+    BackendEnablementProvider,
+    Service,
+    ServiceInfo,
+    ServiceResolver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,9 @@ class ServiceManager(ServiceResolver):
         self._capabilities: dict[str, list[str]] = {}  # capability -> [service_names]
         self._started: list[str] = []
         self._failed: set[str] = set()
+        # Services left disabled by an unmet enablement dependency (ADR-0018):
+        # name -> human-readable reason naming the missing prerequisite.
+        self._disabled: dict[str, str] = {}
         self._event_bus: EventBus | None = None
 
     def register(self, service: Service) -> None:
@@ -62,23 +70,40 @@ class ServiceManager(ServiceResolver):
         started_caps: set[str] = set()
 
         while remaining:
-            # Find services whose requires are all satisfied
+            # A service is eligible for the current wave once every
+            # capability it ``requires`` AND every capability named by an
+            # enablement dependency (``requires_enabled``) has been published
+            # by an earlier wave. Gating on the enablement-dep capability too
+            # ensures the owning service is started before we evaluate it.
             ready = [
                 name
                 for name, svc in remaining.items()
-                if svc.service_info().requires <= started_caps
+                if self._wave_caps_satisfied(svc.service_info(), started_caps)
             ]
 
             if not ready:
-                # Everything left has unsatisfied dependencies
+                # Everything left has unsatisfied dependencies. A service
+                # whose only unmet need is an enablement-dep capability (the
+                # owning service never started) is *disabled* with a reason
+                # rather than marked failed; a genuinely missing required
+                # capability is a failure.
                 for name, svc in remaining.items():
-                    missing = svc.service_info().requires - started_caps
-                    logger.error(
-                        "Service %s cannot start: missing required capabilities: %s",
-                        name,
-                        ", ".join(sorted(missing)),
-                    )
-                    self._failed.add(name)
+                    info = svc.service_info()
+                    missing_required = info.requires - started_caps
+                    missing_enable = {d.capability for d in info.requires_enabled} - started_caps
+                    if missing_required:
+                        logger.error(
+                            "Service %s cannot start: missing required capabilities: %s",
+                            name,
+                            ", ".join(sorted(missing_required)),
+                        )
+                        self._failed.add(name)
+                    else:
+                        reason = "disabled — required service(s) not available: " + ", ".join(
+                            sorted(missing_enable)
+                        )
+                        self._disabled[name] = reason
+                        logger.info("Service %s %s", name, reason)
                 break
 
             # Snapshot the wave so dict mutation during gather is safe.
@@ -87,19 +112,68 @@ class ServiceManager(ServiceResolver):
                 svc = remaining.pop(name)
                 wave.append((name, svc, svc.service_info()))
 
-            await asyncio.gather(*(self._start_one(name, svc, info) for name, svc, info in wave))
+            # Evaluate enablement dependencies *before* starting. A service
+            # whose prerequisite backend/service is off must not start, must
+            # not publish its capabilities, and is recorded as disabled — the
+            # prerequisite is never auto-enabled (ADR-0018).
+            startable: list[tuple[str, Service, ServiceInfo]] = []
+            for name, svc, info in wave:
+                unmet_reason = self._unmet_enablement_reason(info)
+                if unmet_reason is not None:
+                    self._disabled[name] = unmet_reason
+                    logger.info("Service %s disabled — %s", name, unmet_reason)
+                    continue
+                startable.append((name, svc, info))
+
+            await asyncio.gather(
+                *(self._start_one(name, svc, info) for name, svc, info in startable)
+            )
 
             # Augment capabilities once the wave settles. Services in the
             # wave can't depend on each other (they entered the wave
             # together because their requires were already met), so it's
             # safe to defer the cap-set update until the wave completes.
-            for name, _svc, info in wave:
+            for name, _svc, info in startable:
                 if name in self._started:
                     started_caps |= info.capabilities
 
         total = len(self._started)
         failed = len(self._failed)
-        logger.info("Service startup complete: %d started, %d failed", total, failed)
+        disabled = len(self._disabled)
+        logger.info(
+            "Service startup complete: %d started, %d failed, %d disabled",
+            total,
+            failed,
+            disabled,
+        )
+
+    def _wave_caps_satisfied(self, info: ServiceInfo, started_caps: set[str]) -> bool:
+        """A service can join the current wave once every capability it
+        ``requires`` and every capability named by ``requires_enabled`` has
+        been published by an earlier wave."""
+        if not info.requires <= started_caps:
+            return False
+        return all(dep.capability in started_caps for dep in info.requires_enabled)
+
+    def _unmet_enablement_reason(self, info: ServiceInfo) -> str | None:
+        """Evaluate a service's enablement dependencies (ADR-0018).
+
+        Returns a human-readable reason naming the first unmet prerequisite,
+        or ``None`` when every enablement dependency is satisfied. Never
+        enables a prerequisite as a side effect.
+        """
+        for dep in info.requires_enabled:
+            owner = self.get_by_capability(dep.capability)
+            if owner is None:
+                return f"disabled — requires service providing '{dep.capability}' to be enabled"
+            if dep.backend:
+                if not isinstance(owner, BackendEnablementProvider) or not (
+                    owner.is_backend_enabled(dep.backend)
+                ):
+                    return f"disabled — requires the '{dep.backend}' backend to be enabled"
+            elif not owner.enabled:
+                return f"disabled — requires the '{dep.capability}' service to be enabled"
+        return None
 
     async def _start_one(
         self,
@@ -192,6 +266,16 @@ class ServiceManager(ServiceResolver):
         """Names of all services that failed to start."""
         return set(self._failed)
 
+    @property
+    def disabled_services(self) -> dict[str, str]:
+        """Services left disabled by an unmet enablement dependency.
+
+        Maps service name -> human-readable reason (ADR-0018). A disabled
+        service is deliberately not started because a prerequisite
+        backend/service is off; it is neither ``started`` nor ``failed``.
+        """
+        return dict(self._disabled)
+
     # --- ServiceResolver implementation ---
 
     def get_capability(self, capability: str) -> Service | None:
@@ -253,6 +337,7 @@ class ServiceManager(ServiceResolver):
             if name not in self._started:
                 self._started.append(name)
             self._failed.discard(name)
+            self._disabled.pop(name, None)
             logger.info("Service restarted: %s", name)
             await self._publish_event("service.started", name, svc.service_info())
         except Exception:
@@ -272,6 +357,7 @@ class ServiceManager(ServiceResolver):
         try:
             await service.start(self)
             self._started.append(svc_info.name)
+            self._disabled.pop(svc_info.name, None)
             logger.info("Service registered and started: %s", svc_info.name)
             await self._publish_event("service.started", svc_info.name, svc_info)
         except Exception:
@@ -297,6 +383,7 @@ class ServiceManager(ServiceResolver):
             await svc.start(self)
             self._started.append(name)
             self._failed.discard(name)
+            self._disabled.pop(name, None)
             logger.info("Service started: %s", name)
             await self._publish_event("service.started", name, info)
         except Exception:
@@ -338,6 +425,7 @@ class ServiceManager(ServiceResolver):
 
         self._registered.pop(name, None)
         self._failed.discard(name)
+        self._disabled.pop(name, None)
 
         await self._publish_event("service.stopped", name, info)
 

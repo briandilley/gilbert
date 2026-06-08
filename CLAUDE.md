@@ -71,6 +71,30 @@ Non-obvious design rationale, cross-cutting subsystem walkthroughs, and gotchas 
 
 `ls docs/architecture/` to browse. When a doc drifts from the code, fix it in the same change that caused the drift.
 
+### Documentation taxonomy
+
+Gilbert's docs come in distinct genres — reach for the right one:
+
+- **Glossary** (`CONTEXT.md`) — the project's canonical vocabulary. This is a **multi-context** repo: `CONTEXT-MAP.md` (root) points at the Core glossary (`src/gilbert/CONTEXT.md`) and the Plugins glossary (`std-plugins/CONTEXT.md`). Use these terms — and respect their `_Avoid_` lists — in code, comments, commits, and issues.
+- **Decision records** (`docs/adr/` for core/system-wide, `std-plugins/docs/adr/` for plugin-scoped) — *why* a non-obvious, hard-to-reverse choice was made. If a change would contradict an ADR, surface it explicitly.
+- **Walkthroughs** (`docs/architecture/`) — the long-form subsystem explanations described above: reference, not canon. When a walkthrough's decision has been distilled into an ADR, the ADR wins.
+
+`docs/agents/` tells the matt-pocock engineering skills (`/grill-with-docs`, `/triage`, `/to-issues`, `/tdd`, …) how to consume all of the above.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `briandilley/gilbert` via the `gh` CLI (plugin-specific issues may belong on `briandilley/gilbert-plugins`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, mapped to their default label strings (the repo had no prior label vocabulary). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Multi-context: `CONTEXT-MAP.md` points at the Core (`src/gilbert/CONTEXT.md`) and Plugins (`std-plugins/CONTEXT.md`) glossaries, with decisions in `docs/adr/` and `std-plugins/docs/adr/`. See `docs/agents/domain.md`.
+
 ## Privacy
 
 **Never put private or personal information in tracked files.** API keys, credentials, voice IDs, email addresses, and other personal data must only go in gitignored locations (entity storage in `.gilbert/gilbert.db`, `.gilbert/config.yaml`, etc.).
@@ -88,7 +112,8 @@ Non-obvious design rationale, cross-cutting subsystem walkthroughs, and gotchas 
 - **Shared data lives in `interfaces/`.** If two integrations or two layers need the same constant/mapping/policy data, put it in the appropriate `interfaces/` module.
 - **AI prompts are always configurable.** Every non-trivial string passed to `complete_one_shot(system_prompt=...)` / `chat(system_prompt=...)` / `Message(role=SYSTEM, content=...)` MUST be exposed as a `ConfigParam(multiline=True, ai_prompt=True)` on the owning service, with the bundled string as `default`. Read the active value from `self._foo_prompt` (cached in `on_config_changed`), never from the `_DEFAULT_*` constant.
 - **Plugins ship their own UI inside their plugin directory.** A plugin contributing SPA components keeps every TS/TSX file under `<plugin>/frontend/` (types, API hooks, components, styles, side-effect register). Core SPA pages declare `<PluginPanelSlot slot="…">` extension points and never import from a plugin's `frontend/`. The plugin's Python `Plugin.ui_panels()` declares `UIPanel(panel_id, slot, required_role)` entries; the matching `<plugin>/frontend/panels.ts` calls `registerPanel(panel_id, Component)`.
-- **Plugin OS deps go through `runtime_dependencies()`.** A plugin that needs binaries / system libraries beyond what `pyproject.toml` can install (Chromium, tesseract, ffmpeg, …) overrides `Plugin.runtime_dependencies()` with `RuntimeDependency` entries. `./gilbert.sh doctor` runs the checks; `--install` runs each `auto_install_cmd` for plugins that opted in. The check should ideally exercise the dep (e.g. actually launch the browser), not just probe a path.
+- **Plugin OS deps go through `runtime_dependencies()`.** A plugin that needs binaries / system libraries beyond what `pyproject.toml` can install (Chromium, tesseract, ffmpeg, …) overrides `Plugin.runtime_dependencies(self, config: dict[str, Any] | None = None)` with `RuntimeDependency` entries. The hook receives the **resolved plugin/backend config** so a plugin returns a dep **only when the relevant backend/service is enabled** (ADR-0008) — e.g. advertise the Ollama-daemon dep only when the `ollama` backend is enabled, so an Anthropic-only operator isn't nagged. `doctor` calls the hook signature-robustly (via `inspect.signature`), so zero-arg overrides keep working until migrated. `./gilbert.sh doctor` runs the checks; `--install` runs each `auto_install_cmd` for plugins that opted in. The check should ideally exercise the dep (e.g. actually launch the browser), not just probe a path.
+- **Enablement dependencies are visible, never a cascade.** A service declares `ServiceInfo.requires_enabled=(EnablementDep("ai_chat", "ollama"), …)` to require a named backend (or, with `backend=""`, a service) to be *enabled* before it starts. When unmet, the `ServiceManager` leaves it in `disabled_services` (name → reason, surfaced as a Settings badge) instead of starting or failing it — and **never auto-enables the prerequisite** (ADR-0018). Services owning named backends implement the `BackendEnablementProvider` capability (`is_backend_enabled(name)`) so the mechanism and `doctor` can ask "is backend X enabled?".
 - **Migrations must be idempotent.** Core migrations live in `src/gilbert/migrations/NNNN_<slug>.py`; plugin migrations live in `<plugin>/migrations/`. The runner records success after `up()` returns, so a crash mid-run re-executes the script — write it to tolerate partial prior application. Tracking is keyed by `<scope>:<basename>`: **don't rename applied migration files**, or they'll re-run under the new name.
 
 ## Architecture Rules — `validate-architecture` skill
