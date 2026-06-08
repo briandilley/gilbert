@@ -3,15 +3,15 @@
  *
  * Admin-only. Lists every model from the enabled AI backends with its
  * stored ModelConfig — an `enabled` toggle plus generation defaults
- * (`temperature`, `max_tokens`). Edits are persisted through the
- * `ai.model_config.set` RPC, backed by `PerModelConfigProvider` on the AI
- * service. A blank numeric field means "unset" → the layered resolver
- * (backend ← per-model ← profile ← call) falls through to the backend's
- * own default.
+ * (`temperature`, `max_tokens`, `context_window`). Edits are persisted
+ * through the `ai.model_config.set` RPC, backed by `PerModelConfigProvider`
+ * on the AI service. A blank numeric field means "unset" → the layered
+ * resolver (backend ← per-model ← profile ← call) falls through to the
+ * backend's own default.
  *
- * TODO: `context_window` is carried by the type + RPC but not surfaced
- * here yet — it's seeded from GGUF metadata at pull time by the local
- * model manager (PRD #32, separate slice). Add a field once that lands.
+ * `context_window` is seeded from GGUF metadata at pull time by the local
+ * model manager and only honoured by local runtimes (Ollama maps it to
+ * `num_ctx`); hosted backends ignore it.
  */
 
 import { useState } from "react";
@@ -67,7 +67,7 @@ export function ModelConfigEditor() {
       <PageHeader
         eyebrow="INTELLIGENCE"
         title="Per-model config"
-        description="Generation defaults and an enabled toggle for each model. Values resolve in layers — backend default, then per-model, then profile, then call. A blank temperature / max-tokens means 'use the backend default'."
+        description="Generation defaults and an enabled toggle for each model. Values resolve in layers — backend default, then per-model, then profile, then call. A blank field means 'use the backend default'. Context window is honoured only by local runtimes (Ollama)."
       />
       <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-4">
         {isLoading && (
@@ -139,6 +139,27 @@ export function ModelConfigEditor() {
                       onBlur={(e) =>
                         save(backend.name, m, {
                           max_tokens: toNumberOrNull(e.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label
+                      className="text-xs"
+                      title="Total token window the model loads with. Only local runtimes (Ollama) honour this — it sets num_ctx so large prompts don't get rejected. Blank = the runtime's own default."
+                    >
+                      Context window
+                    </Label>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="1"
+                      className="h-7 w-28 text-xs"
+                      defaultValue={m.context_window ?? ""}
+                      placeholder="default"
+                      onBlur={(e) =>
+                        save(backend.name, m, {
+                          context_window: toNumberOrNull(e.target.value),
                         })
                       }
                     />
