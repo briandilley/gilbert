@@ -4671,7 +4671,7 @@ class AIService(Service):
         # Also exclude non-chat sources (agent runs, voice-agent
         # sessions, phone calls) — those have their own dedicated UI
         # and would just clutter the chat list with throwaway records.
-        _EXCLUDED_SOURCES = {"agent", "voice_agent", "phone_call"}
+        _EXCLUDED_SOURCES = {"agent", "voice_agent", "phone_call", "subagent"}
         return [
             c for c in results
             if not c.get("shared") and c.get("source") not in _EXCLUDED_SOURCES

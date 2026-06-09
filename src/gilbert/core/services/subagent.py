@@ -321,6 +321,9 @@ class SubagentService(Service):
                 ai_profile=agent.profile_name,
                 max_tool_rounds=agent.max_rounds,
                 headless=True,
+                # Tag the ephemeral subagent conversation so it's excluded from
+                # the user's chat list (it's persisted for debugging, not shown).
+                source="subagent",
             )
         except Exception as exc:
             await self._publish_event(

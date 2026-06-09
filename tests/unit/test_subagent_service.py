@@ -35,6 +35,7 @@ class _FakeAI:
         between_rounds_callback: Any = None,
         mid_round_interrupt: Any = None,
         headless: bool = False,
+        source: str = "",
     ) -> ChatTurnResult:
         self.calls.append(
             {
@@ -46,6 +47,7 @@ class _FakeAI:
                 "ai_profile": ai_profile,
                 "max_tool_rounds": max_tool_rounds,
                 "headless": headless,
+                "source": source,
             }
         )
         return ChatTurnResult(
@@ -196,6 +198,8 @@ async def test_spawn_drives_chat_with_fresh_context_and_type_config() -> None:
     assert call["ai_call"] == "subagent.general-purpose"
     assert call["max_tool_rounds"] == 12
     assert call["user_message"] == "Research widgets"
+    # Tagged so its ephemeral conversation stays out of the user's chat list.
+    assert call["source"] == "subagent"
 
 
 @pytest.mark.asyncio

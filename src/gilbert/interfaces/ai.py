@@ -522,6 +522,7 @@ class AIProvider(Protocol):
         between_rounds_callback: Any = None,
         mid_round_interrupt: Any = None,
         headless: bool = False,
+        source: str = "",
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
 

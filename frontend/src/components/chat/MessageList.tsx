@@ -150,7 +150,9 @@ export function MessageList({
         )}
 
         {subagents && subagents.length > 0 && (
-          <div className="space-y-1">
+          // Match the assistant-turn rail (see TurnRail in TurnBubble) so the
+          // cards align with the conversation column instead of the viewport.
+          <div className="relative max-w-3xl mx-auto pl-4 space-y-1">
             {subagents.map((sa) => (
               <SubagentCard key={sa.subagent_id} subagent={sa} />
             ))}
