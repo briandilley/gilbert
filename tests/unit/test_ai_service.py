@@ -4012,3 +4012,12 @@ def test_discover_tools_headless_drops_interactive() -> None:
     full = svc._discover_tools(headless=False)
     assert "web_search" in full
     assert "ask_user" in full  # interactive chat keeps it
+
+
+def test_chat_signature_accepts_headless() -> None:
+    import inspect
+
+    from gilbert.interfaces.ai import AIProvider
+
+    assert "headless" in inspect.signature(AIService.chat).parameters
+    assert "headless" in inspect.signature(AIProvider.chat).parameters

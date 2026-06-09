@@ -2302,6 +2302,7 @@ class AIService(Service):
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
         mid_round_interrupt: Callable[[], bool] | None = None,
+        headless: bool = False,
         should_stop_callback: Callable[[], bool] | None = None,
         source: str = "",
     ) -> ChatTurnResult:
@@ -2469,7 +2470,9 @@ class AIService(Service):
         )
 
         # Discover and filter tools based on profile
-        tools_by_name = self._discover_tools(user_ctx=user_ctx, profile=profile)
+        tools_by_name = self._discover_tools(
+            user_ctx=user_ctx, profile=profile, headless=headless
+        )
 
         tool_defs = [defn for _, defn in tools_by_name.values()]
 
