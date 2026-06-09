@@ -2488,8 +2488,14 @@ class AIService(Service):
                     if active:
                         skill_tool_names = skills_svc.get_active_allowed_tools(active)
                         if skill_tool_names:
-                            # Re-discover unfiltered tools and add missing ones
-                            all_tools = self._discover_tools(user_ctx=user_ctx)
+                            # Re-discover unfiltered tools and add missing ones.
+                            # Keep ``headless`` so a skill can't graft an
+                            # interactive tool (e.g. spawn_agent) back into a
+                            # headless subagent run — preserving no-nesting
+                            # unconditionally, not just for fresh conversations.
+                            all_tools = self._discover_tools(
+                                user_ctx=user_ctx, headless=headless
+                            )
                             for tname in skill_tool_names:
                                 if tname not in tools_by_name and tname in all_tools:
                                     tools_by_name[tname] = all_tools[tname]

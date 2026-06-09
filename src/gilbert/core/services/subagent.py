@@ -165,6 +165,7 @@ class SubagentService(Service):
                         ),
                     ),
                 ],
+                required_role="user",
                 # interactive=True keeps spawn_agent out of headless subagent
                 # runs, so subagents can't spawn more subagents (no nesting).
                 interactive=True,
@@ -197,8 +198,10 @@ class SubagentService(Service):
         Drives a fresh chat turn (no parent history) with the shared preamble +
         the type's prompt, on the type's AI profile and round budget, inheriting
         the caller's identity for RBAC. Returns the subagent's final message
-        text. The subagent cannot ask the user anything (headless preamble; the
-        spawn tool excludes interactive tools in a later slice).
+        text. The subagent cannot ask the user anything: the headless preamble
+        plus ``headless=True`` on the chat call exclude all interactive tools —
+        including ``spawn_agent`` itself, so a subagent can't spawn more
+        subagents (no nesting).
         """
         if not self._enabled:
             raise RuntimeError("subagent service is disabled")

@@ -214,6 +214,8 @@ def test_get_tools_exposes_spawn_agent_with_type_enum() -> None:
     # Must be excluded from headless subagents (no nesting).
     assert spawn.interactive is True
     assert spawn.ai_visible is True
+    # Every tool must declare its required_role (project RBAC-defaults rule).
+    assert spawn.required_role == "user"
     agent_type_param = next(p for p in spawn.parameters if p.name == "agent_type")
     assert "general-purpose" in (agent_type_param.enum or [])
     assert any(p.name == "prompt" for p in spawn.parameters)
