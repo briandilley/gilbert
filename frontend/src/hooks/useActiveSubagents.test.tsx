@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GilbertEvent } from "@/types/events";
 import { useActiveSubagents } from "./useActiveSubagents";
 
@@ -10,6 +10,10 @@ vi.mock("@/hooks/useEventBus", () => ({
     handlers.set(type, handler);
   },
 }));
+
+beforeEach(() => {
+  handlers.clear();
+});
 
 function fire(event_type: string, data: Record<string, unknown>) {
   act(() => {

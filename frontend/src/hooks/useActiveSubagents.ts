@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useEventBus } from "@/hooks/useEventBus";
 import type { ActiveSubagent, GilbertEvent, SubagentStatus } from "@/types/events";
 
@@ -29,9 +29,16 @@ export function useActiveSubagents(activeConversationId: string | null): ActiveS
     [activeConversationId],
   );
 
-  useEventBus("chat.stream.subagent_started", upsert("running"));
-  useEventBus("chat.stream.subagent_completed", upsert("completed"));
-  useEventBus("chat.stream.subagent_failed", upsert("failed"));
+  // Memoize the per-status handlers so their references are stable across
+  // renders (changing only when activeConversationId changes). Passing a fresh
+  // closure to useEventBus every render would churn subscribe/unsubscribe and
+  // could drop an event that arrives mid-teardown.
+  const onStarted = useMemo(() => upsert("running"), [upsert]);
+  const onCompleted = useMemo(() => upsert("completed"), [upsert]);
+  const onFailed = useMemo(() => upsert("failed"), [upsert]);
+  useEventBus("chat.stream.subagent_started", onStarted);
+  useEventBus("chat.stream.subagent_completed", onCompleted);
+  useEventBus("chat.stream.subagent_failed", onFailed);
 
   return Object.values(byId);
 }

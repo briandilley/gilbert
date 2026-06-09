@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { TurnBubble } from "./TurnBubble";
 import { TypingFooter } from "./TypingFooter";
+import { SubagentCard } from "./SubagentCard";
 import type { ChatTurn } from "@/types/chat";
+import type { ActiveSubagent } from "@/types/events";
 import type { UIBlock } from "@/types/ui";
 import { UIBlockRenderer } from "@/components/ui/UIBlockRenderer";
 
@@ -13,6 +15,9 @@ interface MessageListProps {
   /** Active conversation id — used to scope inline browser-speaker
    *  audio bubbles to the chat they were emitted into. */
   conversationId?: string;
+  /** Subagents currently running/finished for this conversation — rendered
+   *  live at the bottom of the stream, just above the scroll anchor. */
+  subagents?: ActiveSubagent[];
   onBlockSubmit: (blockId: string, values: Record<string, unknown>) => void;
 }
 
@@ -28,6 +33,7 @@ export function MessageList({
   isShared,
   currentUserId,
   conversationId,
+  subagents,
   onBlockSubmit,
 }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -141,6 +147,14 @@ export function MessageList({
             the scroll anchor so the auto-scroll keeps it in view. */}
         {isShared && conversationId && (
           <TypingFooter conversationId={conversationId} />
+        )}
+
+        {subagents && subagents.length > 0 && (
+          <div className="space-y-1">
+            {subagents.map((sa) => (
+              <SubagentCard key={sa.subagent_id} subagent={sa} />
+            ))}
+          </div>
         )}
 
         <div ref={bottomRef} />

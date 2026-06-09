@@ -16,7 +16,6 @@ import type {
 import type { GilbertEvent } from "@/types/events";
 import type { UIBlock } from "@/types/ui";
 import { useActiveSubagents } from "@/hooks/useActiveSubagents";
-import { SubagentCard } from "@/components/chat/SubagentCard";
 import { ChatSidebarContent } from "./ChatSidebar";
 import { usePageSidebar } from "@/components/layout/PageSidebar";
 import { MessageList } from "./MessageList";
@@ -1369,16 +1368,9 @@ export function ChatPage() {
             isShared={isShared}
             currentUserId={user?.user_id}
             conversationId={activeConvId ?? undefined}
+            subagents={activeSubagents}
             onBlockSubmit={handleBlockSubmit}
           />
-        )}
-
-        {activeSubagents.length > 0 && (
-          <div className="px-4">
-            {activeSubagents.map((sa) => (
-              <SubagentCard key={sa.subagent_id} subagent={sa} />
-            ))}
-          </div>
         )}
 
         {/* The sticky thinking-panel footer is gone — tool activity now
