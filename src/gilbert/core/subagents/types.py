@@ -70,9 +70,7 @@ _DEEP_RESEARCH = AgentType(
     max_wall_clock_s=900.0,
 )
 
-BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
-    t.id: t for t in (_GENERAL_PURPOSE, _DEEP_RESEARCH)
-}
+BUILTIN_AGENT_TYPES: dict[str, AgentType] = {t.id: t for t in (_GENERAL_PURPOSE, _DEEP_RESEARCH)}
 
 
 def get_agent_type(type_id: str) -> AgentType | None:

@@ -311,8 +311,7 @@ class SubagentService(Service):
         except Exception as exc:
             await self._publish_event(
                 "chat.stream.subagent_failed",
-                {**routing, "subagent_id": subagent_id, "agent_type": agent.id,
-                 "reason": str(exc)},
+                {**routing, "subagent_id": subagent_id, "agent_type": agent.id, "reason": str(exc)},
             )
             raise
         await self._publish_event(
