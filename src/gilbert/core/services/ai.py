@@ -1202,7 +1202,7 @@ _BUILTIN_PROFILES = [
             "one yourself (e.g. via Ollama) and point this profile at it."
         ),
         tool_mode="include",
-        tools=["web_search", "fetch_url"],
+        tools=["web_search", "fetch_url", "write_workspace_file"],
     ),
 ]
 

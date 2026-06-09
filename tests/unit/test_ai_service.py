@@ -4028,12 +4028,19 @@ def test_deep_research_builtin_profile_is_model_agnostic() -> None:
 
     p = next((x for x in _BUILTIN_PROFILES if x.name == "deep-research"), None)
     assert p is not None
-    # Web tools only.
+    # Web tools + workspace write.
     assert p.tool_mode == "include"
-    assert set(p.tools) == {"web_search", "fetch_url"}
+    assert {"web_search", "fetch_url"}.issubset(set(p.tools))
     # Model-agnostic: no hardcoded backend/model (uses the default model).
     assert p.backend == ""
     assert p.model == ""
     # Recommends a research-tuned model via a text hint, doesn't wire it.
     assert "tongyi" in p.description.lower()
     assert "deep-research" in _UNDELETABLE_PROFILES
+
+
+def test_deep_research_profile_includes_workspace_write() -> None:
+    from gilbert.core.services.ai import _BUILTIN_PROFILES
+
+    p = next(x for x in _BUILTIN_PROFILES if x.name == "deep-research")
+    assert "write_workspace_file" in p.tools

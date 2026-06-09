@@ -55,6 +55,10 @@ _DEEP_RESEARCH_PROMPT = (
     "for every non-obvious claim and a 'Sources' list at the end. Prefer primary "
     "sources; surface uncertainty and disagreements between sources rather than "
     "smoothing them over."
+    " When you have media (an image, chart, or file) you saved to the workspace,"
+    " embed it in the report with a relative Markdown link like"
+    " ![caption](outputs/<file>). Produce the full report as your final message"
+    " in Markdown — it will be saved as a file and linked into the chat."
 )
 
 _DEEP_RESEARCH = AgentType(
