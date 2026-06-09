@@ -9,7 +9,7 @@ import pytest
 from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.context import _current_user, set_current_user
+from gilbert.interfaces.context import _current_user
 from gilbert.interfaces.tools import ToolParameterType, ToolProvider
 
 
