@@ -45,7 +45,34 @@ _GENERAL_PURPOSE = AgentType(
     max_rounds=12,
 )
 
-BUILTIN_AGENT_TYPES: dict[str, AgentType] = {t.id: t for t in (_GENERAL_PURPOSE,)}
+_DEEP_RESEARCH_PROMPT = (
+    "You are a deep-research subagent. Investigate the question thoroughly and "
+    "autonomously: plan what you need to find, search the web, read the most "
+    "relevant pages in full, and cross-check claims across multiple independent "
+    "sources. Iterate — search again to fill gaps — until you can answer with "
+    "confidence. Then write a clear, well-structured report in Markdown that "
+    "directly addresses the question, with inline citations (page title + URL) "
+    "for every non-obvious claim and a 'Sources' list at the end. Prefer primary "
+    "sources; surface uncertainty and disagreements between sources rather than "
+    "smoothing them over."
+)
+
+_DEEP_RESEARCH = AgentType(
+    id="deep-research",
+    description=(
+        "Deep web research: a long-horizon agent that searches, reads pages, "
+        "cross-checks sources, and returns a cited Markdown report. Use for "
+        "questions needing current information or synthesis across many sources."
+    ),
+    system_prompt=_DEEP_RESEARCH_PROMPT,
+    profile_name="deep-research",
+    max_rounds=24,
+    max_wall_clock_s=900.0,
+)
+
+BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
+    t.id: t for t in (_GENERAL_PURPOSE, _DEEP_RESEARCH)
+}
 
 
 def get_agent_type(type_id: str) -> AgentType | None:
