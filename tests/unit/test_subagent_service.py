@@ -257,3 +257,82 @@ async def test_spawn_runs_headless() -> None:
     svc, fake = await _started()
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["headless"] is True
+
+
+class _FakeBus:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def publish(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class _FakeEventBusProvider:
+    def __init__(self, bus: _FakeBus) -> None:
+        self._bus = bus
+
+    @property
+    def bus(self) -> _FakeBus:
+        return self._bus
+
+
+async def _started_with_bus(text: str = "done"):
+    bus = _FakeBus()
+    svc = SubagentService()
+    fake = _FakeAI(text)
+    await svc.start(_resolver(ai_chat=fake, event_bus=_FakeEventBusProvider(bus)))
+    return svc, fake, bus
+
+
+@pytest.mark.asyncio
+async def test_spawn_emits_started_and_completed_events() -> None:
+    from gilbert.interfaces.context import (
+        _current_conversation_id,
+        _current_user,
+    )
+
+    svc, _fake, bus = await _started_with_bus()
+    caller = UserContext(user_id="u3", email="u3@x.com", display_name="U3")
+    ut = _current_user.set(caller)
+    ct = _current_conversation_id.set("conv-parent")
+    try:
+        await svc.spawn("general-purpose", "research X")
+    finally:
+        _current_user.reset(ut)
+        _current_conversation_id.reset(ct)
+
+    types = [e.event_type for e in bus.events]
+    assert "chat.stream.subagent_started" in types
+    assert "chat.stream.subagent_completed" in types
+    started = next(e for e in bus.events if e.event_type == "chat.stream.subagent_started")
+    # Routes to the PARENT conversation, visible only to the caller.
+    assert started.data["conversation_id"] == "conv-parent"
+    assert started.data["agent_type"] == "general-purpose"
+    assert started.data["visible_to"] == ["u3"]
+    assert "subagent_id" in started.data
+    completed = next(e for e in bus.events if e.event_type == "chat.stream.subagent_completed")
+    assert completed.data["subagent_id"] == started.data["subagent_id"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_emits_failed_event_on_error() -> None:
+    bus = _FakeBus()
+    svc = SubagentService()
+
+    class _BoomAI(_FakeAI):
+        async def chat(self, *a: Any, **k: Any):  # type: ignore[no-untyped-def]
+            raise RuntimeError("boom")
+
+    await svc.start(_resolver(ai_chat=_BoomAI(), event_bus=_FakeEventBusProvider(bus)))
+    with pytest.raises(RuntimeError, match="boom"):
+        await svc.spawn("general-purpose", "task")
+    types = [e.event_type for e in bus.events]
+    assert "chat.stream.subagent_started" in types
+    assert "chat.stream.subagent_failed" in types
+
+
+@pytest.mark.asyncio
+async def test_spawn_without_event_bus_still_works() -> None:
+    # Events are best-effort: no event_bus capability -> spawn still returns.
+    svc, _fake = await _started("ok")  # slice-1 helper, no bus
+    assert await svc.spawn("general-purpose", "task") == "ok"
