@@ -4021,3 +4021,19 @@ def test_chat_signature_accepts_headless() -> None:
 
     assert "headless" in inspect.signature(AIService.chat).parameters
     assert "headless" in inspect.signature(AIProvider.chat).parameters
+
+
+def test_deep_research_builtin_profile_is_model_agnostic() -> None:
+    from gilbert.core.services.ai import _BUILTIN_PROFILES, _UNDELETABLE_PROFILES
+
+    p = next((x for x in _BUILTIN_PROFILES if x.name == "deep-research"), None)
+    assert p is not None
+    # Web tools only.
+    assert p.tool_mode == "include"
+    assert set(p.tools) == {"web_search", "fetch_url"}
+    # Model-agnostic: no hardcoded backend/model (uses the default model).
+    assert p.backend == ""
+    assert p.model == ""
+    # Recommends a research-tuned model via a text hint, doesn't wire it.
+    assert "tongyi" in p.description.lower()
+    assert "deep-research" in _UNDELETABLE_PROFILES

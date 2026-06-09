@@ -1192,9 +1192,21 @@ _BUILTIN_PROFILES = [
         description="Advanced tier — most capable model with all tools",
         tool_mode="all",
     ),
+    AIContextProfile(
+        name="deep-research",
+        description=(
+            "Deep research agent — iteratively searches the web, reads pages, "
+            "cross-checks sources, and returns a cited report. Runs on your "
+            "default model. Tip: a research-tuned model such as "
+            "Tongyi-DeepResearch-30B-A3B works especially well here — configure "
+            "one yourself (e.g. via Ollama) and point this profile at it."
+        ),
+        tool_mode="include",
+        tools=["web_search", "fetch_url"],
+    ),
 ]
 
-_UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced"})
+_UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced", "deep-research"})
 
 # Built-in call→profile assignments seeded on first start.
 # Greeting/roast run through ``complete_one_shot(tools_override=[])``
