@@ -126,6 +126,47 @@ async def test_start_without_ai_chat_raises() -> None:
         await svc.start(_resolver())
 
 
+class _FakeConfig:
+    """Minimal ConfigurationReader returning a fixed subagent section."""
+
+    def __init__(self, enabled: bool) -> None:
+        self._section = {"enabled": enabled}
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return self._section
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self._section
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_start_restores_enabled_after_restart_reset() -> None:
+    """ServiceManager.restart_service() sets _enabled=False before calling
+    start(); start() must read config and restore it — otherwise a toggled-on
+    subagent service silently exposes no tools (no /research) after the restart."""
+    svc = SubagentService()
+    svc._enabled = False  # exactly what restart_service does before start()
+    fake = _FakeAI()
+    await svc.start(_resolver(ai_chat=fake, configuration=_FakeConfig(enabled=True)))
+    assert svc._enabled is True
+    assert any(t.name == "deep_research" for t in svc.get_tools())
+
+
+@pytest.mark.asyncio
+async def test_start_with_disabled_config_leaves_service_off() -> None:
+    svc = SubagentService()
+    fake = _FakeAI()
+    await svc.start(_resolver(ai_chat=fake, configuration=_FakeConfig(enabled=False)))
+    assert svc._enabled is False
+    assert svc.get_tools() == []
+
+
 async def _started(text: str = "subagent result") -> tuple[SubagentService, _FakeAI]:
     svc = SubagentService()
     fake = _FakeAI(text)

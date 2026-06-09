@@ -21,7 +21,7 @@ from typing import Any
 from gilbert.core.subagents.types import get_agent_type, list_agent_types
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.context import (
     get_current_conversation_id,
     get_current_user,
@@ -75,10 +75,24 @@ class SubagentService(Service):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+        # Toggleable service: determine ``self._enabled`` from config HERE.
+        # ``ServiceManager.restart_service`` resets ``_enabled`` to False before
+        # calling start() (so a disabled service can't carry a stale True) and
+        # relies on start() to restore it. Without this, toggling the service on
+        # triggers a restart that leaves it stuck disabled — its tools
+        # (including /research) silently vanish.
+        config_svc = resolver.get_capability("configuration")
+        if isinstance(config_svc, ConfigurationReader):
+            section = config_svc.get_section_safe("subagent")
+            if not section.get("enabled", True):
+                self._enabled = False
+                logger.info("Subagent service disabled")
+                return
         ai = resolver.require_capability("ai_chat")
         if not isinstance(ai, AIProvider):
             raise RuntimeError("ai_chat capability does not implement AIProvider")
         self._ai = ai
+        self._enabled = True
         logger.info("Subagent service started")
 
     # --- Configurable ---
