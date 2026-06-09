@@ -15,6 +15,8 @@ import type {
 } from "@/types/chat";
 import type { GilbertEvent } from "@/types/events";
 import type { UIBlock } from "@/types/ui";
+import { useActiveSubagents } from "@/hooks/useActiveSubagents";
+import { SubagentCard } from "@/components/chat/SubagentCard";
 import { ChatSidebarContent } from "./ChatSidebar";
 import { usePageSidebar } from "@/components/layout/PageSidebar";
 import { MessageList } from "./MessageList";
@@ -70,6 +72,7 @@ export function ChatPage() {
   // active conversation so it can skip notifications for messages
   // in the room the user is already looking at.
   useBrowserNotifications({ activeConversationId: activeConvId });
+  const activeSubagents = useActiveSubagents(activeConvId);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [uiBlocks, setUiBlocks] = useState<UIBlock[]>([]);
   const [sending, setSending] = useState(false);
@@ -1368,6 +1371,14 @@ export function ChatPage() {
             conversationId={activeConvId ?? undefined}
             onBlockSubmit={handleBlockSubmit}
           />
+        )}
+
+        {activeSubagents.length > 0 && (
+          <div className="px-4">
+            {activeSubagents.map((sa) => (
+              <SubagentCard key={sa.subagent_id} subagent={sa} />
+            ))}
+          </div>
         )}
 
         {/* The sticky thinking-panel footer is gone — tool activity now
