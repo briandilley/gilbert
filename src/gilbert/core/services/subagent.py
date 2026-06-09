@@ -27,6 +27,7 @@ from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.context import (
     get_current_conversation_id,
     get_current_user,
+    set_current_conversation_id,
     set_workspace_conversation_id,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -61,6 +62,10 @@ class SubagentService(Service):
         self._enabled = True
         self._ai: AIProvider | None = None
         self._workspace: WorkspaceProvider | None = None
+        # Strong references to detached background runs — without this the event
+        # loop only weak-refs the task and it can be GC'd mid-run (a multi-minute
+        # research would silently vanish). Discarded on completion.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._preamble = _DEFAULT_PREAMBLE
         self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
         self._resolver: ServiceResolver | None = None
@@ -267,8 +272,14 @@ class SubagentService(Service):
     # --- background helpers ---
 
     def _run_in_background(self, coro: Any) -> None:
-        """Detach a coroutine as a tracked task, preserving request context."""
-        asyncio.create_task(coro, context=contextvars.copy_context())
+        """Detach a coroutine as a tracked task, preserving request context.
+
+        Holds a strong reference until the task finishes so the event loop's
+        weak ref can't let a long run be garbage-collected mid-flight.
+        """
+        task = asyncio.create_task(coro, context=contextvars.copy_context())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _run_research_background(
         self,
@@ -280,9 +291,13 @@ class SubagentService(Service):
         result into the parent conversation. Never raises — a detached task's
         failure must be delivered, not lost."""
         # Scope workspace writes to the PARENT conversation so the report (and
-        # any media the agent saves) is linkable from the user's chat.
+        # any media the agent saves) is linkable from the user's chat. Also pin
+        # the conversation-id ContextVar so spawn()'s lifecycle events route to
+        # the parent conversation (the inner chat() sets it to the ephemeral
+        # subagent conversation otherwise).
         if parent_conversation_id:
             set_workspace_conversation_id(parent_conversation_id)
+            set_current_conversation_id(parent_conversation_id)
         try:
             report = await self.spawn("deep-research", query, user_ctx=user_ctx)
             rel_path = await self._write_report(
@@ -340,10 +355,18 @@ class SubagentService(Service):
         return rel_path
 
     async def _deliver(self, conversation_id: str | None, content: str) -> None:
-        """Post the result into the parent conversation (best-effort)."""
+        """Post the result into the parent conversation (best-effort).
+
+        Swallows delivery errors: a failed post must not escape the detached
+        task (the ``_run_research_background`` "never raises" contract), and it's
+        also called from the failure path where re-raising would be worse.
+        """
         if not conversation_id or not isinstance(self._ai, ConversationMessagePoster):
             return
-        await self._ai.append_assistant_message(conversation_id, content)
+        try:
+            await self._ai.append_assistant_message(conversation_id, content)
+        except Exception:
+            logger.exception("Failed to deliver research message to %s", conversation_id)
 
     # --- engine ---
 

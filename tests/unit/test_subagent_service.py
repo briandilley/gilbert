@@ -550,6 +550,43 @@ async def test_run_research_background_delivers_failure(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_research_background_degrades_without_workspace() -> None:
+    """No workspace capability → the report is delivered inline (no file)."""
+    poster = _FakePoster(report="# Findings\n\nInline body.")
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = None
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
+    svc._enabled = True
+    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+    _, msg = poster.delivered[0]
+    assert "Inline body." in msg  # the report itself, not a download link
+    assert "/api/chat/download/" not in msg
+
+
+@pytest.mark.asyncio
+async def test_run_research_background_without_poster_does_not_crash(tmp_path: Any) -> None:
+    """No ConversationMessagePoster → no delivery, but no crash and the file
+    is still written."""
+
+    class _OnlyChat:  # AIProvider but NOT ConversationMessagePoster
+        async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
+            return ChatTurnResult(
+                response_text="# R", conversation_id="e", ui_blocks=[],
+                tool_usage=[], attachments=[], rounds=[],
+            )
+
+    ws = _FakeWorkspace(tmp_path)
+    svc = SubagentService()
+    svc._ai = _OnlyChat()  # type: ignore[assignment]
+    svc._workspace = ws  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
+    svc._enabled = True
+    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+    assert ws.registered, "report still written even without a message poster"
+
+
+@pytest.mark.asyncio
 async def test_deep_research_tool_returns_immediately_and_schedules() -> None:
     scheduled: list[Any] = []
     fake = _FakeAI("ignored")

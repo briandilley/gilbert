@@ -20,7 +20,13 @@ export function rewriteWorkspaceEmbeds(
     ? dir.slice(conversationId.length + 1)
     : dir;
   const toUrl = (target: string): string => {
-    if (/^(https?:)?\/\//i.test(target) || target.startsWith("/")) return target;
+    if (
+      /^(https?:)?\/\//i.test(target) ||
+      target.startsWith("/") ||
+      // already a download path (with or without leading slash)
+      target.startsWith("api/chat/download/")
+    )
+      return target;
     const cleaned = target.replace(/^\.\//, "");
     const full =
       cleaned.startsWith("outputs/") ||
