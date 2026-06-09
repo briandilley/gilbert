@@ -48,9 +48,7 @@ class SubagentService(Service):
         self._enabled = True
         self._ai: AIProvider | None = None
         self._preamble = _DEFAULT_PREAMBLE
-        self._type_prompts: dict[str, str] = {
-            t.id: t.system_prompt for t in list_agent_types()
-        }
+        self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
 
     # --- Service ---
 
@@ -61,8 +59,7 @@ class SubagentService(Service):
             requires=frozenset({"ai_chat"}),
             toggleable=True,
             toggle_description=(
-                "Let the AI spawn ephemeral subagents to work on focused tasks "
-                "in a fresh context."
+                "Let the AI spawn ephemeral subagents to work on focused tasks in a fresh context."
             ),
         )
 

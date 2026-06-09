@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.services.subagent import SubagentService, _DEFAULT_PREAMBLE
+from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.tools import ToolParameterType
@@ -171,8 +171,6 @@ async def test_spawn_before_start_raises() -> None:
 @pytest.mark.asyncio
 async def test_spawn_uses_configured_prompt_override() -> None:
     svc, fake = await _started()
-    await svc.on_config_changed(
-        {"preamble": "PRE", "general_purpose_system_prompt": "GP-OVERRIDE"}
-    )
+    await svc.on_config_changed({"preamble": "PRE", "general_purpose_system_prompt": "GP-OVERRIDE"})
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["system_prompt"] == "PRE\n\nGP-OVERRIDE"
