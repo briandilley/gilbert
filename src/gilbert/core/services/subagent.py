@@ -219,5 +219,6 @@ class SubagentService(Service):
             ai_call=f"subagent.{agent.id}",
             ai_profile=agent.profile_name,
             max_tool_rounds=agent.max_rounds,
+            headless=True,
         )
         return result.response_text

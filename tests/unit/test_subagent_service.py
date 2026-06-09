@@ -34,6 +34,7 @@ class _FakeAI:
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
         mid_round_interrupt: Any = None,
+        headless: bool = False,
     ) -> ChatTurnResult:
         self.calls.append(
             {
@@ -44,6 +45,7 @@ class _FakeAI:
                 "ai_call": ai_call,
                 "ai_profile": ai_profile,
                 "max_tool_rounds": max_tool_rounds,
+                "headless": headless,
             }
         )
         return ChatTurnResult(
@@ -246,3 +248,10 @@ async def test_execute_unknown_tool_raises_keyerror() -> None:
     svc, _ = await _started()
     with pytest.raises(KeyError):
         await svc.execute_tool("nope", {})
+
+
+@pytest.mark.asyncio
+async def test_spawn_runs_headless() -> None:
+    svc, fake = await _started()
+    await svc.spawn("general-purpose", "task")
+    assert fake.calls[0]["headless"] is True
