@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.services.subagent import SubagentService
+from gilbert.core.services.subagent import SubagentService, _DEFAULT_PREAMBLE
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.tools import ToolParameterType
@@ -121,3 +121,58 @@ async def test_start_without_ai_chat_raises() -> None:
     svc = SubagentService()
     with pytest.raises(LookupError):
         await svc.start(_resolver())
+
+
+async def _started(text: str = "subagent result") -> tuple[SubagentService, _FakeAI]:
+    svc = SubagentService()
+    fake = _FakeAI(text)
+    await svc.start(_resolver(ai_chat=fake))
+    return svc, fake
+
+
+@pytest.mark.asyncio
+async def test_spawn_drives_chat_with_fresh_context_and_type_config() -> None:
+    svc, fake = await _started("the report")
+    ctx = UserContext(user_id="u1", email="u@x.com", display_name="U")
+
+    out = await svc.spawn("general-purpose", "Research widgets", user_ctx=ctx)
+
+    assert out == "the report"
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    # Fresh context: no parent conversation is threaded in.
+    assert call["conversation_id"] is None
+    # Caller identity is inherited (RBAC applies as for the caller).
+    assert call["user_ctx"] is ctx
+    # System prompt = shared preamble + the type's prompt.
+    assert call["system_prompt"].startswith(_DEFAULT_PREAMBLE)
+    assert "general-purpose subagent" in call["system_prompt"]
+    # Profile + budget + usage tag come from the type.
+    assert call["ai_profile"] == "standard"
+    assert call["ai_call"] == "subagent.general-purpose"
+    assert call["max_tool_rounds"] == 12
+    assert call["user_message"] == "Research widgets"
+
+
+@pytest.mark.asyncio
+async def test_spawn_unknown_type_raises() -> None:
+    svc, _ = await _started()
+    with pytest.raises(ValueError, match="Unknown agent type"):
+        await svc.spawn("nope", "do a thing")
+
+
+@pytest.mark.asyncio
+async def test_spawn_before_start_raises() -> None:
+    svc = SubagentService()
+    with pytest.raises(RuntimeError, match="not started"):
+        await svc.spawn("general-purpose", "do a thing")
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_configured_prompt_override() -> None:
+    svc, fake = await _started()
+    await svc.on_config_changed(
+        {"preamble": "PRE", "general_purpose_system_prompt": "GP-OVERRIDE"}
+    )
+    await svc.spawn("general-purpose", "task")
+    assert fake.calls[0]["system_prompt"] == "PRE\n\nGP-OVERRIDE"
