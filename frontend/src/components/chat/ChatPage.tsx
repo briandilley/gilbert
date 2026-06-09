@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
@@ -26,6 +26,7 @@ import {
 } from "./ChatInput";
 import { MemberPanelContent } from "./MemberPanel";
 import { WorkspacePanelContent } from "./WorkspacePanel";
+import { WorkspaceMarkdownViewer } from "@/components/chat/WorkspaceMarkdownViewer";
 import { InviteModal } from "./InviteModal";
 import { SkillsModal } from "./SkillsModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -94,6 +95,7 @@ export function ChatPage() {
   } | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [reportView, setReportView] = useState<{ conv: string; path: string } | null>(null);
   const [allUsers, setAllUsers] = useState<{ user_id: string; display_name: string }[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [pendingInvites, setPendingInvites] = useState<{ user_id: string; display_name: string }[]>([]);
@@ -1194,6 +1196,16 @@ export function ChatPage() {
       ? conversations.find((c) => c.conversation_id === activeConvId)?.title || "Chat"
       : "";
 
+  const handleChatClick = useCallback((e: MouseEvent) => {
+    const a = (e.target as HTMLElement).closest("a");
+    const href = a?.getAttribute("href") || "";
+    const m = href.match(/^\/api\/chat\/download\/([^/]+)\/(.+\.md)$/);
+    if (m) {
+      e.preventDefault();
+      setReportView({ conv: decodeURIComponent(m[1]), path: decodeURIComponent(m[2]) });
+    }
+  }, []);
+
   return (
     <div className="flex h-full">
       {/* Mobile sidebar sheet — desktop renders into the global
@@ -1211,6 +1223,7 @@ export function ChatPage() {
       <div
         ref={chatAreaRef}
         className="relative flex flex-1 flex-col min-w-0 overflow-hidden"
+        onClick={handleChatClick}
       >
         {/* Top bar */}
         <div className="flex items-center gap-2 shrink-0 border-b px-3 py-2">
@@ -1522,6 +1535,15 @@ export function ChatPage() {
         conversationId={activeConvId}
         onClose={() => setSkillsOpen(false)}
       />
+
+      {reportView && (
+        <WorkspaceMarkdownViewer
+          open
+          conversationId={reportView.conv}
+          path={reportView.path}
+          onClose={() => setReportView(null)}
+        />
+      )}
 
       <Dialog
         open={!!inviteResponseDialog}
