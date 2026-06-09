@@ -195,6 +195,13 @@ class Gilbert:
 
         self.service_manager.register(OCRService())
 
+        # 6c-bis2. Subagent engine — lets the AI spawn ephemeral, headless
+        # agents in a fresh context. Default-on, toggleable; requires the
+        # ``ai_chat`` capability (AIService), which is registered above.
+        from gilbert.core.services.subagent import SubagentService
+
+        self.service_manager.register(SubagentService())
+
         # 6c-bis. Host-resources service — host-global RAM/GPU/VRAM probe
         # consumed by local-compute backends and the local-model manager.
         # The side-effect import registers the vendor-free ``local``

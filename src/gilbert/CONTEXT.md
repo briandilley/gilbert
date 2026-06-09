@@ -187,6 +187,14 @@ A durable, user-owned AI sub-persona (persona + rules + memory + commitments + t
 own loop, messages peers, and pursues goals. Distinct from Gilbert (the one global assistant).
 _Avoid_: bot, assistant (reserve for Gilbert).
 
+**Subagent** — an *ephemeral, headless* agent run spawned within a chat turn
+  (the `SubagentService` engine): a fresh context (shared preamble + an agent
+  *type* prompt + the task), a scoped toolset + model (from the type's AI
+  profile), and a bounded budget. It runs autonomously and **cannot ask the
+  user** — its final message is returned as the spawning tool's result. Distinct
+  from an **Autonomous agent** (the durable, goal-based agent with persona /
+  memory / heartbeats). _Avoid_ calling a subagent an "agent" unqualified.
+
 **Run**:
 A single execution of an Agent's loop, capturing its response, token usage, and cost.
 
