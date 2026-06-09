@@ -30,12 +30,12 @@ from gilbert.interfaces.context import (
     set_workspace_conversation_id,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
 )
+from gilbert.interfaces.workspace import WorkspaceProvider
 
 logger = logging.getLogger(__name__)
 
