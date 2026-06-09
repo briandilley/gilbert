@@ -336,3 +336,36 @@ async def test_spawn_without_event_bus_still_works() -> None:
     # Events are best-effort: no event_bus capability -> spawn still returns.
     svc, _fake = await _started("ok")  # slice-1 helper, no bus
     assert await svc.spawn("general-purpose", "task") == "ok"
+
+
+def test_get_tools_includes_deep_research_sugar() -> None:
+    tools = SubagentService().get_tools()
+    dr = next((t for t in tools if t.name == "deep_research"), None)
+    assert dr is not None
+    assert dr.slash_command == "research"
+    assert dr.required_role == "user"
+    # Sugar is also an orchestration tool: keep it out of headless subagents.
+    assert dr.interactive is True
+    assert any(p.name == "query" for p in dr.parameters)
+
+
+@pytest.mark.asyncio
+async def test_deep_research_tool_spawns_deep_research_type() -> None:
+    fake = _FakeAI("the report")
+    svc = SubagentService()
+    # websearch capability present -> deep research is allowed.
+    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    out = await svc.execute_tool("deep_research", {"query": "what is X?"})
+    assert out == "the report"
+    assert fake.calls[0]["ai_profile"] == "deep-research"
+    assert fake.calls[0]["ai_call"] == "subagent.deep-research"
+
+
+@pytest.mark.asyncio
+async def test_deep_research_tool_errors_without_web_search() -> None:
+    fake = _FakeAI()
+    svc = SubagentService()
+    await svc.start(_resolver(ai_chat=fake))  # no websearch capability
+    out = await svc.execute_tool("deep_research", {"query": "x"})
+    assert "web" in out.lower() and "search" in out.lower()
+    assert fake.calls == []  # never spawned the subagent

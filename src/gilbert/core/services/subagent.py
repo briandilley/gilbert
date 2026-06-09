@@ -178,18 +178,62 @@ class SubagentService(Service):
                 # Conservative for v1: no parallel fan-out of (expensive)
                 # sub-chats until a per-turn spawn/cost cap exists.
                 parallel_safe=False,
-            )
+            ),
+            ToolDefinition(
+                name="deep_research",
+                description=(
+                    "Run a deep web-research task: an autonomous agent searches "
+                    "the web, reads pages, cross-checks sources, and returns a "
+                    "cited Markdown report. Use for questions that need current "
+                    "information or synthesis across multiple sources. (Sugar "
+                    "over spawn_agent with the 'deep-research' type.)"
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="query",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "The research question or task, stated completely "
+                            "and self-contained — the agent cannot ask follow-ups."
+                        ),
+                    ),
+                ],
+                slash_command="research",
+                slash_help="Deep web research: /research <question>",
+                required_role="user",
+                # Orchestration tool: keep it out of headless subagent runs
+                # (a subagent calling deep_research would nest).
+                interactive=True,
+                parallel_safe=False,
+            ),
         ]
 
+    def _web_search_available(self) -> bool:
+        """Whether a web-search backend is enabled (deep research needs one)."""
+        if self._resolver is None:
+            return False
+        return self._resolver.get_capability("websearch") is not None
+
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        if name != "spawn_agent":
-            raise KeyError(f"Unknown tool: {name}")
-        agent_type = str(arguments.get("agent_type") or "")
-        prompt = str(arguments.get("prompt") or "")
-        if not agent_type or not prompt:
-            raise ValueError("spawn_agent requires 'agent_type' and 'prompt'")
-        # Inherit the caller's full identity for the subagent's RBAC.
-        return await self.spawn(agent_type, prompt, user_ctx=get_current_user())
+        if name == "spawn_agent":
+            agent_type = str(arguments.get("agent_type") or "")
+            prompt = str(arguments.get("prompt") or "")
+            if not agent_type or not prompt:
+                raise ValueError("spawn_agent requires 'agent_type' and 'prompt'")
+            # Inherit the caller's full identity for the subagent's RBAC.
+            return await self.spawn(agent_type, prompt, user_ctx=get_current_user())
+        if name == "deep_research":
+            query = str(arguments.get("query") or "")
+            if not query:
+                raise ValueError("deep_research requires 'query'")
+            if not self._web_search_available():
+                return (
+                    "Deep research needs a web-search backend, but none is "
+                    "enabled. Enable a web-search provider (for example the "
+                    "Tavily plugin) under Settings → Intelligence, then try again."
+                )
+            return await self.spawn("deep-research", query, user_ctx=get_current_user())
+        raise KeyError(f"Unknown tool: {name}")
 
     # --- engine ---
 
