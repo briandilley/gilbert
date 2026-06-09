@@ -3578,6 +3578,7 @@ class AIService(Service):
         self,
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
+        headless: bool = False,
     ) -> dict[str, tuple[ToolProvider, ToolDefinition]]:
         """Find all started services that implement ToolProvider and collect their tools.
 
@@ -3602,6 +3603,10 @@ class AIService(Service):
                 # its tool list. Slash dispatch lives elsewhere and
                 # picks them up regardless.
                 if not tool_def.ai_visible:
+                    continue
+                # Headless subagent runs can't use tools that need the user
+                # or that would let an autonomous agent spawn more agents.
+                if headless and tool_def.interactive:
                     continue
                 if tool_def.name in tools_by_name:
                     logger.warning(

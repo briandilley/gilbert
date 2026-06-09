@@ -3960,3 +3960,55 @@ async def test_complete_one_shot_max_tokens_is_call_override(
     req = stub_backend.requests[0]
     assert req.max_tokens == 128  # call-override beats per-model
     assert req.temperature == 0.42  # per-model survives (no call-override)
+
+
+def _ai_with_tools(*tool_defs):
+    """An AIService whose resolver exposes one ToolProvider with the given tools."""
+    from gilbert.interfaces.tools import ToolProvider
+
+    class _P(Service):
+        def service_info(self):  # type: ignore[no-untyped-def]
+            from gilbert.interfaces.service import ServiceInfo
+
+            return ServiceInfo(name="p", capabilities=frozenset({"ai_tools"}))
+
+        @property
+        def tool_provider_name(self) -> str:
+            return "p"
+
+        def get_tools(self, user_ctx=None):  # type: ignore[no-untyped-def]
+            return list(tool_defs)
+
+        async def execute_tool(self, name, arguments):  # type: ignore[no-untyped-def]
+            return "ok"
+
+    provider = _P()
+    assert isinstance(provider, ToolProvider)
+
+    class _R:
+        def get_all(self, cap):  # type: ignore[no-untyped-def]
+            return [provider] if cap == "ai_tools" else []
+
+        def get_capability(self, cap):  # type: ignore[no-untyped-def]
+            return None
+
+        def require_capability(self, cap):  # type: ignore[no-untyped-def]
+            raise LookupError(cap)
+
+    svc = AIService()
+    svc._resolver = _R()  # type: ignore[assignment]
+    return svc
+
+
+def test_discover_tools_headless_drops_interactive() -> None:
+    normal = ToolDefinition(name="web_search", description="d")
+    interactive = ToolDefinition(name="ask_user", description="d", interactive=True)
+    svc = _ai_with_tools(normal, interactive)
+
+    headless = svc._discover_tools(headless=True)
+    assert "web_search" in headless
+    assert "ask_user" not in headless  # interactive tool excluded when headless
+
+    full = svc._discover_tools(headless=False)
+    assert "web_search" in full
+    assert "ask_user" in full  # interactive chat keeps it
