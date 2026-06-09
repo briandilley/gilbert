@@ -27,7 +27,7 @@ In discussion this generalized to a Claude-Code-style **subagent / Task** primit
 - Ephemeral runs with a fresh context, headless toolset (no user-interaction tools), per-run budget (rounds/tokens/wall-clock), returning the final message as the tool result.
 - A code-registered **agent-type registry** with two built-ins: `general-purpose` and `deep-research`.
 - A live **active-subagent card** in the chat UI driven by new `subagent.*` lifecycle events.
-- The `deep-research` type: research preamble + web tools + a seeded **"Deep Research" AI profile** (Tongyi via OpenRouter), plus a thin `deep_research` / `/research` sugar tool. Add `tongyi-deepresearch-30b-a3b` to the openrouter catalog.
+- The `deep-research` type: research preamble + web tools + a seeded **model-agnostic "Deep Research" AI profile** (blank backend/model → the user's default model; tools restricted to web search/fetch), plus a thin `deep_research` / `/research` sugar tool. **No OpenRouter / catalog change and no hardcoded model** — Tongyi-DeepResearch-30B is recommended only via a text hint in the profile description; the user configures it themselves (e.g. via Ollama) if they want it.
 
 **Non-goals (v1 — explicit boundaries):**
 
@@ -149,9 +149,10 @@ Frontend: a `<SubagentCard>` rendered in the chat stream, subscribed to these ev
 
 ### 6.6 `deep-research` type, profile, and model
 
-- **Seeded "Deep Research" AI profile** (added to the built-in-profile seed in `_load_profiles`, or seeded by `SubagentService` on start): `backend="openrouter"`, `model="alibaba/tongyi-deepresearch-30b-a3b"`, `tool_mode="include"`, `tools=["web_search", "fetch_url"]`. If the profile's model/backend is unavailable, the engine falls back to the default profile/model (the type still works on any capable model).
-- **openrouter catalog entry** for `alibaba/tongyi-deepresearch-30b-a3b` so it's selectable in the model picker and the profile resolves it.
-- **`deep-research` agent type:** research preamble + a research system prompt (plan → search → read → reflect → synthesize a **cited** markdown report), `profile_name="deep-research"`, web-tools-only policy, `max_rounds` ~ depth tier.
+> **Decision (2026-06-09):** keep this **model-agnostic** and **core-only**. No OpenRouter, no catalog change, no hardcoded/special-cased model. Deep research runs on the user's *default* model with a research preamble + web tools; a research-tuned model (e.g. `Tongyi-DeepResearch-30B-A3B`) is recommended only via a **text hint** in the profile description, which the user can configure themselves (e.g. via Ollama). See [[feedback-model-agnostic-features]].
+
+- **Seeded model-agnostic "Deep Research" AI profile** (added to `_BUILTIN_PROFILES` + `_UNDELETABLE_PROFILES` in `ai.py`, seeded by `_load_profiles`): `backend=""`, `model=""` (→ the user's default model), `tool_mode="include"`, `tools=["web_search", "fetch_url"]`. Its `description` carries the hint that a research-tuned local model (Tongyi-DeepResearch-30B via Ollama) works well if the user configures one.
+- **`deep-research` agent type:** research preamble + a research system prompt (plan → search → read → reflect → synthesize a **cited** markdown report), `profile_name="deep-research"`, web-tools-only policy, a larger `max_rounds`/budget than `general-purpose`.
 - **Dependency:** requires a web-search backend (e.g. Tavily) enabled. If none is enabled, `deep_research`/the type returns a clear, actionable error rather than failing opaquely.
 
 ## 7. Data flow (one `deep_research` spawn)
@@ -207,7 +208,7 @@ Frontend: a component test for `<SubagentCard>` state transitions (started → p
 1. **Engine core** — `AgentType` + registry + `SubagentService.spawn(...)` driving `AIService.chat` on a fresh ephemeral context with budget; `general-purpose` built-in. `ToolDefinition.interactive` flag + headless gating. (No tool, no UI yet — tested directly.)
 2. **Spawn tool** — `spawn_agent` exposed to chat; enum/descriptions from the registry; no-nesting exclusion.
 3. **Live UI** — `subagent.*` events + `<SubagentCard>` in the chat stream.
-4. **deep-research** — the type + seeded Tongyi "Deep Research" profile + openrouter catalog entry + `deep_research`/`/research` sugar + web-backend dependency handling.
+4. **deep-research** — the type + seeded model-agnostic "Deep Research" profile (with the Tongyi-via-Ollama hint in its description) + `deep_research`/`/research` sugar + web-backend dependency handling. Core-only; no OpenRouter/submodule change.
 
 ## 13. Out of scope / future (Phase 2+)
 
