@@ -14,19 +14,23 @@ First-party orchestration of the AI capability — lives in core, resolves
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
 import uuid
 from typing import Any
 
 from gilbert.core.subagents.types import get_agent_type, list_agent_types
-from gilbert.interfaces.ai import AIProvider
+from gilbert.interfaces.ai import AIProvider, ConversationMessagePoster
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.context import (
     get_current_conversation_id,
     get_current_user,
+    set_workspace_conversation_id,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -56,6 +60,7 @@ class SubagentService(Service):
     def __init__(self) -> None:
         self._enabled = True
         self._ai: AIProvider | None = None
+        self._workspace: WorkspaceProvider | None = None
         self._preamble = _DEFAULT_PREAMBLE
         self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
         self._resolver: ServiceResolver | None = None
@@ -93,6 +98,8 @@ class SubagentService(Service):
             raise RuntimeError("ai_chat capability does not implement AIProvider")
         self._ai = ai
         self._enabled = True
+        ws = resolver.get_capability("workspace")
+        self._workspace = ws if isinstance(ws, WorkspaceProvider) else None
         logger.info("Subagent service started")
 
     # --- Configurable ---
@@ -246,8 +253,97 @@ class SubagentService(Service):
                     "enabled. Enable a web-search provider (for example the "
                     "Tavily plugin) under Settings → Intelligence, then try again."
                 )
-            return await self.spawn("deep-research", query, user_ctx=get_current_user())
+            parent_conv = get_current_conversation_id()
+            caller = get_current_user()
+            self._run_in_background(
+                self._run_research_background(query, parent_conv, caller)
+            )
+            return (
+                f"\U0001f50d Researching “{query}” in the background — I’ll post the "
+                "report here when it’s ready. You can keep chatting."
+            )
         raise KeyError(f"Unknown tool: {name}")
+
+    # --- background helpers ---
+
+    def _run_in_background(self, coro: Any) -> None:
+        """Detach a coroutine as a tracked task, preserving request context."""
+        asyncio.create_task(coro, context=contextvars.copy_context())
+
+    async def _run_research_background(
+        self,
+        query: str,
+        parent_conversation_id: str | None,
+        user_ctx: UserContext | None,
+    ) -> None:
+        """Run a deep-research subagent off the parent turn and deliver the
+        result into the parent conversation. Never raises — a detached task's
+        failure must be delivered, not lost."""
+        # Scope workspace writes to the PARENT conversation so the report (and
+        # any media the agent saves) is linkable from the user's chat.
+        if parent_conversation_id:
+            set_workspace_conversation_id(parent_conversation_id)
+        try:
+            report = await self.spawn("deep-research", query, user_ctx=user_ctx)
+            rel_path = await self._write_report(
+                parent_conversation_id,
+                user_ctx.user_id if user_ctx else "system",
+                report,
+            )
+            if rel_path and parent_conversation_id:
+                url = f"/api/chat/download/{parent_conversation_id}/{rel_path}"
+                lead = report.strip().split("\n\n", 1)[0][:400]
+                message = f"**Research complete.** [Open the report]({url})\n\n{lead}"
+            else:
+                # No workspace — degrade to delivering the report inline.
+                message = f"**Research complete.**\n\n{report}"
+            await self._deliver(parent_conversation_id, message)
+        except Exception as exc:  # noqa: BLE001 — deliver, don't crash
+            logger.exception("Deep research background run failed")
+            await self._publish_event(
+                "chat.stream.subagent_failed",
+                {
+                    "conversation_id": parent_conversation_id,
+                    "subagent_id": "",
+                    "agent_type": "deep-research",
+                    "reason": str(exc),
+                    "visible_to": [user_ctx.user_id] if user_ctx and user_ctx.user_id else None,
+                },
+            )
+            await self._deliver(
+                parent_conversation_id, f"Deep research failed: {exc}"
+            )
+
+    async def _write_report(
+        self, conversation_id: str | None, user_id: str, content: str
+    ) -> str | None:
+        """Write the report markdown to outputs/ in the conversation workspace.
+        Returns the rel_path, or None when no workspace is available."""
+        if self._workspace is None or not conversation_id:
+            return None
+        filename = f"research-{uuid.uuid4().hex[:8]}.md"
+        rel_path = f"outputs/{filename}"
+        out_dir = self._workspace.get_output_dir(user_id, conversation_id)
+        target = out_dir / filename
+        target.write_text(content, encoding="utf-8")
+        await self._workspace.register_file(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            category="output",
+            filename=filename,
+            rel_path=rel_path,
+            media_type="text/markdown",
+            size=len(content.encode("utf-8")),
+            created_by="ai",
+            description="Deep research report",
+        )
+        return rel_path
+
+    async def _deliver(self, conversation_id: str | None, content: str) -> None:
+        """Post the result into the parent conversation (best-effort)."""
+        if not conversation_id or not isinstance(self._ai, ConversationMessagePoster):
+            return
+        await self._ai.append_assistant_message(conversation_id, content)
 
     # --- engine ---
 

@@ -396,14 +396,22 @@ def test_get_tools_includes_deep_research_sugar() -> None:
 
 @pytest.mark.asyncio
 async def test_deep_research_tool_spawns_deep_research_type() -> None:
+    """deep_research now schedules the run in the background (returns immediately).
+    Verify that the background is scheduled and the engine would use the
+    deep-research profile — we do this by capturing the background coro."""
+    scheduled: list[Any] = []
     fake = _FakeAI("the report")
     svc = SubagentService()
     # websearch capability present -> deep research is allowed.
     await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
     out = await svc.execute_tool("deep_research", {"query": "what is X?"})
-    assert out == "the report"
-    assert fake.calls[0]["ai_profile"] == "deep-research"
-    assert fake.calls[0]["ai_call"] == "subagent.deep-research"
+    # Returns an acknowledgement, not the report.
+    assert "research" in out.lower()
+    # Exactly one background coro was scheduled.
+    assert len(scheduled) == 1
+    # The engine was NOT awaited inline.
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -418,19 +426,26 @@ async def test_deep_research_tool_errors_without_web_search() -> None:
 
 @pytest.mark.asyncio
 async def test_deep_research_tool_inherits_current_user() -> None:
-    """The research subagent runs as the caller (RBAC), same as spawn_agent."""
+    """The research subagent runs as the caller (RBAC), same as spawn_agent.
+    Since deep_research now runs in the background, we verify the caller is
+    captured and passed to the background coroutine by inspecting _run_research_background."""
     from gilbert.interfaces.context import _current_user
 
+    scheduled: list[Any] = []
     fake = _FakeAI("report")
     svc = SubagentService()
     await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
     caller = UserContext(user_id="u7", email="u7@x.com", display_name="U7")
     tok = _current_user.set(caller)
     try:
         await svc.execute_tool("deep_research", {"query": "q"})
     finally:
         _current_user.reset(tok)
-    assert fake.calls[0]["user_ctx"] is caller
+    # The run was scheduled in the background (not awaited inline).
+    assert len(scheduled) == 1
+    # The engine was NOT called inline.
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -438,3 +453,113 @@ async def test_deep_research_empty_query_raises() -> None:
     svc, _ = await _started()
     with pytest.raises(ValueError, match="query"):
         await svc.execute_tool("deep_research", {"query": ""})
+
+
+class _FakePoster:
+    """ConversationMessagePoster + AIProvider in one (mirrors AIService)."""
+
+    def __init__(self, report: str = "THE REPORT") -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.delivered: list[tuple[str, str]] = []
+        self._report = report
+
+    async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
+        self.calls.append(k)
+        return ChatTurnResult(
+            response_text=self._report,
+            conversation_id="ephemeral",
+            ui_blocks=[],
+            tool_usage=[],
+            attachments=[],
+            rounds=[],
+        )
+
+    async def append_assistant_message(self, conversation_id: str, content: str) -> None:
+        self.delivered.append((conversation_id, content))
+
+
+class _FakeWorkspace:
+    def __init__(self, tmp_path: Any) -> None:
+        self.registered: list[dict[str, Any]] = []
+        self._root = tmp_path
+
+    def get_output_dir(self, user_id: str, conversation_id: str) -> Any:
+        d = self._root / user_id / conversation_id / "outputs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    async def register_file(self, **kwargs: Any) -> dict[str, Any]:
+        self.registered.append(kwargs)
+        return {"_id": "f1", **kwargs}
+
+
+@pytest.mark.asyncio
+async def test_run_research_background_writes_report_and_delivers(tmp_path: Any) -> None:
+    poster = _FakePoster(report="# Findings\n\nWidgets are good.")
+    ws = _FakeWorkspace(tmp_path)
+    bus = _FakeBus()
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = ws  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(bus))  # type: ignore[assignment]
+    svc._enabled = True
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+
+    await svc._run_research_background("widgets?", "conv-parent", caller)
+
+    # Wrote the report to the PARENT conversation's outputs/.
+    assert ws.registered, "report file was registered"
+    reg = ws.registered[0]
+    assert reg["conversation_id"] == "conv-parent"
+    assert reg["media_type"] == "text/markdown"
+    assert reg["rel_path"].startswith("outputs/research-")
+    # The subagent ran as the caller.
+    assert poster.calls[0]["user_ctx"] is caller
+    # Delivered a message into the parent conversation with a download link.
+    assert poster.delivered, "delivered a message"
+    conv, msg = poster.delivered[0]
+    assert conv == "conv-parent"
+    assert "/api/chat/download/conv-parent/outputs/research-" in msg
+    # Lifecycle events fired.
+    types = [e.event_type for e in bus.events]
+    assert "chat.stream.subagent_started" in types
+    assert "chat.stream.subagent_completed" in types
+
+
+@pytest.mark.asyncio
+async def test_run_research_background_delivers_failure(tmp_path: Any) -> None:
+    class _BoomPoster(_FakePoster):
+        async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
+            raise RuntimeError("research boom")
+
+    poster = _BoomPoster()
+    bus = _FakeBus()
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = _FakeWorkspace(tmp_path)  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(bus))  # type: ignore[assignment]
+    svc._enabled = True
+
+    # Must NOT raise out of the detached task.
+    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+
+    assert poster.delivered, "delivered a failure message"
+    _, msg = poster.delivered[0]
+    assert "fail" in msg.lower() or "boom" in msg.lower()
+    assert "chat.stream.subagent_failed" in [e.event_type for e in bus.events]
+
+
+@pytest.mark.asyncio
+async def test_deep_research_tool_returns_immediately_and_schedules() -> None:
+    scheduled: list[Any] = []
+    fake = _FakeAI("ignored")
+    svc = SubagentService()
+    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    # Capture the background coro instead of really detaching it.
+    svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
+
+    out = await svc.execute_tool("deep_research", {"query": "what is X?"})
+
+    assert "research" in out.lower()  # an acknowledgement, not the report
+    assert len(scheduled) == 1  # the run was scheduled in the background
+    assert fake.calls == []  # the engine was NOT awaited inline
