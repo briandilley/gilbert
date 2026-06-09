@@ -72,6 +72,15 @@ class ToolDefinition:
     # list to the model; the slash-command path ignores the flag (slash
     # invocations are always intentional).
     ai_visible: bool = True
+    # Marks a tool that must NOT be exposed to a *headless* subagent run
+    # (``AIService.chat(headless=True)``). Two cases set this: tools that
+    # need the user (a future ``request_user_input``), and orchestration
+    # tools whose use by an autonomous leaf would be unsafe — notably
+    # ``spawn_agent`` itself, so subagents can't spawn further subagents
+    # (no nesting). ``AIService._discover_tools`` drops ``interactive=True``
+    # tools when called with ``headless=True``; interactive chat is
+    # unaffected. Default ``False`` — opt-in, like ``parallel_safe``.
+    interactive: bool = False
 
     def to_json_schema(self) -> dict[str, Any]:
         """Convert parameters to JSON Schema format (used by most AI providers)."""
