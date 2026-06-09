@@ -369,3 +369,27 @@ async def test_deep_research_tool_errors_without_web_search() -> None:
     out = await svc.execute_tool("deep_research", {"query": "x"})
     assert "web" in out.lower() and "search" in out.lower()
     assert fake.calls == []  # never spawned the subagent
+
+
+@pytest.mark.asyncio
+async def test_deep_research_tool_inherits_current_user() -> None:
+    """The research subagent runs as the caller (RBAC), same as spawn_agent."""
+    from gilbert.interfaces.context import _current_user
+
+    fake = _FakeAI("report")
+    svc = SubagentService()
+    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    caller = UserContext(user_id="u7", email="u7@x.com", display_name="U7")
+    tok = _current_user.set(caller)
+    try:
+        await svc.execute_tool("deep_research", {"query": "q"})
+    finally:
+        _current_user.reset(tok)
+    assert fake.calls[0]["user_ctx"] is caller
+
+
+@pytest.mark.asyncio
+async def test_deep_research_empty_query_raises() -> None:
+    svc, _ = await _started()
+    with pytest.raises(ValueError, match="query"):
+        await svc.execute_tool("deep_research", {"query": ""})
