@@ -9,7 +9,8 @@ import pytest
 from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
-from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.context import _current_user, set_current_user
+from gilbert.interfaces.tools import ToolParameterType, ToolProvider
 
 
 class _FakeAI:
@@ -195,3 +196,53 @@ async def test_spawn_honors_explicitly_blanked_prompt() -> None:
     await svc.on_config_changed({"preamble": "", "general_purpose_system_prompt": ""})
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["system_prompt"] == "\n\n"
+
+
+def test_subagent_service_is_a_tool_provider() -> None:
+    svc = SubagentService()
+    assert isinstance(svc, ToolProvider)
+    assert svc.tool_provider_name == "subagent"
+    # Advertises ai_tools so AIService._discover_tools picks it up.
+    assert "ai_tools" in svc.service_info().capabilities
+
+
+def test_get_tools_exposes_spawn_agent_with_type_enum() -> None:
+    tools = SubagentService().get_tools()
+    spawn = next(t for t in tools if t.name == "spawn_agent")
+    # Must be excluded from headless subagents (no nesting).
+    assert spawn.interactive is True
+    assert spawn.ai_visible is True
+    agent_type_param = next(p for p in spawn.parameters if p.name == "agent_type")
+    assert "general-purpose" in (agent_type_param.enum or [])
+    assert any(p.name == "prompt" for p in spawn.parameters)
+
+
+def test_get_tools_empty_when_disabled() -> None:
+    svc = SubagentService()
+    svc._enabled = False
+    assert svc.get_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_execute_spawn_agent_inherits_current_user() -> None:
+    svc, fake = await _started("done")
+    caller = UserContext(user_id="u9", email="u9@x.com", display_name="U9")
+    token = _current_user.set(caller)
+    try:
+        out = await svc.execute_tool(
+            "spawn_agent",
+            {"agent_type": "general-purpose", "prompt": "go", "_user_id": "u9"},
+        )
+    finally:
+        _current_user.reset(token)
+    assert out == "done"
+    # The spawned chat inherited the caller identity + ran headless.
+    assert fake.calls[0]["user_ctx"] is caller
+    assert fake.calls[0]["headless"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_unknown_tool_raises_keyerror() -> None:
+    svc, _ = await _started()
+    with pytest.raises(KeyError):
+        await svc.execute_tool("nope", {})

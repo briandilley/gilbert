@@ -21,8 +21,13 @@ from gilbert.core.subagents.types import get_agent_type, list_agent_types
 from gilbert.interfaces.ai import AIProvider
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.tools import (
+    ToolDefinition,
+    ToolParameter,
+    ToolParameterType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +60,7 @@ class SubagentService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="subagent",
-            capabilities=frozenset({"subagent"}),
+            capabilities=frozenset({"subagent", "ai_tools"}),
             requires=frozenset({"ai_chat"}),
             toggleable=True,
             toggle_description=(
@@ -122,6 +127,62 @@ class SubagentService(Service):
         self._preamble = str(config.get("preamble", _DEFAULT_PREAMBLE))
         for t in list_agent_types():
             self._type_prompts[t.id] = str(config.get(_prompt_key(t.id), t.system_prompt))
+
+    # --- ToolProvider ---
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "subagent"
+
+    def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
+        types = list_agent_types()
+        type_lines = "\n".join(f"- {t.id}: {t.description}" for t in types)
+        return [
+            ToolDefinition(
+                name="spawn_agent",
+                description=(
+                    "Launch a subagent to work on a focused task autonomously in "
+                    "a fresh context, then return its final report. The subagent "
+                    "cannot ask you or the user questions — give it a complete, "
+                    "self-contained task. Available agent types:\n" + type_lines
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="agent_type",
+                        type=ToolParameterType.STRING,
+                        description="Which agent type to launch.",
+                        enum=[t.id for t in types],
+                    ),
+                    ToolParameter(
+                        name="prompt",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "The complete task for the subagent. Include all "
+                            "context it needs; it has a fresh context and cannot "
+                            "ask follow-up questions."
+                        ),
+                    ),
+                ],
+                # interactive=True keeps spawn_agent out of headless subagent
+                # runs, so subagents can't spawn more subagents (no nesting).
+                interactive=True,
+                # Conservative for v1: no parallel fan-out of (expensive)
+                # sub-chats until a per-turn spawn/cost cap exists.
+                parallel_safe=False,
+            )
+        ]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name != "spawn_agent":
+            raise KeyError(f"Unknown tool: {name}")
+        agent_type = str(arguments.get("agent_type") or "")
+        prompt = str(arguments.get("prompt") or "")
+        if not agent_type or not prompt:
+            raise ValueError("spawn_agent requires 'agent_type' and 'prompt'")
+        # Inherit the caller's full identity for the subagent's RBAC.
+        return await self.spawn(agent_type, prompt, user_ctx=get_current_user())
 
     # --- engine ---
 
