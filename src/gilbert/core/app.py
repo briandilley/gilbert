@@ -195,7 +195,7 @@ class Gilbert:
 
         self.service_manager.register(OCRService())
 
-        # 6c-bis2. Subagent engine — lets the AI spawn ephemeral, headless
+        # 6c-sub. Subagent engine — lets the AI spawn ephemeral, headless
         # agents in a fresh context. Default-on, toggleable; requires the
         # ``ai_chat`` capability (AIService), which is registered above.
         from gilbert.core.services.subagent import SubagentService

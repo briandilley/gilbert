@@ -174,3 +174,24 @@ async def test_spawn_uses_configured_prompt_override() -> None:
     await svc.on_config_changed({"preamble": "PRE", "general_purpose_system_prompt": "GP-OVERRIDE"})
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["system_prompt"] == "PRE\n\nGP-OVERRIDE"
+
+
+@pytest.mark.asyncio
+async def test_spawn_refuses_when_disabled() -> None:
+    """An operator who disables the service stops new spawns immediately —
+    the engine is defensive even before the (later-slice) tool layer gates it."""
+    svc, fake = await _started()
+    await svc.on_config_changed({"enabled": False})
+    with pytest.raises(RuntimeError, match="disabled"):
+        await svc.spawn("general-purpose", "task")
+    assert fake.calls == []  # never reached the AI backend
+
+
+@pytest.mark.asyncio
+async def test_spawn_honors_explicitly_blanked_prompt() -> None:
+    """A deliberately empty prompt override is honored, not silently reverted
+    to the bundled default."""
+    svc, fake = await _started()
+    await svc.on_config_changed({"preamble": "", "general_purpose_system_prompt": ""})
+    await svc.spawn("general-purpose", "task")
+    assert fake.calls[0]["system_prompt"] == "\n\n"

@@ -115,11 +115,13 @@ class SubagentService(Service):
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
+        # Use ``get(key, default)`` (not ``or default``) so an operator who
+        # deliberately blanks a prompt gets the empty value, never a silent
+        # revert to the bundled constant (per the AI-prompt rule).
         self._enabled = bool(config.get("enabled", True))
-        self._preamble = str(config.get("preamble") or _DEFAULT_PREAMBLE)
+        self._preamble = str(config.get("preamble", _DEFAULT_PREAMBLE))
         for t in list_agent_types():
-            value = config.get(_prompt_key(t.id))
-            self._type_prompts[t.id] = str(value) if value else t.system_prompt
+            self._type_prompts[t.id] = str(config.get(_prompt_key(t.id), t.system_prompt))
 
     # --- engine ---
 
@@ -137,6 +139,8 @@ class SubagentService(Service):
         text. The subagent cannot ask the user anything (headless preamble; the
         spawn tool excludes interactive tools in a later slice).
         """
+        if not self._enabled:
+            raise RuntimeError("subagent service is disabled")
         if self._ai is None:
             raise RuntimeError("subagent service not started")
         agent = get_agent_type(agent_type)
