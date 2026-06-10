@@ -83,6 +83,10 @@ class SubagentService(Service, WsHandlerProvider):
         # Holds a strong reference to each task so the event loop can't
         # GC a long-running research mid-flight.
         self._runs: dict[str, _Run] = {}
+        # Strong refs to detached run tasks (the event loop only weak-refs them).
+        # The registry's _Run.task also holds one; this set is the GC backstop
+        # and covers the window before a run's _Run exists.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._notifications: Any = None
         self._preamble = _DEFAULT_PREAMBLE
         self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
@@ -373,8 +377,6 @@ class SubagentService(Service, WsHandlerProvider):
         task = asyncio.create_task(coro, context=contextvars.copy_context())
         # Keep a small backup set so tasks not yet tied to a _Run entry
         # (e.g. in tests that mock _run_in_background) still stay alive.
-        if not hasattr(self, "_background_tasks"):
-            self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
@@ -409,6 +411,9 @@ class SubagentService(Service, WsHandlerProvider):
             started_at=datetime.now(UTC).isoformat(),
         )
         self._register_run(run)
+        # Record this detached task on the run so the registry is a strong-ref
+        # holder too (the _background_tasks set is the primary GC anchor).
+        run.task = asyncio.current_task()
         try:
             report = await self.spawn(
                 "deep-research",
@@ -622,8 +627,11 @@ class SubagentService(Service, WsHandlerProvider):
                 {**routing, "subagent_id": subagent_id, "agent_type": agent.id, "reason": str(exc)},
             )
             raise
+        # A graceful stop returns normally with the partial — emit the distinct
+        # "stopped" terminal event so the UI can label it (both are terminal).
+        was_stopped = should_stop is not None and bool(should_stop())
         await self._publish_event(
-            "chat.stream.subagent_completed",
+            "chat.stream.subagent_stopped" if was_stopped else "chat.stream.subagent_completed",
             {**routing, "subagent_id": subagent_id, "agent_type": agent.id},
         )
         return result.response_text

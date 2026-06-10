@@ -1,7 +1,8 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationDetail } from "@/types/chat";
+import type { GilbertEvent } from "@/types/events";
 
 // Mock Dialog components — base-ui portals hang in jsdom; wrap children in divs
 vi.mock("@/components/ui/dialog", () => ({
@@ -25,10 +26,24 @@ vi.mock("@/hooks/useWsApi", () => ({
   useWsApi: () => stableApi,
 }));
 
-// Mock useEventBus to avoid WS dependency
+// Capture event-bus handlers so tests can fire events and assert scoping.
+const handlers = new Map<string, (e: GilbertEvent) => void>();
 vi.mock("@/hooks/useEventBus", () => ({
-  useEventBus: () => {},
+  useEventBus: (type: string, handler: (e: GilbertEvent) => void) => {
+    handlers.set(type, handler);
+  },
 }));
+
+function fireDelta(conversation_id: string, text: string) {
+  act(() => {
+    handlers.get("chat.stream.text_delta")?.({
+      event_type: "chat.stream.text_delta",
+      data: { conversation_id, text },
+      source: "ai",
+      timestamp: "",
+    });
+  });
+}
 
 // Mock MessageList with minimal output
 vi.mock("./MessageList", () => ({
@@ -72,5 +87,28 @@ describe("SubagentLiveViewer", () => {
     await waitFor(() =>
       expect(screen.getByText(/working on it/i)).toBeInTheDocument(),
     );
+  });
+
+  it("streams live text for the watched conversation and ignores others", async () => {
+    handlers.clear();
+    mockLoadConversation.mockResolvedValue({
+      conversation_id: "sub-1",
+      title: "Subagent",
+      turns: [],
+      ui_blocks: [],
+      updated_at: "",
+      shared: false,
+    } as ConversationDetail);
+
+    render(<SubagentLiveViewer open conversationId="sub-1" onClose={() => {}} />);
+    await waitFor(() => expect(handlers.has("chat.stream.text_delta")).toBe(true));
+
+    // An event for a DIFFERENT conversation must be ignored.
+    fireDelta("other-conv", "leak");
+    expect(screen.queryByText(/leak/)).not.toBeInTheDocument();
+
+    // An event for the watched conversation streams in (bootstraps a turn).
+    fireDelta("sub-1", "live tokens");
+    expect(screen.getByText(/live tokens/)).toBeInTheDocument();
   });
 });

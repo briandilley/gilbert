@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { useEventBus } from "@/hooks/useEventBus";
 import type { ActiveSubagent, GilbertEvent } from "@/types/events";
 
@@ -47,15 +47,12 @@ export function useActiveSubagents(activeConversationId: string | null): ActiveS
     [activeConversationId],
   );
 
-  // Memoize handlers so their references are stable across renders.
-  const onCompleted = useMemo(() => onTerminal, [onTerminal]);
-  const onFailed = useMemo(() => onTerminal, [onTerminal]);
-  const onStopped = useMemo(() => onTerminal, [onTerminal]);
-
+  // ``onTerminal`` is already a stable useCallback ref — reuse it directly for
+  // every terminal status (completed/failed/stopped all drop the run).
   useEventBus("chat.stream.subagent_started", onStarted);
-  useEventBus("chat.stream.subagent_completed", onCompleted);
-  useEventBus("chat.stream.subagent_failed", onFailed);
-  useEventBus("chat.stream.subagent_stopped", onStopped);
+  useEventBus("chat.stream.subagent_completed", onTerminal);
+  useEventBus("chat.stream.subagent_failed", onTerminal);
+  useEventBus("chat.stream.subagent_stopped", onTerminal);
 
   return Object.values(byId);
 }

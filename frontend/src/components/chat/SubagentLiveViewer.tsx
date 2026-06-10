@@ -54,7 +54,20 @@ export function SubagentLiveViewer({
       const text = String(d.text || "");
       if (!text) return;
       setTurns((prev) => {
-        if (prev.length === 0) return prev;
+        // Opened mid-stream with no persisted turn yet? Bootstrap a streaming
+        // turn so live text shows instead of being dropped.
+        if (prev.length === 0) {
+          return [
+            {
+              user_message: { content: "", attachments: [] },
+              rounds: [],
+              final_content: text,
+              final_attachments: [],
+              incomplete: false,
+              streaming: true,
+            } as ChatTurn,
+          ];
+        }
         const last = prev[prev.length - 1];
         return [
           ...prev.slice(0, -1),
