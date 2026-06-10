@@ -387,7 +387,10 @@ class SubagentService(Service, WsHandlerProvider):
     async def _ws_types_save(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         if not self._is_admin(conn):
             return self._forbidden(frame)
-        raw = frame.get("type")
+        # The DTO rides on ``subagent_type`` — NOT ``type``, which is the WS
+        # frame's message discriminator ("subagent.types.save") and would
+        # collide.
+        raw = frame.get("subagent_type")
         if not isinstance(raw, dict) or not raw.get("id") or not raw.get("name"):
             return {
                 "type": "gilbert.error",

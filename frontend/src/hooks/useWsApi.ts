@@ -1409,11 +1409,9 @@ export function useWsApi() {
       rpc<{ types: SubagentTypeDTO[]; all_tool_names: string[] }>({ type: "subagent.types.list" }),
 
     saveSubagentType: (dto: SubagentTypeDTO) =>
-      // The backend frame uses "type" for both the message discriminator and
-      // the DTO payload key. Build with Object.assign to avoid duplicate-key
-      // TS error while keeping the correct wire format.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      rpc<{ ok: boolean }>(Object.assign({}, { type: "subagent.types.save" }, { type: dto }) as any),
+      // The DTO rides on ``subagent_type`` — ``type`` is the frame's message
+      // discriminator and would collide.
+      rpc<{ ok: boolean }>({ type: "subagent.types.save", subagent_type: dto }),
 
     deleteSubagentType: (type_id: string) =>
       rpc<{ ok: boolean }>({ type: "subagent.types.delete", type_id }),

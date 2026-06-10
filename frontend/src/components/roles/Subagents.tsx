@@ -519,6 +519,12 @@ export function Subagents() {
               </div>
             )}
 
+            {saveMutation.isError && (
+              <p className="text-sm text-rose-400">
+                Couldn't save:{" "}
+                {(saveMutation.error as Error)?.message || "unknown error"}
+              </p>
+            )}
             <DialogFooter>
               <Button variant="outline" onClick={() => setEditing(null)}>
                 Cancel

@@ -1072,19 +1072,19 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     assert denied.get("code") == 403
     # Non-admin save rejected.
     res = await h["subagent.types.save"](
-        _User(), {"id": "2", "type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
+        _User(), {"id": "2", "subagent_type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
     )
     assert res.get("code") == 403
     # Admin save accepted.
     ok = await h["subagent.types.save"](
-        _Admin(), {"id": "3", "type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
+        _Admin(), {"id": "3", "subagent_type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
     )
     assert ok.get("ok") is True
     assert svc.get_type("x") is not None
     # Admin can't un-protect a built-in via save (built_in preserved).
     await h["subagent.types.save"](
         _Admin(),
-        {"id": "4", "type": {"id": "deep-research", "name": "DR", "description": "d",
+        {"id": "4", "subagent_type": {"id": "deep-research", "name": "DR", "description": "d",
                              "system_prompt": "p", "built_in": False}},
     )
     dr = svc.get_type("deep-research")
@@ -1092,7 +1092,7 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     # A new custom type can't forge protection: built_in is forced False.
     await h["subagent.types.save"](
         _Admin(),
-        {"id": "5", "type": {"id": "sneaky", "name": "S", "description": "d",
+        {"id": "5", "subagent_type": {"id": "sneaky", "name": "S", "description": "d",
                              "system_prompt": "p", "built_in": True}},
     )
     sneaky = svc.get_type("sneaky")
@@ -1100,7 +1100,7 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     # Bad id slugs are rejected.
     bad = await h["subagent.types.save"](
         _Admin(),
-        {"id": "6", "type": {"id": "Has Spaces", "name": "X", "system_prompt": "p"}},
+        {"id": "6", "subagent_type": {"id": "Has Spaces", "name": "X", "system_prompt": "p"}},
     )
     assert bad.get("code") == 400
     # Reset + delete handlers work for admin.
