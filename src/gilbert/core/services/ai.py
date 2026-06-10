@@ -7893,6 +7893,34 @@ class AIService(Service):
                 "owner_id": conv_owner,
             },
         )
+        # Cascade: subagent child conversations belong to this parent — delete
+        # them too (and fire ``destroyed`` so their workspace files get cleaned
+        # up like any other conversation).
+        children = await self._storage.query(
+            Query(
+                collection=_COLLECTION,
+                filters=[
+                    Filter(
+                        field="parent_conversation_id",
+                        op=FilterOp.EQ,
+                        value=conversation_id,
+                    )
+                ],
+            )
+        )
+        for child in children:
+            # Defensive: filter in Python too (not every backend applies the
+            # query filter) and read the id from ``_id`` or ``id``.
+            if child.get("parent_conversation_id") != conversation_id:
+                continue
+            child_id = child.get("_id") or child.get("id") or ""
+            if not child_id or child_id == conversation_id:
+                continue
+            await self._storage.delete(_COLLECTION, child_id)
+            await self._publish_event(
+                "chat.conversation.destroyed",
+                {"conversation_id": child_id, "owner_id": child.get("user_id", "")},
+            )
         return {"type": "chat.conversation.delete.result", "ref": frame.get("id"), "status": "ok"}
 
     async def _ws_room_create(

@@ -4141,3 +4141,36 @@ async def test_list_conversations_includes_subagent_children(
     assert subagent_rows, "subagent child must not be hidden from the list"
     child = subagent_rows[0]
     assert child["parent_conversation_id"] == "p"
+
+
+async def test_delete_conversation_cascades_to_subagent_children(
+    ai_service_with_storage: tuple[AIService, Any],
+) -> None:
+    """Deleting a parent conversation also deletes its subagent children,
+    leaving unrelated conversations untouched."""
+    svc, storage = ai_service_with_storage
+    await storage.put(
+        "ai_conversations", "p", {"id": "p", "user_id": "u1", "messages": []}
+    )
+    await storage.put(
+        "ai_conversations",
+        "child",
+        {
+            "id": "child", "user_id": "u1", "source": "subagent",
+            "parent_conversation_id": "p", "messages": [],
+        },
+    )
+    await storage.put(
+        "ai_conversations", "other", {"id": "other", "user_id": "u1", "messages": []}
+    )
+
+    class _Conn:
+        user_id = "u1"
+
+    res = await svc._ws_conversation_delete(
+        _Conn(), {"id": "r", "conversation_id": "p"}
+    )
+    assert res is not None and res.get("status") == "ok"
+    assert await storage.get("ai_conversations", "p") is None
+    assert await storage.get("ai_conversations", "child") is None  # cascaded
+    assert await storage.get("ai_conversations", "other") is not None  # untouched
