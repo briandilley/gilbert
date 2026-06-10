@@ -18,6 +18,8 @@ import asyncio
 import contextvars
 import logging
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from gilbert.core.subagents.types import get_agent_type, list_agent_types
@@ -39,6 +41,20 @@ from gilbert.interfaces.tools import (
 from gilbert.interfaces.workspace import WorkspaceProvider
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Run:
+    subagent_id: str
+    agent_type: str
+    query: str
+    conversation_id: str
+    parent_conversation_id: str | None
+    user_id: str
+    status: str  # running | completed | stopped | failed
+    started_at: str
+    stop_flag: list[bool] = field(default_factory=lambda: [False])
+    task: Any = None
 
 _DEFAULT_PREAMBLE = (
     "You are a subagent launched to complete a single task autonomously. You "
@@ -62,10 +78,11 @@ class SubagentService(Service):
         self._enabled = True
         self._ai: AIProvider | None = None
         self._workspace: WorkspaceProvider | None = None
-        # Strong references to detached background runs — without this the event
-        # loop only weak-refs the task and it can be GC'd mid-run (a multi-minute
-        # research would silently vanish). Discarded on completion.
-        self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Registry of active/recent background runs, keyed by subagent_id.
+        # Holds a strong reference to each task so the event loop can't
+        # GC a long-running research mid-flight.
+        self._runs: dict[str, _Run] = {}
+        self._notifications: Any = None
         self._preamble = _DEFAULT_PREAMBLE
         self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
         self._resolver: ServiceResolver | None = None
@@ -269,15 +286,47 @@ class SubagentService(Service):
             )
         raise KeyError(f"Unknown tool: {name}")
 
+    # --- run registry ---
+
+    _RUN_CAP = 20
+
+    def _register_run(self, run: _Run) -> None:
+        self._runs[run.subagent_id] = run
+        # Prune oldest finished runs beyond the cap.
+        if len(self._runs) > self._RUN_CAP:
+            finished = [r for r in self._runs.values() if r.status != "running"]
+            finished.sort(key=lambda r: r.started_at)
+            for r in finished[: len(self._runs) - self._RUN_CAP]:
+                self._runs.pop(r.subagent_id, None)
+
+    def list_runs(self, user_id: str) -> list[dict[str, Any]]:
+        """Recent/active runs for a user — backs the check_research tool + UI."""
+        return [
+            {
+                "subagent_id": r.subagent_id,
+                "agent_type": r.agent_type,
+                "query": r.query,
+                "conversation_id": r.conversation_id,
+                "status": r.status,
+                "started_at": r.started_at,
+            }
+            for r in self._runs.values()
+            if r.user_id == user_id
+        ]
+
     # --- background helpers ---
 
     def _run_in_background(self, coro: Any) -> None:
         """Detach a coroutine as a tracked task, preserving request context.
 
-        Holds a strong reference until the task finishes so the event loop's
+        Holds a strong reference in the run registry so the event loop's
         weak ref can't let a long run be garbage-collected mid-flight.
         """
         task = asyncio.create_task(coro, context=contextvars.copy_context())
+        # Keep a small backup set so tasks not yet tied to a _Run entry
+        # (e.g. in tests that mock _run_in_background) still stay alive.
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks: set[asyncio.Task[Any]] = set()
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
@@ -298,28 +347,53 @@ class SubagentService(Service):
         if parent_conversation_id:
             set_workspace_conversation_id(parent_conversation_id)
             set_current_conversation_id(parent_conversation_id)
+
+        subagent_id = uuid.uuid4().hex
+        sub_conv = uuid.uuid4().hex
+        run = _Run(
+            subagent_id=subagent_id,
+            agent_type="deep-research",
+            query=query,
+            conversation_id=sub_conv,
+            parent_conversation_id=parent_conversation_id,
+            user_id=user_ctx.user_id if user_ctx else "system",
+            status="running",
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        self._register_run(run)
         try:
-            report = await self.spawn("deep-research", query, user_ctx=user_ctx)
+            report = await self.spawn(
+                "deep-research",
+                query,
+                user_ctx=user_ctx,
+                conversation_id=sub_conv,
+                subagent_id=subagent_id,
+                should_stop=lambda: run.stop_flag[0],
+            )
+            run.status = "stopped" if run.stop_flag[0] else "completed"
             rel_path = await self._write_report(
                 parent_conversation_id,
                 user_ctx.user_id if user_ctx else "system",
                 report,
             )
+            stopped = run.stop_flag[0]
+            verb = "Research stopped early — here's what it found so far." if stopped else "**Research complete.**"
             if rel_path and parent_conversation_id:
                 url = f"/api/chat/download/{parent_conversation_id}/{rel_path}"
                 lead = report.strip().split("\n\n", 1)[0][:400]
-                message = f"**Research complete.** [Open the report]({url})\n\n{lead}"
+                message = f"{verb} [Open the report]({url})\n\n{lead}"
             else:
                 # No workspace — degrade to delivering the report inline.
-                message = f"**Research complete.**\n\n{report}"
+                message = f"{verb}\n\n{report}"
             await self._deliver(parent_conversation_id, message)
         except Exception as exc:  # noqa: BLE001 — deliver, don't crash
+            run.status = "failed"
             logger.exception("Deep research background run failed")
             await self._publish_event(
                 "chat.stream.subagent_failed",
                 {
                     "conversation_id": parent_conversation_id,
-                    "subagent_id": "",
+                    "subagent_id": subagent_id,
                     "agent_type": "deep-research",
                     "reason": str(exc),
                     "visible_to": [user_ctx.user_id] if user_ctx and user_ctx.user_id else None,
@@ -402,6 +476,10 @@ class SubagentService(Service):
         agent_type: str,
         prompt: str,
         user_ctx: UserContext | None = None,
+        *,
+        conversation_id: str | None = None,
+        subagent_id: str | None = None,
+        should_stop: Any = None,
     ) -> str:
         """Run one ephemeral subagent of ``agent_type`` on ``prompt``.
 
@@ -412,6 +490,11 @@ class SubagentService(Service):
         plus ``headless=True`` on the chat call exclude all interactive tools —
         including ``spawn_agent`` itself, so a subagent can't spawn more
         subagents (no nesting).
+
+        ``conversation_id`` is the pre-allocated conversation id for this
+        subagent run; if given, the subagent's messages are persisted under
+        that id (watchable from the UI). ``should_stop`` is an optional
+        callable ``() -> bool`` that the AI engine checks between rounds.
         """
         if not self._enabled:
             raise RuntimeError("subagent service is disabled")
@@ -424,16 +507,22 @@ class SubagentService(Service):
         type_prompt = self._type_prompts.get(agent.id, agent.system_prompt)
         system_prompt = f"{self._preamble}\n\n{type_prompt}"
 
-        subagent_id = uuid.uuid4().hex
+        subagent_id = subagent_id or uuid.uuid4().hex
         routing = self._event_routing()
         await self._publish_event(
             "chat.stream.subagent_started",
-            {**routing, "subagent_id": subagent_id, "agent_type": agent.id},
+            {
+                **routing,
+                "subagent_id": subagent_id,
+                "agent_type": agent.id,
+                "subagent_conversation_id": conversation_id,
+                "query": prompt,
+            },
         )
         try:
             result = await self._ai.chat(
                 user_message=prompt,
-                conversation_id=None,
+                conversation_id=conversation_id,   # pre-allocated (watchable) or None
                 user_ctx=user_ctx,
                 system_prompt=system_prompt,
                 ai_call=f"subagent.{agent.id}",
@@ -443,6 +532,7 @@ class SubagentService(Service):
                 # Tag the ephemeral subagent conversation so it's excluded from
                 # the user's chat list (it's persisted for debugging, not shown).
                 source="subagent",
+                should_stop_callback=should_stop,
             )
         except Exception as exc:
             await self._publish_event(

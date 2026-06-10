@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService
+from gilbert.core.services.subagent import _Run
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.context import _current_user
@@ -36,6 +37,7 @@ class _FakeAI:
         mid_round_interrupt: Any = None,
         headless: bool = False,
         source: str = "",
+        should_stop_callback: Any = None,
     ) -> ChatTurnResult:
         self.calls.append(
             {
@@ -600,3 +602,32 @@ async def test_deep_research_tool_returns_immediately_and_schedules() -> None:
     assert "research" in out.lower()  # an acknowledgement, not the report
     assert len(scheduled) == 1  # the run was scheduled in the background
     assert fake.calls == []  # the engine was NOT awaited inline
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_preallocated_conversation_and_registers_run(tmp_path: Any) -> None:
+    poster = _FakePoster(report="# R")
+    bus = _FakeBus()
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = _FakeWorkspace(tmp_path)  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(bus))  # type: ignore[assignment]
+    svc._enabled = True
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+
+    await svc._run_research_background("widgets?", "conv-parent", caller)
+
+    # A run was registered with the subagent's own pre-allocated conversation id.
+    runs = svc.list_runs("u1")
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["agent_type"] == "deep-research"
+    assert run["query"] == "widgets?"
+    assert run["conversation_id"]  # pre-allocated, non-empty
+    # spawn passed that id to chat (fresh conv, but a known id we can watch).
+    assert poster.calls[0]["conversation_id"] == run["conversation_id"]
+    # The started event carried the subagent conversation id + the query.
+    started = next(e for e in bus.events if e.event_type == "chat.stream.subagent_started")
+    assert started.data["conversation_id"] == "conv-parent"  # routing = parent
+    assert started.data["subagent_conversation_id"] == run["conversation_id"]
+    assert started.data["query"] == "widgets?"
