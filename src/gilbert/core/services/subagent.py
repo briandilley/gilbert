@@ -820,7 +820,7 @@ class SubagentService(Service, WsHandlerProvider):
             model=model_override or t.model,
             backend_override=backend_override or t.backend,
             temperature=t.temperature,
-            tool_filter=(t.tool_mode, list(t.tools)),
+            # Tool gating comes from the type's AI profile (no per-type filter).
             max_rounds=t.max_rounds,
             max_wall_clock_s=t.max_wall_clock_s,
             headless=True,

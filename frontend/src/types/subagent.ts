@@ -10,9 +10,6 @@ export interface SubagentTypeDTO {
   model: string;
   temperature: number | null;
   max_tokens: number | null;
-  /** "all" | "include" | "exclude" */
-  tool_mode: string;
-  tools: string[];
   max_rounds: number;
   max_wall_clock_s: number | null;
   /** "sync" | "background" */

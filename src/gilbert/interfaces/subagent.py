@@ -14,7 +14,7 @@ shared data used by multiple services belongs in ``interfaces/``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 
@@ -24,16 +24,16 @@ class SubagentType:
     name: str
     description: str
     system_prompt: str
-    # Model selection. ``ai_profile`` (an AI profile name) is the preferred,
-    # model-agnostic selector; when empty, the raw ``backend``/``model``/
-    # ``temperature`` fields apply. A per-call model override beats both.
+    # Model selection AND tool gating come from the referenced AI profile
+    # (an AIContextProfile owns ``tool_mode``/``tools`` + model). ``ai_profile``
+    # is the preferred, model-agnostic selector; when empty, the raw
+    # ``backend``/``model``/``temperature`` fields apply (with all tools, since
+    # there's no profile to gate them). A per-call model override beats both.
     ai_profile: str = ""
     backend: str = ""
     model: str = ""
     temperature: float | None = None
     max_tokens: int | None = None
-    tool_mode: str = "all"  # all | include | exclude
-    tools: list[str] = field(default_factory=list)
     max_rounds: int = 12
     max_wall_clock_s: float | None = 300.0
     execution_mode: str = "sync"  # sync | background

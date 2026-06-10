@@ -13,7 +13,6 @@ def test_subagent_type_has_self_contained_fields() -> None:
     t = SubagentType(id="x", name="X", description="d", system_prompt="p")
     # Defaults
     assert t.ai_profile == ""
-    assert t.tool_mode == "all"
     assert t.execution_mode == "sync"
     assert t.deliver_as == "inline"
     assert t.max_rounds == 12
@@ -42,7 +41,6 @@ def test_catalog_ships_expected_builtins_with_ids() -> None:
 def test_durable_default_is_neutral_disabled_profile() -> None:
     t = {x.id: x for x in builtin_seed_list()}["durable-default"]
     assert t.ai_profile == "standard"
-    assert t.tool_mode == "all"
     assert t.system_prompt == ""
     assert t.max_rounds == 50
     assert t.max_wall_clock_s is None
@@ -59,6 +57,18 @@ def test_deep_research_and_market_analyst_are_background_report() -> None:
     # A sync/inline one for contrast
     assert by_id["software-engineer"].execution_mode == "sync"
     assert by_id["software-engineer"].temperature == 0.1
+
+
+def test_builtin_types_reference_seeded_profiles() -> None:
+    # Tool gating lives on the profile now — every built-in type must point at
+    # an AI profile that actually ships, or behavior silently degrades to all
+    # tools / default model.
+    from gilbert.core.services.ai import _BUILTIN_PROFILES
+
+    profile_names = {p.name for p in _BUILTIN_PROFILES}
+    for t in builtin_seed_list():
+        assert t.ai_profile, f"{t.id} has no ai_profile"
+        assert t.ai_profile in profile_names, f"{t.id} -> missing profile {t.ai_profile}"
 
 
 def test_builtin_prompts_are_substantial() -> None:

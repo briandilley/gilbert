@@ -1204,6 +1204,63 @@ _BUILTIN_PROFILES = [
         tool_mode="include",
         tools=["web_search", "fetch_url", "write_workspace_file"],
     ),
+    # ── Subagent-type profiles ──────────────────────────────────────────
+    # One profile per built-in subagent type — the type references it by name
+    # for model selection AND tool gating (a subagent type no longer carries
+    # its own tool list). Admins retune a type's tools by editing its profile.
+    AIContextProfile(
+        name="general-purpose",
+        description="Backs the General Purpose subagent — all tools.",
+        tool_mode="all",
+    ),
+    AIContextProfile(
+        name="quick-answer",
+        description="Backs the Quick Answer subagent — fast web lookup.",
+        tool_mode="include",
+        tools=["web_search", "fetch_url"],
+    ),
+    AIContextProfile(
+        name="software-engineer",
+        description="Backs the Software Engineer subagent — code + web.",
+        tool_mode="include",
+        tools=["read_workspace_file", "write_workspace_file", "web_search", "fetch_url"],
+    ),
+    AIContextProfile(
+        name="code-reviewer",
+        description="Backs the Code Reviewer subagent — read + web.",
+        tool_mode="include",
+        tools=["read_workspace_file", "web_search", "fetch_url"],
+    ),
+    AIContextProfile(
+        name="qa-engineer",
+        description="Backs the QA Engineer subagent — read/write + web.",
+        tool_mode="include",
+        tools=["read_workspace_file", "web_search", "fetch_url", "write_workspace_file"],
+    ),
+    AIContextProfile(
+        name="product-manager",
+        description="Backs the Product Manager subagent — read/write + web.",
+        tool_mode="include",
+        tools=["read_workspace_file", "web_search", "fetch_url", "write_workspace_file"],
+    ),
+    AIContextProfile(
+        name="market-analyst",
+        description="Backs the Market Analyst subagent — web + report file.",
+        tool_mode="include",
+        tools=["web_search", "fetch_url", "write_workspace_file"],
+    ),
+    AIContextProfile(
+        name="fact-checker",
+        description="Backs the Fact Checker subagent — web lookup.",
+        tool_mode="include",
+        tools=["web_search", "fetch_url"],
+    ),
+    AIContextProfile(
+        name="summarizer",
+        description="Backs the Summarizer subagent — fetch only.",
+        tool_mode="include",
+        tools=["fetch_url"],
+    ),
 ]
 
 _UNDELETABLE_PROFILES = frozenset({"light", "standard", "advanced", "deep-research"})

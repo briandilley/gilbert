@@ -45,13 +45,11 @@ const builtInType: SubagentTypeDTO = {
   name: "Research Analyst",
   description: "Thorough research",
   system_prompt: "You are a research agent.",
-  ai_profile: "",
+  ai_profile: "deep-research",
   backend: "",
   model: "",
   temperature: 0.4,
   max_tokens: null,
-  tool_mode: "include",
-  tools: ["web_search", "fetch_url"],
   max_rounds: 40,
   max_wall_clock_s: 900,
   execution_mode: "background",
@@ -71,8 +69,6 @@ const customType: SubagentTypeDTO = {
   model: "",
   temperature: null,
   max_tokens: null,
-  tool_mode: "all",
-  tools: [],
   max_rounds: 12,
   max_wall_clock_s: 300,
   execution_mode: "sync",
@@ -234,16 +230,15 @@ describe("Subagents admin page", () => {
     );
   });
 
-  it("shows execution_mode and tool_mode badges on cards", async () => {
+  it("shows execution_mode and ai_profile badges on cards", async () => {
     renderSubagents();
     await waitFor(() =>
       expect(screen.getByText("Research Analyst")).toBeInTheDocument(),
     );
-    // The built-in type has execution_mode=background, tool_mode=include
+    // The built-in type has execution_mode=background, ai_profile=deep-research
     expect(screen.getByText("background")).toBeInTheDocument();
-    expect(screen.getByText("include")).toBeInTheDocument();
-    // The custom type has execution_mode=sync, tool_mode=all
+    expect(screen.getByText("deep-research")).toBeInTheDocument();
+    // The custom type has execution_mode=sync.
     expect(screen.getByText("sync")).toBeInTheDocument();
-    expect(screen.getByText("all")).toBeInTheDocument();
   });
 });

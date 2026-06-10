@@ -37,8 +37,6 @@ interface TypeForm {
   model: string;
   temperature: string; // stored as string for input, coerced on save
   max_tokens: string;
-  tool_mode: string;
-  tools: string[];
   max_rounds: string;
   max_wall_clock_s: string;
   execution_mode: string;
@@ -69,8 +67,6 @@ function formToDto(f: TypeForm): SubagentTypeDTO {
     model: f.model,
     temperature: f.temperature.trim() !== "" ? parseFloat(f.temperature) : null,
     max_tokens: f.max_tokens.trim() !== "" ? parseInt(f.max_tokens, 10) : null,
-    tool_mode: f.tool_mode,
-    tools: f.tools,
     max_rounds: parseInt(f.max_rounds, 10) || 12,
     max_wall_clock_s: f.max_wall_clock_s.trim() !== "" ? parseFloat(f.max_wall_clock_s) : null,
     execution_mode: f.execution_mode,
@@ -92,8 +88,6 @@ function emptyForm(): TypeForm {
     model: "",
     temperature: "",
     max_tokens: "",
-    tool_mode: "all",
-    tools: [],
     max_rounds: "12",
     max_wall_clock_s: "300",
     execution_mode: "sync",
@@ -123,7 +117,6 @@ export function Subagents() {
 
   const [editing, setEditing] = useState<TypeForm | null>(null);
   const [isNew, setIsNew] = useState(false);
-  const [toolFilter, setToolFilter] = useState("");
 
   const saveMutation = useMutation({
     mutationFn: (f: TypeForm) => api.saveSubagentType(formToDto(f)),
@@ -147,13 +140,11 @@ export function Subagents() {
 
   function openNew() {
     setIsNew(true);
-    setToolFilter("");
     setEditing(emptyForm());
   }
 
   function openEdit(t: SubagentTypeDTO) {
     setIsNew(false);
-    setToolFilter("");
     setEditing(dtoToForm(t));
   }
 
@@ -177,16 +168,14 @@ export function Subagents() {
             <Card key={t.id}>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm flex items-center gap-2">
+                  {t.icon && <span aria-hidden>{t.icon}</span>}
                   <span className="flex-1">{t.name}</span>
                   <Badge variant="secondary" className="text-xs">
                     {t.execution_mode}
                   </Badge>
-                  <Badge variant="secondary" className="text-xs">
-                    {t.tool_mode}
-                  </Badge>
-                  {(t.backend || t.model) && (
+                  {t.ai_profile && (
                     <Badge variant="outline" className="text-xs">
-                      {t.model || t.backend || "default"}
+                      {t.ai_profile}
                     </Badge>
                   )}
                   {!t.enabled && (
@@ -225,15 +214,6 @@ export function Subagents() {
               <CardContent className="space-y-2 text-sm">
                 {t.description && (
                   <p className="text-muted-foreground">{t.description}</p>
-                )}
-                {t.tools.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {t.tools.map((tool) => (
-                      <Badge key={tool} variant="outline" className="text-[10px]">
-                        {tool}
-                      </Badge>
-                    ))}
-                  </div>
                 )}
               </CardContent>
             </Card>
@@ -398,62 +378,17 @@ export function Subagents() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Tool mode</Label>
-                  <Select
-                    value={editing.tool_mode}
-                    onValueChange={(v) =>
-                      v && setEditing({ ...editing, tool_mode: v })
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All tools</SelectItem>
-                      <SelectItem value="include">Include list</SelectItem>
-                      <SelectItem value="exclude">Exclude list</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label className="text-xs">Icon</Label>
+                  <Input
+                    value={editing.icon}
+                    onChange={(e) => setEditing({ ...editing, icon: e.target.value })}
+                    placeholder="emoji or lucide icon name, e.g. 🔎 or search"
+                    className="h-8 text-sm"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Tools are determined by the selected AI profile.
+                  </p>
                 </div>
-
-                {editing.tool_mode !== "all" && data?.all_tool_names && (
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">
-                      Tools to {editing.tool_mode}
-                    </Label>
-                    <Input
-                      value={toolFilter}
-                      onChange={(e) => setToolFilter(e.target.value)}
-                      placeholder="Filter tools..."
-                      className="h-7 text-xs"
-                    />
-                    <div className="max-h-48 overflow-y-auto border rounded-md p-2 space-y-1">
-                      {data.all_tool_names
-                        .filter((tool) =>
-                          tool.toLowerCase().includes(toolFilter.toLowerCase()),
-                        )
-                        .map((tool) => (
-                          <label
-                            key={tool}
-                            className="flex items-center gap-2 text-sm cursor-pointer"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={editing.tools.includes(tool)}
-                              onChange={(e) => {
-                                const next = e.target.checked
-                                  ? [...editing.tools, tool]
-                                  : editing.tools.filter((x) => x !== tool);
-                                setEditing({ ...editing, tools: next });
-                              }}
-                              className="accent-primary"
-                            />
-                            {tool}
-                          </label>
-                        ))}
-                    </div>
-                  </div>
-                )}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">

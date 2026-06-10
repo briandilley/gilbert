@@ -244,8 +244,9 @@ async def test_spawn_drives_chat_with_fresh_context_and_type_config() -> None:
     # Budget + usage tag come from the type.
     assert call["ai_call"] == "subagent.general-purpose"
     assert call["max_tool_rounds"] == 30  # general-purpose budget from the catalog
-    # The type's tool gating + temperature flow through.
-    assert call["tool_filter"] == ("all", [])
+    # Tool gating now comes from the type's AI profile — no per-type filter.
+    assert call["tool_filter"] is None
+    assert call["ai_profile"] == "general-purpose"
     assert call["temperature"] == 0.4
     assert call["user_message"] == "Research widgets"
     # Tagged so its ephemeral conversation stays out of the user's chat list.
@@ -977,25 +978,27 @@ async def test_type_store_seeds_builtins_and_crud() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_uses_type_model_temperature_tools_and_override() -> None:
+async def test_spawn_uses_type_model_temperature_and_override() -> None:
     storage, _ = _inmemory_storage_service()
     svc = SubagentService()
     fake = _FakeAI("# Done\n\n" + "x" * 100)
     await svc.start(_resolver(ai_chat=fake, entity_storage=storage))
-    # Configure a custom sync type with a model + temperature + include tools.
+    # Configure a custom sync type with a model + temperature + profile.
     await svc.save_type(SubagentType(
         id="t1", name="T1", description="d", system_prompt="go",
         backend="ollama", model="llama3.3", temperature=0.2,
-        tool_mode="include", tools=["web_search"], max_rounds=7,
+        ai_profile="quick-answer", max_rounds=7,
     ))
     await svc.spawn("t1", "task")
     call = fake.calls[0]
     assert call["max_tool_rounds"] == 7
-    # Type model/backend/temperature/tools flow through to chat().
+    # Type model/backend/temperature/profile flow through to chat(); tool
+    # gating comes from the profile, so no per-type tool_filter is passed.
     assert call["model"] == "llama3.3"
     assert call["backend_override"] == "ollama"
     assert call["temperature"] == 0.2
-    assert call["tool_filter"] == ("include", ["web_search"])
+    assert call["ai_profile"] == "quick-answer"
+    assert call["tool_filter"] is None
     # A per-spawn override beats the type's model.
     await svc.spawn("t1", "task", model_override="qwen2.5")
     assert fake.calls[1]["model"] == "qwen2.5"
