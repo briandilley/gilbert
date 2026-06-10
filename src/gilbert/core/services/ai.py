@@ -4572,6 +4572,7 @@ class AIService(Service):
         self,
         conversation_id: str,
         content: str,
+        attachments: list[FileAttachment] | None = None,
     ) -> None:
         """Append a synthetic ASSISTANT message to a conversation.
 
@@ -4605,10 +4606,13 @@ class AIService(Service):
             )
             return
         messages_raw: list[dict[str, Any]] = existing.get("messages") or []
-        new_row = {
+        serialized_atts = _serialize_attachments_for_wire(attachments or [])
+        new_row: dict[str, Any] = {
             "role": MessageRole.ASSISTANT.value,
             "content": content,
         }
+        if serialized_atts:
+            new_row["attachments"] = serialized_atts
         messages_raw.append(new_row)
         existing["messages"] = messages_raw
         existing["updated_at"] = datetime.now(UTC).isoformat()
@@ -4641,7 +4645,7 @@ class AIService(Service):
                         "author_name": "Gilbert",
                         "content": content,
                         "user_message": "",
-                        "attachments": [],
+                        "attachments": serialized_atts,
                         "user_attachments": [],
                         "ui_blocks": [],
                         "mentioned_user_ids": [],

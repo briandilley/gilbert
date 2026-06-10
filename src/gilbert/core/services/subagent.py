@@ -123,6 +123,7 @@ class SubagentService(Service, WsHandlerProvider):
         self._enabled = True
         ws = resolver.get_capability("workspace")
         self._workspace = ws if isinstance(ws, WorkspaceProvider) else None
+        self._notifications = resolver.get_capability("notifications")
         logger.info("Subagent service started")
 
     # --- Configurable ---
@@ -425,14 +426,43 @@ class SubagentService(Service, WsHandlerProvider):
             )
             stopped = run.stop_flag[0]
             verb = "Research stopped early — here's what it found so far." if stopped else "**Research complete.**"
+            from gilbert.interfaces.attachments import FileAttachment
+            from gilbert.interfaces.notifications import NotificationProvider, NotificationUrgency
+
+            attachments: list[FileAttachment] = []
             if rel_path and parent_conversation_id:
+                attachments = [
+                    FileAttachment(
+                        kind="text",
+                        name=rel_path.split("/")[-1],
+                        media_type="text/markdown",
+                        workspace_skill="workspace",
+                        workspace_path=rel_path,
+                        workspace_conv=parent_conversation_id,
+                    )
+                ]
                 url = f"/api/chat/download/{parent_conversation_id}/{rel_path}"
                 lead = report.strip().split("\n\n", 1)[0][:400]
                 message = f"{verb} [Open the report]({url})\n\n{lead}"
             else:
                 # No workspace — degrade to delivering the report inline.
                 message = f"{verb}\n\n{report}"
-            await self._deliver(parent_conversation_id, message)
+            await self._deliver(parent_conversation_id, message, attachments)
+            if isinstance(self._notifications, NotificationProvider) and user_ctx:
+                try:
+                    await self._notifications.notify_user(
+                        user_id=user_ctx.user_id,
+                        message=f"Deep research {run.status}: {query}",
+                        urgency=NotificationUrgency.NORMAL,
+                        source="subagent",
+                        source_ref={
+                            "conversation_id": parent_conversation_id,
+                            "subagent_id": run.subagent_id,
+                            "report_path": rel_path or "",
+                        },
+                    )
+                except Exception:
+                    logger.exception("subagent notification failed")
         except Exception as exc:  # noqa: BLE001 — deliver, don't crash
             run.status = "failed"
             logger.exception("Deep research background run failed")
@@ -475,7 +505,12 @@ class SubagentService(Service, WsHandlerProvider):
         )
         return rel_path
 
-    async def _deliver(self, conversation_id: str | None, content: str) -> None:
+    async def _deliver(
+        self,
+        conversation_id: str | None,
+        content: str,
+        attachments: Any = None,
+    ) -> None:
         """Post the result into the parent conversation (best-effort).
 
         Swallows delivery errors: a failed post must not escape the detached
@@ -485,7 +520,7 @@ class SubagentService(Service, WsHandlerProvider):
         if not conversation_id or not isinstance(self._ai, ConversationMessagePoster):
             return
         try:
-            await self._ai.append_assistant_message(conversation_id, content)
+            await self._ai.append_assistant_message(conversation_id, content, attachments)
         except Exception:
             logger.exception("Failed to deliver research message to %s", conversation_id)
 

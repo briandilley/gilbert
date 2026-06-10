@@ -45,3 +45,10 @@ def test_deep_research_type_registered() -> None:
 def test_list_agent_types_includes_both_builtins() -> None:
     ids = {t.id for t in list_agent_types()}
     assert {"general-purpose", "deep-research"} <= ids
+
+
+def test_deep_research_prompt_mentions_credible_sources_and_evidence() -> None:
+    t = get_agent_type("deep-research")
+    p = t.system_prompt.lower()
+    assert "credible" in p
+    assert "evidence" in p or "preserv" in p  # the page-reading discipline

@@ -462,7 +462,7 @@ class _FakePoster:
 
     def __init__(self, report: str = "THE REPORT") -> None:
         self.calls: list[dict[str, Any]] = []
-        self.delivered: list[tuple[str, str]] = []
+        self.delivered: list[tuple[str, str, list[Any]]] = []
         self._report = report
 
     async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
@@ -476,8 +476,10 @@ class _FakePoster:
             rounds=[],
         )
 
-    async def append_assistant_message(self, conversation_id: str, content: str) -> None:
-        self.delivered.append((conversation_id, content))
+    async def append_assistant_message(
+        self, conversation_id: str, content: str, attachments: Any = None
+    ) -> None:
+        self.delivered.append((conversation_id, content, attachments or []))
 
 
 class _FakeWorkspace:
@@ -519,7 +521,7 @@ async def test_run_research_background_writes_report_and_delivers(tmp_path: Any)
     assert poster.calls[0]["user_ctx"] is caller
     # Delivered a message into the parent conversation with a download link.
     assert poster.delivered, "delivered a message"
-    conv, msg = poster.delivered[0]
+    conv, msg, _atts = poster.delivered[0]
     assert conv == "conv-parent"
     assert "/api/chat/download/conv-parent/outputs/research-" in msg
     # Lifecycle events fired.
@@ -546,7 +548,7 @@ async def test_run_research_background_delivers_failure(tmp_path: Any) -> None:
     await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
 
     assert poster.delivered, "delivered a failure message"
-    _, msg = poster.delivered[0]
+    _, msg, _atts = poster.delivered[0]
     assert "fail" in msg.lower() or "boom" in msg.lower()
     assert "chat.stream.subagent_failed" in [e.event_type for e in bus.events]
 
@@ -561,7 +563,7 @@ async def test_run_research_background_degrades_without_workspace() -> None:
     svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
     svc._enabled = True
     await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
-    _, msg = poster.delivered[0]
+    _, msg, _atts = poster.delivered[0]
     assert "Inline body." in msg  # the report itself, not a download link
     assert "/api/chat/download/" not in msg
 
@@ -683,7 +685,7 @@ async def test_stopped_run_delivers_partial(tmp_path: Any) -> None:
     # The fake triggers stop via the callback; status reflects it.
     # (Delivery happened; we just assert a message was delivered with the partial.)
     assert poster.delivered, "delivered the partial"
-    conv, msg = poster.delivered[0]
+    conv, msg, _atts = poster.delivered[0]
     assert conv == "conv-parent"
     assert "Partial findings" in msg or "/api/chat/download/" in msg
 
@@ -719,3 +721,33 @@ async def test_ws_stop_handler_stops_owned_run() -> None:
 def test_get_tools_includes_check_research() -> None:
     tools = SubagentService().get_tools()
     assert any(t.name == "check_research" for t in tools)
+
+
+@pytest.mark.asyncio
+async def test_completed_run_delivers_report_attachment_and_notifies(tmp_path: Any) -> None:
+    poster = _FakePoster(report="# Findings\n\nbody")
+    notifs: list[dict[str, Any]] = []
+
+    class _Notif:
+        async def notify_user(self, **kwargs: Any) -> Any:
+            notifs.append(kwargs)
+            return object()
+
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = _FakeWorkspace(tmp_path)  # type: ignore[assignment]
+    svc._notifications = _Notif()  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
+    svc._enabled = True
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+
+    await svc._run_research_background("widgets?", "conv-parent", caller)
+
+    conv, _msg, atts = poster.delivered[0]
+    assert conv == "conv-parent"
+    assert len(atts) == 1
+    att = atts[0]
+    assert att.media_type == "text/markdown"
+    assert att.workspace_path.startswith("outputs/research-")
+    assert att.workspace_conv == "conv-parent"
+    assert notifs and notifs[0]["user_id"] == "u1"

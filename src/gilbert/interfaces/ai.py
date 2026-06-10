@@ -680,4 +680,5 @@ class ConversationMessagePoster(Protocol):
         self,
         conversation_id: str,
         content: str,
+        attachments: list[FileAttachment] | None = None,
     ) -> None: ...

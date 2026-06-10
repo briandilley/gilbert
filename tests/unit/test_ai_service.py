@@ -4044,3 +4044,13 @@ def test_deep_research_profile_includes_workspace_write() -> None:
 
     p = next(x for x in _BUILTIN_PROFILES if x.name == "deep-research")
     assert "write_workspace_file" in p.tools
+
+
+def test_append_assistant_message_accepts_attachments_param() -> None:
+    import inspect
+
+    from gilbert.core.services.ai import AIService
+    from gilbert.interfaces.ai import ConversationMessagePoster
+
+    assert "attachments" in inspect.signature(AIService.append_assistant_message).parameters
+    assert "attachments" in inspect.signature(ConversationMessagePoster.append_assistant_message).parameters
