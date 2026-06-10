@@ -17,6 +17,8 @@ members = [
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-current-data-sync",
+    "gilbert-plugin-current-sales-assistant",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-discord-webhook",
@@ -29,6 +31,7 @@ members = [
     "gilbert-plugin-hk-webhook",
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-kokoro",
+    "gilbert-plugin-llmfit",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mentra",
     "gilbert-plugin-messaging",
@@ -1554,6 +1557,16 @@ requires-dist = [
 ]
 
 [[package]]
+name = "gilbert-plugin-current-data-sync"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-data-sync" }
+
+[[package]]
+name = "gilbert-plugin-current-sales-assistant"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-sales-assistant" }
+
+[[package]]
 name = "gilbert-plugin-deepgram"
 version = "1.0.0"
 source = { virtual = "std-plugins/deepgram" }
@@ -1656,6 +1669,11 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "torch", specifier = ">=2.4" },
 ]
+
+[[package]]
+name = "gilbert-plugin-llmfit"
+version = "1.0.0"
+source = { virtual = "std-plugins/llmfit" }
 
 [[package]]
 name = "gilbert-plugin-lutron-radiora"

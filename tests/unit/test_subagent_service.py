@@ -6,8 +6,7 @@ from typing import Any
 
 import pytest
 
-from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService
-from gilbert.core.services.subagent import _Run
+from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService, _Run
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.context import _current_user
@@ -681,7 +680,6 @@ async def test_stopped_run_delivers_partial(tmp_path: Any) -> None:
 
     # Pre-set a run whose stop flag is already requested, then run.
     await svc._run_research_background("q", "conv-parent", caller)
-    run = svc.list_runs("u1")[0]
     # The fake triggers stop via the callback; status reflects it.
     # (Delivery happened; we just assert a message was delivered with the partial.)
     assert poster.delivered, "delivered the partial"
