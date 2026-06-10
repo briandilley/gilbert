@@ -291,6 +291,28 @@ async def test_run_agent_now_creates_run_row(started_agent_service: Any) -> None
     assert runs[0].id == run.id
 
 
+async def test_durable_run_goes_through_engine_non_headless(
+    started_agent_service: Any,
+) -> None:
+    """Durable runs drive the shared engine non-headless with the agent's
+    profile, round budget, and run callbacks (so peer/delegate tools survive)."""
+    svc = started_agent_service
+    a = await svc.create_agent(owner_user_id="usr_1", name="x")
+    await svc.run_agent_now(a.id, user_message="hello")
+
+    kw = svc._ai.last_call_kwargs
+    # Non-headless: durable agents keep spawn/delegate/request_user_input.
+    assert kw["headless"] is False
+    # Model selection via the agent's profile.
+    assert kw["ai_profile"] == a.profile_id
+    # Run callbacks are wired through the engine.
+    assert kw["between_rounds_callback"] is not None
+    assert kw["mid_round_interrupt"] is not None
+    assert kw["should_stop_callback"] is not None
+    # No subagent tool_filter is forced (existing gating path preserved).
+    assert kw["tool_filter"] is None
+
+
 # ── Task 12 tests — ConfigParam defaults + on_config_changed ──────────
 
 

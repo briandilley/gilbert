@@ -37,6 +37,7 @@ _active_delegation_chain: ContextVar[list[str]] = ContextVar(
     "_active_delegation_chain", default=[],
 )
 
+from gilbert.core.agent_run import AgentRunEngine, RunSpec
 from gilbert.interfaces.agent import (
     Agent,
     AgentMemory,
@@ -1138,6 +1139,10 @@ class AgentService(Service):
         # AIProvider capability (bound in start())
         self._ai: AIProvider | None = None
 
+        # Shared single-agent execution engine (durable runs delegate the
+        # per-run chat shaping to it, as subagents do).
+        self._engine = AgentRunEngine()
+
         # AIToolDiscoveryProvider capability (bound in start())
         # — used by agents.tools.list_available to enumerate tools.
         self._tool_discovery: AIToolDiscoveryProvider | None = None
@@ -2222,18 +2227,33 @@ class AgentService(Service):
                         goal.war_room_conversation_id
                     )
             try:
-                result = await self._ai.chat(  # type: ignore[union-attr]
-                    user_message=user_msg,
-                    conversation_id=a.conversation_id or None,
-                    user_ctx=user_ctx,
+                # Durable runs delegate the per-run chat shaping to the shared
+                # engine (same primitive subagents use), but non-headless — so
+                # the agent keeps its peer/delegate/spawn tools — and without
+                # the subagent synthesis fallback. Everything genuinely durable
+                # (Run row, cost, inbox, delegation, ContextVars) stays here.
+                spec = RunSpec(
                     system_prompt=system_prompt,
-                    ai_call=_AI_CALL_NAME,
+                    user_message=user_msg,
                     ai_profile=a.profile_id,
+                    max_rounds=a.max_tool_rounds or None,
+                    headless=False,
+                    ai_call=_AI_CALL_NAME,
+                    agent_type=a.id,
                     between_rounds_callback=_between_rounds,
                     mid_round_interrupt=_interrupt_check,
                     should_stop_callback=_should_stop_check,
-                    max_tool_rounds=a.max_tool_rounds or None,
+                    synthesize_on_empty=False,
                 )
+                run_result = await self._engine.run(
+                    spec,
+                    ai=self._ai,  # type: ignore[arg-type]
+                    user_ctx=user_ctx,
+                    conversation_id=a.conversation_id or None,
+                    subagent_id=run.id,
+                )
+                result = run_result.chat_result
+                assert result is not None  # engine returns it on success
             finally:
                 _active_agent_id.reset(agent_token)
                 _active_delegation_chain.reset(chain_token)
