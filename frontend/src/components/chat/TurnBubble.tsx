@@ -33,12 +33,15 @@ interface TurnBubbleProps {
   turn: ChatTurn;
   isShared: boolean;
   currentUserId?: string;
+  /** Called when the user clicks a `.md` workspace-reference attachment. */
+  onOpenReport?: (conv: string, path: string) => void;
 }
 
 export function TurnBubble({
   turn,
   isShared,
   currentUserId,
+  onOpenReport,
 }: TurnBubbleProps) {
   const userAuthorId = turn.user_message.author_id || "";
   const userIsOwn =
@@ -115,7 +118,7 @@ export function TurnBubble({
             <ThinkingCard turn={turn} />
           )}
 
-          {hasFinal && <FinalAnswer turn={turn} />}
+          {hasFinal && <FinalAnswer turn={turn} onOpenReport={onOpenReport} />}
 
           {!hasFinal && turn.incomplete && !turn.interrupted && (
             <div className="mt-2 flex items-center gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
@@ -489,13 +492,32 @@ function CollapsibleSection({
 
 // ─── Final answer ─────────────────────────────────────────────────────
 
-function FinalAnswer({ turn }: { turn: ChatTurn }) {
+function FinalAnswer({
+  turn,
+  onOpenReport,
+}: {
+  turn: ChatTurn;
+  onOpenReport?: (conv: string, path: string) => void;
+}) {
   return (
     <div className="space-y-2 mt-2">
       {turn.final_attachments.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {turn.final_attachments.map((att, idx) => (
-            <AttachmentChip key={idx} attachment={att} index={idx} />
+            <AttachmentChip
+              key={idx}
+              attachment={att}
+              index={idx}
+              onOpen={
+                onOpenReport && att.media_type === "text/markdown" && att.workspace_path
+                  ? () =>
+                      onOpenReport(
+                        att.workspace_conv || "",
+                        att.workspace_path!,
+                      )
+                  : undefined
+              }
+            />
           ))}
         </div>
       )}

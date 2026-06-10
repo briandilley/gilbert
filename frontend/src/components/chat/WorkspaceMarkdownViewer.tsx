@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 
 /**
@@ -55,12 +56,14 @@ export function WorkspaceMarkdownViewer({
   path: string;
   onClose: () => void;
 }) {
+  const [rawContent, setRawContent] = useState<string>("");
   const [content, setContent] = useState<string>("");
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    setRawContent("");
     setContent("");
     setError("");
     const url = `/api/chat/download/${encodeURIComponent(conversationId)}/${path
@@ -70,10 +73,12 @@ export function WorkspaceMarkdownViewer({
     fetch(url, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((text) => {
-        if (!cancelled)
+        if (!cancelled) {
+          setRawContent(text);
           setContent(
             rewriteWorkspaceEmbeds(text, conversationId, `${conversationId}/${path}`),
           );
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(String(e));
@@ -92,7 +97,20 @@ export function WorkspaceMarkdownViewer({
         {error ? (
           <p className="text-sm text-rose-400">Couldn't load report: {error}</p>
         ) : (
-          <MarkdownContent content={content} />
+          <Tabs defaultValue="rendered">
+            <TabsList variant="line">
+              <TabsTrigger value="rendered">Rendered</TabsTrigger>
+              <TabsTrigger value="raw">Raw</TabsTrigger>
+            </TabsList>
+            <TabsContent value="rendered">
+              <MarkdownContent content={content} />
+            </TabsContent>
+            <TabsContent value="raw">
+              <pre className="text-xs whitespace-pre-wrap break-words">
+                <code>{rawContent}</code>
+              </pre>
+            </TabsContent>
+          </Tabs>
         )}
       </DialogContent>
     </Dialog>

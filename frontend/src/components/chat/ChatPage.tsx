@@ -1393,6 +1393,7 @@ export function ChatPage() {
             onBlockSubmit={handleBlockSubmit}
             onWatchSubagent={(subagentConvId) => setWatchConv(subagentConvId)}
             onStopSubagent={(subagentId) => api.stopSubagent(subagentId)}
+            onOpenReport={(conv, path) => setReportView({ conv, path })}
           />
         )}
 
