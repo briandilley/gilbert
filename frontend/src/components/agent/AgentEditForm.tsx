@@ -25,6 +25,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useAgentDefaults,
+  useAgentTypes,
   useCreateAgent,
   useUpdateAgent,
   uploadAgentAvatar,
@@ -103,6 +104,7 @@ interface FormState {
   dream_max_per_night: number;
   max_tool_rounds: number;
   profile_id: string;
+  agent_type_id: string;
   cost_cap_usd: string; // text — empty string => null
   tools_include: string[] | null;
   tools_exclude: string[] | null;
@@ -165,6 +167,7 @@ function emptyState(): FormState {
     dream_max_per_night: 0,
     max_tool_rounds: 50,
     profile_id: "",
+    agent_type_id: "durable-default",
     cost_cap_usd: "",
     tools_include: null,
     tools_exclude: null,
@@ -217,6 +220,7 @@ function stateFromAgent(agent: Agent): FormState {
     dream_max_per_night: agent.dream_max_per_night,
     max_tool_rounds: agent.max_tool_rounds,
     profile_id: agent.profile_id,
+    agent_type_id: agent.agent_type_id || "durable-default",
     cost_cap_usd:
       agent.cost_cap_usd === null || agent.cost_cap_usd === undefined
         ? ""
@@ -292,6 +296,9 @@ export function AgentEditForm(props: Props) {
     queryFn: () => api.listAiProfiles(),
     staleTime: 60_000,
   });
+
+  // Execution types for the agent_type_id picker.
+  const typesQuery = useAgentTypes();
 
   const initialAgent = props.mode === "edit" ? props.agent : null;
   const initialState = useMemo<FormState | null>(() => {
@@ -417,6 +424,7 @@ export function AgentEditForm(props: Props) {
       dream_max_per_night: state.dream_max_per_night,
       max_tool_rounds: state.max_tool_rounds,
       profile_id: state.profile_id,
+      agent_type_id: state.agent_type_id,
       cost_cap_usd:
         state.cost_cap_usd.trim() === "" ? null : Number(state.cost_cap_usd),
       tools_include: state.tools_include,
@@ -451,6 +459,7 @@ export function AgentEditForm(props: Props) {
       dream_max_per_night: state.dream_max_per_night,
       max_tool_rounds: state.max_tool_rounds,
       profile_id: state.profile_id,
+      agent_type_id: state.agent_type_id,
       cost_cap_usd:
         state.cost_cap_usd.trim() === "" ? null : Number(state.cost_cap_usd),
       tools_include: state.tools_include,
@@ -850,6 +859,29 @@ export function AgentEditForm(props: Props) {
           <CardTitle>Profile & cost</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="agent-type">Execution type</Label>
+            <Select
+              value={state.agent_type_id}
+              onValueChange={(v) => update("agent_type_id", v ?? "durable-default")}
+            >
+              <SelectTrigger id="agent-type">
+                <SelectValue placeholder="Select an execution type…" />
+              </SelectTrigger>
+              <SelectContent>
+                {(typesQuery.data ?? []).map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    {t.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Supplies model, tools, and budgets. The fields below override the
+              type per setting.
+            </p>
+          </div>
+
           <div className="space-y-1">
             <Label htmlFor="agent-profile">AI profile</Label>
             <Select

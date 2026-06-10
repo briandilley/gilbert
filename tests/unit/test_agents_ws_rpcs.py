@@ -55,6 +55,32 @@ async def test_ws_handler_responses_include_ref_and_type(
     assert "agents" in res  # original payload preserved
 
 
+async def test_ws_types_list_returns_catalog(started_agent_service: Any) -> None:
+    from gilbert.interfaces.subagent import SubagentType
+
+    svc = started_agent_service
+
+    class _Cat:
+        def list_types(self) -> list[Any]:
+            return [SubagentType(id="t1", name="T One", description="d", system_prompt="p")]
+
+        def get_type(self, tid: str) -> Any:
+            return None
+
+    svc._subagents = _Cat()
+    h = svc.get_ws_handlers()
+    res = await h["agents.types.list"](_FakeConn("usr_1"), {"id": "x"})
+    assert res["types"] == [{"id": "t1", "name": "T One", "description": "d"}]
+
+
+async def test_ws_types_list_empty_without_catalog(started_agent_service: Any) -> None:
+    svc = started_agent_service
+    assert svc._subagents is None
+    h = svc.get_ws_handlers()
+    res = await h["agents.types.list"](_FakeConn("usr_1"), {"id": "x"})
+    assert res["types"] == []
+
+
 # ── Task 2: agents.runs.list ─────────────────────────────────────────
 
 

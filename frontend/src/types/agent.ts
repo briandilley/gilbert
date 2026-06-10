@@ -51,8 +51,17 @@ export interface Agent {
   dream_probability: number;
   dream_max_per_night: number;
   max_tool_rounds: number;
+  /** SubagentType referenced for execution defaults; agent fields override. */
+  agent_type_id: string;
   created_at: string;
   updated_at: string;
+}
+
+/** A referenceable execution type, for the agent-edit form's picker. */
+export interface AgentTypeOption {
+  id: string;
+  name: string;
+  description: string;
 }
 
 export interface AgentMemory {
@@ -154,6 +163,7 @@ export interface AgentCreatePayload {
   dream_probability?: number;
   dream_max_per_night?: number;
   max_tool_rounds?: number;
+  agent_type_id?: string;
 }
 
 export type AgentUpdatePayload = Partial<AgentCreatePayload> & {

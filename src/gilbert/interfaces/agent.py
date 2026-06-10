@@ -110,6 +110,11 @@ class Agent:
                                     # this agent's runs.
     created_at: datetime
     updated_at: datetime
+    # SubagentType this agent references for execution defaults (model/tools/
+    # budgets/role-prompt). The agent's own fields override the type per
+    # field; ``durable-default`` is the neutral built-in seeded for every
+    # agent so behavior is unchanged until an admin picks a richer type.
+    agent_type_id: str = "durable-default"
 
 
 @dataclass

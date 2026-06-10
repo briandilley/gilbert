@@ -115,6 +115,13 @@ def _resolver(**caps: Any) -> Any:
     return _R()
 
 
+def test_subagent_service_satisfies_subagent_catalog() -> None:
+    # AgentService resolves the catalog via this protocol, not the concrete class.
+    from gilbert.interfaces.subagent import SubagentCatalog
+
+    assert isinstance(SubagentService(), SubagentCatalog)
+
+
 def test_fake_ai_satisfies_aiprovider() -> None:
     # runtime_checkable: presence of chat() is enough; guards the rest of the suite.
     assert isinstance(_FakeAI(), AIProvider)
@@ -342,6 +349,8 @@ def test_get_tools_exposes_spawn_agent_with_type_enum() -> None:
     assert spawn.required_role == "user"
     agent_type_param = next(p for p in spawn.parameters if p.name == "agent_type")
     assert "general-purpose" in (agent_type_param.enum or [])
+    # durable-default is a durable-agent execution profile, not spawnable.
+    assert "durable-default" not in (agent_type_param.enum or [])
     assert any(p.name == "prompt" for p in spawn.parameters)
 
 

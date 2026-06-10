@@ -30,6 +30,7 @@ import type {
   Agent,
   AgentCreatePayload,
   AgentDefaults,
+  AgentTypeOption,
   AgentMemory,
   AgentRun,
   AgentStatus,
@@ -144,6 +145,19 @@ export function useAvailableTools() {
         type: "agents.tools.list_available",
       }).then((r) => r.tools),
     enabled: connected,
+  });
+}
+
+export function useAgentTypes() {
+  const { rpc, connected } = useWebSocket();
+  return useQuery({
+    queryKey: ["agents", "types"],
+    queryFn: () =>
+      rpc<{ types: AgentTypeOption[] }>({
+        type: "agents.types.list",
+      }).then((r) => r.types),
+    enabled: connected,
+    staleTime: 60_000,
   });
 }
 

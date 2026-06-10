@@ -425,6 +425,25 @@ def builtin_seed_list() -> list[SubagentType]:
             max_rounds=4, max_wall_clock_s=120.0,
             execution_mode="sync", deliver_as="inline", built_in=True,
         ),
+        # Neutral execution profile for durable AgentService agents. Not a
+        # spawnable ephemeral subagent (``enabled=False`` keeps it out of the
+        # ``spawn_agent`` menu) — it exists so every durable agent references a
+        # type for execution defaults. Empty ``system_prompt`` and unlimited
+        # wall-clock keep migrated agents' behavior identical to before the
+        # type system; admins point an agent at a richer type to opt in.
+        SubagentType(
+            id="durable-default", name="Durable Agent (default)",
+            description=(
+                "Default execution profile for durable agents (not a spawnable "
+                "subagent). Supplies neutral model/tools/budgets that the "
+                "agent's own fields override."
+            ),
+            system_prompt="",
+            ai_profile="standard", tool_mode="all",
+            max_rounds=50, max_wall_clock_s=None,
+            execution_mode="sync", deliver_as="inline",
+            enabled=False, built_in=True,
+        ),
     ]
 
 

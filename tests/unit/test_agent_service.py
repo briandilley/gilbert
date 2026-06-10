@@ -313,6 +313,78 @@ async def test_durable_run_goes_through_engine_non_headless(
     assert kw["tool_filter"] is None
 
 
+class _FakeCatalog:
+    """Minimal SubagentCatalog for type-resolution tests."""
+
+    def __init__(self, t: Any) -> None:
+        self._t = t
+
+    def list_types(self) -> list[Any]:
+        return [self._t]
+
+    def get_type(self, tid: str) -> Any:
+        return self._t if tid == self._t.id else None
+
+
+async def test_durable_run_sources_defaults_from_referenced_type(
+    started_agent_service: Any,
+) -> None:
+    """An agent with no profile / round override inherits them from its type,
+    and the type's role prompt is prepended as a base layer."""
+    from gilbert.interfaces.subagent import SubagentType
+
+    svc = started_agent_service
+    t = SubagentType(
+        id="t1", name="T1", description="d", system_prompt="ROLE BASE",
+        ai_profile="fast", max_rounds=9, max_wall_clock_s=None,
+    )
+    svc._subagents = _FakeCatalog(t)
+    a = await svc.create_agent(
+        owner_user_id="u1", name="ag", agent_type_id="t1",
+        profile_id="", max_tool_rounds=0,
+    )
+    await svc.run_agent_now(a.id, user_message="hi")
+
+    kw = svc._ai.last_call_kwargs
+    assert kw["ai_profile"] == "fast"
+    assert kw["max_tool_rounds"] == 9
+    assert kw["system_prompt"].startswith("ROLE BASE")
+
+
+async def test_agent_fields_override_referenced_type(
+    started_agent_service: Any,
+) -> None:
+    """The agent's own profile / round budget beat the type's defaults."""
+    from gilbert.interfaces.subagent import SubagentType
+
+    svc = started_agent_service
+    t = SubagentType(
+        id="t1", name="T1", description="d", system_prompt="ROLE",
+        ai_profile="fast", max_rounds=9,
+    )
+    svc._subagents = _FakeCatalog(t)
+    a = await svc.create_agent(
+        owner_user_id="u1", name="ag", agent_type_id="t1",
+        profile_id="own", max_tool_rounds=20,
+    )
+    await svc.run_agent_now(a.id, user_message="hi")
+
+    kw = svc._ai.last_call_kwargs
+    assert kw["ai_profile"] == "own"
+    assert kw["max_tool_rounds"] == 20
+
+
+async def test_durable_run_falls_back_without_catalog(
+    started_agent_service: Any,
+) -> None:
+    """No subagent catalog → run uses the agent's own fields (legacy behavior)."""
+    svc = started_agent_service
+    assert svc._subagents is None  # fixture wires no subagent capability
+    a = await svc.create_agent(owner_user_id="u1", name="ag", profile_id="standard")
+    await svc.run_agent_now(a.id, user_message="hi")
+    assert svc._ai.last_call_kwargs["ai_profile"] == "standard"
+
+
 # ── Task 12 tests — ConfigParam defaults + on_config_changed ──────────
 
 

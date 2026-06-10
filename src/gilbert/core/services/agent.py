@@ -60,6 +60,7 @@ from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBusProvider
 from gilbert.interfaces.scheduler import Schedule, SchedulerProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.subagent import SubagentCatalog, SubagentType
 from gilbert.interfaces.storage import Filter, FilterOp, Query, StorageBackend, StorageProvider
 from gilbert.interfaces.tools import ToolDefinition, ToolParameter, ToolParameterType
 
@@ -810,6 +811,7 @@ def _agent_to_dict(a: Agent) -> dict[str, Any]:
         "dream_probability": a.dream_probability,
         "dream_max_per_night": a.dream_max_per_night,
         "max_tool_rounds": a.max_tool_rounds,
+        "agent_type_id": a.agent_type_id,
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -842,6 +844,7 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         dream_probability=float(row.get("dream_probability", 0.1)),
         dream_max_per_night=int(row.get("dream_max_per_night", 3)),
         max_tool_rounds=int(row.get("max_tool_rounds", 50)),
+        agent_type_id=row.get("agent_type_id") or "durable-default",
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -1147,6 +1150,10 @@ class AgentService(Service):
         # — used by agents.tools.list_available to enumerate tools.
         self._tool_discovery: AIToolDiscoveryProvider | None = None
 
+        # SubagentCatalog capability (bound in start(); optional). Durable
+        # agents reference a SubagentType for execution defaults.
+        self._subagents: SubagentCatalog | None = None
+
         # ServiceResolver reference for late-bound capability lookups
         self._resolver: ServiceResolver | None = None
 
@@ -1411,6 +1418,12 @@ class AgentService(Service):
             )
         self._scheduler = scheduler_svc
 
+        # Bind the subagent type catalog (optional — the subagent service may
+        # be disabled). Durable agents reference a SubagentType for execution
+        # defaults; when unavailable, runs fall back to the agent's own fields.
+        subagent_svc = resolver.get_capability("subagent")
+        self._subagents = subagent_svc if isinstance(subagent_svc, SubagentCatalog) else None
+
         # Task 5: index creation goes here.
         # Task 8: run rehydration goes here.
 
@@ -1524,6 +1537,7 @@ class AgentService(Service):
                 "max_tool_rounds",
                 int(defaults.get("default_max_tool_rounds", 50)),
             )),
+            agent_type_id=fields.get("agent_type_id") or "durable-default",
             created_at=now,
             updated_at=now,
         )
@@ -1572,6 +1586,7 @@ class AgentService(Service):
             "heartbeat_enabled", "heartbeat_interval_s",
             "heartbeat_checklist", "dream_enabled", "dream_quiet_hours",
             "dream_probability", "dream_max_per_night", "max_tool_rounds",
+            "agent_type_id",
             "status",
         }
         for k, v in patch.items():
@@ -2127,7 +2142,13 @@ class AgentService(Service):
         )
 
         try:
-            system_prompt = await self._build_system_prompt(a, triggered_by, trigger_context)
+            # Resolve the referenced execution type once — supplies model/
+            # budget defaults and a role-prompt base layer; the agent's own
+            # fields override per dimension.
+            agent_type = self._resolve_type(a)
+            system_prompt = await self._build_system_prompt(
+                a, triggered_by, trigger_context, agent_type
+            )
             user_msg = user_message or self._synthesize_trigger_message(triggered_by, trigger_context)
 
             # Drain inbox at round 0: append any pending signals onto
@@ -2232,11 +2253,18 @@ class AgentService(Service):
                 # the agent keeps its peer/delegate/spawn tools — and without
                 # the subagent synthesis fallback. Everything genuinely durable
                 # (Run row, cost, inbox, delegation, ContextVars) stays here.
+                # Type provides defaults; the agent's own fields override per
+                # dimension (profile, round budget). Wall-clock comes from the
+                # type (None on durable-default → unlimited, as before).
+                eff_profile = a.profile_id or (agent_type.ai_profile if agent_type else "")
+                eff_rounds = a.max_tool_rounds or (agent_type.max_rounds if agent_type else None)
+                eff_wall_clock = agent_type.max_wall_clock_s if agent_type else None
                 spec = RunSpec(
                     system_prompt=system_prompt,
                     user_message=user_msg,
-                    ai_profile=a.profile_id,
-                    max_rounds=a.max_tool_rounds or None,
+                    ai_profile=eff_profile,
+                    max_rounds=eff_rounds,
+                    max_wall_clock_s=eff_wall_clock,
                     headless=False,
                     ai_call=_AI_CALL_NAME,
                     agent_type=a.id,
@@ -2384,14 +2412,38 @@ class AgentService(Service):
             return keep
         return set(available)
 
+    def _resolve_type(self, a: Agent) -> SubagentType | None:
+        """The SubagentType this agent references for execution defaults.
+
+        ``None`` when the subagent catalog is unavailable (service disabled)
+        or the referenced type was deleted — callers fall back to the agent's
+        own fields, preserving pre-type-system behavior.
+        """
+        if self._subagents is None:
+            return None
+        try:
+            return self._subagents.get_type(a.agent_type_id)
+        except Exception:
+            logger.debug("subagent type lookup failed for %s", a.agent_type_id, exc_info=True)
+            return None
+
     async def _build_system_prompt(
         self,
         a: Agent,
         triggered_by: str,
         trigger_context: dict[str, Any],
+        agent_type: SubagentType | None = None,
     ) -> str:
-        """Assemble the full system prompt from persona, rules, and context blocks."""
+        """Assemble the full system prompt from persona, rules, and context blocks.
+
+        When the referenced ``agent_type`` carries a role ``system_prompt``, it
+        is prepended as a base layer beneath the agent's persona/rules.
+        ``durable-default`` ships an empty prompt, so migrated agents are
+        unaffected until pointed at a richer type.
+        """
         parts = [a.persona, a.system_prompt, a.procedural_rules]
+        if agent_type is not None and agent_type.system_prompt:
+            parts.insert(0, agent_type.system_prompt)
 
         if triggered_by == "heartbeat":
             due = await self._due_commitments(a.id)
@@ -4420,6 +4472,7 @@ class AgentService(Service):
             "agents.memories.list": self._ws_memories_list,
             "agents.memories.set_state": self._ws_memories_set_state,
             "agents.tools.list_available": self._ws_tools_list_available,
+            "agents.types.list": self._ws_types_list,
             # Phase 4 — goals
             "goals.create": self._ws_goals_create,
             "goals.list": self._ws_goals_list,
@@ -4687,6 +4740,20 @@ class AgentService(Service):
             })
         tools.sort(key=lambda t: t["name"])
         return {"tools": tools}
+
+    async def _ws_types_list(self, conn: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """Referenceable execution types for the agent-edit form's picker.
+
+        Returns ``{id, name, description}`` for every SubagentType in the
+        catalog (including ``durable-default``). Empty when the subagent
+        service is disabled — the form falls back to ``durable-default``.
+        """
+        self._caller_user_id(conn)  # authenticated callers only
+        types: list[dict[str, Any]] = []
+        if self._subagents is not None:
+            for t in self._subagents.list_types():
+                types.append({"id": t.id, "name": t.name, "description": t.description})
+        return {"types": types}
 
     # ── WS handlers — goals (Phase 4) ───────────────────────────────
 
