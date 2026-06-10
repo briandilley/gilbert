@@ -314,6 +314,17 @@ class SubagentService(Service):
             if r.user_id == user_id
         ]
 
+    def stop_subagent(self, subagent_id: str, requester_id: str) -> bool:
+        """Request a graceful stop of a running subagent. Returns True if the
+        stop was applied (the run exists, is running, and is owned by the
+        requester). No-op (False) for unknown/finished/foreign runs."""
+        run = self._runs.get(subagent_id)
+        if run is None or run.status != "running" or run.user_id != requester_id:
+            return False
+        run.stop_flag[0] = True
+        logger.info("Subagent %s stop requested by %s", subagent_id, requester_id)
+        return True
+
     # --- background helpers ---
 
     def _run_in_background(self, coro: Any) -> None:

@@ -631,3 +631,58 @@ async def test_spawn_uses_preallocated_conversation_and_registers_run(tmp_path: 
     assert started.data["conversation_id"] == "conv-parent"  # routing = parent
     assert started.data["subagent_conversation_id"] == run["conversation_id"]
     assert started.data["query"] == "widgets?"
+
+
+@pytest.mark.asyncio
+async def test_stop_subagent_sets_flag_and_checks_owner(tmp_path: Any) -> None:
+    svc = SubagentService()
+    svc._enabled = True
+    run = _Run(
+        subagent_id="s1", agent_type="deep-research", query="q",
+        conversation_id="c", parent_conversation_id="p", user_id="u1",
+        status="running", started_at="t",
+    )
+    svc._runs["s1"] = run
+
+    # Wrong user can't stop it.
+    assert svc.stop_subagent("s1", "intruder") is False
+    assert run.stop_flag[0] is False
+    # Owner can.
+    assert svc.stop_subagent("s1", "u1") is True
+    assert run.stop_flag[0] is True
+    # Unknown id is a harmless no-op.
+    assert svc.stop_subagent("nope", "u1") is False
+
+
+@pytest.mark.asyncio
+async def test_stopped_run_delivers_partial(tmp_path: Any) -> None:
+    # A poster whose chat returns once should_stop is requested.
+    class _StopAwarePoster(_FakePoster):
+        async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
+            cb = k.get("should_stop_callback")
+            # Simulate the engine seeing the stop and returning the partial.
+            if cb:
+                cb()
+            return ChatTurnResult(
+                response_text="# Partial findings", conversation_id=k.get("conversation_id") or "c",
+                ui_blocks=[], tool_usage=[], attachments=[], rounds=[],
+            )
+
+    poster = _StopAwarePoster()
+    bus = _FakeBus()
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = _FakeWorkspace(tmp_path)  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(bus))  # type: ignore[assignment]
+    svc._enabled = True
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+
+    # Pre-set a run whose stop flag is already requested, then run.
+    await svc._run_research_background("q", "conv-parent", caller)
+    run = svc.list_runs("u1")[0]
+    # The fake triggers stop via the callback; status reflects it.
+    # (Delivery happened; we just assert a message was delivered with the partial.)
+    assert poster.delivered, "delivered the partial"
+    conv, msg = poster.delivered[0]
+    assert conv == "conv-parent"
+    assert "Partial findings" in msg or "/api/chat/download/" in msg
