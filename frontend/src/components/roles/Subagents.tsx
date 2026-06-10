@@ -32,6 +32,7 @@ interface TypeForm {
   name: string;
   description: string;
   system_prompt: string;
+  ai_profile: string;
   backend: string;
   model: string;
   temperature: string; // stored as string for input, coerced on save
@@ -63,6 +64,7 @@ function formToDto(f: TypeForm): SubagentTypeDTO {
     name: f.name,
     description: f.description,
     system_prompt: f.system_prompt,
+    ai_profile: f.ai_profile,
     backend: f.backend,
     model: f.model,
     temperature: f.temperature.trim() !== "" ? parseFloat(f.temperature) : null,
@@ -85,6 +87,7 @@ function emptyForm(): TypeForm {
     name: "",
     description: "",
     system_prompt: "",
+    ai_profile: "",
     backend: "",
     model: "",
     temperature: "",
@@ -284,6 +287,33 @@ export function Subagents() {
                     rows={2}
                     placeholder="When to use this agent type..."
                   />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs">AI profile</Label>
+                  <Select
+                    value={editing.ai_profile || "__none__"}
+                    onValueChange={(v) => {
+                      if (!v) return;
+                      setEditing({ ...editing, ai_profile: v === "__none__" ? "" : v });
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None (use raw backend/model below)</SelectItem>
+                      {(data?.all_profiles ?? []).map((p) => (
+                        <SelectItem key={p} value={p}>
+                          {p}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">
+                    Preferred, model-agnostic selection. When set, the raw
+                    backend/model below act as a per-call override.
+                  </p>
                 </div>
 
                 <div className="space-y-1.5">

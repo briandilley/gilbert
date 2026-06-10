@@ -45,6 +45,7 @@ const builtInType: SubagentTypeDTO = {
   name: "Research Analyst",
   description: "Thorough research",
   system_prompt: "You are a research agent.",
+  ai_profile: "",
   backend: "",
   model: "",
   temperature: 0.4,
@@ -65,6 +66,7 @@ const customType: SubagentTypeDTO = {
   name: "My Agent",
   description: "Custom agent",
   system_prompt: "Do stuff.",
+  ai_profile: "",
   backend: "",
   model: "",
   temperature: null,
@@ -102,6 +104,7 @@ beforeEach(() => {
     Promise.resolve({
       types: [builtInType, customType],
       all_tool_names: ["web_search", "fetch_url", "write_workspace_file"],
+      all_profiles: ["standard", "fast"],
     });
   mockListModels = () =>
     Promise.resolve({ backends: [] });

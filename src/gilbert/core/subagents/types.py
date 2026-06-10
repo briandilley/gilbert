@@ -10,28 +10,12 @@ the dataclass and the editable built-in *seed* values (mirrors
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+# The ``SubagentType`` dataclass moved to ``interfaces/`` (shared data — both
+# SubagentService and AgentService use it). Re-exported here so existing
+# importers (and this module's built-in seed catalog) keep working unchanged.
+from gilbert.interfaces.subagent import SubagentType
 
-
-@dataclass
-class SubagentType:
-    id: str
-    name: str
-    description: str
-    system_prompt: str
-    backend: str = ""
-    model: str = ""
-    temperature: float | None = None
-    max_tokens: int | None = None
-    tool_mode: str = "all"  # all | include | exclude
-    tools: list[str] = field(default_factory=list)
-    max_rounds: int = 12
-    max_wall_clock_s: float | None = 300.0
-    execution_mode: str = "sync"  # sync | background
-    deliver_as: str = "inline"  # inline | report_file
-    enabled: bool = True
-    built_in: bool = False
-    icon: str = ""
+__all__ = ["SubagentType", "builtin_seed_list", "BUILTIN_SUBAGENT_TYPES"]
 
 
 # Prompts live verbatim in the catalog doc

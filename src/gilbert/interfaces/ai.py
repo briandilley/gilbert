@@ -605,6 +605,20 @@ class AIModelProvider(Protocol):
 
 
 @runtime_checkable
+class AIProfileLister(Protocol):
+    """Protocol for listing the defined AI profiles by name.
+
+    Used by ``ConfigurationService`` (dynamic ``ai_profiles`` choices) and by
+    ``SubagentService`` (the admin type form's profile dropdown) to read the
+    profile catalog without importing the concrete AI service.
+    """
+
+    def list_profiles(self) -> list[AIContextProfile]:
+        """Return all defined AI profiles."""
+        ...
+
+
+@runtime_checkable
 class PerModelConfigProvider(Protocol):
     """Protocol for reading/writing per-``(backend, model)`` config (ADR-0019).
 

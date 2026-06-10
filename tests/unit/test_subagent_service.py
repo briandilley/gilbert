@@ -246,6 +246,34 @@ async def test_spawn_drives_chat_with_fresh_context_and_type_config() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_passes_type_ai_profile_to_chat() -> None:
+    svc, fake = await _started()
+    await svc.save_type(
+        SubagentType(
+            id="general-purpose", name="GP", description="d",
+            system_prompt="p", ai_profile="fast",
+        )
+    )
+    await svc.spawn("general-purpose", "task")
+    assert fake.calls[0]["ai_profile"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_spawn_model_override_still_wins() -> None:
+    svc, fake = await _started()
+    await svc.save_type(
+        SubagentType(
+            id="general-purpose", name="GP", description="d",
+            system_prompt="p", ai_profile="fast", model="type-model",
+        )
+    )
+    await svc.spawn("general-purpose", "task", model_override="override-model")
+    assert fake.calls[0]["model"] == "override-model"
+    # Profile still flows; chat() layers the raw model above it.
+    assert fake.calls[0]["ai_profile"] == "fast"
+
+
+@pytest.mark.asyncio
 async def test_spawn_unknown_type_raises() -> None:
     svc, _ = await _started()
     with pytest.raises(ValueError, match="Unknown agent type"):
@@ -1040,6 +1068,28 @@ async def test_sync_type_returns_inline(tmp_path: Any) -> None:
     assert "Answer" in out  # returned inline, not an ack
 
 
+@pytest.mark.asyncio
+async def test_types_list_includes_ai_profiles_from_catalog() -> None:
+    class _Prof:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _ProfileAI(_FakeAI):
+        def list_profiles(self) -> list[Any]:
+            return [_Prof("standard"), _Prof("fast")]
+
+    svc = SubagentService()
+    await svc.start(_resolver(ai_chat=_ProfileAI()))
+    h = svc.get_ws_handlers()
+
+    class _Admin:
+        user_id = "a"
+        roles = ("admin",)
+
+    listed = await h["subagent.types.list"](_Admin(), {"id": "1"})
+    assert listed["all_profiles"] == ["standard", "fast"]
+
+
 # ── Admin CRUD WS RPCs ─────────────────────────────────────────────────────
 
 
@@ -1067,6 +1117,9 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     listed = await h["subagent.types.list"](_Admin(), {"id": "1"})
     assert any(t["id"] == "deep-research" for t in listed["types"])
     assert "all_tool_names" in listed
+    # Types carry the profile selector; the form gets the profile catalog.
+    assert "ai_profile" in listed["types"][0]
+    assert "all_profiles" in listed
     # Non-admin list rejected.
     denied = await h["subagent.types.list"](_User(), {"id": "1b"})
     assert denied.get("code") == 403

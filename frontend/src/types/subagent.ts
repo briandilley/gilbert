@@ -4,6 +4,8 @@ export interface SubagentTypeDTO {
   name: string;
   description: string;
   system_prompt: string;
+  /** AI profile name for model-agnostic selection; "" = use raw backend/model. */
+  ai_profile: string;
   backend: string;
   model: string;
   temperature: number | null;

@@ -375,6 +375,22 @@ class SubagentService(Service, WsHandlerProvider):
                         names.add(t.name)
         return sorted(names)
 
+    def _all_profile_names(self) -> list[str]:
+        """Every defined AI profile name — backs the admin form's profile
+        dropdown (a type names a profile for model-agnostic model selection)."""
+        from gilbert.interfaces.ai import AIProfileLister
+
+        if self._resolver is None:
+            return []
+        svc = self._resolver.get_capability("ai_chat")
+        if not isinstance(svc, AIProfileLister):
+            return []
+        try:
+            return [p.name for p in svc.list_profiles()]
+        except Exception:
+            logger.debug("ai profile listing failed", exc_info=True)
+            return []
+
     async def _ws_types_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         if not self._is_admin(conn):
             return self._forbidden(frame)
@@ -383,6 +399,7 @@ class SubagentService(Service, WsHandlerProvider):
             "ref": frame.get("id"),
             "types": [self._type_to_dict(t) for t in self.list_types()],
             "all_tool_names": self._all_tool_names(),
+            "all_profiles": self._all_profile_names(),
         }
 
     async def _ws_types_save(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
@@ -799,6 +816,7 @@ class SubagentService(Service, WsHandlerProvider):
         spec = RunSpec(
             system_prompt=f"{self._preamble}\n\n{t.system_prompt}",
             user_message=prompt,
+            ai_profile=t.ai_profile,
             model=model_override or t.model,
             backend_override=backend_override or t.backend,
             temperature=t.temperature,

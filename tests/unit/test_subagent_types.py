@@ -12,12 +12,20 @@ from gilbert.core.subagents.types import (
 def test_subagent_type_has_self_contained_fields() -> None:
     t = SubagentType(id="x", name="X", description="d", system_prompt="p")
     # Defaults
+    assert t.ai_profile == ""
     assert t.tool_mode == "all"
     assert t.execution_mode == "sync"
     assert t.deliver_as == "inline"
     assert t.max_rounds == 12
     assert t.enabled is True
     assert t.built_in is False
+
+
+def test_subagent_type_is_shared_interface_type() -> None:
+    # The dataclass lives in interfaces/ (shared data); core re-exports it.
+    from gilbert.interfaces.subagent import SubagentType as IfaceType
+
+    assert SubagentType is IfaceType
 
 
 def test_catalog_ships_ten_builtins_with_expected_ids() -> None:

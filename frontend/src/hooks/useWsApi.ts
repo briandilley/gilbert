@@ -1406,7 +1406,9 @@ export function useWsApi() {
     // ── Subagent type admin CRUD (admin-only) ─────────────────────
 
     listSubagentTypes: () =>
-      rpc<{ types: SubagentTypeDTO[]; all_tool_names: string[] }>({ type: "subagent.types.list" }),
+      rpc<{ types: SubagentTypeDTO[]; all_tool_names: string[]; all_profiles: string[] }>({
+        type: "subagent.types.list",
+      }),
 
     saveSubagentType: (dto: SubagentTypeDTO) =>
       // The DTO rides on ``subagent_type`` — ``type`` is the frame's message
