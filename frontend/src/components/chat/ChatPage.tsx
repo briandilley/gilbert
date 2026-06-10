@@ -27,6 +27,7 @@ import {
 import { MemberPanelContent } from "./MemberPanel";
 import { WorkspacePanelContent } from "./WorkspacePanel";
 import { WorkspaceMarkdownViewer } from "@/components/chat/WorkspaceMarkdownViewer";
+import { SubagentLiveViewer } from "@/components/chat/SubagentLiveViewer";
 import { InviteModal } from "./InviteModal";
 import { SkillsModal } from "./SkillsModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -96,6 +97,7 @@ export function ChatPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [reportView, setReportView] = useState<{ conv: string; path: string } | null>(null);
+  const [watchConv, setWatchConv] = useState<string | null>(null);
   const [allUsers, setAllUsers] = useState<{ user_id: string; display_name: string }[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [pendingInvites, setPendingInvites] = useState<{ user_id: string; display_name: string }[]>([]);
@@ -1389,6 +1391,8 @@ export function ChatPage() {
             conversationId={activeConvId ?? undefined}
             subagents={activeSubagents}
             onBlockSubmit={handleBlockSubmit}
+            onWatchSubagent={(subagentConvId) => setWatchConv(subagentConvId)}
+            onStopSubagent={(subagentId) => api.stopSubagent(subagentId)}
           />
         )}
 
@@ -1542,6 +1546,14 @@ export function ChatPage() {
           conversationId={reportView.conv}
           path={reportView.path}
           onClose={() => setReportView(null)}
+        />
+      )}
+
+      {watchConv && (
+        <SubagentLiveViewer
+          open
+          conversationId={watchConv}
+          onClose={() => setWatchConv(null)}
         />
       )}
 

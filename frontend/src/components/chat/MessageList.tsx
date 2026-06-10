@@ -19,6 +19,10 @@ interface MessageListProps {
    *  live at the bottom of the stream, just above the scroll anchor. */
   subagents?: ActiveSubagent[];
   onBlockSubmit: (blockId: string, values: Record<string, unknown>) => void;
+  /** Called when the user clicks Watch on a subagent card. */
+  onWatchSubagent?: (subagentConvId: string) => void;
+  /** Called when the user clicks Stop on a subagent card. */
+  onStopSubagent?: (subagentId: string) => void;
 }
 
 // How close to the bottom (in CSS pixels) we consider the user
@@ -35,6 +39,8 @@ export function MessageList({
   conversationId,
   subagents,
   onBlockSubmit,
+  onWatchSubagent,
+  onStopSubagent,
 }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
@@ -154,7 +160,18 @@ export function MessageList({
           // cards align with the conversation column instead of the viewport.
           <div className="relative max-w-3xl mx-auto pl-4 space-y-1">
             {subagents.map((sa) => (
-              <SubagentCard key={sa.subagent_id} subagent={sa} />
+              <SubagentCard
+                key={sa.subagent_id}
+                subagent={sa}
+                onWatch={
+                  sa.conversationId && onWatchSubagent
+                    ? () => onWatchSubagent(sa.conversationId!)
+                    : undefined
+                }
+                onStop={
+                  onStopSubagent ? () => onStopSubagent(sa.subagent_id) : undefined
+                }
+              />
             ))}
           </div>
         )}

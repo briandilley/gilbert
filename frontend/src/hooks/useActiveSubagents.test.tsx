@@ -30,6 +30,8 @@ describe("useActiveSubagents", () => {
       conversation_id: "conv-1",
       subagent_id: "a1",
       agent_type: "general-purpose",
+      subagent_conversation_id: "sub-conv-1",
+      query: "what is X?",
     });
     fire("chat.stream.subagent_started", {
       conversation_id: "other",
@@ -42,10 +44,12 @@ describe("useActiveSubagents", () => {
       subagent_id: "a1",
       agent_type: "general-purpose",
       status: "running",
+      conversationId: "sub-conv-1",
+      query: "what is X?",
     });
   });
 
-  it("marks a subagent completed", () => {
+  it("removes a subagent when completed (card disappears, delivered message takes over)", () => {
     const { result } = renderHook(() => useActiveSubagents("conv-1"));
     fire("chat.stream.subagent_started", {
       conversation_id: "conv-1",
@@ -57,10 +61,25 @@ describe("useActiveSubagents", () => {
       subagent_id: "a1",
       agent_type: "general-purpose",
     });
-    expect(result.current[0].status).toBe("completed");
+    // Terminal event removes the run — card disappears, message stands in.
+    expect(result.current).toHaveLength(0);
   });
 
-  it("marks a subagent failed with a reason", () => {
+  it("removes a subagent when stopped", () => {
+    const { result } = renderHook(() => useActiveSubagents("conv-1"));
+    fire("chat.stream.subagent_started", {
+      conversation_id: "conv-1",
+      subagent_id: "a1",
+      agent_type: "general-purpose",
+    });
+    fire("chat.stream.subagent_stopped", {
+      conversation_id: "conv-1",
+      subagent_id: "a1",
+    });
+    expect(result.current).toHaveLength(0);
+  });
+
+  it("removes a subagent when failed", () => {
     const { result } = renderHook(() => useActiveSubagents("conv-1"));
     fire("chat.stream.subagent_started", {
       conversation_id: "conv-1",
@@ -73,7 +92,6 @@ describe("useActiveSubagents", () => {
       agent_type: "general-purpose",
       reason: "boom",
     });
-    expect(result.current[0].status).toBe("failed");
-    expect(result.current[0].reason).toBe("boom");
+    expect(result.current).toHaveLength(0);
   });
 });

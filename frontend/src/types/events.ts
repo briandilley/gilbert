@@ -44,7 +44,7 @@ export interface GilbertEvent {
 }
 
 /** Lifecycle status of a subagent spawned within a chat turn. */
-export type SubagentStatus = "running" | "completed" | "failed";
+export type SubagentStatus = "running" | "completed" | "failed" | "stopped";
 
 /** Data payload shared by the chat.stream.subagent_* events. */
 export interface SubagentEventData {
@@ -60,4 +60,8 @@ export interface ActiveSubagent {
   agent_type: string;
   status: SubagentStatus;
   reason?: string;
+  /** Pre-allocated conversation id for the subagent (watchable). */
+  conversationId?: string;
+  /** The research query/task. */
+  query?: string;
 }

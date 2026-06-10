@@ -1392,6 +1392,11 @@ export function useWsApi() {
         notification_id: notificationId,
       }),
 
+    // ── Subagent ──────────────────────────────────────────────────
+
+    stopSubagent: (subagentId: string) =>
+      rpc<{ ok: boolean }>({ type: "subagent.stop", subagent_id: subagentId }),
+
     // ── Plugin UI extensions ──────────────────────────────────────
 
     listUIPanels: (slot?: string) =>
