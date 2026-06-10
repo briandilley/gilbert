@@ -2311,6 +2311,8 @@ class AIService(Service):
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        temperature: float | None = None,
+        tool_filter: tuple[str, list[str]] | None = None,
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
         mid_round_interrupt: Callable[[], bool] | None = None,
@@ -2467,9 +2469,10 @@ class AIService(Service):
         resolved_backend_name = resolved_backend.backend_name
 
         # Layered generation params (backend ← per-model ← profile ← call).
-        # The public ``chat`` entry point carries no per-call temperature /
-        # max_tokens override, so the call layer is unset here; the profile
-        # and per-model layers still apply. Resolved once and reused for
+        # ``temperature`` is the per-call override (top layer) — set by
+        # autonomous-agent runs whose subagent type carries its own
+        # temperature without a backing profile; ``None`` falls through to the
+        # profile / per-model / backend default. Resolved once and reused for
         # every round's request below.
         _per_model_cfg = await self.get_model_config(
             self._backend_key(resolved_backend), resolved_model
@@ -2481,13 +2484,14 @@ class AIService(Service):
         ) = self._resolve_generation_params(
             _per_model_cfg,
             profile,
-            call_temperature=None,
+            call_temperature=temperature,
             call_max_tokens=None,
         )
 
-        # Discover and filter tools based on profile
+        # Discover and filter tools based on profile, then any explicit
+        # ``tool_filter`` (callers without a backing profile, e.g. subagents).
         tools_by_name = self._discover_tools(
-            user_ctx=user_ctx, profile=profile, headless=headless
+            user_ctx=user_ctx, profile=profile, headless=headless, tool_filter=tool_filter
         )
 
         tool_defs = [defn for _, defn in tools_by_name.values()]
@@ -3622,6 +3626,7 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         profile: AIContextProfile | None = None,
         headless: bool = False,
+        tool_filter: tuple[str, list[str]] | None = None,
     ) -> dict[str, tuple[ToolProvider, ToolDefinition]]:
         """Find all started services that implement ToolProvider and collect their tools.
 
@@ -3629,6 +3634,11 @@ class AIService(Service):
         - ``all``: all tools (RBAC still applies)
         - ``include``: only tools named in ``profile.tools``
         - ``exclude``: all tools except those named in ``profile.tools``
+
+        ``tool_filter`` is an optional ``(mode, names)`` pair that gates the set
+        the same way a profile would, for callers that drive a run without a
+        backing profile (subagent types). It applies *after* the profile filter
+        (both narrow), so a profile + tool_filter compose to an intersection.
 
         If the profile defines ``tool_roles``, those override each tool's
         ``required_role`` for RBAC checks within this call.
@@ -3670,6 +3680,21 @@ class AIService(Service):
                 }
             elif profile.tool_mode == "exclude":
                 exclude_set = set(profile.tools)
+                tools_by_name = {
+                    name: v for name, v in tools_by_name.items() if name not in exclude_set
+                }
+            # "all" = no filtering
+
+        # Apply explicit tool_filter (callers without a backing profile).
+        if tool_filter is not None:
+            filter_mode, filter_names = tool_filter
+            if filter_mode == "include":
+                include_set = set(filter_names)
+                tools_by_name = {
+                    name: v for name, v in tools_by_name.items() if name in include_set
+                }
+            elif filter_mode == "exclude":
+                exclude_set = set(filter_names)
                 tools_by_name = {
                     name: v for name, v in tools_by_name.items() if name not in exclude_set
                 }

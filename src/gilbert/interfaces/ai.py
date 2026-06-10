@@ -518,6 +518,8 @@ class AIProvider(Protocol):
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        temperature: float | None = None,
+        tool_filter: tuple[str, list[str]] | None = None,
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
         mid_round_interrupt: Any = None,
@@ -528,6 +530,18 @@ class AIProvider(Protocol):
         conversation_title: str = "",
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
+
+        ``temperature`` is an optional per-call generation override. It sits
+        at the top of the layered resolution (*backend ← per-model ← profile ←
+        call*), so a concrete value here beats the profile/per-model default;
+        ``None`` falls through. Used by autonomous-agent runs (subagents) whose
+        type carries its own temperature without a backing AI profile.
+
+        ``tool_filter`` is an optional ``(mode, names)`` pair — ``mode`` is
+        ``"all" | "include" | "exclude"`` — that gates the discoverable tool set
+        the same way an AI profile's ``tool_mode``/``tools`` does, for callers
+        that drive a run without a backing profile (subagent types). It applies
+        on top of (after) any profile filter and RBAC.
 
         ``backend_override`` forces a specific backend name (e.g.
         ``"anthropic"``); empty string means "resolve from profile or
