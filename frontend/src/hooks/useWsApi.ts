@@ -19,6 +19,7 @@ import type {
   ModelConfigInput,
 } from "@/types/chat";
 import type { Role, ToolPermission, AIProfile, UserRoleAssignment, CollectionACL } from "@/types/roles";
+import type { SubagentTypeDTO } from "@/types/subagent";
 import type { DocumentNode, SearchResult } from "@/types/documents";
 import type { DashboardResponse } from "@/types/dashboard";
 import type { ServiceInfo } from "@/types/system";
@@ -1401,6 +1402,24 @@ export function useWsApi() {
       rpc<{ runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }>(
         { type: "subagent.list", conversation_id: conversationId },
       ),
+
+    // ── Subagent type admin CRUD (admin-only) ─────────────────────
+
+    listSubagentTypes: () =>
+      rpc<{ types: SubagentTypeDTO[]; all_tool_names: string[] }>({ type: "subagent.types.list" }),
+
+    saveSubagentType: (dto: SubagentTypeDTO) =>
+      // The backend frame uses "type" for both the message discriminator and
+      // the DTO payload key. Build with Object.assign to avoid duplicate-key
+      // TS error while keeping the correct wire format.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rpc<{ ok: boolean }>(Object.assign({}, { type: "subagent.types.save" }, { type: dto }) as any),
+
+    deleteSubagentType: (type_id: string) =>
+      rpc<{ ok: boolean }>({ type: "subagent.types.delete", type_id }),
+
+    resetSubagentType: (type_id: string) =>
+      rpc<{ ok: boolean }>({ type: "subagent.types.reset", type_id }),
 
     // ── Plugin UI extensions ──────────────────────────────────────
 

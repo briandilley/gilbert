@@ -13,6 +13,7 @@ import { UserRoles } from "./UserRoles";
 import { CollectionACLs } from "./CollectionACLs";
 import { EventVisibility } from "./EventVisibility";
 import { RpcPermissions } from "./RpcPermissions";
+import { Subagents } from "./Subagents";
 
 export function RolesPage() {
   return (
@@ -22,6 +23,7 @@ export function RolesPage() {
       <Route path="roles" element={<RolesList />} />
       <Route path="tools" element={<ToolPermissions />} />
       <Route path="profiles" element={<AIProfiles />} />
+      <Route path="subagents" element={<Subagents />} />
       <Route path="model-config" element={<ModelConfigEditor />} />
       <Route path="collections" element={<CollectionACLs />} />
       <Route path="events" element={<EventVisibility />} />

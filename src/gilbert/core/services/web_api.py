@@ -424,6 +424,13 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Subagent Types",
+                        "description": "Admin-managed subagent type definitions",
+                        "url": "/security/subagents",
+                        "icon": "bot",
+                        "required_role": "admin",
+                    },
+                    {
                         "label": "Collections",
                         "description": "Per-collection ACLs",
                         "url": "/security/collections",
