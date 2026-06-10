@@ -31,7 +31,6 @@ members = [
     "gilbert-plugin-hk-webhook",
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-kokoro",
-    "gilbert-plugin-llmfit",
     "gilbert-plugin-lutron-radiora",
     "gilbert-plugin-mentra",
     "gilbert-plugin-messaging",
@@ -1669,11 +1668,6 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "torch", specifier = ">=2.4" },
 ]
-
-[[package]]
-name = "gilbert-plugin-llmfit"
-version = "1.0.0"
-source = { virtual = "std-plugins/llmfit" }
 
 [[package]]
 name = "gilbert-plugin-lutron-radiora"

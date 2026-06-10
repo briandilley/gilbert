@@ -26,12 +26,12 @@ import contextvars
 import dataclasses
 import logging
 import re
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from gilbert.core.agent_run import AgentRunEngine, RunSpec
 from gilbert.core.subagents.types import SubagentType, builtin_seed_list
 from gilbert.interfaces.ai import AIProvider, ConversationMessagePoster
 from gilbert.interfaces.auth import UserContext
@@ -102,6 +102,7 @@ class SubagentService(Service, WsHandlerProvider):
         self._types: dict[str, SubagentType] = {t.id: t for t in builtin_seed_list()}
         self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
+        self._engine = AgentRunEngine()
 
     # --- Service ---
 
@@ -785,98 +786,40 @@ class SubagentService(Service, WsHandlerProvider):
         if t is None:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
-        system_prompt = f"{self._preamble}\n\n{t.system_prompt}"
-        tool_filter = (t.tool_mode, list(t.tools))
-
-        # Enforce the type's wall-clock budget by folding a deadline into the
-        # stop check: chat() checks should_stop between rounds, so an expired
-        # deadline ends the run gracefully (keeping the partial + synthesis),
-        # exactly like a user Stop. Combines with any caller-provided stop.
-        caller_stop = should_stop
-        if t.max_wall_clock_s is not None:
-            deadline = time.monotonic() + t.max_wall_clock_s
-
-            def should_stop() -> bool:  # noqa: F811 — wraps the caller's stop
-                if caller_stop is not None and caller_stop():
-                    return True
-                return time.monotonic() >= deadline
-
-        subagent_id = subagent_id or uuid.uuid4().hex
+        # Build the resolved run spec and hand it to the shared engine. The
+        # engine folds the type's wall-clock budget into the stop check, runs
+        # the chat turn (headless — no nesting), applies the budget-exhaustion
+        # synthesis fallback, and emits the lifecycle events. ``model_override``
+        # / ``backend_override`` beat the type's configured model/backend.
         routing = self._event_routing()
-        await self._publish_event(
-            "chat.stream.subagent_started",
-            {
-                **routing,
-                "subagent_id": subagent_id,
-                "agent_type": t.id,
-                "subagent_conversation_id": conversation_id,
-                "query": prompt,
-            },
+
+        async def _on_event(event_type: str, payload: dict[str, Any]) -> None:
+            await self._publish_event(event_type, {**routing, **payload})
+
+        spec = RunSpec(
+            system_prompt=f"{self._preamble}\n\n{t.system_prompt}",
+            user_message=prompt,
+            model=model_override or t.model,
+            backend_override=backend_override or t.backend,
+            temperature=t.temperature,
+            tool_filter=(t.tool_mode, list(t.tools)),
+            max_rounds=t.max_rounds,
+            max_wall_clock_s=t.max_wall_clock_s,
+            headless=True,
+            ai_call=f"subagent.{t.id}",
+            source="subagent",
+            agent_type=t.id,
+            should_stop_callback=should_stop,
+            conversation_parent_id=conversation_parent_id,
+            conversation_title=conversation_title,
+            synthesize_on_empty=True,
         )
-        try:
-            result = await self._ai.chat(
-                user_message=prompt,
-                conversation_id=conversation_id,   # pre-allocated (watchable) or None
-                user_ctx=user_ctx,
-                system_prompt=system_prompt,
-                ai_call=f"subagent.{t.id}",
-                model=model_override or t.model,
-                backend_override=backend_override or t.backend,
-                temperature=t.temperature,
-                tool_filter=tool_filter,
-                max_tool_rounds=t.max_rounds,
-                headless=True,
-                # Tag the ephemeral subagent conversation so it's visible in
-                # the user's chat list as a child of the parent conversation.
-                source="subagent",
-                should_stop_callback=should_stop,
-                conversation_parent_id=conversation_parent_id,
-                conversation_title=conversation_title,
-            )
-        except Exception as exc:
-            await self._publish_event(
-                "chat.stream.subagent_failed",
-                {**routing, "subagent_id": subagent_id, "agent_type": t.id, "reason": str(exc)},
-            )
-            raise
-        was_stopped = should_stop is not None and bool(should_stop())
-        report = result.response_text
-        # Budget-exhaustion guard: if the agent used up its rounds mid-tool-use
-        # and never wrote a final answer (empty/near-empty text), force one
-        # synthesis turn so we never return an empty "report". Only possible
-        # when the run has a persisted conversation to reload its findings from.
-        if not was_stopped and len(report.strip()) < 80 and conversation_id:
-            try:
-                synth = await self._ai.chat(
-                    user_message=(
-                        "You've reached your step limit. Do NOT call any "
-                        "more tools. Using everything you have already gathered in "
-                        "this conversation, write your COMPLETE final answer now — "
-                        "a thorough, well-structured Markdown report that directly "
-                        "answers the original task, with citations where relevant."
-                    ),
-                    conversation_id=conversation_id,
-                    user_ctx=user_ctx,
-                    system_prompt=system_prompt,
-                    ai_call=f"subagent.{t.id}.synthesis",
-                    model=model_override or t.model,
-                    backend_override=backend_override or t.backend,
-                    temperature=t.temperature,
-                    tool_filter=tool_filter,
-                    max_tool_rounds=2,
-                    headless=True,
-                    source="subagent",
-                    conversation_parent_id=conversation_parent_id,
-                    conversation_title=conversation_title,
-                )
-                if synth.response_text.strip():
-                    report = synth.response_text
-            except Exception:
-                logger.exception("subagent synthesis fallback failed")
-        # A graceful stop returns normally with the partial — emit the distinct
-        # "stopped" terminal event so the UI can label it (both are terminal).
-        await self._publish_event(
-            "chat.stream.subagent_stopped" if was_stopped else "chat.stream.subagent_completed",
-            {**routing, "subagent_id": subagent_id, "agent_type": t.id},
+        result = await self._engine.run(
+            spec,
+            ai=self._ai,
+            user_ctx=user_ctx,
+            conversation_id=conversation_id,
+            subagent_id=subagent_id or uuid.uuid4().hex,
+            on_event=_on_event,
         )
-        return report
+        return result.text
