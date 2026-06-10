@@ -686,3 +686,36 @@ async def test_stopped_run_delivers_partial(tmp_path: Any) -> None:
     conv, msg = poster.delivered[0]
     assert conv == "conv-parent"
     assert "Partial findings" in msg or "/api/chat/download/" in msg
+
+
+def test_service_provides_subagent_stop_ws_handler() -> None:
+    from gilbert.interfaces.ws import WsHandlerProvider
+
+    svc = SubagentService()
+    assert isinstance(svc, WsHandlerProvider)
+    assert "ws_handlers" in svc.service_info().capabilities
+    assert "subagent.stop" in svc.get_ws_handlers()
+
+
+@pytest.mark.asyncio
+async def test_ws_stop_handler_stops_owned_run() -> None:
+    svc = SubagentService()
+    svc._enabled = True
+    svc._runs["s1"] = _Run(
+        subagent_id="s1", agent_type="deep-research", query="q",
+        conversation_id="c", parent_conversation_id="p", user_id="u1",
+        status="running", started_at="t",
+    )
+
+    class _Conn:
+        user_id = "u1"
+        user_ctx = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+
+    res = await svc.get_ws_handlers()["subagent.stop"](_Conn(), {"id": "r1", "subagent_id": "s1"})
+    assert res["ok"] is True
+    assert svc._runs["s1"].stop_flag[0] is True
+
+
+def test_get_tools_includes_check_research() -> None:
+    tools = SubagentService().get_tools()
+    assert any(t.name == "check_research" for t in tools)

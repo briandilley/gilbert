@@ -39,6 +39,7 @@ from gilbert.interfaces.tools import (
     ToolParameterType,
 )
 from gilbert.interfaces.workspace import WorkspaceProvider
+from gilbert.interfaces.ws import WsHandlerProvider
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def _prompt_key(type_id: str) -> str:
     return f"{type_id.replace('-', '_')}_system_prompt"
 
 
-class SubagentService(Service):
+class SubagentService(Service, WsHandlerProvider):
     """Engine that runs a single ephemeral subagent and returns its result."""
 
     def __init__(self) -> None:
@@ -92,7 +93,7 @@ class SubagentService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="subagent",
-            capabilities=frozenset({"subagent", "ai_tools"}),
+            capabilities=frozenset({"subagent", "ai_tools", "ws_handlers"}),
             requires=frozenset({"ai_chat"}),
             toggleable=True,
             toggle_description=(
@@ -249,6 +250,19 @@ class SubagentService(Service):
                 interactive=True,
                 parallel_safe=False,
             ),
+            ToolDefinition(
+                name="check_research",
+                description=(
+                    "List your recent and in-progress research runs and their "
+                    "status (running/completed/stopped/failed) so you can report "
+                    "progress or point at a finished report."
+                ),
+                parameters=[],
+                slash_command="research-status",
+                slash_help="Show running/recent research: /research-status",
+                required_role="user",
+                interactive=True,
+            ),
         ]
 
     def _web_search_available(self) -> bool:
@@ -256,6 +270,18 @@ class SubagentService(Service):
         if self._resolver is None:
             return False
         return self._resolver.get_capability("websearch") is not None
+
+    # --- WsHandlerProvider ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {"subagent.stop": self._ws_stop_subagent}
+
+    async def _ws_stop_subagent(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        subagent_id = str(frame.get("subagent_id") or "")
+        ok = self.stop_subagent(subagent_id, getattr(conn, "user_id", ""))
+        return {"type": "subagent.stop.result", "ref": frame.get("id"), "ok": ok}
+
+    # --- ToolProvider ---
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name == "spawn_agent":
@@ -281,9 +307,19 @@ class SubagentService(Service):
                 self._run_research_background(query, parent_conv, caller)
             )
             return (
-                f"\U0001f50d Researching “{query}” in the background — I’ll post the "
-                "report here when it’s ready. You can keep chatting."
+                f"\U0001f50d Researching \"{query}\" in the background — will post the "
+                "report here when ready. You can keep chatting."
             )
+        if name == "check_research":
+            user = get_current_user()
+            runs = self.list_runs(user.user_id)
+            if not runs:
+                return "No research runs found."
+            lines = [
+                f"- [{r['status']}] {r['agent_type']}: \"{r['query']}\" (started {r['started_at']})"
+                for r in runs
+            ]
+            return "Research runs:\n" + "\n".join(lines)
         raise KeyError(f"Unknown tool: {name}")
 
     # --- run registry ---
