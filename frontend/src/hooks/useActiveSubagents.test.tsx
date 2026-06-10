@@ -142,6 +142,24 @@ describe("useActiveSubagents", () => {
     });
   });
 
+  it("clears an event-tracked card when switching to another conversation", async () => {
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | null }) => useActiveSubagents(id),
+      { initialProps: { id: "conv-A" as string | null } },
+    );
+    // A live event adds a card for conv-A.
+    fire("chat.stream.subagent_started", {
+      conversation_id: "conv-A",
+      subagent_id: "a1",
+      agent_type: "deep-research",
+    });
+    expect(result.current).toHaveLength(1);
+
+    // Switching to conv-B (no runs) must drop conv-A's lingering card.
+    rerender({ id: "conv-B" });
+    await waitFor(() => expect(result.current).toHaveLength(0));
+  });
+
   it("ignores stale listSubagents response when conversation changes before RPC returns", async () => {
     let resolveStale!: (v: { runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }) => void;
 

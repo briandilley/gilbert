@@ -417,7 +417,10 @@ export function ChatPage() {
   });
 
   const loadConversation = useCallback(
-    async (id: string) => {
+    async (id: string, opts?: { readOnly?: boolean; returnTo?: string | null }) => {
+      // Any navigation clears watch mode unless this load IS a watch entry.
+      setReadOnly(opts?.readOnly ?? false);
+      setReturnToConv(opts?.returnTo ?? null);
       setLoadingConv(true);
       try {
         const conv = await api.loadConversation(id);
@@ -687,6 +690,9 @@ export function ChatPage() {
         try {
           const result = await api.createConversation(name.trim() || "New conversation");
           refetchConversations();
+          // Leaving any watch view — this is a fresh, editable conversation.
+          setReadOnly(false);
+          setReturnToConv(null);
           setActiveConvId(result.conversation_id);
           setTurns([]);
           setUiBlocks([]);
@@ -1188,9 +1194,7 @@ export function ChatPage() {
   // returns to whatever parent was active when the child was opened.
   const handleSelectSubagentChild = useCallback(
     (childId: string) => {
-      setReturnToConv(activeConvId);
-      setReadOnly(true);
-      void loadConversation(childId);
+      void loadConversation(childId, { readOnly: true, returnTo: activeConvId });
     },
     [activeConvId, loadConversation],
   );
@@ -1413,10 +1417,11 @@ export function ChatPage() {
             subagents={activeSubagents}
             onBlockSubmit={handleBlockSubmit}
             onWatchSubagent={(subagentConvId) => {
-                              setReturnToConv(activeConvId);
-                              setReadOnly(true);
-                              void loadConversation(subagentConvId);
-                            }}
+              void loadConversation(subagentConvId, {
+                readOnly: true,
+                returnTo: activeConvId,
+              });
+            }}
             onStopSubagent={(subagentId) => {
               void api.stopSubagent(subagentId).catch(() => {});
             }}

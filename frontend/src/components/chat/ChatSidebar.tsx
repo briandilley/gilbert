@@ -42,8 +42,14 @@ export function ChatSidebarContent({
   // Subagent child conversations — nested under their parent in the
   // Chats section. They carry ``parent_conversation_id`` and are
   // opened read-only by the watcher. We keep one level of nesting only.
+  // Only nest a child when its parent is actually present in the list —
+  // otherwise an orphan (parent deleted/filtered) would vanish entirely.
+  const presentIds = new Set(conversations.map((c) => c.conversation_id));
   const subagentChildren = conversations.filter(
-    (c) => !c.shared && !!c.parent_conversation_id,
+    (c) =>
+      !c.shared &&
+      !!c.parent_conversation_id &&
+      presentIds.has(c.parent_conversation_id),
   );
   const subagentChildIds = new Set(subagentChildren.map((c) => c.conversation_id));
   const subagentByParent = new Map<string, ConversationSummary[]>();

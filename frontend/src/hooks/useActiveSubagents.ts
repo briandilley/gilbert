@@ -23,28 +23,26 @@ export function useActiveSubagents(activeConversationId: string | null): ActiveS
   // Re-seed running cards whenever the active conversation changes.
   useEffect(() => {
     latestConvRef.current = activeConversationId;
-    if (!activeConversationId) {
-      setById({});
-      return;
-    }
+    // Clear immediately on EVERY navigation so another conversation's cards
+    // (added via live events) can't linger into this one.
+    setById({});
+    if (!activeConversationId) return;
     const convId = activeConversationId;
     api.listSubagents(convId).then((result) => {
       // Ignore stale responses if the conversation changed while awaiting.
       if (latestConvRef.current !== convId) return;
-      setById((prev) => {
-        const next = { ...prev };
-        for (const run of result.runs) {
-          if (run.status !== "running") continue;
-          next[run.subagent_id] = {
-            subagent_id: run.subagent_id,
-            agent_type: run.agent_type,
-            status: "running",
-            conversationId: run.conversation_id,
-            query: run.query,
-          };
-        }
-        return next;
-      });
+      const next: Record<string, ActiveSubagent> = {};
+      for (const run of result.runs) {
+        if (run.status !== "running") continue;
+        next[run.subagent_id] = {
+          subagent_id: run.subagent_id,
+          agent_type: run.agent_type,
+          status: "running",
+          conversationId: run.conversation_id,
+          query: run.query,
+        };
+      }
+      setById(next);
     }).catch(() => {
       // Best-effort — a failed RPC just means no re-seeding this navigation.
     });
