@@ -1188,6 +1188,14 @@ export function ChatPage() {
   useEventBus("chat.stream.turn_complete", handleTurnComplete);
   useEventBus("chat.tool.started", handleToolStarted);
   useEventBus("chat.tool.completed", handleToolCompleted);
+  // A subagent run creates a child conversation up front; refresh the sidebar
+  // so it appears (and is watchable) immediately, not only once it finishes.
+  useEventBus(
+    "chat.stream.subagent_started",
+    useCallback(() => {
+      void refetchConversations();
+    }, [refetchConversations]),
+  );
 
   // Opening a subagent child from the sidebar sets read-only mode (no
   // composer — you can watch but not chat). The "Back to chat" bar

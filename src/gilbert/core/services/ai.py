@@ -4589,6 +4589,34 @@ class AIService(Service):
 
         await self._storage.put(_COLLECTION, conv_id, data)
 
+    async def ensure_conversation(
+        self,
+        conversation_id: str,
+        user_ctx: UserContext,
+        *,
+        source: str = "",
+        parent_conversation_id: str = "",
+        title: str = "",
+    ) -> None:
+        """Create an empty conversation row if it doesn't exist (see protocol).
+
+        Lets a background subagent run make its conversation visible in the
+        sidebar and loadable for watching *before* it produces any messages.
+        """
+        if self._storage is None:
+            return
+        existing = await self._storage.get(_COLLECTION, conversation_id)
+        if existing:
+            return
+        await self._save_conversation(
+            conversation_id,
+            [],
+            user_ctx=user_ctx,
+            source=source,
+            parent_conversation_id=parent_conversation_id,
+            title=title,
+        )
+
     async def append_assistant_message(
         self,
         conversation_id: str,

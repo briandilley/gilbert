@@ -684,3 +684,21 @@ class ConversationMessagePoster(Protocol):
         content: str,
         attachments: list[FileAttachment] | None = None,
     ) -> None: ...
+
+    async def ensure_conversation(
+        self,
+        conversation_id: str,
+        user_ctx: UserContext,
+        *,
+        source: str = "",
+        parent_conversation_id: str = "",
+        title: str = "",
+    ) -> None:
+        """Create an empty conversation row if it doesn't exist yet.
+
+        Lets a background producer (e.g. a subagent run) make its
+        conversation visible/loadable immediately — before any messages
+        exist — so it can be listed in the sidebar and watched while the
+        run is still in progress. No-op if the conversation already exists.
+        """
+        ...

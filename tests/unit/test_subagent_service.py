@@ -464,6 +464,7 @@ class _FakePoster:
     def __init__(self, report: str = "THE REPORT") -> None:
         self.calls: list[dict[str, Any]] = []
         self.delivered: list[tuple[str, str, list[Any]]] = []
+        self.ensured: list[dict[str, Any]] = []
         self._report = report
 
     async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
@@ -481,6 +482,24 @@ class _FakePoster:
         self, conversation_id: str, content: str, attachments: Any = None
     ) -> None:
         self.delivered.append((conversation_id, content, attachments or []))
+
+    async def ensure_conversation(
+        self,
+        conversation_id: str,
+        user_ctx: Any,
+        *,
+        source: str = "",
+        parent_conversation_id: str = "",
+        title: str = "",
+    ) -> None:
+        self.ensured.append(
+            {
+                "conversation_id": conversation_id,
+                "source": source,
+                "parent_conversation_id": parent_conversation_id,
+                "title": title,
+            }
+        )
 
 
 class _FakeWorkspace:
@@ -520,6 +539,14 @@ async def test_run_research_background_writes_report_and_delivers(tmp_path: Any)
     assert reg["rel_path"].startswith("outputs/research-")
     # The subagent ran as the caller.
     assert poster.calls[0]["user_ctx"] is caller
+    # The child conversation was created up front (so it lists + is watchable
+    # while the run is in progress), tagged as a subagent child of the parent.
+    assert poster.ensured, "ensured the child conversation"
+    ens = poster.ensured[0]
+    assert ens["source"] == "subagent"
+    assert ens["parent_conversation_id"] == "conv-parent"
+    assert ens["title"].startswith("Research:")
+    assert ens["conversation_id"] == poster.calls[0]["conversation_id"]
     # Delivered a message into the parent conversation with a download link.
     assert poster.delivered, "delivered a message"
     conv, msg, _atts = poster.delivered[0]

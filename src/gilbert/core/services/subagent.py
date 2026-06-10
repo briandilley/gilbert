@@ -446,6 +446,20 @@ class SubagentService(Service, WsHandlerProvider):
         # Record this detached task on the run so the registry is a strong-ref
         # holder too (the _background_tasks set is the primary GC anchor).
         run.task = asyncio.current_task()
+        # Create the child conversation row NOW (before spawn emits
+        # subagent_started) so it lists in the sidebar and is watchable while
+        # the run is still in progress — not only once it finishes.
+        if isinstance(self._ai, ConversationMessagePoster) and user_ctx is not None:
+            try:
+                await self._ai.ensure_conversation(
+                    sub_conv,
+                    user_ctx,
+                    source="subagent",
+                    parent_conversation_id=parent_conversation_id or "",
+                    title=f"Research: {query}"[:80],
+                )
+            except Exception:
+                logger.exception("ensure_conversation failed for subagent %s", subagent_id)
         try:
             report = await self.spawn(
                 "deep-research",
