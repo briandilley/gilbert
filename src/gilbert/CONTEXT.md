@@ -199,13 +199,27 @@ _Avoid_: bot, assistant (reserve for Gilbert).
 
 **SubagentType** — an entity-backed, admin-managed agent definition stored in
   the `subagent_types` collection. A type is *self-contained*: it carries its
-  own model, backend, temperature, tool gating, round/time budget, system
+  model selection (`ai_profile` — the preferred, model-agnostic selector — or
+  raw backend/model/temperature), tool gating, round/time budget, system
   prompt, execution mode (`sync` | `background`), and delivery mode (`inline` |
   `report_file`). Built-in types (e.g. `deep-research`, `software-engineer`)
   are seeded on first run and can be edited or reset. Custom types can be
   deleted. Model selection on a type is **admin-selected data**, not a
-  user-visible AI-backend detail — see ADR-0021. _Avoid_: "agent profile",
-  "agent template". The correct term is "subagent type".
+  user-visible AI-backend detail — see ADR-0021. The dataclass lives in
+  `interfaces/subagent.py` (shared data) and is read via the `SubagentCatalog`
+  capability. _Avoid_: "agent profile", "agent template". The correct term is
+  "subagent type". A durable **Autonomous agent** references a SubagentType
+  (`agent_type_id`) for execution defaults, which its own fields override; the
+  neutral `durable-default` type is the seeded baseline.
+
+**RunSpec / AgentRunEngine** — the shared single-agent run primitive in
+  `core/agent_run/`. A `RunSpec` is the fully-resolved description of one run
+  (system prompt, profile/model, tool filter, round + wall-clock budget,
+  `headless` flag, callbacks); `AgentRunEngine.run()` drives the chat turn,
+  enforces the wall-clock deadline, runs the budget-exhaustion synthesis
+  fallback, and emits lifecycle events. Both `SubagentService.spawn()`
+  (headless) and `AgentService` durable runs (non-headless) build a RunSpec and
+  call it — one "run an agent" primitive, two coordinators.
 
 **Run**:
 A single execution of an Agent's loop, capturing its response, token usage, and cost.

@@ -546,7 +546,53 @@ React Query hooks live in `frontend/src/api/goals.ts`:
 - Workspace cleanup on goal deletion. Goal deletion isn't a thing yet
   in Phase 4/5; CANCELLED is the closure path.
 
+## Phase 6 — Coordinator on the shared run engine
+
+AgentService no longer carries its own per-run chat-execution logic. The
+per-run *shaping* — assemble (system prompt, profile/model, tool filter,
+round + wall-clock budget), call `ai.chat()`, run the budget-exhaustion
+synthesis fallback, emit `chat.stream.subagent_*` lifecycle events — lives in a
+shared engine, `src/gilbert/core/agent_run/` (`RunSpec` + `AgentRunEngine`),
+which `SubagentService.spawn()` also uses. See
+`docs/superpowers/specs/2026-06-09-agentservice-coordinator-design.md`.
+
+`_run_agent_internal` builds a **non-headless** `RunSpec` and calls
+`self._engine.run(...)`; everything genuinely durable (Run row lifecycle, cost
+accounting + cap auto-disable, inbox drain, the `_active_agent_id` /
+`_active_delegation_chain` / `_workspace_conversation_id` ContextVars,
+delegation-future resolution, conversation-row patching) stays in AgentService
+around that call. `headless=False` is what keeps the durable agent's
+peer/`agent_delegate`/`spawn_agent` tools available — the engine never forces
+headless (that gate is the subagent path's no-nesting rule).
+
+**Execution type reference.** Each `Agent` carries `agent_type_id` referencing
+a `SubagentType` (the same entity SubagentService manages at
+`/security/subagents`), resolved through the `SubagentCatalog` capability
+protocol — AgentService never imports the concrete SubagentService. The type
+supplies execution defaults; the agent's own fields override per dimension:
+
+| Dimension | Type provides | Agent override |
+|---|---|---|
+| Model/sampling | `ai_profile` | `profile_id` when set |
+| Round budget | `max_rounds` | `max_tool_rounds` when set |
+| Wall-clock | `max_wall_clock_s` | (`None` on `durable-default` → unlimited) |
+| Prompt | `system_prompt` prepended as a base layer | persona/system_prompt/rules + dynamic blocks layer on top |
+
+`execution_mode`/`deliver_as` on the type are ignored for durable runs
+(durability is AgentService's job). Tool gating is unchanged — durable runs
+still pass no `tool_filter`. The `durable-default` built-in type (neutral,
+`enabled=False` so it's not spawnable, empty prompt, unlimited wall-clock) is
+seeded for every agent by migration `0005`, so existing agents behave
+identically until an admin points one at a richer type. When the subagent
+service is disabled, `_resolve_type` returns `None` and runs fall back to the
+agent's own fields (pre-type-system behavior). Referenceable types for the
+agent-edit picker come from the user-facing `agents.types.list` WS RPC.
+
 ## Related
+- `src/gilbert/core/agent_run/` (shared RunSpec + AgentRunEngine, Phase 6)
+- `src/gilbert/interfaces/subagent.py` (SubagentType + SubagentCatalog protocol)
+- `tests/unit/core/test_agent_run_engine.py` (Phase 6 engine coverage)
+- `tests/unit/test_migration_link_agents.py` (Phase 6 migration 0005)
 - `src/gilbert/interfaces/agent.py`
 - `src/gilbert/core/services/agent.py`
 - `src/gilbert/web/routes/agent_avatar.py` (Phase 1B HTTP routes)
