@@ -62,6 +62,6 @@ export interface ActiveSubagent {
   reason?: string;
   /** Pre-allocated conversation id for the subagent (watchable). */
   conversationId?: string;
-  /** The research query/task. */
+  /** The task or query the subagent was spawned with. */
   query?: string;
 }

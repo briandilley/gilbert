@@ -188,12 +188,24 @@ own loop, messages peers, and pursues goals. Distinct from Gilbert (the one glob
 _Avoid_: bot, assistant (reserve for Gilbert).
 
 **Subagent** — an *ephemeral, headless* agent run spawned within a chat turn
-  (the `SubagentService` engine): a fresh context (shared preamble + an agent
-  *type* prompt + the task), a scoped toolset + model (from the type's AI
-  profile), and a bounded budget. It runs autonomously and **cannot ask the
-  user** — its final message is returned as the spawning tool's result. Distinct
-  from an **Autonomous agent** (the durable, goal-based agent with persona /
-  memory / heartbeats). _Avoid_ calling a subagent an "agent" unqualified.
+  (the `SubagentService` engine): a fresh context (shared preamble + a
+  *SubagentType* system prompt + the task), a scoped toolset + model (from the
+  type's configuration), and a bounded budget. It runs autonomously and
+  **cannot ask the user** — its final message is returned as the spawning
+  tool's result (inline) or delivered as a report file attachment (background).
+  Distinct from an **Autonomous agent** (the durable, goal-based agent with
+  persona / memory / heartbeats). _Avoid_ calling a subagent an "agent"
+  unqualified.
+
+**SubagentType** — an entity-backed, admin-managed agent definition stored in
+  the `subagent_types` collection. A type is *self-contained*: it carries its
+  own model, backend, temperature, tool gating, round/time budget, system
+  prompt, execution mode (`sync` | `background`), and delivery mode (`inline` |
+  `report_file`). Built-in types (e.g. `deep-research`, `software-engineer`)
+  are seeded on first run and can be edited or reset. Custom types can be
+  deleted. Model selection on a type is **admin-selected data**, not a
+  user-visible AI-backend detail — see ADR-0021. _Avoid_: "agent profile",
+  "agent template". The correct term is "subagent type".
 
 **Run**:
 A single execution of an Agent's loop, capturing its response, token usage, and cost.

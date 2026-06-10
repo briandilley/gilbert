@@ -1116,7 +1116,7 @@ export function ChatPage() {
           rounds.push({ reasoning: "", tools: [] });
         }
         // Idempotent: a tool_call_id is unique, so never render it twice.
-        // A long-running tool (e.g. deep_research) can have its start event
+        // A long-running tool (e.g. spawn_agent background) can have its start event
         // arrive more than once (reconnect/replay); dedupe by id.
         if (rounds.some((r) => r.tools.some((t) => t.tool_call_id === toolCallId))) {
           return turn;

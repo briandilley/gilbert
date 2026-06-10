@@ -225,6 +225,8 @@ Gilbert's AI service runs an agentic tool-use loop. Services that implement the 
 
 **AI context profiles** control which tools are available for different interaction types. A sales agent profile might only see the `sales_lead` tool, while a human chat profile sees everything except sales tools. Profiles are managed at runtime under **Security → AI Profiles** or via AI tools themselves.
 
+**Subagent types** are entity-backed, admin-managed agent definitions. Each type bundles a system prompt, model/backend selection, tool gating, round/time budget, and an execution mode (`sync` for inline results, `background` for long-running tasks that deliver a report file). The `spawn_agent` tool launches a subagent by type ID; the AI picks the type based on the task. Types are seeded with 10 built-ins (general-purpose, deep-research, software-engineer, code-reviewer, etc.) and are editable, resettable, and extensible by admins under **Security → Subagent Types**.
+
 Tools are filtered through two layers:
 1. **Profile filtering** — which tools are available for this type of interaction
 2. **RBAC filtering** — which tools this user's role is allowed to invoke
