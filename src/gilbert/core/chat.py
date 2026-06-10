@@ -207,6 +207,9 @@ def conv_summary(
         # Populated by services that own conversation creation.
         "kind": str(metadata.get("kind") or ""),
         "agent_id": str(metadata.get("agent_id") or ""),
+        # Parent link for subagent child conversations — empty string for
+        # regular conversations. Lets the frontend sidebar nest them.
+        "parent_conversation_id": str(c.get("parent_conversation_id") or ""),
     }
     if shared:
         members = c.get("members", [])

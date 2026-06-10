@@ -37,6 +37,8 @@ class _FakeAI:
         headless: bool = False,
         source: str = "",
         should_stop_callback: Any = None,
+        conversation_parent_id: str = "",
+        conversation_title: str = "",
     ) -> ChatTurnResult:
         self.calls.append(
             {
@@ -749,3 +751,46 @@ async def test_completed_run_delivers_report_attachment_and_notifies(tmp_path: A
     assert att.workspace_path.startswith("outputs/research-")
     assert att.workspace_conv == "conv-parent"
     assert notifs and notifs[0]["user_id"] == "u1"
+
+
+# ── Slice 7: subagent.list RPC ─────────────────────────────────────────────
+
+
+def test_list_active_for_conversation_filters_by_parent_and_user() -> None:
+    svc = SubagentService()
+    svc._runs["a"] = _Run(
+        subagent_id="a", agent_type="deep-research", query="q1",
+        conversation_id="ca", parent_conversation_id="p1", user_id="u1",
+        status="running", started_at="t",
+    )
+    svc._runs["b"] = _Run(
+        subagent_id="b", agent_type="deep-research", query="q2",
+        conversation_id="cb", parent_conversation_id="p2", user_id="u1",
+        status="running", started_at="t",
+    )
+    svc._runs["c"] = _Run(
+        subagent_id="c", agent_type="deep-research", query="q3",
+        conversation_id="cc", parent_conversation_id="p1", user_id="u1",
+        status="completed", started_at="t",
+    )
+    out = svc.list_active_for_conversation("p1", "u1")
+    ids = {r["subagent_id"] for r in out}
+    assert ids == {"a"}  # only running + parent p1 + user u1
+    assert out[0]["conversation_id"] == "ca"
+    assert out[0]["query"] == "q1"
+
+
+@pytest.mark.asyncio
+async def test_ws_subagent_list_returns_active() -> None:
+    svc = SubagentService()
+    svc._runs["a"] = _Run(
+        subagent_id="a", agent_type="deep-research", query="q",
+        conversation_id="ca", parent_conversation_id="p1", user_id="u1",
+        status="running", started_at="t",
+    )
+
+    class _Conn:
+        user_id = "u1"
+
+    res = await svc.get_ws_handlers()["subagent.list"](_Conn(), {"id": "r", "conversation_id": "p1"})
+    assert [r["subagent_id"] for r in res["runs"]] == ["a"]

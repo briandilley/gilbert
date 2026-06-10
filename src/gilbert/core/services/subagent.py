@@ -279,12 +279,21 @@ class SubagentService(Service, WsHandlerProvider):
     # --- WsHandlerProvider ---
 
     def get_ws_handlers(self) -> dict[str, Any]:
-        return {"subagent.stop": self._ws_stop_subagent}
+        return {
+            "subagent.stop": self._ws_stop_subagent,
+            "subagent.list": self._ws_list_subagents,
+        }
 
     async def _ws_stop_subagent(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         subagent_id = str(frame.get("subagent_id") or "")
         ok = self.stop_subagent(subagent_id, getattr(conn, "user_id", ""))
         return {"type": "subagent.stop.result", "ref": frame.get("id"), "ok": ok}
+
+    async def _ws_list_subagents(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        runs = self.list_active_for_conversation(
+            str(frame.get("conversation_id") or ""), getattr(conn, "user_id", "")
+        )
+        return {"type": "subagent.list.result", "ref": frame.get("id"), "runs": runs}
 
     # --- ToolProvider ---
 
@@ -355,6 +364,29 @@ class SubagentService(Service, WsHandlerProvider):
             if r.user_id == user_id
         ]
 
+    def list_active_for_conversation(
+        self, parent_conversation_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Running subagent runs whose parent is ``parent_conversation_id``.
+
+        Returns a list of dicts suitable for the ``subagent.list.result`` WS
+        frame. Filters to ``status == "running"`` so completed/stopped/failed
+        runs are not re-seeded as cards on the frontend.
+        """
+        return [
+            {
+                "subagent_id": r.subagent_id,
+                "agent_type": r.agent_type,
+                "query": r.query,
+                "conversation_id": r.conversation_id,
+                "status": r.status,
+            }
+            for r in self._runs.values()
+            if r.user_id == user_id
+            and r.status == "running"
+            and r.parent_conversation_id == parent_conversation_id
+        ]
+
     def stop_subagent(self, subagent_id: str, requester_id: str) -> bool:
         """Request a graceful stop of a running subagent. Returns True if the
         stop was applied (the run exists, is running, and is owned by the
@@ -422,6 +454,8 @@ class SubagentService(Service, WsHandlerProvider):
                 conversation_id=sub_conv,
                 subagent_id=subagent_id,
                 should_stop=lambda: run.stop_flag[0],
+                conversation_parent_id=parent_conversation_id or "",
+                conversation_title=f"Research: {query}"[:80],
             )
             run.status = "stopped" if run.stop_flag[0] else "completed"
             rel_path = await self._write_report(
@@ -567,6 +601,8 @@ class SubagentService(Service, WsHandlerProvider):
         conversation_id: str | None = None,
         subagent_id: str | None = None,
         should_stop: Any = None,
+        conversation_parent_id: str = "",
+        conversation_title: str = "",
     ) -> str:
         """Run one ephemeral subagent of ``agent_type`` on ``prompt``.
 
@@ -616,10 +652,12 @@ class SubagentService(Service, WsHandlerProvider):
                 ai_profile=agent.profile_name,
                 max_tool_rounds=agent.max_rounds,
                 headless=True,
-                # Tag the ephemeral subagent conversation so it's excluded from
-                # the user's chat list (it's persisted for debugging, not shown).
+                # Tag the ephemeral subagent conversation so it's visible in
+                # the user's chat list as a child of the parent conversation.
                 source="subagent",
                 should_stop_callback=should_stop,
+                conversation_parent_id=conversation_parent_id,
+                conversation_title=conversation_title,
             )
         except Exception as exc:
             await self._publish_event(

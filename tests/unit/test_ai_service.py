@@ -4054,3 +4054,90 @@ def test_append_assistant_message_accepts_attachments_param() -> None:
 
     assert "attachments" in inspect.signature(AIService.append_assistant_message).parameters
     assert "attachments" in inspect.signature(ConversationMessagePoster.append_assistant_message).parameters
+
+
+# ── Subagent child-chat: parent + title stamping (Slice 7) ──────────────────
+
+
+@pytest.fixture
+def ai_service_with_storage() -> tuple[AIService, Any]:
+    """AIService backed by a real in-memory store, started against it.
+
+    The ``_StorageProxy`` uses the same NamespacedStorageBackend that
+    ``_save_conversation`` / ``list_conversations`` use (``svc._storage``),
+    so collection names must be given *without* the ``gilbert.`` prefix — the
+    NamespacedStorageBackend adds it transparently.
+    """
+    import asyncio as _asyncio
+
+    storage_service, store = _inmemory_storage_service()
+    svc = AIService()
+    svc._backends = {"stub": StubAIBackend()}
+    svc._enabled = True
+    svc._system_prompt = "You are a test assistant."
+    svc._max_tool_rounds = 5
+
+    # Wire storage so _save_conversation / _load_conversation / list_conversations work.
+    _asyncio.run(svc.start(_resolver_for(storage_service)))
+
+    class _StorageProxy:
+        """Thin helper so tests can call storage.get/put directly.
+
+        Uses ``svc._storage`` (the NamespacedStorageBackend) — pass bare
+        collection names without the ``gilbert.`` prefix.
+        """
+        def __init__(self, svc_ref: AIService) -> None:
+            self._svc = svc_ref
+
+        async def get(self, collection: str, key: str) -> Any:
+            assert self._svc._storage is not None
+            return await self._svc._storage.get(collection, key)
+
+        async def put(self, collection: str, key: str, data: dict[str, Any]) -> None:
+            assert self._svc._storage is not None
+            await self._svc._storage.put(collection, key, data)
+
+    return svc, _StorageProxy(svc)
+
+
+@pytest.mark.asyncio
+async def test_save_conversation_stamps_parent_and_title(
+    ai_service_with_storage: tuple[AIService, Any],
+) -> None:
+    svc, storage = ai_service_with_storage
+    await svc._save_conversation(
+        "c1", [], source="subagent",
+        parent_conversation_id="parent-1", title="Research: widgets",
+    )
+    # Collection names go through the NamespacedStorageBackend (svc._storage),
+    # so use the bare name — no "gilbert." prefix needed.
+    row = await storage.get("ai_conversations", "c1")
+    assert row["parent_conversation_id"] == "parent-1"
+    assert row["source"] == "subagent"
+    assert row["title"] == "Research: widgets"
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_includes_subagent_children(
+    ai_service_with_storage: tuple[AIService, Any],
+) -> None:
+    svc, storage = ai_service_with_storage
+    await storage.put(
+        "ai_conversations", "p",
+        {"id": "p", "user_id": "u1", "messages": [{"role": "user", "content": "hi"}], "updated_at": "2026-01-01"},
+    )
+    await storage.put(
+        "ai_conversations", "s",
+        {
+            "id": "s", "user_id": "u1", "source": "subagent",
+            "parent_conversation_id": "p", "title": "Research: x",
+            "messages": [{"role": "user", "content": "go"}], "updated_at": "2026-01-02",
+        },
+    )
+    convs = await svc.list_conversations("u1")
+    # The in-memory storage returns whatever was put (no _id injection).
+    # Identify the subagent child by its source/parent fields.
+    subagent_rows = [c for c in convs if c.get("source") == "subagent"]
+    assert subagent_rows, "subagent child must not be hidden from the list"
+    child = subagent_rows[0]
+    assert child["parent_conversation_id"] == "p"

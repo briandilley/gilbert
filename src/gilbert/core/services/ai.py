@@ -2317,6 +2317,8 @@ class AIService(Service):
         headless: bool = False,
         should_stop_callback: Callable[[], bool] | None = None,
         source: str = "",
+        conversation_parent_id: str = "",
+        conversation_title: str = "",
     ) -> ChatTurnResult:
         """Send a user message and get an AI response (with full agentic loop).
 
@@ -2425,6 +2427,8 @@ class AIService(Service):
                 messages,
                 user_ctx=user_ctx,
                 source=source,
+                parent_conversation_id=conversation_parent_id,
+                title=conversation_title,
             )
             return ChatTurnResult(
                 response_text=error_text,
@@ -3132,6 +3136,8 @@ class AIService(Service):
             user_ctx,
             ui_blocks=ui_block_dicts,
             source=source,
+            parent_conversation_id=conversation_parent_id,
+            title=conversation_title,
         )
         if was_interrupted:
             await asyncio.shield(save_coro)
@@ -4533,6 +4539,8 @@ class AIService(Service):
         user_ctx: UserContext | None = None,
         ui_blocks: list[dict[str, Any]] | None = None,
         source: str = "",
+        parent_conversation_id: str = "",
+        title: str = "",
     ) -> None:
         """Persist a conversation to storage with optional user ownership.
 
@@ -4542,6 +4550,13 @@ class AIService(Service):
         ones — voice/phone sessions create their own entity_store
         records anyway, so showing the chat() history-blob in the
         chat list is just noise.
+
+        ``parent_conversation_id`` links a subagent child conversation to
+        its parent so the sidebar can nest it. Always set when non-empty.
+
+        ``title`` stamps a human-readable title on first save only — later
+        saves never overwrite an existing title (e.g. one the user set via
+        the rename RPC).
         """
         if self._storage is None:
             return
@@ -4559,6 +4574,12 @@ class AIService(Service):
         # doesn't strip the tag).
         if source and not existing.get("source"):
             data["source"] = source
+        # Stamp parent link — always set when provided (idempotent).
+        if parent_conversation_id:
+            data["parent_conversation_id"] = parent_conversation_id
+        # Stamp title on first save only so user renames aren't clobbered.
+        if title and not existing.get("title"):
+            data["title"] = title
 
         # Merge new UI blocks with any existing ones
         if ui_blocks:
@@ -4675,7 +4696,10 @@ class AIService(Service):
         # Also exclude non-chat sources (agent runs, voice-agent
         # sessions, phone calls) — those have their own dedicated UI
         # and would just clutter the chat list with throwaway records.
-        _EXCLUDED_SOURCES = {"agent", "voice_agent", "phone_call", "subagent"}
+        # NOTE: "subagent" is intentionally NOT excluded here — subagent
+        # conversations are surfaced as children (carrying parent_conversation_id)
+        # so the sidebar can nest them under their parent.
+        _EXCLUDED_SOURCES = {"agent", "voice_agent", "phone_call"}
         return [
             c for c in results
             if not c.get("shared") and c.get("source") not in _EXCLUDED_SOURCES

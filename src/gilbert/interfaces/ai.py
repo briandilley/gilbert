@@ -524,6 +524,8 @@ class AIProvider(Protocol):
         headless: bool = False,
         source: str = "",
         should_stop_callback: Any = None,
+        conversation_parent_id: str = "",
+        conversation_title: str = "",
     ) -> ChatTurnResult:
         """Run a full AI chat turn. See ``ChatTurnResult`` for the shape.
 
