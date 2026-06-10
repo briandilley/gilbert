@@ -1,54 +1,50 @@
-"""Tests for the built-in subagent type registry."""
+"""Tests for the built-in subagent type catalog."""
 
 from __future__ import annotations
 
 from gilbert.core.subagents.types import (
-    AgentType,
-    get_agent_type,
-    list_agent_types,
+    BUILTIN_SUBAGENT_TYPES,
+    SubagentType,
+    builtin_seed_list,
 )
 
 
-def test_general_purpose_type_is_registered() -> None:
-    t = get_agent_type("general-purpose")
-    assert t is not None
-    assert isinstance(t, AgentType)
-    assert t.id == "general-purpose"
-    # Description is the routing hint the parent LLM will see — must be non-empty.
-    assert t.description.strip()
-    assert t.system_prompt.strip()
-    # References an AI profile for model + tools; never names a backend itself.
-    assert t.profile_name == "standard"
-    assert t.max_rounds > 0
+def test_subagent_type_has_self_contained_fields() -> None:
+    t = SubagentType(id="x", name="X", description="d", system_prompt="p")
+    # Defaults
+    assert t.tool_mode == "all"
+    assert t.execution_mode == "sync"
+    assert t.deliver_as == "inline"
+    assert t.max_rounds == 12
+    assert t.enabled is True
+    assert t.built_in is False
 
 
-def test_get_unknown_type_returns_none() -> None:
-    assert get_agent_type("does-not-exist") is None
+def test_catalog_ships_ten_builtins_with_expected_ids() -> None:
+    ids = {t.id for t in builtin_seed_list()}
+    assert ids == {
+        "general-purpose", "deep-research", "quick-answer", "software-engineer",
+        "code-reviewer", "qa-engineer", "product-manager", "market-analyst",
+        "fact-checker", "summarizer",
+    }
+    assert all(t.built_in for t in builtin_seed_list())
 
 
-def test_list_agent_types_includes_general_purpose() -> None:
-    ids = {t.id for t in list_agent_types()}
-    assert "general-purpose" in ids
+def test_deep_research_and_market_analyst_are_background_report() -> None:
+    by_id = {t.id: t for t in builtin_seed_list()}
+    for tid in ("deep-research", "market-analyst"):
+        assert by_id[tid].execution_mode == "background"
+        assert by_id[tid].deliver_as == "report_file"
+    # A sync/inline one for contrast
+    assert by_id["software-engineer"].execution_mode == "sync"
+    assert by_id["software-engineer"].temperature == 0.1
 
 
-def test_deep_research_type_registered() -> None:
-    t = get_agent_type("deep-research")
-    assert t is not None
-    assert t.profile_name == "deep-research"
-    # A longer budget than general-purpose — research is long-horizon.
-    assert t.max_rounds >= 16
-    # The prompt asks for a cited report.
-    assert "report" in t.system_prompt.lower()
-    assert "cit" in t.system_prompt.lower()  # "cite"/"citation"
+def test_builtin_prompts_are_substantial() -> None:
+    for t in builtin_seed_list():
+        assert len(t.system_prompt) > 120, t.id
 
 
-def test_list_agent_types_includes_both_builtins() -> None:
-    ids = {t.id for t in list_agent_types()}
-    assert {"general-purpose", "deep-research"} <= ids
-
-
-def test_deep_research_prompt_mentions_credible_sources_and_evidence() -> None:
-    t = get_agent_type("deep-research")
-    p = t.system_prompt.lower()
-    assert "credible" in p
-    assert "evidence" in p or "preserv" in p  # the page-reading discipline
+def test_builtin_subagent_types_dict_keyed_by_id() -> None:
+    assert set(BUILTIN_SUBAGENT_TYPES) == {t.id for t in builtin_seed_list()}
+    assert BUILTIN_SUBAGENT_TYPES["deep-research"].id == "deep-research"
