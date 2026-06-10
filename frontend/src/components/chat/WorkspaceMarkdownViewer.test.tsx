@@ -23,13 +23,13 @@ describe("rewriteWorkspaceEmbeds", () => {
 });
 
 describe("WorkspaceMarkdownViewer", () => {
-  it("fetches and renders the report markdown", async () => {
+  it("renders markdown (not raw source) by default", async () => {
     const { WorkspaceMarkdownViewer } = await import("./WorkspaceMarkdownViewer");
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({ ok: true, text: async () => "# Hello report" })),
+      vi.fn(async () => ({ ok: true, text: async () => "# Hello report\n\nbody text" })),
     );
-    render(
+    const { container } = render(
       <AuthProvider>
         <WorkspaceMarkdownViewer
           open
@@ -39,9 +39,14 @@ describe("WorkspaceMarkdownViewer", () => {
         />
       </AuthProvider>,
     );
+    // The Rendered tab must be active by default: a real <h1> heading element,
+    // and NO raw <pre> source block visible.
     await waitFor(() =>
-      expect(screen.getByText(/Hello report/i)).toBeInTheDocument(),
+      expect(
+        screen.getByRole("heading", { name: /Hello report/i }),
+      ).toBeInTheDocument(),
     );
+    expect(container.querySelector("pre")).toBeNull();
   });
 
   it("shows raw markdown in a pre when Raw tab is clicked", async () => {

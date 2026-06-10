@@ -12,6 +12,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { useWsApi } from "@/hooks/useWsApi";
 import hljs from "highlight.js/lib/core";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { WorkspaceFile } from "@/types/workspace";
 
 interface FileViewerProps {
@@ -168,6 +170,8 @@ function FilePreview({
   const [textContent, setTextContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [rawBuffer, setRawBuffer] = useState<ArrayBuffer | null>(null);
+  // Markdown files default to a rendered view (not syntax-highlighted source).
+  const [mdView, setMdView] = useState<"rendered" | "raw">("rendered");
 
   const mt = file.media_type;
   const isText = isTextFile(mt, file.filename);
@@ -239,6 +243,36 @@ function FilePreview({
   }
 
   if (textContent !== null) {
+    // Markdown files render as formatted markdown (with a Raw toggle), not as
+    // syntax-highlighted source — that's how a report is meant to be read.
+    const isMarkdown = /\.(md|markdown)$/i.test(file.filename);
+    if (isMarkdown) {
+      return (
+        <ScrollArea className="h-full">
+          <div className="p-4">
+            <Tabs
+              value={mdView}
+              onValueChange={(v) => setMdView((v as "rendered" | "raw") || "rendered")}
+            >
+              <TabsList variant="line">
+                <TabsTrigger value="rendered">Rendered</TabsTrigger>
+                <TabsTrigger value="raw">Raw</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <div className="mt-3">
+              {mdView === "raw" ? (
+                <pre className="text-xs leading-5 whitespace-pre-wrap break-words font-mono text-foreground/90">
+                  {textContent}
+                </pre>
+              ) : (
+                <MarkdownContent content={textContent} />
+              )}
+            </div>
+          </div>
+        </ScrollArea>
+      );
+    }
+
     const lang = getLanguageFromFilename(file.filename);
     let highlighted = false;
     let html = "";
