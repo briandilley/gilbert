@@ -64,6 +64,12 @@ _DEEP_RESEARCH_PROMPT = (
     " embed it in the report with a relative Markdown link like"
     " ![caption](outputs/<file>). Produce the full report as your final message"
     " in Markdown — it will be saved as a file and linked into the chat."
+    " IMPORTANT — you have a LIMITED number of research steps. Budget them: do"
+    " NOT spend them all searching. Once you have enough material to answer"
+    " (typically after a handful of focused searches), STOP searching and WRITE"
+    " the report. Writing the final report is mandatory — running out of steps"
+    " mid-search without a written report is a failure. If you sense you are"
+    " running low on steps, write the report immediately with what you have."
 )
 
 _DEEP_RESEARCH = AgentType(
@@ -75,7 +81,7 @@ _DEEP_RESEARCH = AgentType(
     ),
     system_prompt=_DEEP_RESEARCH_PROMPT,
     profile_name="deep-research",
-    max_rounds=24,
+    max_rounds=40,
     max_wall_clock_s=900.0,
 )
 

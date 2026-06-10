@@ -518,8 +518,41 @@ class _FakeWorkspace:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_spawn_synthesizes_when_run_returns_empty() -> None:
+    """If the agent exhausts its budget without a final report (empty text),
+    spawn() forces a synthesis turn so it never returns an empty report."""
+
+    class _EmptyThenReport(_FakePoster):
+        def __init__(self) -> None:
+            super().__init__()
+            self._n = 0
+
+        async def chat(self, *a: Any, **k: Any) -> ChatTurnResult:
+            self.calls.append(k)
+            self._n += 1
+            text = "" if self._n == 1 else "# Synthesized report\n\n" + "x" * 120
+            return ChatTurnResult(
+                response_text=text, conversation_id=k.get("conversation_id") or "c",
+                ui_blocks=[], tool_usage=[], attachments=[], rounds=[],
+            )
+
+    poster = _EmptyThenReport()
+    svc = SubagentService()
+    svc._ai = poster  # type: ignore[assignment]
+    svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
+    svc._enabled = True
+    report = await svc.spawn(
+        "deep-research", "q", user_ctx=UserContext.SYSTEM, conversation_id="sub-1"
+    )
+    assert len(poster.calls) == 2  # main run + synthesis fallback
+    assert "Synthesized report" in report
+    assert poster.calls[1]["ai_call"].endswith(".synthesis")
+
+
+@pytest.mark.asyncio
 async def test_run_research_background_writes_report_and_delivers(tmp_path: Any) -> None:
-    poster = _FakePoster(report="# Findings\n\nWidgets are good.")
+    poster = _FakePoster(report="# Findings\n\n" + "Widgets are good. " * 8)
     ws = _FakeWorkspace(tmp_path)
     bus = _FakeBus()
     svc = SubagentService()

@@ -679,11 +679,41 @@ class SubagentService(Service, WsHandlerProvider):
                 {**routing, "subagent_id": subagent_id, "agent_type": agent.id, "reason": str(exc)},
             )
             raise
+        was_stopped = should_stop is not None and bool(should_stop())
+        report = result.response_text
+        # Budget-exhaustion guard: if the agent used up its rounds mid-tool-use
+        # and never wrote a final answer (empty/near-empty text), force one
+        # synthesis turn so we never return an empty "report". Only possible
+        # when the run has a persisted conversation to reload its findings from.
+        if not was_stopped and len(report.strip()) < 80 and conversation_id:
+            try:
+                synth = await self._ai.chat(
+                    user_message=(
+                        "You've reached your research step limit. Do NOT call any "
+                        "more tools. Using everything you have already gathered in "
+                        "this conversation, write your COMPLETE final answer now — "
+                        "a thorough, well-structured Markdown report that directly "
+                        "answers the original question, with citations."
+                    ),
+                    conversation_id=conversation_id,
+                    user_ctx=user_ctx,
+                    system_prompt=system_prompt,
+                    ai_call=f"subagent.{agent.id}.synthesis",
+                    ai_profile=agent.profile_name,
+                    max_tool_rounds=2,
+                    headless=True,
+                    source="subagent",
+                    conversation_parent_id=conversation_parent_id,
+                    conversation_title=conversation_title,
+                )
+                if synth.response_text.strip():
+                    report = synth.response_text
+            except Exception:
+                logger.exception("subagent synthesis fallback failed")
         # A graceful stop returns normally with the partial — emit the distinct
         # "stopped" terminal event so the UI can label it (both are terminal).
-        was_stopped = should_stop is not None and bool(should_stop())
         await self._publish_event(
             "chat.stream.subagent_stopped" if was_stopped else "chat.stream.subagent_completed",
             {**routing, "subagent_id": subagent_id, "agent_type": agent.id},
         )
-        return result.response_text
+        return report
