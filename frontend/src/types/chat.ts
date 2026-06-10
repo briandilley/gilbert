@@ -148,6 +148,9 @@ export interface ConversationSummary {
    *  room, not just @-mentions. Reset via ``chat.conversation.mark_read``
    *  whenever the user opens the conversation. */
   unread_messages_count?: number;
+  /** Non-empty only for subagent child conversations. Points at the
+   *  parent conversation so the sidebar can nest them one level deep. */
+  parent_conversation_id?: string;
 }
 
 export interface ConversationMember {

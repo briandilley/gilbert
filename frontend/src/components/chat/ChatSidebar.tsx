@@ -11,6 +11,8 @@ interface ChatSidebarProps {
   activeId: string | null;
   currentUserId?: string;
   onSelect: (id: string) => void;
+  /** Called when a subagent child conversation is clicked — opens it read-only. */
+  onSelectSubagentChild?: (id: string) => void;
   onSelectInvite: (id: string) => void;
   onJoinRoom: (id: string) => void;
   onLeaveRoom: (id: string) => void;
@@ -23,6 +25,7 @@ export function ChatSidebarContent({
   activeId,
   currentUserId,
   onSelect,
+  onSelectSubagentChild,
   onSelectInvite,
   onJoinRoom,
   onLeaveRoom,
@@ -36,8 +39,21 @@ export function ChatSidebarContent({
   const agentConvs = conversations.filter(
     (c) => !c.shared && c.kind === "agent",
   );
+  // Subagent child conversations — nested under their parent in the
+  // Chats section. They carry ``parent_conversation_id`` and are
+  // opened read-only by the watcher. We keep one level of nesting only.
+  const subagentChildren = conversations.filter(
+    (c) => !c.shared && !!c.parent_conversation_id,
+  );
+  const subagentChildIds = new Set(subagentChildren.map((c) => c.conversation_id));
+  const subagentByParent = new Map<string, ConversationSummary[]>();
+  for (const child of subagentChildren) {
+    const pid = child.parent_conversation_id!;
+    if (!subagentByParent.has(pid)) subagentByParent.set(pid, []);
+    subagentByParent.get(pid)!.push(child);
+  }
   const personal = conversations.filter(
-    (c) => !c.shared && c.kind !== "agent",
+    (c) => !c.shared && c.kind !== "agent" && !subagentChildIds.has(c.conversation_id),
   );
 
   return (
@@ -178,35 +194,54 @@ export function ChatSidebarContent({
             <p className="px-2 text-xs text-muted-foreground/60">No chats yet</p>
           ) : (
             personal.map((conv) => (
-              <div
-                key={conv.conversation_id}
-                className={cn(
-                  "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
-                  activeId === conv.conversation_id && "bg-accent",
-                )}
-                onClick={() => onSelect(conv.conversation_id)}
-              >
-                <span className="flex-1 truncate">{conv.title}</span>
-                <span className="hidden group-hover:inline-flex gap-1 shrink-0">
-                  <button
-                    className="text-muted-foreground hover:text-foreground text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRename(conv.conversation_id);
-                    }}
+              <div key={conv.conversation_id}>
+                <div
+                  className={cn(
+                    "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
+                    activeId === conv.conversation_id && "bg-accent",
+                  )}
+                  onClick={() => onSelect(conv.conversation_id)}
+                >
+                  <span className="flex-1 truncate">{conv.title}</span>
+                  <span className="hidden group-hover:inline-flex gap-1 shrink-0">
+                    <button
+                      className="text-muted-foreground hover:text-foreground text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRename(conv.conversation_id);
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="text-muted-foreground hover:text-destructive text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(conv.conversation_id);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </div>
+                {/* Subagent children — nested one level, read-only on click */}
+                {subagentByParent.get(conv.conversation_id)?.map((child) => (
+                  <div
+                    key={child.conversation_id}
+                    className={cn(
+                      "group flex items-center gap-2 rounded-lg pl-6 pr-2.5 py-1 text-xs cursor-pointer transition-colors hover:bg-accent min-w-0 text-muted-foreground",
+                      activeId === child.conversation_id && "bg-accent text-foreground",
+                    )}
+                    onClick={() =>
+                      onSelectSubagentChild
+                        ? onSelectSubagentChild(child.conversation_id)
+                        : onSelect(child.conversation_id)
+                    }
                   >
-                    Rename
-                  </button>
-                  <button
-                    className="text-muted-foreground hover:text-destructive text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDelete(conv.conversation_id);
-                    }}
-                  >
-                    Delete
-                  </button>
-                </span>
+                    <span className="shrink-0" aria-hidden>🔍</span>
+                    <span className="flex-1 truncate">{child.title || "Research"}</span>
+                  </div>
+                ))}
               </div>
             ))
           )}

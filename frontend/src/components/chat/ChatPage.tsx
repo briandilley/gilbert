@@ -1183,11 +1183,24 @@ export function ChatPage() {
   useEventBus("chat.tool.started", handleToolStarted);
   useEventBus("chat.tool.completed", handleToolCompleted);
 
+  // Opening a subagent child from the sidebar sets read-only mode (no
+  // composer — you can watch but not chat). The "Back to chat" bar
+  // returns to whatever parent was active when the child was opened.
+  const handleSelectSubagentChild = useCallback(
+    (childId: string) => {
+      setReturnToConv(activeConvId);
+      setReadOnly(true);
+      void loadConversation(childId);
+    },
+    [activeConvId, loadConversation],
+  );
+
   const sidebarProps = {
     conversations,
     activeId: activeConvId,
     currentUserId: user?.user_id,
     onSelect: loadConversation,
+    onSelectSubagentChild: handleSelectSubagentChild,
     onSelectInvite: handleSelectInvite,
     onJoinRoom: handleJoinRoom,
     onLeaveRoom: handleLeaveRoom,
