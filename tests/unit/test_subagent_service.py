@@ -1089,6 +1089,20 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     )
     dr = svc.get_type("deep-research")
     assert dr is not None and dr.built_in is True
+    # A new custom type can't forge protection: built_in is forced False.
+    await h["subagent.types.save"](
+        _Admin(),
+        {"id": "5", "type": {"id": "sneaky", "name": "S", "description": "d",
+                             "system_prompt": "p", "built_in": True}},
+    )
+    sneaky = svc.get_type("sneaky")
+    assert sneaky is not None and sneaky.built_in is False
+    # Bad id slugs are rejected.
+    bad = await h["subagent.types.save"](
+        _Admin(),
+        {"id": "6", "type": {"id": "Has Spaces", "name": "X", "system_prompt": "p"}},
+    )
+    assert bad.get("code") == 400
     # Reset + delete handlers work for admin.
     reset_res = await h["subagent.types.reset"](_Admin(), {"id": "5", "type_id": "deep-research"})
     assert reset_res.get("ok") is True

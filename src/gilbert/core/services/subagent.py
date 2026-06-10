@@ -25,6 +25,8 @@ import asyncio
 import contextvars
 import dataclasses
 import logging
+import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -321,12 +323,6 @@ class SubagentService(Service, WsHandlerProvider):
             ),
         ]
 
-    def _web_search_available(self) -> bool:
-        """Whether a web-search backend is enabled (some agent types need one)."""
-        if self._resolver is None:
-            return False
-        return self._resolver.get_capability("websearch") is not None
-
     # --- WsHandlerProvider ---
 
     def get_ws_handlers(self) -> dict[str, Any]:
@@ -399,12 +395,19 @@ class SubagentService(Service, WsHandlerProvider):
                 "error": "type requires at least 'id' and 'name'",
                 "code": 400,
             }
-        # Preserve the built_in flag from the existing type so an admin edit
-        # can't accidentally un-protect (or fake-protect) a type.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", str(raw["id"])):
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "id must be a lowercase slug (a-z, 0-9, hyphen)",
+                "code": 400,
+            }
         existing = self.get_type(str(raw["id"]))
         t = self._type_from_dict(raw)
-        if existing is not None:
-            t.built_in = existing.built_in
+        # ``built_in`` is server-controlled: editing a built-in preserves its
+        # protected flag; a brand-new type is never protected (so a client can't
+        # forge an undeletable, un-resettable orphan).
+        t.built_in = existing.built_in if existing is not None else False
         await self.save_type(t)
         return {"type": "subagent.types.save.result", "ref": frame.get("id"), "ok": True}
 
@@ -781,6 +784,19 @@ class SubagentService(Service, WsHandlerProvider):
 
         system_prompt = f"{self._preamble}\n\n{t.system_prompt}"
         tool_filter = (t.tool_mode, list(t.tools))
+
+        # Enforce the type's wall-clock budget by folding a deadline into the
+        # stop check: chat() checks should_stop between rounds, so an expired
+        # deadline ends the run gracefully (keeping the partial + synthesis),
+        # exactly like a user Stop. Combines with any caller-provided stop.
+        caller_stop = should_stop
+        if t.max_wall_clock_s is not None:
+            deadline = time.monotonic() + t.max_wall_clock_s
+
+            def should_stop() -> bool:  # noqa: F811 — wraps the caller's stop
+                if caller_stop is not None and caller_stop():
+                    return True
+                return time.monotonic() >= deadline
 
         subagent_id = subagent_id or uuid.uuid4().hex
         routing = self._event_routing()

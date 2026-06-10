@@ -2514,7 +2514,7 @@ class AIService(Service):
                             # headless subagent run — preserving no-nesting
                             # unconditionally, not just for fresh conversations.
                             all_tools = self._discover_tools(
-                                user_ctx=user_ctx, headless=headless
+                                user_ctx=user_ctx, headless=headless, tool_filter=tool_filter
                             )
                             for tname in skill_tool_names:
                                 if tname not in tools_by_name and tname in all_tools:
