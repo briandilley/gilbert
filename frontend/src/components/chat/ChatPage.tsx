@@ -1197,6 +1197,26 @@ export function ChatPage() {
     }, [refetchConversations]),
   );
 
+  // While watching a subagent read-only, poll its conversation so live
+  // progress (persisted per round) shows without a manual reload. The stream
+  // handlers only update a turn the local client is actively sending, so a
+  // passive watcher needs this. Stops when watch mode ends.
+  useEffect(() => {
+    if (!readOnly || !activeConvId) return;
+    const id = activeConvId;
+    const interval = setInterval(() => {
+      void api
+        .loadConversation(id)
+        .then((conv) => {
+          if (activeConvIdRef.current !== id) return;
+          setTurns(conv.turns || []);
+          setUiBlocks(conv.ui_blocks || []);
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [readOnly, activeConvId, api]);
+
   // Opening a subagent child from the sidebar sets read-only mode (no
   // composer — you can watch but not chat). The "Back to chat" bar
   // returns to whatever parent was active when the child was opened.

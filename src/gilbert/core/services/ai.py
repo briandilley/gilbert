@@ -2824,6 +2824,22 @@ class AIService(Service):
                     all_ui_blocks.extend(round_ui_blocks)
                     messages.append(Message(role=MessageRole.TOOL_RESULT, tool_results=tool_results))
 
+                    # Persist progress after each tool round for watchable
+                    # subagent runs, so opening the (child) conversation while
+                    # the run is still going shows what it's done so far — not
+                    # an empty chat until the final report lands. The live
+                    # ``chat.stream.*`` events drive the in-place view; this
+                    # covers a fresh open / reload mid-run.
+                    if source == "subagent":
+                        await self._save_conversation(
+                            conversation_id,
+                            messages,
+                            user_ctx=user_ctx,
+                            source=source,
+                            parent_conversation_id=conversation_parent_id,
+                            title=conversation_title,
+                        )
+
                     # Collect any files produced by tool calls — these will
                     # ride back on the final assistant ``Message`` at the end
                     # of the turn.
