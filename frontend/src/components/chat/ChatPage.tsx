@@ -27,7 +27,6 @@ import {
 import { MemberPanelContent } from "./MemberPanel";
 import { WorkspacePanelContent } from "./WorkspacePanel";
 import { WorkspaceMarkdownViewer } from "@/components/chat/WorkspaceMarkdownViewer";
-import { SubagentLiveViewer } from "@/components/chat/SubagentLiveViewer";
 import { InviteModal } from "./InviteModal";
 import { SkillsModal } from "./SkillsModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -97,7 +96,8 @@ export function ChatPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [reportView, setReportView] = useState<{ conv: string; path: string } | null>(null);
-  const [watchConv, setWatchConv] = useState<string | null>(null);
+  const [readOnly, setReadOnly] = useState(false);
+  const [returnToConv, setReturnToConv] = useState<string | null>(null);
   const [allUsers, setAllUsers] = useState<{ user_id: string; display_name: string }[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [pendingInvites, setPendingInvites] = useState<{ user_id: string; display_name: string }[]>([]);
@@ -703,6 +703,14 @@ export function ChatPage() {
       },
     });
   }, [api, refetchConversations]);
+
+  const exitWatch = useCallback(() => {
+    setReadOnly(false);
+    const back = returnToConv;
+    setReturnToConv(null);
+    if (back) loadConversation(back);
+    else handleNewChat();
+  }, [returnToConv, loadConversation, handleNewChat]);
 
   const handleCreateRoom = useCallback(() => {
     setPromptDialog({
@@ -1391,7 +1399,11 @@ export function ChatPage() {
             conversationId={activeConvId ?? undefined}
             subagents={activeSubagents}
             onBlockSubmit={handleBlockSubmit}
-            onWatchSubagent={(subagentConvId) => setWatchConv(subagentConvId)}
+            onWatchSubagent={(subagentConvId) => {
+                              setReturnToConv(activeConvId);
+                              setReadOnly(true);
+                              void loadConversation(subagentConvId);
+                            }}
             onStopSubagent={(subagentId) => {
               void api.stopSubagent(subagentId).catch(() => {});
             }}
@@ -1405,15 +1417,15 @@ export function ChatPage() {
         {/* Toolbar slot for plugin contributions above the chat
             input — quick-actions like 'send to slack', 'attach
             now-playing track', etc. Only visible alongside the
-            input. */}
-        {(activeConvId || turns.length > 0) && (
+            input. Hidden in read-only (watch) mode. */}
+        {!readOnly && (activeConvId || turns.length > 0) && (
           <div className="px-3 sm:px-4 pt-2">
             <PluginPanelSlot slot="chat.input.toolbar" />
           </div>
         )}
 
-        {/* Sticky input — only show when a conversation is active or turns exist */}
-        {(activeConvId || turns.length > 0) && (
+        {/* Sticky input — only show when a conversation is active or turns exist, and not in read-only watch mode */}
+        {!readOnly && (activeConvId || turns.length > 0) && (
           <ChatInput
             onSend={handleSend}
             onStop={handleStop}
@@ -1451,6 +1463,15 @@ export function ChatPage() {
                 : null
             }
           />
+        )}
+
+        {/* Read-only bar — shown instead of the composer when watching a subagent conversation */}
+        {readOnly && (
+          <div className="px-3 sm:px-4 py-3 border-t border-border flex items-center gap-3 text-sm text-muted-foreground">
+            <span aria-hidden>👁</span>
+            <span>Watching a subagent — read-only.</span>
+            <button className="ml-auto underline" onClick={exitWatch}>Back to chat</button>
+          </div>
         )}
 
         {/* Drag-and-drop overlay — rendered above the chat area when the
@@ -1549,14 +1570,6 @@ export function ChatPage() {
           conversationId={reportView.conv}
           path={reportView.path}
           onClose={() => setReportView(null)}
-        />
-      )}
-
-      {watchConv && (
-        <SubagentLiveViewer
-          open
-          conversationId={watchConv}
-          onClose={() => setWatchConv(null)}
         />
       )}
 
