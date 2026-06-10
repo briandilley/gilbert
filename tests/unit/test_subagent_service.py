@@ -3,14 +3,44 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from gilbert.core.services.storage import StorageService
 from gilbert.core.services.subagent import _DEFAULT_PREAMBLE, SubagentService, _Run
+from gilbert.core.subagents.types import SubagentType
 from gilbert.interfaces.ai import AIProvider, ChatTurnResult
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.context import _current_user
+from gilbert.interfaces.storage import StorageBackend
 from gilbert.interfaces.tools import ToolParameterType, ToolProvider
+
+
+def _inmemory_storage_service() -> tuple[StorageService, dict[str, dict[str, Any]]]:
+    """A StorageService backed by a real in-memory dict (mirrors test_ai_service)."""
+    store: dict[str, dict[str, Any]] = {}
+
+    async def _get(collection: str, key: str) -> Any:
+        return store.get(f"{collection}:{key}")
+
+    async def _put(collection: str, key: str, data: dict[str, Any]) -> None:
+        store[f"{collection}:{key}"] = data
+
+    async def _delete(collection: str, key: str) -> None:
+        store.pop(f"{collection}:{key}", None)
+
+    async def _query(query: Any) -> list[dict[str, Any]]:
+        prefix = f"{query.collection}:"
+        return [v for k, v in store.items() if k.startswith(prefix)]
+
+    backend = AsyncMock(spec=StorageBackend)
+    backend.get = AsyncMock(side_effect=_get)
+    backend.put = AsyncMock(side_effect=_put)
+    backend.delete = AsyncMock(side_effect=_delete)
+    backend.query = AsyncMock(side_effect=_query)
+    backend.ensure_index = AsyncMock()
+    return StorageService(backend), store
 
 
 class _FakeAI:
@@ -31,6 +61,8 @@ class _FakeAI:
         model: str = "",
         backend_override: str = "",
         ai_profile: str = "",
+        temperature: float | None = None,
+        tool_filter: Any = None,
         max_tool_rounds: int | None = None,
         between_rounds_callback: Any = None,
         mid_round_interrupt: Any = None,
@@ -48,6 +80,10 @@ class _FakeAI:
                 "system_prompt": system_prompt,
                 "ai_call": ai_call,
                 "ai_profile": ai_profile,
+                "model": model,
+                "backend_override": backend_override,
+                "temperature": temperature,
+                "tool_filter": tool_filter,
                 "max_tool_rounds": max_tool_rounds,
                 "headless": headless,
                 "source": source,
@@ -92,28 +128,27 @@ def test_service_info_declares_subagent_capability() -> None:
     assert info.toggleable is True
 
 
-def test_config_params_include_enabled_and_ai_prompts() -> None:
+def test_config_params_include_enabled_and_shared_preamble() -> None:
     params = SubagentService().config_params()
     by_key = {p.key: p for p in params}
     assert by_key["enabled"].type == ToolParameterType.BOOLEAN
-    # Shared preamble + the general-purpose type prompt are both AI-authorable.
+    # The shared preamble is AI-authorable; per-type prompts now live on the
+    # type entity (managed at /security/subagents), not as config params.
     assert by_key["preamble"].ai_prompt is True
     assert by_key["preamble"].multiline is True
-    assert by_key["general_purpose_system_prompt"].ai_prompt is True
+    assert "general_purpose_system_prompt" not in by_key
 
 
 @pytest.mark.asyncio
-async def test_on_config_changed_caches_prompt_overrides() -> None:
+async def test_on_config_changed_caches_preamble() -> None:
     svc = SubagentService()
     await svc.on_config_changed(
         {
             "enabled": True,
             "preamble": "CUSTOM PREAMBLE",
-            "general_purpose_system_prompt": "CUSTOM GP PROMPT",
         }
     )
     assert svc._preamble == "CUSTOM PREAMBLE"
-    assert svc._type_prompts["general-purpose"] == "CUSTOM GP PROMPT"
 
 
 @pytest.mark.asyncio
@@ -125,10 +160,13 @@ async def test_start_binds_ai_chat_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_without_ai_chat_raises() -> None:
+async def test_spawn_without_ai_chat_raises() -> None:
+    # start() no longer hard-requires ai_chat (storage-only start is valid for
+    # the type store), but spawning without a bound AI provider must fail.
     svc = SubagentService()
-    with pytest.raises(LookupError):
-        await svc.start(_resolver())
+    await svc.start(_resolver())
+    with pytest.raises(RuntimeError, match="not started"):
+        await svc.spawn("general-purpose", "do a thing")
 
 
 class _FakeConfig:
@@ -160,7 +198,7 @@ async def test_start_restores_enabled_after_restart_reset() -> None:
     fake = _FakeAI()
     await svc.start(_resolver(ai_chat=fake, configuration=_FakeConfig(enabled=True)))
     assert svc._enabled is True
-    assert any(t.name == "deep_research" for t in svc.get_tools())
+    assert any(t.name == "spawn_agent" for t in svc.get_tools())
 
 
 @pytest.mark.asyncio
@@ -195,11 +233,13 @@ async def test_spawn_drives_chat_with_fresh_context_and_type_config() -> None:
     assert call["user_ctx"] is ctx
     # System prompt = shared preamble + the type's prompt.
     assert call["system_prompt"].startswith(_DEFAULT_PREAMBLE)
-    assert "general-purpose subagent" in call["system_prompt"]
-    # Profile + budget + usage tag come from the type.
-    assert call["ai_profile"] == "standard"
+    assert "autonomous agent inside Gilbert" in call["system_prompt"]
+    # Budget + usage tag come from the type.
     assert call["ai_call"] == "subagent.general-purpose"
-    assert call["max_tool_rounds"] == 12
+    assert call["max_tool_rounds"] == 30  # general-purpose budget from the catalog
+    # The type's tool gating + temperature flow through.
+    assert call["tool_filter"] == ("all", [])
+    assert call["temperature"] == 0.4
     assert call["user_message"] == "Research widgets"
     # Tagged so its ephemeral conversation stays out of the user's chat list.
     assert call["source"] == "subagent"
@@ -220,9 +260,14 @@ async def test_spawn_before_start_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_uses_configured_prompt_override() -> None:
+async def test_spawn_uses_type_prompt_and_preamble() -> None:
     svc, fake = await _started()
-    await svc.on_config_changed({"preamble": "PRE", "general_purpose_system_prompt": "GP-OVERRIDE"})
+    await svc.on_config_changed({"preamble": "PRE"})
+    # The type's own system_prompt is now the source of truth (editable via
+    # save_type, not a per-type config param).
+    await svc.save_type(
+        SubagentType(id="general-purpose", name="GP", description="d", system_prompt="GP-OVERRIDE")
+    )
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["system_prompt"] == "PRE\n\nGP-OVERRIDE"
 
@@ -240,10 +285,13 @@ async def test_spawn_refuses_when_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_spawn_honors_explicitly_blanked_prompt() -> None:
-    """A deliberately empty prompt override is honored, not silently reverted
-    to the bundled default."""
+    """A deliberately empty preamble + type prompt is honored, not silently
+    reverted to the bundled default."""
     svc, fake = await _started()
-    await svc.on_config_changed({"preamble": "", "general_purpose_system_prompt": ""})
+    await svc.on_config_changed({"preamble": ""})
+    await svc.save_type(
+        SubagentType(id="general-purpose", name="GP", description="d", system_prompt="")
+    )
     await svc.spawn("general-purpose", "task")
     assert fake.calls[0]["system_prompt"] == "\n\n"
 
@@ -386,31 +434,29 @@ async def test_spawn_without_event_bus_still_works() -> None:
     assert await svc.spawn("general-purpose", "task") == "ok"
 
 
-def test_get_tools_includes_deep_research_sugar() -> None:
-    tools = SubagentService().get_tools()
-    dr = next((t for t in tools if t.name == "deep_research"), None)
-    assert dr is not None
-    assert dr.slash_command == "research"
-    assert dr.required_role == "user"
-    # Sugar is also an orchestration tool: keep it out of headless subagents.
-    assert dr.interactive is True
-    assert any(p.name == "query" for p in dr.parameters)
+def test_deep_research_tool_is_removed() -> None:
+    # deep_research collapsed into a background-mode subagent type; the
+    # standalone tool and its /research slash command no longer exist.
+    names = {t.name for t in SubagentService().get_tools()}
+    assert "deep_research" not in names
+    slash = {t.slash_command for t in SubagentService().get_tools()}
+    assert "research" not in slash
 
 
 @pytest.mark.asyncio
-async def test_deep_research_tool_spawns_deep_research_type() -> None:
-    """deep_research now schedules the run in the background (returns immediately).
-    Verify that the background is scheduled and the engine would use the
-    deep-research profile — we do this by capturing the background coro."""
+async def test_background_type_spawn_schedules_in_background() -> None:
+    """A background-mode type (deep-research) schedules the run off-turn and
+    returns an acknowledgement instead of the report."""
     scheduled: list[Any] = []
     fake = _FakeAI("the report")
     svc = SubagentService()
-    # websearch capability present -> deep research is allowed.
-    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    await svc.start(_resolver(ai_chat=fake))
     svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
-    out = await svc.execute_tool("deep_research", {"query": "what is X?"})
+    out = await svc.execute_tool(
+        "spawn_agent", {"agent_type": "deep-research", "prompt": "what is X?"}
+    )
     # Returns an acknowledgement, not the report.
-    assert "research" in out.lower()
+    assert "background" in out.lower()
     # Exactly one background coro was scheduled.
     assert len(scheduled) == 1
     # The engine was NOT awaited inline.
@@ -418,44 +464,31 @@ async def test_deep_research_tool_spawns_deep_research_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deep_research_tool_errors_without_web_search() -> None:
-    fake = _FakeAI()
-    svc = SubagentService()
-    await svc.start(_resolver(ai_chat=fake))  # no websearch capability
-    out = await svc.execute_tool("deep_research", {"query": "x"})
-    assert "web" in out.lower() and "search" in out.lower()
-    assert fake.calls == []  # never spawned the subagent
-
-
-@pytest.mark.asyncio
-async def test_deep_research_tool_inherits_current_user() -> None:
-    """The research subagent runs as the caller (RBAC), same as spawn_agent.
-    Since deep_research now runs in the background, we verify the caller is
-    captured and passed to the background coroutine by inspecting _run_research_background."""
+async def test_background_type_spawn_inherits_current_user() -> None:
+    """A background subagent runs as the caller (RBAC). Since it runs in the
+    background, we verify the caller is captured and a coro is scheduled."""
     from gilbert.interfaces.context import _current_user
 
     scheduled: list[Any] = []
     fake = _FakeAI("report")
     svc = SubagentService()
-    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    await svc.start(_resolver(ai_chat=fake))
     svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
     caller = UserContext(user_id="u7", email="u7@x.com", display_name="U7")
     tok = _current_user.set(caller)
     try:
-        await svc.execute_tool("deep_research", {"query": "q"})
+        await svc.execute_tool("spawn_agent", {"agent_type": "deep-research", "prompt": "q"})
     finally:
         _current_user.reset(tok)
-    # The run was scheduled in the background (not awaited inline).
     assert len(scheduled) == 1
-    # The engine was NOT called inline.
     assert fake.calls == []
 
 
 @pytest.mark.asyncio
-async def test_deep_research_empty_query_raises() -> None:
+async def test_spawn_agent_empty_prompt_raises() -> None:
     svc, _ = await _started()
-    with pytest.raises(ValueError, match="query"):
-        await svc.execute_tool("deep_research", {"query": ""})
+    with pytest.raises(ValueError, match="prompt"):
+        await svc.execute_tool("spawn_agent", {"agent_type": "deep-research", "prompt": ""})
 
 
 class _FakePoster:
@@ -517,6 +550,14 @@ class _FakeWorkspace:
         return {"_id": "f1", **kwargs}
 
 
+def _dr_type() -> SubagentType:
+    """The built-in deep-research type (background + report_file) — used to
+    drive _run_agent_background directly in tests."""
+    from gilbert.core.subagents.types import BUILTIN_SUBAGENT_TYPES
+
+    return BUILTIN_SUBAGENT_TYPES["deep-research"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_spawn_synthesizes_when_run_returns_empty() -> None:
@@ -562,7 +603,7 @@ async def test_run_research_background_writes_report_and_delivers(tmp_path: Any)
     svc._enabled = True
     caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
 
-    await svc._run_research_background("widgets?", "conv-parent", caller)
+    await svc._run_agent_background(_dr_type(), "widgets?", "conv-parent", caller)
 
     # Wrote the report to the PARENT conversation's outputs/.
     assert ws.registered, "report file was registered"
@@ -578,7 +619,7 @@ async def test_run_research_background_writes_report_and_delivers(tmp_path: Any)
     ens = poster.ensured[0]
     assert ens["source"] == "subagent"
     assert ens["parent_conversation_id"] == "conv-parent"
-    assert ens["title"].startswith("Research:")
+    assert ens["title"].startswith("Research Analyst:")
     assert ens["conversation_id"] == poster.calls[0]["conversation_id"]
     # Delivered a message into the parent conversation with a download link.
     assert poster.delivered, "delivered a message"
@@ -606,7 +647,7 @@ async def test_run_research_background_delivers_failure(tmp_path: Any) -> None:
     svc._enabled = True
 
     # Must NOT raise out of the detached task.
-    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+    await svc._run_agent_background(_dr_type(), "q", "conv-parent", UserContext.SYSTEM)
 
     assert poster.delivered, "delivered a failure message"
     _, msg, _atts = poster.delivered[0]
@@ -623,7 +664,7 @@ async def test_run_research_background_degrades_without_workspace() -> None:
     svc._workspace = None
     svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
     svc._enabled = True
-    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+    await svc._run_agent_background(_dr_type(), "q", "conv-parent", UserContext.SYSTEM)
     _, msg, _atts = poster.delivered[0]
     assert "Inline body." in msg  # the report itself, not a download link
     assert "/api/chat/download/" not in msg
@@ -647,22 +688,24 @@ async def test_run_research_background_without_poster_does_not_crash(tmp_path: A
     svc._workspace = ws  # type: ignore[assignment]
     svc._resolver = _resolver(event_bus=_FakeEventBusProvider(_FakeBus()))  # type: ignore[assignment]
     svc._enabled = True
-    await svc._run_research_background("q", "conv-parent", UserContext.SYSTEM)
+    await svc._run_agent_background(_dr_type(), "q", "conv-parent", UserContext.SYSTEM)
     assert ws.registered, "report still written even without a message poster"
 
 
 @pytest.mark.asyncio
-async def test_deep_research_tool_returns_immediately_and_schedules() -> None:
+async def test_background_spawn_returns_immediately_and_schedules() -> None:
     scheduled: list[Any] = []
     fake = _FakeAI("ignored")
     svc = SubagentService()
-    await svc.start(_resolver(ai_chat=fake, websearch=object()))
+    await svc.start(_resolver(ai_chat=fake))
     # Capture the background coro instead of really detaching it.
     svc._run_in_background = lambda coro: scheduled.append(coro) or coro.close()  # type: ignore[assignment]
 
-    out = await svc.execute_tool("deep_research", {"query": "what is X?"})
+    out = await svc.execute_tool(
+        "spawn_agent", {"agent_type": "deep-research", "prompt": "what is X?"}
+    )
 
-    assert "research" in out.lower()  # an acknowledgement, not the report
+    assert "background" in out.lower()  # an acknowledgement, not the report
     assert len(scheduled) == 1  # the run was scheduled in the background
     assert fake.calls == []  # the engine was NOT awaited inline
 
@@ -678,7 +721,7 @@ async def test_spawn_uses_preallocated_conversation_and_registers_run(tmp_path: 
     svc._enabled = True
     caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
 
-    await svc._run_research_background("widgets?", "conv-parent", caller)
+    await svc._run_agent_background(_dr_type(), "widgets?", "conv-parent", caller)
 
     # A run was registered with the subagent's own pre-allocated conversation id.
     runs = svc.list_runs("u1")
@@ -741,7 +784,7 @@ async def test_stopped_run_delivers_partial(tmp_path: Any) -> None:
     caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
 
     # Pre-set a run whose stop flag is already requested, then run.
-    await svc._run_research_background("q", "conv-parent", caller)
+    await svc._run_agent_background(_dr_type(), "q", "conv-parent", caller)
     # The fake triggers stop via the callback; status reflects it.
     # (Delivery happened; we just assert a message was delivered with the partial.)
     assert poster.delivered, "delivered the partial"
@@ -801,7 +844,7 @@ async def test_completed_run_delivers_report_attachment_and_notifies(tmp_path: A
     svc._enabled = True
     caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
 
-    await svc._run_research_background("widgets?", "conv-parent", caller)
+    await svc._run_agent_background(_dr_type(), "widgets?", "conv-parent", caller)
 
     conv, _msg, atts = poster.delivered[0]
     assert conv == "conv-parent"
@@ -854,3 +897,201 @@ async def test_ws_subagent_list_returns_active() -> None:
 
     res = await svc.get_ws_handlers()["subagent.list"](_Conn(), {"id": "r", "conversation_id": "p1"})
     assert [r["subagent_id"] for r in res["runs"]] == ["a"]
+
+
+# ── Type store (seed builtins, CRUD, reset, protection) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_type_store_seeds_builtins_and_crud() -> None:
+    from gilbert.core.subagents.types import builtin_seed_list
+
+    storage, _store = _inmemory_storage_service()
+    svc = SubagentService()
+    await svc.start(_resolver(entity_storage=storage))
+    # Seeded all built-ins.
+    ids = {t.id for t in svc.list_types()}
+    assert {"general-purpose", "deep-research", "software-engineer"} <= ids
+    assert len(svc.list_types()) >= len(builtin_seed_list())
+    # Create a custom type.
+    await svc.save_type(SubagentType(id="my-agent", name="Mine", description="d", system_prompt="do it"))
+    assert svc.get_type("my-agent") is not None
+    # Built-ins can't be deleted; custom can.
+    assert await svc.delete_type("deep-research") is False
+    assert await svc.delete_type("my-agent") is True
+    # Edits to a built-in persist across reload (not overwritten by seeding).
+    edited = svc.get_type("deep-research")
+    assert edited is not None
+    edited.max_rounds = 99
+    await svc.save_type(edited)
+    svc2 = SubagentService()
+    await svc2.start(_resolver(entity_storage=storage))
+    reloaded = svc2.get_type("deep-research")
+    assert reloaded is not None
+    assert reloaded.max_rounds == 99
+    # Reset restores shipped default.
+    await svc2.reset_type("deep-research")
+    after_reset = svc2.get_type("deep-research")
+    assert after_reset is not None
+    assert after_reset.max_rounds == 40
+
+
+# ── spawn() drives model/temperature/tools/budget from the type ────────────
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_type_model_temperature_tools_and_override() -> None:
+    storage, _ = _inmemory_storage_service()
+    svc = SubagentService()
+    fake = _FakeAI("# Done\n\n" + "x" * 100)
+    await svc.start(_resolver(ai_chat=fake, entity_storage=storage))
+    # Configure a custom sync type with a model + temperature + include tools.
+    await svc.save_type(SubagentType(
+        id="t1", name="T1", description="d", system_prompt="go",
+        backend="ollama", model="llama3.3", temperature=0.2,
+        tool_mode="include", tools=["web_search"], max_rounds=7,
+    ))
+    await svc.spawn("t1", "task")
+    call = fake.calls[0]
+    assert call["max_tool_rounds"] == 7
+    # Type model/backend/temperature/tools flow through to chat().
+    assert call["model"] == "llama3.3"
+    assert call["backend_override"] == "ollama"
+    assert call["temperature"] == 0.2
+    assert call["tool_filter"] == ("include", ["web_search"])
+    # A per-spawn override beats the type's model.
+    await svc.spawn("t1", "task", model_override="qwen2.5")
+    assert fake.calls[1]["model"] == "qwen2.5"
+
+
+# ── execution_mode / deliver_as + spawn_agent model param ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_is_only_tool_with_model_param_and_dynamic_types() -> None:
+    storage, _ = _inmemory_storage_service()
+    svc = SubagentService()
+    await svc.start(_resolver(entity_storage=storage))
+    tools = svc.get_tools()
+    names = {t.name for t in tools}
+    assert "spawn_agent" in names
+    assert "deep_research" not in names  # collapsed away
+    spawn = next(t for t in tools if t.name == "spawn_agent")
+    pnames = {p.name for p in spawn.parameters}
+    assert {"agent_type", "prompt", "model"} <= pnames
+    # The agent_type enum lists enabled type ids; the description name-drops them.
+    enum = next(p for p in spawn.parameters if p.name == "agent_type").enum
+    assert enum is not None
+    assert "software-engineer" in enum and "deep-research" in enum
+    assert "deep-research" in spawn.description
+
+
+@pytest.mark.asyncio
+async def test_background_type_detaches_and_delivers_report(tmp_path: Any) -> None:
+    # market-analyst is background/report_file.
+    poster = _FakePoster(report="# Market\n\n" + "y" * 120)
+    ws = _FakeWorkspace(tmp_path)
+    storage, _ = _inmemory_storage_service()
+    svc = SubagentService()
+    await svc.start(
+        _resolver(ai_chat=poster, entity_storage=storage, event_bus=_FakeEventBusProvider(_FakeBus()))
+    )
+    svc._ai = poster  # type: ignore[assignment]
+    svc._workspace = ws  # type: ignore[assignment]
+    captured: list[Any] = []
+    svc._run_in_background = lambda coro: captured.append(coro)  # type: ignore[assignment]
+    from gilbert.interfaces.context import _current_conversation_id
+
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+    tok = _current_user.set(caller)
+    ct = _current_conversation_id.set("conv-parent")
+    try:
+        out = await svc.execute_tool(
+            "spawn_agent", {"agent_type": "market-analyst", "prompt": "EV chargers"}
+        )
+    finally:
+        _current_user.reset(tok)
+        _current_conversation_id.reset(ct)
+    assert "background" in out.lower() or "i'll" in out.lower()
+    assert len(captured) == 1  # detached
+    await captured[0]  # run it
+    # Delivered a report attachment (deliver_as=report_file).
+    _conv, _msg, atts = poster.delivered[0]
+    assert atts and atts[0].media_type == "text/markdown"
+
+
+@pytest.mark.asyncio
+async def test_sync_type_returns_inline(tmp_path: Any) -> None:
+    poster = _FakePoster(report="# Answer\n\n" + "z" * 120)
+    storage, _ = _inmemory_storage_service()
+    svc = SubagentService()
+    await svc.start(
+        _resolver(ai_chat=poster, entity_storage=storage, event_bus=_FakeEventBusProvider(_FakeBus()))
+    )
+    svc._ai = poster  # type: ignore[assignment]
+    caller = UserContext(user_id="u1", email="u1@x.com", display_name="U1")
+    tok = _current_user.set(caller)
+    try:
+        out = await svc.execute_tool(
+            "spawn_agent", {"agent_type": "software-engineer", "prompt": "write fizzbuzz"}
+        )
+    finally:
+        _current_user.reset(tok)
+    assert "Answer" in out  # returned inline, not an ack
+
+
+# ── Admin CRUD WS RPCs ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_type_crud_ws_handlers_admin_gated() -> None:
+    storage, _ = _inmemory_storage_service()
+    svc = SubagentService()
+    await svc.start(_resolver(entity_storage=storage))
+    h = svc.get_ws_handlers()
+    assert {
+        "subagent.types.list",
+        "subagent.types.save",
+        "subagent.types.delete",
+        "subagent.types.reset",
+    } <= set(h)
+
+    class _Admin:
+        user_id = "a"
+        roles = ("admin",)
+
+    class _User:
+        user_id = "u"
+        roles = ("user",)
+
+    listed = await h["subagent.types.list"](_Admin(), {"id": "1"})
+    assert any(t["id"] == "deep-research" for t in listed["types"])
+    assert "all_tool_names" in listed
+    # Non-admin list rejected.
+    denied = await h["subagent.types.list"](_User(), {"id": "1b"})
+    assert denied.get("code") == 403
+    # Non-admin save rejected.
+    res = await h["subagent.types.save"](
+        _User(), {"id": "2", "type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
+    )
+    assert res.get("code") == 403
+    # Admin save accepted.
+    ok = await h["subagent.types.save"](
+        _Admin(), {"id": "3", "type": {"id": "x", "name": "X", "description": "d", "system_prompt": "p"}}
+    )
+    assert ok.get("ok") is True
+    assert svc.get_type("x") is not None
+    # Admin can't un-protect a built-in via save (built_in preserved).
+    await h["subagent.types.save"](
+        _Admin(),
+        {"id": "4", "type": {"id": "deep-research", "name": "DR", "description": "d",
+                             "system_prompt": "p", "built_in": False}},
+    )
+    dr = svc.get_type("deep-research")
+    assert dr is not None and dr.built_in is True
+    # Reset + delete handlers work for admin.
+    reset_res = await h["subagent.types.reset"](_Admin(), {"id": "5", "type_id": "deep-research"})
+    assert reset_res.get("ok") is True
+    del_res = await h["subagent.types.delete"](_Admin(), {"id": "6", "type_id": "x"})
+    assert del_res.get("ok") is True
+    assert svc.get_type("x") is None

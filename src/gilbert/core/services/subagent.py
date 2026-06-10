@@ -1,28 +1,36 @@
 """Subagent engine — spawn ephemeral, headless agents in a fresh context.
 
 A subagent is a one-shot, autonomous run: a fresh conversation seeded with a
-shared headless preamble + an agent type's system prompt, driven on the type's
-AI profile (model + tool gating) with a bounded round budget, returning its
-final message. It cannot ask the user anything. This service is the engine;
-the user-facing ``spawn_agent`` tool, the live UI, and the ``deep-research``
-type are added in later slices.
+shared headless preamble + a *subagent type*'s system prompt, driven from the
+type's self-contained definition (model + generation params, tool gating, round
+budget) with a bounded round budget, returning its final message. It cannot ask
+the user anything.
+
+Subagent types are entity-backed (``subagent_types`` collection), admin-managed,
+and seeded from a curated built-in catalog (``builtin_seed_list``). A type's
+``execution_mode`` (sync vs background) and ``deliver_as`` (inline vs
+report_file) generalize what used to be the special-cased ``deep_research``
+flow: a background+report type detaches the run, writes a Markdown report file,
+and delivers it as an attachment + link + notification into the parent
+conversation.
 
 First-party orchestration of the AI capability — lives in core, resolves
-``ai_chat`` (``AIProvider``) via the resolver, and never names a backend/model
-(the type's profile owns those).
+``ai_chat`` (``AIProvider``) via the resolver, and never hardcodes a
+backend/model (the type owns those, admin-selected).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from gilbert.core.subagents.types import get_agent_type, list_agent_types
+from gilbert.core.subagents.types import SubagentType, builtin_seed_list
 from gilbert.interfaces.ai import AIProvider, ConversationMessagePoster
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
@@ -33,6 +41,7 @@ from gilbert.interfaces.context import (
     set_workspace_conversation_id,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
+from gilbert.interfaces.storage import Query, StorageBackend, StorageProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -42,6 +51,8 @@ from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.interfaces.ws import WsHandlerProvider
 
 logger = logging.getLogger(__name__)
+
+_TYPES_COLLECTION = "subagent_types"
 
 
 @dataclass
@@ -66,12 +77,6 @@ _DEFAULT_PREAMBLE = (
 )
 
 
-def _prompt_key(type_id: str) -> str:
-    """Config key for a type's system-prompt override (``general-purpose`` ->
-    ``general_purpose_system_prompt``)."""
-    return f"{type_id.replace('-', '_')}_system_prompt"
-
-
 class SubagentService(Service, WsHandlerProvider):
     """Engine that runs a single ephemeral subagent and returns its result."""
 
@@ -81,7 +86,7 @@ class SubagentService(Service, WsHandlerProvider):
         self._workspace: WorkspaceProvider | None = None
         # Registry of active/recent background runs, keyed by subagent_id.
         # Holds a strong reference to each task so the event loop can't
-        # GC a long-running research mid-flight.
+        # GC a long-running agent mid-flight.
         self._runs: dict[str, _Run] = {}
         # Strong refs to detached run tasks (the event loop only weak-refs them).
         # The registry's _Run.task also holds one; this set is the GC backstop
@@ -89,7 +94,11 @@ class SubagentService(Service, WsHandlerProvider):
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._notifications: Any = None
         self._preamble = _DEFAULT_PREAMBLE
-        self._type_prompts: dict[str, str] = {t.id: t.system_prompt for t in list_agent_types()}
+        # Entity-backed type catalog, loaded in start(). Falls back to the
+        # in-memory seed list when no storage is available (e.g. unit tests
+        # that drive the engine directly).
+        self._types: dict[str, SubagentType] = {t.id: t for t in builtin_seed_list()}
+        self._storage: StorageBackend | None = None
         self._resolver: ServiceResolver | None = None
 
     # --- Service ---
@@ -111,8 +120,8 @@ class SubagentService(Service, WsHandlerProvider):
         # ``ServiceManager.restart_service`` resets ``_enabled`` to False before
         # calling start() (so a disabled service can't carry a stale True) and
         # relies on start() to restore it. Without this, toggling the service on
-        # triggers a restart that leaves it stuck disabled — its tools
-        # (including /research) silently vanish.
+        # triggers a restart that leaves it stuck disabled — its tools silently
+        # vanish.
         config_svc = resolver.get_capability("configuration")
         if isinstance(config_svc, ConfigurationReader):
             section = config_svc.get_section_safe("subagent")
@@ -120,10 +129,17 @@ class SubagentService(Service, WsHandlerProvider):
                 self._enabled = False
                 logger.info("Subagent service disabled")
                 return
-        ai = resolver.require_capability("ai_chat")
-        if not isinstance(ai, AIProvider):
-            raise RuntimeError("ai_chat capability does not implement AIProvider")
-        self._ai = ai
+        # Resolve storage for the entity-backed type catalog. Optional so the
+        # engine still runs (with the in-memory seed list) where storage isn't
+        # wired — but required for admin edits to persist.
+        storage = resolver.get_capability("entity_storage")
+        self._storage = storage.backend if isinstance(storage, StorageProvider) else None
+        await self._load_types()
+        ai = resolver.get_capability("ai_chat")
+        if ai is not None:
+            if not isinstance(ai, AIProvider):
+                raise RuntimeError("ai_chat capability does not implement AIProvider")
+            self._ai = ai
         self._enabled = True
         ws = resolver.get_capability("workspace")
         self._workspace = ws if isinstance(ws, WorkspaceProvider) else None
@@ -141,7 +157,10 @@ class SubagentService(Service, WsHandlerProvider):
         return "Intelligence"
 
     def config_params(self) -> list[ConfigParam]:
-        params = [
+        # Per-type system prompts live on the type entity now (managed at
+        # /security/subagents), not as config params. Only the shared, engine-
+        # level config remains here.
+        return [
             ConfigParam(
                 key="enabled",
                 type=ToolParameterType.BOOLEAN,
@@ -161,27 +180,74 @@ class SubagentService(Service, WsHandlerProvider):
                 ai_prompt=True,
             ),
         ]
-        for t in list_agent_types():
-            params.append(
-                ConfigParam(
-                    key=_prompt_key(t.id),
-                    type=ToolParameterType.STRING,
-                    description=f"System prompt for the '{t.id}' subagent type.",
-                    default=t.system_prompt,
-                    multiline=True,
-                    ai_prompt=True,
-                )
-            )
-        return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         # Use ``get(key, default)`` (not ``or default``) so an operator who
-        # deliberately blanks a prompt gets the empty value, never a silent
+        # deliberately blanks the preamble gets the empty value, never a silent
         # revert to the bundled constant (per the AI-prompt rule).
         self._enabled = bool(config.get("enabled", True))
         self._preamble = str(config.get("preamble", _DEFAULT_PREAMBLE))
-        for t in list_agent_types():
-            self._type_prompts[t.id] = str(config.get(_prompt_key(t.id), t.system_prompt))
+
+    # --- type store ---
+
+    @staticmethod
+    def _type_to_dict(t: SubagentType) -> dict[str, Any]:
+        return dataclasses.asdict(t)
+
+    @staticmethod
+    def _type_from_dict(d: dict[str, Any]) -> SubagentType:
+        fields = {f.name for f in dataclasses.fields(SubagentType)}
+        return SubagentType(**{k: v for k, v in d.items() if k in fields})
+
+    async def _load_types(self) -> None:
+        """Seed missing built-ins (preserving edits), then load all into memory."""
+        if self._storage is None:
+            self._types = {t.id: t for t in builtin_seed_list()}
+            return
+        for seed in builtin_seed_list():
+            existing = await self._storage.get(_TYPES_COLLECTION, seed.id)
+            if existing is None:
+                await self._storage.put(_TYPES_COLLECTION, seed.id, self._type_to_dict(seed))
+                logger.info("Seeded built-in subagent type '%s'", seed.id)
+        await self._refresh_types()
+
+    async def _refresh_types(self) -> None:
+        if self._storage is None:
+            return
+        rows = await self._storage.query(Query(collection=_TYPES_COLLECTION))
+        self._types = {}
+        for r in rows:
+            tid = r.get("id") or r.get("_id")
+            if tid:
+                self._types[tid] = self._type_from_dict({**r, "id": tid})
+
+    def list_types(self) -> list[SubagentType]:
+        return sorted(self._types.values(), key=lambda t: t.name)
+
+    def get_type(self, type_id: str) -> SubagentType | None:
+        return self._types.get(type_id)
+
+    async def save_type(self, t: SubagentType) -> None:
+        if self._storage is not None:
+            await self._storage.put(_TYPES_COLLECTION, t.id, self._type_to_dict(t))
+        self._types[t.id] = t
+
+    async def delete_type(self, type_id: str) -> bool:
+        t = self._types.get(type_id)
+        if t is None or t.built_in:
+            return False
+        if self._storage is not None:
+            await self._storage.delete(_TYPES_COLLECTION, type_id)
+        self._types.pop(type_id, None)
+        return True
+
+    async def reset_type(self, type_id: str) -> bool:
+        """Restore a built-in type to its shipped seed values."""
+        seed = next((s for s in builtin_seed_list() if s.id == type_id), None)
+        if seed is None:
+            return False
+        await self.save_type(seed)
+        return True
 
     # --- ToolProvider ---
 
@@ -192,8 +258,8 @@ class SubagentService(Service, WsHandlerProvider):
     def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
         if not self._enabled:
             return []
-        types = list_agent_types()
-        type_lines = "\n".join(f"- {t.id}: {t.description}" for t in types)
+        types = [t for t in self.list_types() if t.enabled]
+        type_lines = "\n".join(f"- {t.name} ({t.id}): {t.description}" for t in types)
         return [
             ToolDefinition(
                 name="spawn_agent",
@@ -201,7 +267,9 @@ class SubagentService(Service, WsHandlerProvider):
                     "Launch a subagent to work on a focused task autonomously in "
                     "a fresh context, then return its final report. The subagent "
                     "cannot ask you or the user questions — give it a complete, "
-                    "self-contained task. Available agent types:\n" + type_lines
+                    "self-contained task. Some agent types run in the background "
+                    "and deliver a written report into the chat when done; the "
+                    "rest answer inline. Available agent types:\n" + type_lines
                 ),
                 parameters=[
                     ToolParameter(
@@ -219,6 +287,16 @@ class SubagentService(Service, WsHandlerProvider):
                             "ask follow-up questions."
                         ),
                     ),
+                    ToolParameter(
+                        name="model",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional model override for this run (e.g. a "
+                            "stronger model for a hard task). Leave empty to use "
+                            "the agent type's configured model."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
                 # interactive=True keeps spawn_agent out of headless subagent
@@ -229,49 +307,22 @@ class SubagentService(Service, WsHandlerProvider):
                 parallel_safe=False,
             ),
             ToolDefinition(
-                name="deep_research",
-                description=(
-                    "Run a deep web-research task: an autonomous agent searches "
-                    "the web, reads pages, cross-checks sources, and returns a "
-                    "cited Markdown report. Use for questions that need current "
-                    "information or synthesis across multiple sources. (Sugar "
-                    "over spawn_agent with the 'deep-research' type.)"
-                ),
-                parameters=[
-                    ToolParameter(
-                        name="query",
-                        type=ToolParameterType.STRING,
-                        description=(
-                            "The research question or task, stated completely "
-                            "and self-contained — the agent cannot ask follow-ups."
-                        ),
-                    ),
-                ],
-                slash_command="research",
-                slash_help="Deep web research: /research <question>",
-                required_role="user",
-                # Orchestration tool: keep it out of headless subagent runs
-                # (a subagent calling deep_research would nest).
-                interactive=True,
-                parallel_safe=False,
-            ),
-            ToolDefinition(
                 name="check_research",
                 description=(
-                    "List your recent and in-progress research runs and their "
-                    "status (running/completed/stopped/failed) so you can report "
-                    "progress or point at a finished report."
+                    "List your recent and in-progress background agent runs and "
+                    "their status (running/completed/stopped/failed) so you can "
+                    "report progress or point at a finished report."
                 ),
                 parameters=[],
                 slash_command="research-status",
-                slash_help="Show running/recent research: /research-status",
+                slash_help="Show running/recent background agents: /research-status",
                 required_role="user",
                 interactive=True,
             ),
         ]
 
     def _web_search_available(self) -> bool:
-        """Whether a web-search backend is enabled (deep research needs one)."""
+        """Whether a web-search backend is enabled (some agent types need one)."""
         if self._resolver is None:
             return False
         return self._resolver.get_capability("websearch") is not None
@@ -282,6 +333,10 @@ class SubagentService(Service, WsHandlerProvider):
         return {
             "subagent.stop": self._ws_stop_subagent,
             "subagent.list": self._ws_list_subagents,
+            "subagent.types.list": self._ws_types_list,
+            "subagent.types.save": self._ws_types_save,
+            "subagent.types.delete": self._ws_types_delete,
+            "subagent.types.reset": self._ws_types_reset,
         }
 
     async def _ws_stop_subagent(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
@@ -295,45 +350,111 @@ class SubagentService(Service, WsHandlerProvider):
         )
         return {"type": "subagent.list.result", "ref": frame.get("id"), "runs": runs}
 
+    # --- admin type CRUD (mirrors roles.profile.*) ---
+
+    @staticmethod
+    def _is_admin(conn: Any) -> bool:
+        return "admin" in tuple(getattr(conn, "roles", ()) or ())
+
+    @staticmethod
+    def _forbidden(frame: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "gilbert.error",
+            "ref": frame.get("id"),
+            "error": "Admin role required",
+            "code": 403,
+        }
+
+    def _all_tool_names(self) -> list[str]:
+        """Every AI tool name any started ToolProvider exposes — backs the
+        admin form's include/exclude checkbox list (mirrors profiles)."""
+        from gilbert.interfaces.tools import ToolProvider
+
+        names: set[str] = set()
+        if self._resolver is not None:
+            for svc in self._resolver.get_all("ai_tools"):
+                if isinstance(svc, ToolProvider):
+                    for t in svc.get_tools():
+                        names.add(t.name)
+        return sorted(names)
+
+    async def _ws_types_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn):
+            return self._forbidden(frame)
+        return {
+            "type": "subagent.types.list.result",
+            "ref": frame.get("id"),
+            "types": [self._type_to_dict(t) for t in self.list_types()],
+            "all_tool_names": self._all_tool_names(),
+        }
+
+    async def _ws_types_save(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn):
+            return self._forbidden(frame)
+        raw = frame.get("type")
+        if not isinstance(raw, dict) or not raw.get("id") or not raw.get("name"):
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "type requires at least 'id' and 'name'",
+                "code": 400,
+            }
+        # Preserve the built_in flag from the existing type so an admin edit
+        # can't accidentally un-protect (or fake-protect) a type.
+        existing = self.get_type(str(raw["id"]))
+        t = self._type_from_dict(raw)
+        if existing is not None:
+            t.built_in = existing.built_in
+        await self.save_type(t)
+        return {"type": "subagent.types.save.result", "ref": frame.get("id"), "ok": True}
+
+    async def _ws_types_delete(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn):
+            return self._forbidden(frame)
+        ok = await self.delete_type(str(frame.get("type_id") or ""))
+        return {"type": "subagent.types.delete.result", "ref": frame.get("id"), "ok": ok}
+
+    async def _ws_types_reset(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_admin(conn):
+            return self._forbidden(frame)
+        ok = await self.reset_type(str(frame.get("type_id") or ""))
+        return {"type": "subagent.types.reset.result", "ref": frame.get("id"), "ok": ok}
+
     # --- ToolProvider ---
 
     async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name == "spawn_agent":
             agent_type = str(arguments.get("agent_type") or "")
             prompt = str(arguments.get("prompt") or "")
+            model = str(arguments.get("model") or "")
             if not agent_type or not prompt:
                 raise ValueError("spawn_agent requires 'agent_type' and 'prompt'")
+            t = self.get_type(agent_type)
+            if t is None:
+                raise ValueError(f"Unknown agent type: {agent_type}")
             # Inherit the caller's full identity for the subagent's RBAC.
-            return await self.spawn(agent_type, prompt, user_ctx=get_current_user())
-        if name == "deep_research":
-            query = str(arguments.get("query") or "")
-            if not query:
-                raise ValueError("deep_research requires 'query'")
-            if not self._web_search_available():
-                return (
-                    "Deep research needs a web-search backend, but none is "
-                    "enabled. Enable a web-search provider (for example the "
-                    "Tavily plugin) under Settings → Intelligence, then try again."
-                )
-            parent_conv = get_current_conversation_id()
             caller = get_current_user()
-            self._run_in_background(
-                self._run_research_background(query, parent_conv, caller)
-            )
-            return (
-                f"\U0001f50d Researching \"{query}\" in the background — will post the "
-                "report here when ready. You can keep chatting."
-            )
+            if t.execution_mode == "background":
+                parent_conv = get_current_conversation_id()
+                self._run_in_background(
+                    self._run_agent_background(t, prompt, parent_conv, caller, model)
+                )
+                return (
+                    f"\U0001f50d Running {t.name} on \"{prompt}\" in the background "
+                    "— I'll post the report here when it's ready. You can keep "
+                    "chatting."
+                )
+            return await self.spawn(t.id, prompt, user_ctx=caller, model_override=model)
         if name == "check_research":
             user = get_current_user()
             runs = self.list_runs(user.user_id)
             if not runs:
-                return "No research runs found."
+                return "No background agent runs found."
             lines = [
                 f"- [{r['status']}] {r['agent_type']}: \"{r['query']}\" (started {r['started_at']})"
                 for r in runs
             ]
-            return "Research runs:\n" + "\n".join(lines)
+            return "Background agent runs:\n" + "\n".join(lines)
         raise KeyError(f"Unknown tool: {name}")
 
     # --- run registry ---
@@ -412,15 +533,17 @@ class SubagentService(Service, WsHandlerProvider):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _run_research_background(
+    async def _run_agent_background(
         self,
+        t: SubagentType,
         query: str,
         parent_conversation_id: str | None,
         user_ctx: UserContext | None,
+        model_override: str = "",
     ) -> None:
-        """Run a deep-research subagent off the parent turn and deliver the
-        result into the parent conversation. Never raises — a detached task's
-        failure must be delivered, not lost."""
+        """Run a background subagent off the parent turn and deliver its result
+        into the parent conversation per the type's ``deliver_as``. Never raises
+        — a detached task's failure must be delivered, not lost."""
         # Scope workspace writes to the PARENT conversation so the report (and
         # any media the agent saves) is linkable from the user's chat. Also pin
         # the conversation-id ContextVar so spawn()'s lifecycle events route to
@@ -432,9 +555,10 @@ class SubagentService(Service, WsHandlerProvider):
 
         subagent_id = uuid.uuid4().hex
         sub_conv = uuid.uuid4().hex
+        title = f"{t.name}: {query}"[:80]
         run = _Run(
             subagent_id=subagent_id,
-            agent_type="deep-research",
+            agent_type=t.id,
             query=query,
             conversation_id=sub_conv,
             parent_conversation_id=parent_conversation_id,
@@ -456,56 +580,66 @@ class SubagentService(Service, WsHandlerProvider):
                     user_ctx,
                     source="subagent",
                     parent_conversation_id=parent_conversation_id or "",
-                    title=f"Research: {query}"[:80],
+                    title=title,
                 )
             except Exception:
                 logger.exception("ensure_conversation failed for subagent %s", subagent_id)
         try:
             report = await self.spawn(
-                "deep-research",
+                t.id,
                 query,
                 user_ctx=user_ctx,
                 conversation_id=sub_conv,
                 subagent_id=subagent_id,
                 should_stop=lambda: run.stop_flag[0],
+                model_override=model_override,
                 conversation_parent_id=parent_conversation_id or "",
-                conversation_title=f"Research: {query}"[:80],
+                conversation_title=title,
             )
             run.status = "stopped" if run.stop_flag[0] else "completed"
-            rel_path = await self._write_report(
-                parent_conversation_id,
-                user_ctx.user_id if user_ctx else "system",
-                report,
-            )
             stopped = run.stop_flag[0]
-            verb = "Research stopped early — here's what it found so far." if stopped else "**Research complete.**"
+            verb = (
+                f"{t.name} stopped early — here's what it found so far."
+                if stopped
+                else f"**{t.name} complete.**"
+            )
             from gilbert.interfaces.attachments import FileAttachment
             from gilbert.interfaces.notifications import NotificationProvider, NotificationUrgency
 
             attachments: list[FileAttachment] = []
-            if rel_path and parent_conversation_id:
-                attachments = [
-                    FileAttachment(
-                        kind="text",
-                        name=rel_path.split("/")[-1],
-                        media_type="text/markdown",
-                        workspace_skill="workspace",
-                        workspace_path=rel_path,
-                        workspace_conv=parent_conversation_id,
-                    )
-                ]
-                url = f"/api/chat/download/{parent_conversation_id}/{rel_path}"
-                lead = report.strip().split("\n\n", 1)[0][:400]
-                message = f"{verb} [Open the report]({url})\n\n{lead}"
+            rel_path: str | None = None
+            if t.deliver_as == "report_file":
+                rel_path = await self._write_report(
+                    parent_conversation_id,
+                    user_ctx.user_id if user_ctx else "system",
+                    report,
+                )
+                if rel_path and parent_conversation_id:
+                    attachments = [
+                        FileAttachment(
+                            kind="text",
+                            name=rel_path.split("/")[-1],
+                            media_type="text/markdown",
+                            workspace_skill="workspace",
+                            workspace_path=rel_path,
+                            workspace_conv=parent_conversation_id,
+                        )
+                    ]
+                    url = f"/api/chat/download/{parent_conversation_id}/{rel_path}"
+                    lead = report.strip().split("\n\n", 1)[0][:400]
+                    message = f"{verb} [Open the report]({url})\n\n{lead}"
+                else:
+                    # No workspace — degrade to delivering the report inline.
+                    message = f"{verb}\n\n{report}"
             else:
-                # No workspace — degrade to delivering the report inline.
+                # inline delivery: post the full report into the parent chat.
                 message = f"{verb}\n\n{report}"
             await self._deliver(parent_conversation_id, message, attachments)
             if isinstance(self._notifications, NotificationProvider) and user_ctx:
                 try:
                     await self._notifications.notify_user(
                         user_id=user_ctx.user_id,
-                        message=f"Deep research {run.status}: {query}",
+                        message=f"{t.name} {run.status}: {query}",
                         urgency=NotificationUrgency.NORMAL,
                         source="subagent",
                         source_ref={
@@ -518,19 +652,19 @@ class SubagentService(Service, WsHandlerProvider):
                     logger.exception("subagent notification failed")
         except Exception as exc:  # noqa: BLE001 — deliver, don't crash
             run.status = "failed"
-            logger.exception("Deep research background run failed")
+            logger.exception("Background subagent run failed")
             await self._publish_event(
                 "chat.stream.subagent_failed",
                 {
                     "conversation_id": parent_conversation_id,
                     "subagent_id": subagent_id,
-                    "agent_type": "deep-research",
+                    "agent_type": t.id,
                     "reason": str(exc),
                     "visible_to": [user_ctx.user_id] if user_ctx and user_ctx.user_id else None,
                 },
             )
             await self._deliver(
-                parent_conversation_id, f"Deep research failed: {exc}"
+                parent_conversation_id, f"{t.name} failed: {exc}"
             )
 
     async def _write_report(
@@ -554,7 +688,7 @@ class SubagentService(Service, WsHandlerProvider):
             media_type="text/markdown",
             size=len(content.encode("utf-8")),
             created_by="ai",
-            description="Deep research report",
+            description="Subagent report",
         )
         return rel_path
 
@@ -567,7 +701,7 @@ class SubagentService(Service, WsHandlerProvider):
         """Post the result into the parent conversation (best-effort).
 
         Swallows delivery errors: a failed post must not escape the detached
-        task (the ``_run_research_background`` "never raises" contract), and it's
+        task (the ``_run_agent_background`` "never raises" contract), and it's
         also called from the failure path where re-raising would be worse.
         """
         if not conversation_id or not isinstance(self._ai, ConversationMessagePoster):
@@ -575,7 +709,7 @@ class SubagentService(Service, WsHandlerProvider):
         try:
             await self._ai.append_assistant_message(conversation_id, content, attachments)
         except Exception:
-            logger.exception("Failed to deliver research message to %s", conversation_id)
+            logger.exception("Failed to deliver subagent message to %s", conversation_id)
 
     # --- engine ---
 
@@ -615,34 +749,38 @@ class SubagentService(Service, WsHandlerProvider):
         conversation_id: str | None = None,
         subagent_id: str | None = None,
         should_stop: Any = None,
+        model_override: str = "",
+        backend_override: str = "",
         conversation_parent_id: str = "",
         conversation_title: str = "",
     ) -> str:
         """Run one ephemeral subagent of ``agent_type`` on ``prompt``.
 
         Drives a fresh chat turn (no parent history) with the shared preamble +
-        the type's prompt, on the type's AI profile and round budget, inheriting
-        the caller's identity for RBAC. Returns the subagent's final message
-        text. The subagent cannot ask the user anything: the headless preamble
-        plus ``headless=True`` on the chat call exclude all interactive tools —
-        including ``spawn_agent`` itself, so a subagent can't spawn more
-        subagents (no nesting).
+        the type's prompt, on the type's model + generation params + tool gating
+        and round budget, inheriting the caller's identity for RBAC. Returns the
+        subagent's final message text. The subagent cannot ask the user
+        anything: the headless preamble plus ``headless=True`` on the chat call
+        exclude all interactive tools — including ``spawn_agent`` itself, so a
+        subagent can't spawn more subagents (no nesting).
 
-        ``conversation_id`` is the pre-allocated conversation id for this
-        subagent run; if given, the subagent's messages are persisted under
-        that id (watchable from the UI). ``should_stop`` is an optional
-        callable ``() -> bool`` that the AI engine checks between rounds.
+        ``model_override`` / ``backend_override`` beat the type's configured
+        model/backend for this run (e.g. a per-spawn model choice from the
+        tool). ``conversation_id`` is the pre-allocated conversation id for this
+        subagent run; if given, the subagent's messages are persisted under that
+        id (watchable from the UI). ``should_stop`` is an optional callable
+        ``() -> bool`` that the AI engine checks between rounds.
         """
         if not self._enabled:
             raise RuntimeError("subagent service is disabled")
         if self._ai is None:
             raise RuntimeError("subagent service not started")
-        agent = get_agent_type(agent_type)
-        if agent is None:
+        t = self.get_type(agent_type)
+        if t is None:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
-        type_prompt = self._type_prompts.get(agent.id, agent.system_prompt)
-        system_prompt = f"{self._preamble}\n\n{type_prompt}"
+        system_prompt = f"{self._preamble}\n\n{t.system_prompt}"
+        tool_filter = (t.tool_mode, list(t.tools))
 
         subagent_id = subagent_id or uuid.uuid4().hex
         routing = self._event_routing()
@@ -651,7 +789,7 @@ class SubagentService(Service, WsHandlerProvider):
             {
                 **routing,
                 "subagent_id": subagent_id,
-                "agent_type": agent.id,
+                "agent_type": t.id,
                 "subagent_conversation_id": conversation_id,
                 "query": prompt,
             },
@@ -662,9 +800,12 @@ class SubagentService(Service, WsHandlerProvider):
                 conversation_id=conversation_id,   # pre-allocated (watchable) or None
                 user_ctx=user_ctx,
                 system_prompt=system_prompt,
-                ai_call=f"subagent.{agent.id}",
-                ai_profile=agent.profile_name,
-                max_tool_rounds=agent.max_rounds,
+                ai_call=f"subagent.{t.id}",
+                model=model_override or t.model,
+                backend_override=backend_override or t.backend,
+                temperature=t.temperature,
+                tool_filter=tool_filter,
+                max_tool_rounds=t.max_rounds,
                 headless=True,
                 # Tag the ephemeral subagent conversation so it's visible in
                 # the user's chat list as a child of the parent conversation.
@@ -676,7 +817,7 @@ class SubagentService(Service, WsHandlerProvider):
         except Exception as exc:
             await self._publish_event(
                 "chat.stream.subagent_failed",
-                {**routing, "subagent_id": subagent_id, "agent_type": agent.id, "reason": str(exc)},
+                {**routing, "subagent_id": subagent_id, "agent_type": t.id, "reason": str(exc)},
             )
             raise
         was_stopped = should_stop is not None and bool(should_stop())
@@ -689,17 +830,20 @@ class SubagentService(Service, WsHandlerProvider):
             try:
                 synth = await self._ai.chat(
                     user_message=(
-                        "You've reached your research step limit. Do NOT call any "
+                        "You've reached your step limit. Do NOT call any "
                         "more tools. Using everything you have already gathered in "
                         "this conversation, write your COMPLETE final answer now — "
                         "a thorough, well-structured Markdown report that directly "
-                        "answers the original question, with citations."
+                        "answers the original task, with citations where relevant."
                     ),
                     conversation_id=conversation_id,
                     user_ctx=user_ctx,
                     system_prompt=system_prompt,
-                    ai_call=f"subagent.{agent.id}.synthesis",
-                    ai_profile=agent.profile_name,
+                    ai_call=f"subagent.{t.id}.synthesis",
+                    model=model_override or t.model,
+                    backend_override=backend_override or t.backend,
+                    temperature=t.temperature,
+                    tool_filter=tool_filter,
                     max_tool_rounds=2,
                     headless=True,
                     source="subagent",
@@ -714,6 +858,6 @@ class SubagentService(Service, WsHandlerProvider):
         # "stopped" terminal event so the UI can label it (both are terminal).
         await self._publish_event(
             "chat.stream.subagent_stopped" if was_stopped else "chat.stream.subagent_completed",
-            {**routing, "subagent_id": subagent_id, "agent_type": agent.id},
+            {**routing, "subagent_id": subagent_id, "agent_type": t.id},
         )
         return report
