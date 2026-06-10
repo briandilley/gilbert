@@ -35,6 +35,9 @@ interface TurnBubbleProps {
   currentUserId?: string;
   /** Called when the user clicks a `.md` workspace-reference attachment. */
   onOpenReport?: (conv: string, path: string) => void;
+  /** Suppress the "didn't reach a final answer" warning — used when watching a
+   *  read-only subagent whose transcript may still be in progress. */
+  hideIncompleteWarning?: boolean;
 }
 
 export function TurnBubble({
@@ -42,6 +45,7 @@ export function TurnBubble({
   isShared,
   currentUserId,
   onOpenReport,
+  hideIncompleteWarning,
 }: TurnBubbleProps) {
   const userAuthorId = turn.user_message.author_id || "";
   const userIsOwn =
@@ -120,7 +124,7 @@ export function TurnBubble({
 
           {hasFinal && <FinalAnswer turn={turn} onOpenReport={onOpenReport} />}
 
-          {!hasFinal && turn.incomplete && !turn.interrupted && (
+          {!hasFinal && turn.incomplete && !turn.interrupted && !hideIncompleteWarning && (
             <div className="mt-2 flex items-center gap-1.5 rounded-md border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
               <AlertTriangleIcon className="size-3.5 shrink-0" />
               <span>

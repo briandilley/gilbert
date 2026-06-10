@@ -410,6 +410,15 @@ export function ChatPage() {
     enabled: connected,
   });
 
+  // Workspace files live on the PARENT conversation (a subagent run writes its
+  // report/media there). When viewing a subagent child, show the parent's
+  // workspace so its files are visible while watching.
+  const workspaceConvId = useMemo(() => {
+    if (!activeConvId) return activeConvId;
+    const active = conversations.find((c) => c.conversation_id === activeConvId);
+    return active?.parent_conversation_id || activeConvId;
+  }, [activeConvId, conversations]);
+
   const { data: modelsData } = useQuery({
     queryKey: ["chat-models"],
     queryFn: api.listModels,
@@ -1443,6 +1452,7 @@ export function ChatPage() {
             currentUserId={user?.user_id}
             conversationId={activeConvId ?? undefined}
             subagents={activeSubagents}
+            hideIncompleteWarning={readOnly}
             onBlockSubmit={handleBlockSubmit}
             onWatchSubagent={(subagentConvId) => {
               void loadConversation(subagentConvId, {
@@ -1549,7 +1559,7 @@ export function ChatPage() {
       {/* Desktop workspace panel */}
       {workspaceOpen && activeConvId && (
         <div className="hidden md:block w-64 shrink-0 border-l overflow-hidden">
-          <WorkspacePanelContent conversationId={activeConvId} />
+          <WorkspacePanelContent conversationId={workspaceConvId} />
         </div>
       )}
 
@@ -1578,7 +1588,7 @@ export function ChatPage() {
             <SheetTitle>Workspace Files</SheetTitle>
           </SheetHeader>
           {activeConvId && (
-            <WorkspacePanelContent conversationId={activeConvId} />
+            <WorkspacePanelContent conversationId={workspaceConvId} />
           )}
         </SheetContent>
       </Sheet>

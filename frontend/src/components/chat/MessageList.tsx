@@ -25,6 +25,8 @@ interface MessageListProps {
   onStopSubagent?: (subagentId: string) => void;
   /** Called when the user clicks a `.md` workspace attachment to open the viewer. */
   onOpenReport?: (conv: string, path: string) => void;
+  /** Suppress the per-turn "didn't reach a final answer" warning (read-only watch). */
+  hideIncompleteWarning?: boolean;
 }
 
 // How close to the bottom (in CSS pixels) we consider the user
@@ -44,6 +46,7 @@ export function MessageList({
   onWatchSubagent,
   onStopSubagent,
   onOpenReport,
+  hideIncompleteWarning,
 }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
@@ -136,6 +139,7 @@ export function MessageList({
               isShared={isShared}
               currentUserId={currentUserId}
               onOpenReport={onOpenReport}
+              hideIncompleteWarning={hideIncompleteWarning}
             />
             {blocksByTurnIndex.get(i)?.map((block) => (
               <div key={block.block_id} className="max-w-md mx-auto mt-4">
