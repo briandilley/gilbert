@@ -6,10 +6,10 @@ budget, a system prompt, and an execution mode (sync vs background) +
 delivery (inline vs report file). Types are stored as entities
 (``subagent_types``) and managed by admins.
 
-The dataclass lives here (``interfaces/``) because it is shared data: the
-ephemeral ``SubagentService`` owns the catalog, and ``AgentService`` reads it
-(durable agents reference a type for execution defaults). Per the layer rules,
-shared data used by multiple services belongs in ``interfaces/``.
+The dataclass lives here (``interfaces/``) because it is shared data that
+consumers read through the ``SubagentCatalog`` capability without importing the
+concrete ``SubagentService``. Per the layer rules, shared data used across
+services belongs in ``interfaces/``.
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ class SubagentType:
 class SubagentCatalog(Protocol):
     """Read surface for the subagent type catalog.
 
-    Consumers (e.g. ``AgentService``) resolve this via
-    ``resolver.get_capability("subagent")`` and ``isinstance``-check it to read
-    types without importing the concrete ``SubagentService``.
+    Consumers resolve this via ``resolver.get_capability("subagent")`` and
+    ``isinstance``-check it to read types without importing the concrete
+    ``SubagentService``.
     """
 
     def list_types(self) -> list[SubagentType]: ...

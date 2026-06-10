@@ -180,86 +180,36 @@ Gilbert-as-server.
 An external MCP server asking Gilbert for an AI completion, gated by an allow flag, a sampling
 profile, and a token budget.
 
-## Agents & goals
-
-**Agent**:
-A durable, user-owned AI sub-persona (persona + rules + memory + commitments + tools) that runs its
-own loop, messages peers, and pursues goals. Distinct from Gilbert (the one global assistant).
-_Avoid_: bot, assistant (reserve for Gilbert).
+## Subagents
 
 **Subagent** — an *ephemeral, headless* agent run spawned within a chat turn
   (the `SubagentService` engine): a fresh context (shared preamble + a
   *SubagentType* system prompt + the task), a scoped toolset + model (from the
-  type's configuration), and a bounded budget. It runs autonomously and
-  **cannot ask the user** — its final message is returned as the spawning
-  tool's result (inline) or delivered as a report file attachment (background).
-  Distinct from an **Autonomous agent** (the durable, goal-based agent with
-  persona / memory / heartbeats). _Avoid_ calling a subagent an "agent"
-  unqualified.
+  type's profile), and a bounded budget. It runs autonomously and **cannot ask
+  the user** — its final message is returned as the spawning tool's result
+  (inline) or delivered as a report file attachment (background). _Avoid_
+  calling a subagent an "agent" unqualified.
 
 **SubagentType** — an entity-backed, admin-managed agent definition stored in
-  the `subagent_types` collection. A type is *self-contained*: it carries its
-  model selection (`ai_profile` — the preferred, model-agnostic selector — or
-  raw backend/model/temperature), tool gating, round/time budget, system
-  prompt, execution mode (`sync` | `background`), and delivery mode (`inline` |
+  the `subagent_types` collection. A type carries a system prompt, a referenced
+  AI profile (which owns model selection *and* tool gating), round/time budget,
+  execution mode (`sync` | `background`), and delivery mode (`inline` |
   `report_file`). Built-in types (e.g. `deep-research`, `software-engineer`)
-  are seeded on first run and can be edited or reset. Custom types can be
-  deleted. Model selection on a type is **admin-selected data**, not a
+  are seeded on first run and can be edited or reset; custom types can be
+  deleted. Each built-in type references a same-named seeded AI profile that
+  carries its toolset. Model/tool selection is **admin-selected data**, not a
   user-visible AI-backend detail — see ADR-0021. The dataclass lives in
   `interfaces/subagent.py` (shared data) and is read via the `SubagentCatalog`
   capability. _Avoid_: "agent profile", "agent template". The correct term is
-  "subagent type". A durable **Autonomous agent** references a SubagentType
-  (`agent_type_id`) for execution defaults, which its own fields override; the
-  neutral `durable-default` type is the seeded baseline.
+  "subagent type".
 
 **RunSpec / AgentRunEngine** — the shared single-agent run primitive in
   `core/agent_run/`. A `RunSpec` is the fully-resolved description of one run
   (system prompt, profile/model, tool filter, round + wall-clock budget,
   `headless` flag, callbacks); `AgentRunEngine.run()` drives the chat turn,
   enforces the wall-clock deadline, runs the budget-exhaustion synthesis
-  fallback, and emits lifecycle events. Both `SubagentService.spawn()`
-  (headless) and `AgentService` durable runs (non-headless) build a RunSpec and
-  call it — one "run an agent" primitive, two coordinators.
-
-**Run**:
-A single execution of an Agent's loop, capturing its response, token usage, and cost.
-
-**Heartbeat**:
-A recurring self-wake that spawns a Run, letting an Agent act periodically without user input.
-
-**Commitment**:
-A short-lived follow-up an Agent records for itself, surfaced in heartbeat prompts when due.
-
-**AgentMemory**:
-An Agent's own two-tier durable memory (short-term observations vs. promoted long-term facts).
-Distinct from Memory scopes (Gilbert's user-fact memory).
-
-**InboxSignal**:
-A durable wake-up record for an Agent (a peer DM, mention, delegation, or system event) that drives
-when it spawns or interrupts a Run.
-_Avoid_: notification (reserve for the user-facing Notification).
-
-**Delegation**:
-An Agent's send-*and-await* message to a same-owner peer: the caller awaits a result the target
-returns at end-of-run. Contrast with a fire-and-forget peer message.
-
-**Goal**:
-A first-class multi-agent objective with a kanban status, agent assignees, and its own coordination
-conversation.
-
-**War room**:
-A Goal's shared conversation where assigned agents coordinate and workspace artifacts land.
-
-**Deliverable**:
-A first-class Goal artifact with a DRAFT → READY → OBSOLETE lifecycle; finalizing one can satisfy a
-cross-goal dependency.
-
-**GoalDependency**:
-A structured cross-goal blocker: a dependent goal waits on a named Deliverable from a source goal.
-
-**Assignment role** (`DRIVER` / `COLLABORATOR` / `REVIEWER`):
-The three labels on a Goal assignment. **Display-only** — they gate nothing; coordination is via
-prompting, not RBAC. They exist so personas can key off "you're the driver" semantically.
+  fallback, and emits lifecycle events. `SubagentService.spawn()` builds a
+  RunSpec and calls it.
 
 ## Conversation
 

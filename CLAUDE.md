@@ -67,7 +67,7 @@ app.py          ← composition root, may import anything
 
 ## Deep-Dive Architecture Docs
 
-Non-obvious design rationale, cross-cutting subsystem walkthroughs, and gotchas live in `docs/architecture/`. Read on demand when working in the relevant area (e.g., `speaker-system.md` before touching speaker code, `agent-service.md` before touching the agent loop). Architectural *rules* — enforceable constraints — live in the `validate-architecture` skill, not here.
+Non-obvious design rationale, cross-cutting subsystem walkthroughs, and gotchas live in `docs/architecture/`. Read on demand when working in the relevant area (e.g., `speaker-system.md` before touching speaker code). Architectural *rules* — enforceable constraints — live in the `validate-architecture` skill, not here.
 
 `ls docs/architecture/` to browse. When a doc drifts from the code, fix it in the same change that caused the drift.
 

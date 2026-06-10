@@ -63,13 +63,8 @@ export function NotificationsPage() {
   };
 
   const handleClick = (n: AppNotification) => {
-    const ref = n.source_ref ?? null;
-    if (ref && typeof ref === "object" && "goal_id" in ref) {
-      // TODO(phase-4): map goal references when Goal entities return.
-      // The legacy goal_id is no longer an agent_id, so we fall back
-      // to the agents list rather than navigating to a broken URL.
-      navigate("/agents");
-    }
+    // Notification deep-links to agent/goal views were removed with the
+    // agent/goal subsystem; just mark read.
     handleMarkRead(n);
   };
 

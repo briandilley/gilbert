@@ -62,7 +62,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
 
     # Routes
     from gilbert.web.routes.account import router as account_router
-    from gilbert.web.routes.agent_avatar import router as agent_avatar_router
+    from gilbert.web.routes.audio_blob import router as audio_blob_router
     from gilbert.web.routes.auth import router as auth_router
     from gilbert.web.routes.browser import router as browser_router
     from gilbert.web.routes.cameras import router as cameras_router
@@ -78,7 +78,6 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     from gilbert.web.routes.share import router as share_router
     from gilbert.web.routes.telnyx_webhooks import router as telnyx_router
     from gilbert.web.routes.tls import router as tls_router
-    from gilbert.web.routes.audio_blob import router as audio_blob_router
     from gilbert.web.routes.tts import router as tts_router
     from gilbert.web.routes.websocket import router as ws_router
 
@@ -87,7 +86,6 @@ def create_app(gilbert: Gilbert) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(account_router)
-    app.include_router(agent_avatar_router)
     app.include_router(auth_router)
     app.include_router(browser_router)
     app.include_router(cameras_router)

@@ -27,11 +27,6 @@ import { McpLocalPage } from "@/components/mcp/McpLocalPage";
 import { UsagePage } from "@/components/usage/UsagePage";
 import { NotificationsPage } from "@/components/notifications/NotificationsPage";
 import { NotificationRoutesPage } from "@/components/notifications/NotificationRoutesPage";
-import { AgentsListPage } from "@/components/agent/AgentsListPage";
-import { AgentEditForm } from "@/components/agent/AgentEditForm";
-import { AgentDetailPage } from "@/components/agent/AgentDetailPage";
-import { GoalsListPage } from "@/components/goals/GoalsListPage";
-import { WarRoomPage } from "@/components/goals/WarRoomPage";
 import { PresencePage } from "@/components/presence/PresencePage";
 import { HealthPage } from "@/components/health/HealthPage";
 import { HealthAuditLogPage } from "@/components/health/HealthAuditLogPage";
@@ -79,11 +74,6 @@ export default function App() {
             path="/account/notifications"
             element={<NotificationRoutesPage />}
           />
-          <Route path="/agents" element={<AgentsListPage />} />
-          <Route path="/agents/new" element={<AgentEditForm mode="create" />} />
-          <Route path="/agents/:agentId" element={<AgentDetailPage />} />
-          <Route path="/goals" element={<GoalsListPage />} />
-          <Route path="/goals/:goalId" element={<WarRoomPage />} />
           <Route path="/presence" element={<PresencePage />} />
           <Route path="/account" element={<AccountPage />} />
           <Route path="/health" element={<HealthPage />} />

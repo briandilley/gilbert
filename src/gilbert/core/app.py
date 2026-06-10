@@ -438,10 +438,6 @@ class Gilbert:
 
         self.service_manager.register(PushNotificationService())
 
-        from gilbert.core.services.agent import AgentService
-
-        self.service_manager.register(AgentService())
-
         # Voice-brain engine — generic conversation-loop driver. Phone
         # calls (and the eventual wake-word voice-agent plugin) delegate
         # the LLM-turn loop, STT pump, local-VAD barge-in, TTS pacing,

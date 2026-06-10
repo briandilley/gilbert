@@ -33,20 +33,8 @@ def test_catalog_ships_expected_builtins_with_ids() -> None:
         "general-purpose", "deep-research", "quick-answer", "software-engineer",
         "code-reviewer", "qa-engineer", "product-manager", "market-analyst",
         "fact-checker", "summarizer",
-        "durable-default",
     }
     assert all(t.built_in for t in builtin_seed_list())
-
-
-def test_durable_default_is_neutral_disabled_profile() -> None:
-    t = {x.id: x for x in builtin_seed_list()}["durable-default"]
-    assert t.ai_profile == "standard"
-    assert t.system_prompt == ""
-    assert t.max_rounds == 50
-    assert t.max_wall_clock_s is None
-    assert t.built_in is True
-    # Excluded from the spawn_agent menu — it's a durable-agent profile only.
-    assert t.enabled is False
 
 
 def test_deep_research_and_market_analyst_are_background_report() -> None:

@@ -176,29 +176,3 @@ def _make_resolver(**caps: Any) -> Any:
             return []
 
     return _Resolver()
-
-
-# ── Shared AgentService fixture ──────────────────────────────────────
-
-
-@pytest.fixture
-async def started_agent_service(sqlite_storage: SQLiteStorage) -> Any:
-    """Start an AgentService backed by a real SQLite database."""
-    from gilbert.core.services.agent import AgentService
-
-    storage_provider = _FakeStorageProvider(sqlite_storage)
-    event_bus_provider = _FakeEventBusProvider()
-    ai_provider = _FakeAIProvider()
-    scheduler_provider = _FakeSchedulerProvider()
-
-    resolver = _make_resolver(
-        entity_storage=storage_provider,
-        event_bus=event_bus_provider,
-        ai_chat=ai_provider,
-        scheduler=scheduler_provider,
-    )
-
-    svc = AgentService()
-    await svc.start(resolver)
-    yield svc
-    await svc.stop()

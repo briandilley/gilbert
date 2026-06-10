@@ -10,9 +10,9 @@ the dataclass and the editable built-in *seed* values (mirrors
 
 from __future__ import annotations
 
-# The ``SubagentType`` dataclass moved to ``interfaces/`` (shared data — both
-# SubagentService and AgentService use it). Re-exported here so existing
-# importers (and this module's built-in seed catalog) keep working unchanged.
+# The ``SubagentType`` dataclass lives in ``interfaces/`` (shared data read via
+# the SubagentCatalog capability). Re-exported here so existing importers (and
+# this module's built-in seed catalog) keep working unchanged.
 from gilbert.interfaces.subagent import SubagentType
 
 __all__ = ["SubagentType", "builtin_seed_list", "BUILTIN_SUBAGENT_TYPES"]
@@ -418,25 +418,6 @@ def builtin_seed_list() -> list[SubagentType]:
             temperature=0.2, ai_profile="summarizer",
             max_rounds=4, max_wall_clock_s=120.0,
             execution_mode="sync", deliver_as="inline", built_in=True,
-        ),
-        # Neutral execution profile for durable AgentService agents. Not a
-        # spawnable ephemeral subagent (``enabled=False`` keeps it out of the
-        # ``spawn_agent`` menu) — it exists so every durable agent references a
-        # type for execution defaults. Empty ``system_prompt`` and unlimited
-        # wall-clock keep migrated agents' behavior identical to before the
-        # type system; admins point an agent at a richer type to opt in.
-        SubagentType(
-            id="durable-default", name="Durable Agent (default)",
-            description=(
-                "Default execution profile for durable agents (not a spawnable "
-                "subagent). Supplies neutral model/tools/budgets that the "
-                "agent's own fields override."
-            ),
-            system_prompt="",
-            ai_profile="standard",
-            max_rounds=50, max_wall_clock_s=None,
-            execution_mode="sync", deliver_as="inline",
-            enabled=False, built_in=True,
         ),
     ]
 
