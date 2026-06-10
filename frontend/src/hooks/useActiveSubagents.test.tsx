@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GilbertEvent } from "@/types/events";
 import { useActiveSubagents } from "./useActiveSubagents";
@@ -11,8 +11,19 @@ vi.mock("@/hooks/useEventBus", () => ({
   },
 }));
 
+// Mock useWsApi to control listSubagents responses.
+let mockListSubagents: (convId: string) => Promise<{ runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }>;
+
+vi.mock("@/hooks/useWsApi", () => ({
+  useWsApi: () => ({
+    listSubagents: (convId: string) => mockListSubagents(convId),
+  }),
+}));
+
 beforeEach(() => {
   handlers.clear();
+  // Default: return no runs.
+  mockListSubagents = () => Promise.resolve({ runs: [] });
 });
 
 function fire(event_type: string, data: Record<string, unknown>) {
@@ -92,6 +103,76 @@ describe("useActiveSubagents", () => {
       agent_type: "general-purpose",
       reason: "boom",
     });
+    expect(result.current).toHaveLength(0);
+  });
+
+  it("re-seeds running runs from listSubagents when activeConversationId changes", async () => {
+    mockListSubagents = (convId) => {
+      if (convId !== "conv-reseed") return Promise.resolve({ runs: [] });
+      return Promise.resolve({
+        runs: [
+          {
+            subagent_id: "seeded-1",
+            agent_type: "deep-research",
+            query: "something",
+            conversation_id: "sub-conv-seeded",
+            status: "running",
+          },
+        ],
+      });
+    };
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | null }) => useActiveSubagents(id),
+      { initialProps: { id: null as string | null } },
+    );
+
+    rerender({ id: "conv-reseed" });
+
+    await waitFor(() => {
+      expect(result.current).toHaveLength(1);
+    });
+
+    expect(result.current[0]).toMatchObject({
+      subagent_id: "seeded-1",
+      agent_type: "deep-research",
+      query: "something",
+      conversationId: "sub-conv-seeded",
+      status: "running",
+    });
+  });
+
+  it("ignores stale listSubagents response when conversation changes before RPC returns", async () => {
+    let resolveStale!: (v: { runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }) => void;
+
+    mockListSubagents = (convId) => {
+      if (convId === "stale-conv") {
+        return new Promise((res) => { resolveStale = res; });
+      }
+      return Promise.resolve({ runs: [] });
+    };
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | null }) => useActiveSubagents(id),
+      { initialProps: { id: null as string | null } },
+    );
+
+    rerender({ id: "stale-conv" });
+    // Switch away before the RPC resolves.
+    rerender({ id: "new-conv" });
+
+    // Now resolve the stale RPC with a run.
+    act(() => {
+      resolveStale({
+        runs: [{ subagent_id: "stale-run", agent_type: "dr", query: "q", conversation_id: "c", status: "running" }],
+      });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Stale result must not be merged in.
     expect(result.current).toHaveLength(0);
   });
 });

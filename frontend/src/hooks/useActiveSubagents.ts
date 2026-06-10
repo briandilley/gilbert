@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEventBus } from "@/hooks/useEventBus";
+import { useWsApi } from "@/hooks/useWsApi";
 import type { ActiveSubagent, GilbertEvent } from "@/types/events";
 
 /**
@@ -8,9 +9,47 @@ import type { ActiveSubagent, GilbertEvent } from "@/types/events";
  * list of running subagents. Terminal events (completed/stopped/failed)
  * remove the entry — the delivered message in the conversation stands in.
  * Events for other conversations are ignored.
+ *
+ * On conversation open (``activeConversationId`` changes), the hook re-seeds
+ * running subagent cards from the ``subagent.list`` RPC so they survive
+ * navigation away from and back to the conversation.
  */
 export function useActiveSubagents(activeConversationId: string | null): ActiveSubagent[] {
   const [byId, setById] = useState<Record<string, ActiveSubagent>>({});
+  const api = useWsApi();
+  // Track the latest conversation id to guard against stale RPC responses.
+  const latestConvRef = useRef<string | null>(null);
+
+  // Re-seed running cards whenever the active conversation changes.
+  useEffect(() => {
+    latestConvRef.current = activeConversationId;
+    if (!activeConversationId) {
+      setById({});
+      return;
+    }
+    const convId = activeConversationId;
+    api.listSubagents(convId).then((result) => {
+      // Ignore stale responses if the conversation changed while awaiting.
+      if (latestConvRef.current !== convId) return;
+      setById((prev) => {
+        const next = { ...prev };
+        for (const run of result.runs) {
+          if (run.status !== "running") continue;
+          next[run.subagent_id] = {
+            subagent_id: run.subagent_id,
+            agent_type: run.agent_type,
+            status: "running",
+            conversationId: run.conversation_id,
+            query: run.query,
+          };
+        }
+        return next;
+      });
+    }).catch(() => {
+      // Best-effort — a failed RPC just means no re-seeding this navigation.
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
 
   const onStarted = useCallback(
     (event: GilbertEvent) => {

@@ -1397,6 +1397,11 @@ export function useWsApi() {
     stopSubagent: (subagentId: string) =>
       rpc<{ ok: boolean }>({ type: "subagent.stop", subagent_id: subagentId }),
 
+    listSubagents: (conversationId: string) =>
+      rpc<{ runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }>(
+        { type: "subagent.list", conversation_id: conversationId },
+      ),
+
     // ── Plugin UI extensions ──────────────────────────────────────
 
     listUIPanels: (slot?: string) =>
