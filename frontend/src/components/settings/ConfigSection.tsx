@@ -161,6 +161,44 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
     [sectionState],
   );
 
+  /** Evaluate a param's ``visible_when_field`` / ``visible_when_values``
+   *  predicate against the current merged section values. Returns
+   *  true when the param has no predicate (the default) OR the
+   *  named sibling field's current value matches one of the
+   *  allowed values.
+   *
+   *  Sibling resolution: for a param keyed ``backends.gmail.X``
+   *  with ``visible_when_field="credential_mode"``, we look up
+   *  ``backends.gmail.credential_mode`` — the trailing path segment
+   *  is swapped, so multi-role (``transcription.backends.X.Y``) and
+   *  service-level (bare ``X``) layouts both work without bespoke
+   *  branches.
+   *
+   *  Comparison is by stringified equality (matching the WS-layer
+   *  serialization), so boolean and integer sibling fields work too
+   *  — the backend declares ``visible_when_values=("true",)`` or
+   *  ``("42",)`` as appropriate.
+   */
+  const isParamVisible = useCallback(
+    (param: ConfigParamMeta): boolean => {
+      const field = param.visible_when_field;
+      if (!field) return true;
+      const allowed = param.visible_when_values ?? [];
+      if (allowed.length === 0) return false;
+      // Swap the trailing path segment for the named sibling field.
+      // For a bare ``credential_mode``-style key this still resolves
+      // to ``credential_mode``; for a nested ``backends.gmail.X`` key
+      // it resolves to ``backends.gmail.credential_mode``.
+      const siblingKey = param.key.includes(".")
+        ? param.key.replace(/[^.]+$/, field)
+        : field;
+      const currentRaw = merged[siblingKey];
+      const current = currentRaw == null ? "" : String(currentRaw);
+      return allowed.some((v) => String(v) === current);
+    },
+    [merged],
+  );
+
   /** Bare-key for matching inline actions: a backend param keyed
    *  ``backends.<name>.<bare>`` matches an action with
    *  ``inline_after_param === bare`` AND ``backend === name``.
@@ -274,9 +312,16 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
       p.key !== "enabled" &&
       p.key !== "backend" &&
       !p.backend_param &&
-      !(isGreetingSection && p.key === "enabled_context_providers"),
+      !(isGreetingSection && p.key === "enabled_context_providers") &&
+      isParamVisible(p),
   );
-  const backendSettingsParams = section.params.filter((p) => p.backend_param);
+  // Backend params: prefilter by visible_when so a backend that uses
+  // ``visible_when_field`` to collapse multi-mode forms (Gmail OAuth
+  // vs service-account fields) only surfaces the fields applicable
+  // to the operator's current credential_mode choice.
+  const backendSettingsParams = section.params.filter(
+    (p) => p.backend_param && isParamVisible(p),
+  );
 
   const backendName = String(merged["backend"] ?? "");
 

@@ -478,6 +478,8 @@ class ConfigurationService(Service):
             "backend_param": p.backend_param,
             "ai_prompt": p.ai_prompt,
             "extensible_target": p.extensible_target,
+            "visible_when_field": p.visible_when_field,
+            "visible_when_values": list(p.visible_when_values),
         }
 
     def _serialize_action(self, a: ConfigAction) -> dict[str, Any]:

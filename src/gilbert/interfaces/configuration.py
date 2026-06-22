@@ -47,6 +47,30 @@ class ConfigParam:
     contributing service's own ConfigParams). Conventional value:
     ``"agent.system_prompt"`` for the autonomous agent's system frame."""
 
+    visible_when_field: str = ""
+    """When non-empty, this param is only rendered in the Settings UI
+    when the named sibling field's current value matches one of
+    ``visible_when_values``. Collapses multi-mode forms — e.g. the
+    Gmail backend hides the OAuth fields when ``credential_mode`` is
+    one of the service-account modes, and vice versa, so the
+    operator only sees the 3-4 fields that apply to their chosen
+    auth path instead of all 8 at once.
+
+    The field is matched as a SIBLING within the same backend group
+    or service namespace; cross-section conditioning isn't supported.
+    A non-empty ``visible_when_field`` paired with an empty
+    ``visible_when_values`` tuple means "never visible", which is
+    almost certainly a configuration mistake — provide at least one
+    matching value."""
+    visible_when_values: tuple[str, ...] = ()
+    """Values of ``visible_when_field`` that make this param visible.
+    Compared by string equality on the WS layer (the frontend
+    stringifies the current sibling value before checking), so this
+    works uniformly for string-choice fields, booleans, and ints —
+    pass ``("oauth_bot",)``, ``("true",)``, or ``("42",)`` as
+    appropriate. Multiple values OR together (any match shows the
+    field)."""
+
 
 @dataclass(frozen=True)
 class ConfigAction:

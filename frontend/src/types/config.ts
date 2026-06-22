@@ -24,6 +24,12 @@ export interface ConfigParamMeta {
    *  from ``prompts.contributions.list`` for that target. Conventional
    *  value: ``"agent.system_prompt"``. */
   extensible_target?: string;
+  /** When non-empty, this param is only rendered when the named sibling
+   *  field's current value matches one of ``visible_when_values`` (OR).
+   *  Collapses multi-mode forms — e.g. Gmail's OAuth fields hide when
+   *  ``credential_mode`` is a service-account mode and vice versa. */
+  visible_when_field?: string;
+  visible_when_values?: string[];
 }
 
 /** Normalize a ConfigChoice to its {value, label} form. */
