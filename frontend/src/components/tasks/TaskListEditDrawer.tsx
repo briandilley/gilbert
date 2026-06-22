@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { ConfigField } from "@/components/settings/ConfigField";
+import { isParamVisible } from "@/lib/configVisibility";
 import { useWsApi } from "@/hooks/useWsApi";
 import type { TaskList } from "@/types/tasks";
 import { AlertTriangle, Trash2 } from "lucide-react";
@@ -197,16 +198,18 @@ export function TaskListEditDrawer({ list, onClose, onSaved }: Props) {
               <div className="text-xs font-semibold text-muted-foreground">
                 Backend configuration
               </div>
-              {selectedBackend.config_params.map((p) => (
-                <ConfigField
-                  key={p.key}
-                  param={p}
-                  value={backendConfig[p.key] ?? p.default}
-                  onChange={(key, value) =>
-                    setBackendConfig({ ...backendConfig, [key]: value })
-                  }
-                />
-              ))}
+              {selectedBackend.config_params
+                .filter((p) => isParamVisible(p, backendConfig))
+                .map((p) => (
+                  <ConfigField
+                    key={p.key}
+                    param={p}
+                    value={backendConfig[p.key] ?? p.default}
+                    onChange={(key, value) =>
+                      setBackendConfig({ ...backendConfig, [key]: value })
+                    }
+                  />
+                ))}
               {(selectedBackend.actions ?? []).filter((a) => !a.hidden).length > 0 && (
                 <div className="flex flex-wrap gap-2 pt-1">
                   {(selectedBackend.actions ?? [])

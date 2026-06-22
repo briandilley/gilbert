@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigField } from "@/components/settings/ConfigField";
+import { isParamVisible } from "@/lib/configVisibility";
 import { useWsApi } from "@/hooks/useWsApi";
 import type { CalendarAccount } from "@/types/calendar";
 import { Trash2Icon, AlertTriangleIcon, InfoIcon } from "lucide-react";
@@ -249,17 +250,19 @@ export function AccountEditDrawer({ account, onClose, onSaved }: Props) {
             </Select>
           </div>
 
-          {selectedBackend?.config_params.map((p) => (
-            <div key={p.key} className="space-y-2">
-              <ConfigField
-                param={p}
-                value={backendConfig[p.key]}
-                onChange={(key, value) =>
-                  setBackendConfig({ ...backendConfig, [key]: value })
-                }
-              />
-            </div>
-          ))}
+          {selectedBackend?.config_params
+            .filter((p) => isParamVisible(p, backendConfig))
+            .map((p) => (
+              <div key={p.key} className="space-y-2">
+                <ConfigField
+                  param={p}
+                  value={backendConfig[p.key]}
+                  onChange={(key, value) =>
+                    setBackendConfig({ ...backendConfig, [key]: value })
+                  }
+                />
+              </div>
+            ))}
 
           {(selectedBackend?.actions ?? []).filter((a) => !a.hidden).length > 0 && (
             <div className="flex flex-wrap gap-2">

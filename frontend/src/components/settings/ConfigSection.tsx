@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { isParamVisible as isParamVisibleHelper } from "@/lib/configVisibility";
 import {
   Card,
   CardContent,
@@ -161,41 +162,12 @@ export function ConfigSection({ section, searchQuery }: ConfigSectionProps) {
     [sectionState],
   );
 
-  /** Evaluate a param's ``visible_when_field`` / ``visible_when_values``
-   *  predicate against the current merged section values. Returns
-   *  true when the param has no predicate (the default) OR the
-   *  named sibling field's current value matches one of the
-   *  allowed values.
-   *
-   *  Sibling resolution: for a param keyed ``backends.gmail.X``
-   *  with ``visible_when_field="credential_mode"``, we look up
-   *  ``backends.gmail.credential_mode`` — the trailing path segment
-   *  is swapped, so multi-role (``transcription.backends.X.Y``) and
-   *  service-level (bare ``X``) layouts both work without bespoke
-   *  branches.
-   *
-   *  Comparison is by stringified equality (matching the WS-layer
-   *  serialization), so boolean and integer sibling fields work too
-   *  — the backend declares ``visible_when_values=("true",)`` or
-   *  ``("42",)`` as appropriate.
-   */
+  // ``visible_when`` predicate against the section's merged values.
+  // Shared with the mailbox/calendar/tasks/service-card editors so a
+  // backend that declares ``visible_when_field`` hides the param
+  // consistently across every render path.
   const isParamVisible = useCallback(
-    (param: ConfigParamMeta): boolean => {
-      const field = param.visible_when_field;
-      if (!field) return true;
-      const allowed = param.visible_when_values ?? [];
-      if (allowed.length === 0) return false;
-      // Swap the trailing path segment for the named sibling field.
-      // For a bare ``credential_mode``-style key this still resolves
-      // to ``credential_mode``; for a nested ``backends.gmail.X`` key
-      // it resolves to ``backends.gmail.credential_mode``.
-      const siblingKey = param.key.includes(".")
-        ? param.key.replace(/[^.]+$/, field)
-        : field;
-      const currentRaw = merged[siblingKey];
-      const current = currentRaw == null ? "" : String(currentRaw);
-      return allowed.some((v) => String(v) === current);
-    },
+    (param: ConfigParamMeta): boolean => isParamVisibleHelper(param, merged),
     [merged],
   );
 

@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigField } from "@/components/settings/ConfigField";
+import { isParamVisible } from "@/lib/configVisibility";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import type { InboxMailbox, EmailBackendInfo } from "@/types/inbox";
@@ -297,14 +298,16 @@ export function MailboxEditor({
                 <div className="text-xs font-medium text-muted-foreground">
                   {activeBackend.name} settings
                 </div>
-                {activeBackend.config_params.map((p) => (
-                  <ConfigField
-                    key={p.key}
-                    param={p}
-                    value={backendConfig[p.key] ?? p.default}
-                    onChange={handleBackendConfigChange}
-                  />
-                ))}
+                {activeBackend.config_params
+                  .filter((p) => isParamVisible(p, backendConfig))
+                  .map((p) => (
+                    <ConfigField
+                      key={p.key}
+                      param={p}
+                      value={backendConfig[p.key] ?? p.default}
+                      onChange={handleBackendConfigChange}
+                    />
+                  ))}
                 {(activeBackend.actions ?? []).filter((a) => !a.hidden).length > 0 && (
                   <div className="flex flex-wrap gap-2 pt-1">
                     {(activeBackend.actions ?? [])
