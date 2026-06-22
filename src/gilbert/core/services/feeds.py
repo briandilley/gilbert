@@ -3646,21 +3646,10 @@ class FeedsService(Service):
     async def _ws_backends_list(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         backends: list[dict[str, Any]] = []
         for name, cls in FeedBackend.registered_backends().items():
-            params = []
-            for p in cls.backend_config_params():
-                params.append(
-                    {
-                        "key": p.key,
-                        "type": p.type.value if hasattr(p.type, "value") else str(p.type),
-                        "description": p.description,
-                        "default": p.default,
-                        "restart_required": p.restart_required,
-                        "sensitive": p.sensitive,
-                        "choices": list(p.choices) if p.choices else None,
-                        "multiline": p.multiline,
-                        "backend_param": True,
-                    }
-                )
+            params = [
+                p.to_wire_dict(backend_param=True)
+                for p in cls.backend_config_params()
+            ]
             backends.append({"name": name, "config_params": params})
         return self._ok(frame, "feeds.backends.list.result", backends=backends)
 

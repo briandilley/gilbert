@@ -897,14 +897,7 @@ class WebApiService(Service):
                 entry["config_namespace"] = svc.config_namespace
                 try:
                     entry["config_params"] = [
-                        {
-                            "key": p.key,
-                            "type": p.type.value,
-                            "description": p.description,
-                            "default": p.default,
-                            "restart_required": p.restart_required,
-                        }
-                        for p in svc.config_params()
+                        p.to_wire_dict() for p in svc.config_params()
                     ]
                 except Exception:
                     pass

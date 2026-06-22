@@ -449,11 +449,14 @@ class ConfigurationService(Service):
         source wants to show a friendly label distinct from the stored
         value (e.g. mailbox name vs. mailbox id).
         """
-        choices: list[Any] | None = list(p.choices) if p.choices else None
+        # Canonical wire dict (single source of truth on the param itself),
+        # then layer the dynamic-choices resolution on top — that's the
+        # only thing ``_serialize_param`` does beyond the bare ``to_wire_dict``.
+        out = p.to_wire_dict()
         if p.choices_from:
             resolved = self._resolve_dynamic_choices(p.choices_from)
             if resolved is not None:
-                choices = resolved  # may be list[str] or list[dict]
+                out["choices"] = resolved  # may be list[str] or list[dict]
             elif values is not None and p.type.value == "array":
                 # Fallback: use currently stored values as choices so the UI
                 # can at least show what's selected (e.g., before backend starts)
@@ -465,22 +468,8 @@ class ConfigurationService(Service):
                         current = None
                         break
                 if isinstance(current, list) and current:
-                    choices = [str(v) for v in current]
-        return {
-            "key": p.key,
-            "type": p.type.value,
-            "description": p.description,
-            "default": p.default,
-            "restart_required": p.restart_required,
-            "sensitive": p.sensitive,
-            "choices": choices,
-            "multiline": p.multiline,
-            "backend_param": p.backend_param,
-            "ai_prompt": p.ai_prompt,
-            "extensible_target": p.extensible_target,
-            "visible_when_field": p.visible_when_field,
-            "visible_when_values": list(p.visible_when_values),
-        }
+                    out["choices"] = [str(v) for v in current]
+        return out
 
     def _serialize_action(self, a: ConfigAction) -> dict[str, Any]:
         """Serialize a ConfigAction for the WS response."""
@@ -1059,18 +1048,7 @@ class ConfigurationService(Service):
             "type": "config.section.get.result",
             "ref": frame.get("id"),
             "namespace": namespace,
-            "params": [
-                {
-                    "key": p.key,
-                    "type": p.type.value,
-                    "description": p.description,
-                    "default": p.default,
-                    "restart_required": p.restart_required,
-                    "sensitive": p.sensitive,
-                    "choices": list(p.choices) if p.choices else None,
-                }
-                for p in params
-            ],
+            "params": [p.to_wire_dict() for p in params],
             "values": section,
         }
 

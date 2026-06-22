@@ -71,6 +71,40 @@ class ConfigParam:
     appropriate. Multiple values OR together (any match shows the
     field)."""
 
+    def to_wire_dict(self, *, backend_param: bool | None = None) -> dict[str, Any]:
+        """Serialize this param to the wire-format dict the SPA consumes.
+
+        Single source of truth for WS-layer ConfigParam serialization —
+        every RPC that ships ``config_params`` over the bus should go
+        through here so new fields land everywhere at once. Open-coded
+        ``{"key": p.key, ...}`` dicts in service handlers drift the
+        moment a new field is added (the original ``visible_when_*``
+        rollout silently broke the Inbox/Calendar/Tasks/Feeds editors
+        because each one carried its own copy).
+
+        ``backend_param`` override lets callers force the flag on for
+        plugins iterating backend-registry classes that don't set it
+        per-param (Inbox/Calendar/Tasks/Feeds all do this — every param
+        coming off a backend is by definition a backend param). Default
+        ``None`` preserves the param's own value.
+        """
+        bp = self.backend_param if backend_param is None else backend_param
+        return {
+            "key": self.key,
+            "type": self.type.value,
+            "description": self.description,
+            "default": self.default,
+            "restart_required": self.restart_required,
+            "sensitive": self.sensitive,
+            "choices": list(self.choices) if self.choices else None,
+            "multiline": self.multiline,
+            "backend_param": bp,
+            "ai_prompt": self.ai_prompt,
+            "extensible_target": self.extensible_target,
+            "visible_when_field": self.visible_when_field,
+            "visible_when_values": list(self.visible_when_values),
+        }
+
 
 @dataclass(frozen=True)
 class ConfigAction:

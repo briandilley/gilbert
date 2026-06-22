@@ -2603,17 +2603,7 @@ class InboxService(Service):
         backends = []
         for name, cls in EmailBackend.registered_backends().items():
             params = [
-                {
-                    "key": p.key,
-                    "type": p.type.value if hasattr(p.type, "value") else str(p.type),
-                    "description": p.description,
-                    "default": p.default,
-                    "restart_required": p.restart_required,
-                    "sensitive": p.sensitive,
-                    "choices": list(p.choices) if p.choices else None,
-                    "multiline": p.multiline,
-                    "backend_param": True,
-                }
+                p.to_wire_dict(backend_param=True)
                 for p in cls.backend_config_params()
             ]
             actions = []
