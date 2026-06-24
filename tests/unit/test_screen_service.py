@@ -571,3 +571,54 @@ class TestFindPagesByKeyword:
         pages = ScreenService._find_pages_by_keyword(pdf, "pinout details")
         assert pages is not None
         assert len(pages) <= 12
+
+
+# ── Guest-screen document serving (login-bounce regression) ──
+
+
+@pytest.mark.asyncio
+async def test_show_document_serves_via_temp_token_not_auth_gated_path(
+    started_service: ScreenService,
+) -> None:
+    """A whole-document screen push must serve via ``/screens/tmp/<token>``
+    (allowlisted, guest-fetchable) — NOT the auth-gated
+    ``/documents/serve/...`` path. Otherwise a guest screen
+    (``allow_guest_screens``) fetching the doc gets 302'd to the login page,
+    which is the "screen requires login when configured not to" report.
+    """
+    from types import SimpleNamespace
+
+    svc = started_service
+    svc._enabled = True
+
+    class _Backend:
+        async def get_document(self, path: str) -> Any:
+            return SimpleNamespace(data=b"document bytes")
+
+    class _Knowledge:
+        def get_backend(self, source: str) -> Any:
+            return _Backend()
+
+    resolver = FakeResolver()
+    resolver.capabilities["knowledge"] = _Knowledge()
+    svc._resolver = resolver
+    svc.connect("Test")
+
+    await svc._tool_show_document(
+        {"screen_name": "test", "document_path": "local/notes.txt"}
+    )
+
+    screen = svc.get_screen("test")
+    assert screen is not None
+    events = []
+    while not screen.queue.empty():
+        msg = screen.queue.get_nowait()
+        if "data: " in msg:
+            events.append(json.loads(msg.split("data: ")[1].split("\n")[0]))
+
+    docs = [e for e in events if e.get("type") == "show_document"]
+    assert len(docs) == 1
+    serve_url = docs[0]["serve_url"]
+    assert serve_url.startswith("/screens/tmp/"), serve_url
+    assert "/documents/serve/" not in serve_url
+    assert docs[0].get("tmp_token")

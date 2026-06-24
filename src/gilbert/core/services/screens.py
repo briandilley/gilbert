@@ -960,10 +960,29 @@ class ScreenService(Service):
                 self.push_error(resolved, f"Failed to extract pages: {e}")
                 return f"Failed to extract pages: {e}"
 
-        # Non-PDF or no page info — serve the whole document
-        serve_url = f"/documents/serve/{doc_source}/{doc_path}"
+        # Non-PDF or no page info — serve the whole document via a
+        # short-lived temp token (``/screens/tmp/<token>``) rather than the
+        # auth-gated ``/documents/serve/`` path. A guest screen
+        # (``allow_guest_screens``) is unauthenticated, so a fetch of
+        # ``/documents/serve/`` 302s to the login page and the screen shows
+        # a login form instead of the document. ``/screens/tmp/`` is
+        # allowlisted and uses the same random-token trust model the
+        # PDF-pages path above already relies on.
+        backend = self._knowledge.get_backend(doc_source)
+        if backend is None:
+            self.push_error(resolved, f"Document source '{doc_source}' not found.")
+            return f"Document source '{doc_source}' not available."
+        try:
+            doc_content = await backend.get_document(doc_path)
+        except Exception as e:
+            logger.exception("Failed to load document for screen display")
+            self.push_error(resolved, f"Failed to load document: {e}")
+            return f"Failed to load document: {e}"
+
+        token = self.save_temp_file(doc_path, doc_content.data)
+        tmp_url = f"/screens/tmp/{token}"
         content_type = "pdf" if is_pdf else ("image" if file_ext in _IMAGE_EXTS else "other")
-        self.push_document(resolved, doc_name, serve_url, content_type)
+        self.push_document(resolved, doc_name, tmp_url, content_type, tmp_token=token)
         return f'Displaying "{doc_name}" on {resolved}.'
 
     def _tool_show_images(self, arguments: dict[str, Any]) -> str:
