@@ -368,37 +368,51 @@ class ConfigurationService(Service):
                 if not section.get("enabled", False):
                     continue
 
-            cat = svc.config_category
-            params = svc.config_params()
-            # Filter out the 'enabled' param — it's shown in the "Services" section
-            if info is not None and info.toggleable:
-                params = [p for p in params if p.key != "enabled"]
-            if not params:
+            # A single service's config_params()/serialization must never
+            # blank the whole Settings page. A plugin that constructs a
+            # ConfigParam with a field the running core doesn't have (the
+            # gdrive ``visible_when_field`` skew) raises here; without this
+            # guard that one TypeError aborts describe_categories and the
+            # UI renders zero cards. Skip just the broken section instead.
+            try:
+                cat = svc.config_category
+                params = svc.config_params()
+                # Filter out the 'enabled' param — shown in the "Services" section
+                if info is not None and info.toggleable:
+                    params = [p for p in params if p.key != "enabled"]
+                if not params:
+                    continue
+                started = name in sm.started_services
+                failed = name in sm.failed_services
+
+                section = self.get_section_safe(ns)
+
+                actions: list[ConfigAction] = []
+                if isinstance(svc, ConfigActionProvider):
+                    try:
+                        actions = list(svc.config_actions())
+                    except Exception:
+                        logger.exception("Error collecting config actions for %s", ns)
+
+                categories.setdefault(cat, []).append(
+                    {
+                        "namespace": ns,
+                        "service_name": name,
+                        "enabled": section.get("enabled", True),
+                        "started": started,
+                        "failed": failed,
+                        "params": [self._serialize_param(p, section) for p in params],
+                        "values": section,
+                        "actions": [self._serialize_action(a) for a in actions],
+                    }
+                )
+            except Exception:
+                logger.exception(
+                    "Error building config section for %s; skipping it so the "
+                    "rest of Settings still renders",
+                    ns,
+                )
                 continue
-            started = name in sm.started_services
-            failed = name in sm.failed_services
-
-            section = self.get_section_safe(ns)
-
-            actions: list[ConfigAction] = []
-            if isinstance(svc, ConfigActionProvider):
-                try:
-                    actions = list(svc.config_actions())
-                except Exception:
-                    logger.exception("Error collecting config actions for %s", ns)
-
-            categories.setdefault(cat, []).append(
-                {
-                    "namespace": ns,
-                    "service_name": name,
-                    "enabled": section.get("enabled", True),
-                    "started": started,
-                    "failed": failed,
-                    "params": [self._serialize_param(p, section) for p in params],
-                    "values": section,
-                    "actions": [self._serialize_action(a) for a in actions],
-                }
-            )
 
         # Add the "Services" category if there are toggleable services
         if toggle_params:

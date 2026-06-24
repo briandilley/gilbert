@@ -63,6 +63,39 @@ class StubConfigurableService(Service):
         self.last_config = config
 
 
+class BrokenConfigurableService(Service):
+    """A Configurable whose ``config_params()`` raises.
+
+    Models the real failure where ``std-plugins/google`` constructed a
+    ``ConfigParam(visible_when_field=...)`` against a core whose
+    ``ConfigParam`` lacked that field — a ``TypeError`` that, with no
+    per-service guard, blanked the ENTIRE Settings page.
+    """
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(
+            name="broken_configurable",
+            capabilities=frozenset({"broken_cap"}),
+        )
+
+    @property
+    def config_namespace(self) -> str:
+        return "broken_ns"
+
+    @property
+    def config_category(self) -> str:
+        return "Intelligence"
+
+    def config_params(self) -> list[ConfigParam]:
+        raise TypeError(
+            "ConfigParam.__init__() got an unexpected keyword argument "
+            "'visible_when_field'"
+        )
+
+    async def on_config_changed(self, config: dict[str, Any]) -> None:
+        return None
+
+
 # --- Fixtures ---
 
 
@@ -181,6 +214,31 @@ def test_describe_all(config_svc: ConfigurationService) -> None:
     names = [p.key for p in result["ai"]]
     assert "system_prompt" in names
     assert "backend" in names
+
+
+def test_describe_categories_resilient_to_one_service_error(
+    config_svc: ConfigurationService,
+) -> None:
+    """One service raising in ``config_params()`` must NOT blank the whole
+    Settings page — the failing section is skipped (and logged), every other
+    service's section still renders. Regression for the gdrive
+    ``visible_when_field`` skew that made ``config.describe.list`` throw and
+    left Settings with no service cards."""
+    manager = ServiceManager()
+    manager.register(StubConfigurableService())  # namespace "ai"
+    manager.register(BrokenConfigurableService())  # namespace "broken_ns", raises
+    manager._started.append("stub_configurable")
+    manager._started.append("broken_configurable")
+    config_svc._resolver = manager
+
+    # Must not raise even though one service's config_params() throws.
+    cats = config_svc.describe_categories()
+
+    section_ns = [s["namespace"] for c in cats for s in c["sections"]]
+    # The healthy service still produces a card.
+    assert "ai" in section_ns
+    # The broken service is skipped rather than crashing the page.
+    assert "broken_ns" not in section_ns
 
 
 # --- Service Info ---
