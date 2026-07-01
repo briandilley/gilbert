@@ -1397,12 +1397,6 @@ class TestWorkspaceAttachments:
             async def build_workspace_manifest(self, conversation_id):
                 return ""
 
-            async def resolve_deliverable_for_dependent(
-                self, *, file_id, viewing_agent_id, viewing_goal_id,
-            ):
-                # Phase 5 — protocol stub; not exercised here.
-                return None, "not supported"
-
             async def member_workspace_roots(
                 self, caller_user_id, conversation_id,
             ):

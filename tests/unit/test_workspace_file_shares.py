@@ -26,7 +26,20 @@ from gilbert.core.services.workspace import (
 )
 from gilbert.interfaces.service import ServiceResolver
 from gilbert.interfaces.storage import StorageProvider
+from gilbert.interfaces.workspace import WorkspaceProvider
 from gilbert.storage.sqlite import SQLiteStorage
+
+
+def test_workspace_service_satisfies_workspace_provider() -> None:
+    """The real service must satisfy the ``@runtime_checkable``
+    ``WorkspaceProvider`` protocol.
+
+    Consumers like the chat-upload HTTP route resolve the service with
+    ``isinstance(svc, WorkspaceProvider)`` and return 503 "Workspace
+    service unavailable" when it fails. If the protocol declares a
+    method the service doesn't implement, every upload breaks — so this
+    guards against protocol/implementation drift."""
+    assert isinstance(WorkspaceService(), WorkspaceProvider)
 
 
 @pytest.fixture
