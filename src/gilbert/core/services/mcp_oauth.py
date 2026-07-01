@@ -25,6 +25,7 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from mcp.client.auth import OAuthClientProvider, TokenStorage
@@ -187,10 +188,49 @@ class OAuthFlowManager:
             server_url=record.url or "",
             client_metadata=_client_metadata_for(record, redirect_uri),
             storage=self.storage_for(record.id),
-            redirect_handler=_make_redirect_handler(flow),
+            redirect_handler=self._make_tracking_redirect_handler(flow),
             callback_handler=_make_callback_handler(flow),
         )
         return state, provider
+
+    def _make_tracking_redirect_handler(self, flow: _PendingFlow) -> Any:
+        """Redirect handler used by the interactive ``begin()`` flow.
+
+        The MCP SDK invents its *own* ``state`` for the authorization
+        request and bakes it into the URL it hands us here — it never
+        uses the ``state`` this manager generated in ``begin()``. The
+        browser's callback therefore returns carrying the SDK's state,
+        so we re-key the pending flow by that state before surfacing the
+        URL; otherwise the callback route can never look the flow up and
+        every sign-in dead-ends at "No flow in progress"."""
+
+        async def handler(authorization_url: str) -> None:
+            await self._rekey_from_auth_url(flow, authorization_url)
+            if not flow.auth_url_future.done():
+                flow.auth_url_future.set_result(authorization_url)
+
+        return handler
+
+    async def _rekey_from_auth_url(
+        self,
+        flow: _PendingFlow,
+        authorization_url: str,
+    ) -> None:
+        """Re-index ``flow`` under the ``state`` embedded in the SDK's
+        authorization URL, replacing the placeholder state assigned in
+        ``begin()``. No-op if the URL carries no state."""
+        params = parse_qs(urlparse(authorization_url).query)
+        values = params.get("state")
+        sdk_state = values[0] if values else None
+        if not sdk_state or sdk_state == flow.state:
+            return
+        async with self._lock:
+            # Only move the index entry if it still points at this flow —
+            # a concurrent cancel()/begin() may have already reclaimed it.
+            if self._by_state.get(flow.state) is flow:
+                self._by_state.pop(flow.state, None)
+            flow.state = sdk_state
+            self._by_state[sdk_state] = flow
 
     def auth_url_future(self, server_id: str) -> asyncio.Future[str] | None:
         flow = self._by_server.get(server_id)

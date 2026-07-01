@@ -132,6 +132,37 @@ class TestOAuthFlowManager:
         await mgr.settle(record.id)
 
     @pytest.mark.asyncio
+    async def test_callback_resolves_by_sdk_state_not_gilbert_state(self) -> None:
+        """The MCP SDK generates its OWN ``state`` for the authorization
+        URL (see ``mcp.client.auth.oauth2`` — ``state = secrets.token_urlsafe(32)``),
+        independent of anything Gilbert invents. The browser callback comes
+        back carrying THAT state, so the flow manager must be able to resolve
+        the pending flow by the SDK's state. Otherwise every interactive
+        sign-in dead-ends at "No flow in progress"."""
+        storage = FakeStorage()
+        mgr = OAuthFlowManager(storage)
+        record = _remote_oauth_record()
+        _gilbert_state, provider = await mgr.begin(record, "https://g/callback")
+
+        # Simulate the SDK handing us the authorization URL — it bakes its
+        # own state into the query string, never Gilbert's.
+        sdk_state = "sdk-generated-state-abc123"
+        auth_url = (
+            "https://authserver.example/authorize?response_type=code"
+            f"&client_id=x&state={sdk_state}&code_challenge=y"
+        )
+        await provider.context.redirect_handler(auth_url)
+
+        # The auth URL is still surfaced to the UI.
+        flow_auth_url = await mgr.auth_url_future(record.id)
+        assert flow_auth_url == auth_url
+
+        # The browser callback returns carrying the SDK's state.
+        ok = await mgr.complete(sdk_state, "auth-code", sdk_state)
+        assert ok is True
+        await mgr.settle(record.id)
+
+    @pytest.mark.asyncio
     async def test_cancel_clears_indexes(self) -> None:
         storage = FakeStorage()
         mgr = OAuthFlowManager(storage)
