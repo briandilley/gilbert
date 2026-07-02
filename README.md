@@ -288,6 +288,7 @@ Every third-party integration is a plugin in the [gilbert-plugins](https://githu
 | **groq** | Groq LPU chat backend + Groq Whisper batch speech-to-text backend |
 | **guess-that-song** | Multiplayer music guessing game managed by the AI |
 | **jellyfin** | Jellyfin media library + casting — `MediaLibraryBackend` parity with Plex |
+| **mafia** | In-person social-deduction party game narrated by Gilbert |
 | **ngrok** | Public HTTPS tunnel for OAuth callbacks and webhooks |
 | **ntfy / pushover / discord-webhook / telegram** | External notification fan-out backends |
 | **open-meteo** | Weather backend (no API key) — current, hourly, and daily forecasts |
