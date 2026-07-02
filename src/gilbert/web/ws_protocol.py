@@ -458,8 +458,14 @@ class WsConnectionManager:
         """Subscribe to the event bus and discover service handlers."""
         self.gilbert = gilbert
 
-        # Start with core handlers (gilbert.*)
+        # Start with core handlers (gilbert.*). Reset the owner and
+        # declared-role maps alongside — without this, a second call (e.g.
+        # re-discovery after a service restart) leaves stale owners behind,
+        # which both misattributes conflict warnings and can let a
+        # long-gone service's declared role keep applying.
         self._handlers = dict(_rpc_handlers)
+        self._handler_owner = {}
+        self._declared_rpc_roles = {}
 
         # Discover service-provided handlers
         from gilbert.interfaces.ws import WsHandlerProvider, WsRpcRoleProvider
@@ -502,6 +508,28 @@ class WsConnectionManager:
                                 key,
                                 role,
                                 svc_name,
+                            )
+                            continue
+                        if role not in BUILTIN_ROLE_LEVELS:
+                            # Declared roles are resolved against the
+                            # built-in role vocabulary, not the full ACL
+                            # role set (custom ACL roles are for humans,
+                            # not service declarations). An unknown role
+                            # name here — e.g. a typo — would otherwise
+                            # fail OPEN: get_role_level() and the
+                            # BUILTIN_ROLE_LEVELS.get() fallback both
+                            # default an unrecognized role to the most
+                            # permissive level (everyone/200). Reject it
+                            # at registration time instead so frames fall
+                            # back to the hardcoded default resolution.
+                            logger.warning(
+                                "Ignoring declared RPC role %r=%r from %s: %r is not a "
+                                "built-in role (%s)",
+                                key,
+                                role,
+                                svc_name,
+                                role,
+                                ", ".join(sorted(BUILTIN_ROLE_LEVELS)),
                             )
                             continue
                         if key in self._declared_rpc_roles:

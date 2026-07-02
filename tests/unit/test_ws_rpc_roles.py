@@ -3,7 +3,10 @@ declaring service's own frames; admin overrides still win."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+import pytest
 
 from gilbert.interfaces.service import Service, ServiceInfo
 from gilbert.interfaces.ws import WsRpcRoleProvider
@@ -127,3 +130,51 @@ def test_conflicting_declarations_first_registered_wins() -> None:
 
 def test_protocol_isinstance() -> None:
     assert isinstance(_GameService(), WsRpcRoleProvider)
+
+
+class _TypoService(Service):
+    """Declares 'evryone' (typo for 'everyone') — not a built-in role."""
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="mafia", capabilities=frozenset({"ws_handlers"}))
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {"mafia.game.join": _handler}
+
+    def get_ws_rpc_roles(self) -> dict[str, str]:
+        return {"mafia.": "evryone"}
+
+
+def test_unknown_declared_role_is_ignored(caplog: pytest.LogCaptureFixture) -> None:
+    """A typo'd declared role (e.g. 'evryone') must not fail open. It should
+    be dropped at registration time so the frame resolves to the hardcoded
+    default (100 = user) rather than a role that resolves to 200 (everyone)
+    via the ACL service's unknown-role fallback."""
+    with caplog.at_level(logging.WARNING):
+        mgr = _manager([_TypoService()])
+    assert mgr.resolve_declared_rpc_role("mafia.game.join") is None
+    assert _resolve_rpc_level(_Conn(mgr, 200), "mafia.game.join") == 100
+    assert any("not a built-in role" in r.message for r in caplog.records)
+
+
+def test_subscribe_to_bus_twice_resets_owner_and_declared_roles(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for I4: re-running subscribe_to_bus (e.g. re-discovery)
+    must reset _handler_owner and _declared_rpc_roles alongside _handlers,
+    else stale owners survive and produce bogus conflict warnings — or a
+    long-gone service's declared role keeps applying — on the next run."""
+    mgr = WsConnectionManager()
+    gilbert = _Gilbert([_GameService(), _ChatService()])
+
+    mgr.subscribe_to_bus(gilbert)
+    with caplog.at_level(logging.WARNING):
+        mgr.subscribe_to_bus(gilbert)
+
+    conflict_warnings = [r for r in caplog.records if "conflict" in r.message]
+    assert not conflict_warnings, [r.message for r in conflict_warnings]
+
+    # Declarations still resolve correctly after the second discovery.
+    assert mgr.resolve_declared_rpc_role("mafia.game.join") == "everyone"
+    assert _resolve_rpc_level(_Conn(mgr, 200), "mafia.game.join") == 200
+    assert mgr.resolve_declared_rpc_role("chat.message.send") is None
