@@ -992,7 +992,9 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                 except Exception:
                     pass
             # Hardcoded fallback matching the defaults in interfaces/acl.py.
-            return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+            return {"admin": 0, "user": 100, "everyone": 200, "anonymous": 200}.get(
+                role, 100
+            )
 
         caller_level = getattr(conn, "user_level", 200)
 

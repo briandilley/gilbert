@@ -750,7 +750,9 @@ class WebApiService(Service):
                     return acl.get_role_level(role)
                 except Exception:
                     pass
-            return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+            return {"admin": 0, "user": 100, "everyone": 200, "anonymous": 200}.get(
+                role, 100
+            )
 
         def _capability_live(cap: str) -> bool:
             # Mirrors the nav-visibility check in ``_ws_dashboard_get``:
