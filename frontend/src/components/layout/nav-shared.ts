@@ -30,6 +30,8 @@ import {
   TargetIcon,
   GaugeIcon,
   BotIcon,
+  Gamepad2Icon,
+  VenetianMaskIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -66,6 +68,8 @@ const ICONS: Record<string, LucideIcon> = {
   "target": TargetIcon,
   "gauge": GaugeIcon,
   "bot": BotIcon,
+  "gamepad-2": Gamepad2Icon,
+  "venetian-mask": VenetianMaskIcon,
 };
 
 export function groupIconFor(name: string): LucideIcon | undefined {
@@ -82,6 +86,7 @@ export const GROUP_COLORS: Record<string, string> = {
   knowledge: "text-amber-500",
   health: "text-red-500",
   media: "text-rose-500",
+  games: "text-fuchsia-500",
   mcp: "text-pink-500",
   calls: "text-cyan-500",
   security: "text-violet-500",
@@ -98,6 +103,7 @@ export const GROUP_ACCENT_BG: Record<string, string> = {
   knowledge: "bg-amber-500",
   health: "bg-red-500",
   media: "bg-rose-500",
+  games: "bg-fuchsia-500",
   mcp: "bg-pink-500",
   calls: "bg-cyan-500",
   security: "bg-violet-500",
