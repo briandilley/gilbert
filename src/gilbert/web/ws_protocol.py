@@ -16,6 +16,8 @@ from collections.abc import Callable
 from typing import Any
 
 from gilbert.interfaces.acl import (
+    BUILTIN_ROLE_LEVELS,
+    DEFAULT_RPC_LEVEL,
     resolve_default_event_level,
     resolve_default_rpc_level,
     resolve_event_visibility,
@@ -447,16 +449,26 @@ class WsConnectionManager:
         self.gilbert: Any = None
         # Combined handler registry: core + service-provided
         self._handlers: dict[str, RpcHandler] = {}
+        # frame_type → owning service name (for declared-role scoping)
+        self._handler_owner: dict[str, str] = {}
+        # declared prefix/frame → (role_name, owning service name)
+        self._declared_rpc_roles: dict[str, tuple[str, str]] = {}
 
     def subscribe_to_bus(self, gilbert: Any) -> None:
         """Subscribe to the event bus and discover service handlers."""
         self.gilbert = gilbert
 
-        # Start with core handlers (gilbert.*)
+        # Start with core handlers (gilbert.*). Reset the owner and
+        # declared-role maps alongside — without this, a second call (e.g.
+        # re-discovery after a service restart) leaves stale owners behind,
+        # which both misattributes conflict warnings and can let a
+        # long-gone service's declared role keep applying.
         self._handlers = dict(_rpc_handlers)
+        self._handler_owner = {}
+        self._declared_rpc_roles = {}
 
         # Discover service-provided handlers
-        from gilbert.interfaces.ws import WsHandlerProvider
+        from gilbert.interfaces.ws import WsHandlerProvider, WsRpcRoleProvider
 
         for svc in gilbert.service_manager.get_all_by_capability("ws_handlers"):
             # Services exposing ws_handlers always inherit from
@@ -475,11 +487,60 @@ class WsConnectionManager:
                         )
                     else:
                         self._handlers[frame_type] = handler
+                        self._handler_owner[frame_type] = svc.service_info().name
                 logger.info(
                     "Registered %d WS handlers from %s",
                     len(service_handlers),
                     svc.service_info().name,
                 )
+
+                if isinstance(svc, WsRpcRoleProvider):
+                    svc_name = svc.service_info().name
+                    for key, role in svc.get_ws_rpc_roles().items():
+                        owns_match = any(
+                            ft == key or ft.startswith(key)
+                            for ft, owner in self._handler_owner.items()
+                            if owner == svc_name
+                        )
+                        if not owns_match:
+                            logger.warning(
+                                "Ignoring declared RPC role %r=%r from %s: matches none of its own handlers",
+                                key,
+                                role,
+                                svc_name,
+                            )
+                            continue
+                        if role not in BUILTIN_ROLE_LEVELS:
+                            # Declared roles are resolved against the
+                            # built-in role vocabulary, not the full ACL
+                            # role set (custom ACL roles are for humans,
+                            # not service declarations). An unknown role
+                            # name here — e.g. a typo — would otherwise
+                            # fail OPEN: get_role_level() and the
+                            # BUILTIN_ROLE_LEVELS.get() fallback both
+                            # default an unrecognized role to the most
+                            # permissive level (everyone/200). Reject it
+                            # at registration time instead so frames fall
+                            # back to the hardcoded default resolution.
+                            logger.warning(
+                                "Ignoring declared RPC role %r=%r from %s: %r is not a "
+                                "built-in role (%s)",
+                                key,
+                                role,
+                                svc_name,
+                                role,
+                                ", ".join(sorted(BUILTIN_ROLE_LEVELS)),
+                            )
+                            continue
+                        if key in self._declared_rpc_roles:
+                            logger.warning(
+                                "Declared RPC role conflict on %r: keeping %s, skipping %s",
+                                key,
+                                self._declared_rpc_roles[key][1],
+                                svc_name,
+                            )
+                            continue
+                        self._declared_rpc_roles[key] = (role, svc_name)
 
         logger.info("WebSocket manager ready: %d handlers registered", len(self._handlers))
 
@@ -493,6 +554,20 @@ class WsConnectionManager:
         """Unsubscribe from the bus."""
         if self._unsubscribe:
             self._unsubscribe()
+
+    def resolve_declared_rpc_role(self, frame_type: str) -> str | None:
+        """Longest-prefix declared role for a frame the declarer owns."""
+        owner = self._handler_owner.get(frame_type)
+        if owner is None:
+            return None
+        best = ""
+        best_role: str | None = None
+        for key, (role, svc_name) in self._declared_rpc_roles.items():
+            if svc_name != owner:
+                continue
+            if (frame_type == key or frame_type.startswith(key)) and len(key) > len(best):
+                best, best_role = key, role
+        return best_role
 
     def register(self, conn: WsConnection) -> None:
         self._connections.add(conn)
@@ -823,14 +898,29 @@ async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str,
 def _resolve_rpc_level(conn: WsConnection, frame_type: str) -> int:
     """Resolve the required level for an RPC frame type.
 
-    Delegates to AccessControlService if available, otherwise falls back
-    to hardcoded defaults.
+    Precedence: admin runtime overrides, then roles the owning service
+    declared for its own frames (WsRpcRoleProvider), then hardcoded
+    defaults.
     """
-    gilbert = conn.manager.gilbert
+    manager = conn.manager
+    acl_svc: AccessControlProvider | None = None
+    gilbert = manager.gilbert
     if gilbert is not None:
-        acl_svc = gilbert.service_manager.get_by_capability("access_control")
-        if isinstance(acl_svc, AccessControlProvider):
-            return acl_svc.resolve_rpc_level(frame_type)
+        svc = gilbert.service_manager.get_by_capability("access_control")
+        if isinstance(svc, AccessControlProvider):
+            acl_svc = svc
 
-    # Fall back to hardcoded defaults
+    if acl_svc is not None:
+        override = acl_svc.get_rpc_override_level(frame_type)
+        if override is not None:
+            return override
+
+    declared = manager.resolve_declared_rpc_role(frame_type)
+    if declared is not None:
+        if acl_svc is not None:
+            return acl_svc.get_role_level(declared)
+        return BUILTIN_ROLE_LEVELS.get(declared, DEFAULT_RPC_LEVEL)
+
+    if acl_svc is not None:
+        return acl_svc.resolve_rpc_level(frame_type)
     return get_rpc_permission_level(frame_type)

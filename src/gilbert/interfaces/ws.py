@@ -104,6 +104,26 @@ class WsHandlerProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class WsRpcRoleProvider(Protocol):
+    """Optional companion to ``WsHandlerProvider``.
+
+    A service may declare the minimum role required to call its OWN WS
+    frames — e.g. a game plugin whose players are unauthenticated guests
+    declares ``{"mafia.": "everyone"}``. Keys are exact frame types or
+    dot-terminated prefixes; values are role names resolved through the
+    access-control service. A declared entry is honored only for frame
+    types whose handler the same service registered — it can never
+    change the level of another service's frames. Admin runtime
+    overrides still take precedence; hardcoded defaults remain the
+    fallback.
+    """
+
+    def get_ws_rpc_roles(self) -> dict[str, str]:
+        """Map frame types / prefixes to minimum role names."""
+        ...
+
+
 def require_admin(conn: WsConnectionBase, frame: dict[str, Any]) -> dict[str, Any] | None:
     """Return an error frame if the connection is not admin-level, else None.
 

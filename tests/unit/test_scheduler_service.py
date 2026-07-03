@@ -480,6 +480,9 @@ class _FakeACL:
     def resolve_rpc_level(self, *args: Any, **kwargs: Any) -> int:
         return self._user_level
 
+    def get_rpc_override_level(self, frame_type: str) -> int | None:
+        return None
+
     def check_collection_read(self, user_ctx: Any, collection: str) -> bool:
         return True
 
