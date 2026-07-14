@@ -32,6 +32,7 @@ members = [
     "gilbert-plugin-jellyfin",
     "gilbert-plugin-kokoro",
     "gilbert-plugin-lutron-radiora",
+    "gilbert-plugin-mafia",
     "gilbert-plugin-mentra",
     "gilbert-plugin-messaging",
     "gilbert-plugin-mistral",
@@ -1679,6 +1680,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pylutron", specifier = ">=0.4.1" }]
+
+[[package]]
+name = "gilbert-plugin-mafia"
+version = "1.0.0"
+source = { virtual = "std-plugins/mafia" }
 
 [[package]]
 name = "gilbert-plugin-mentra"

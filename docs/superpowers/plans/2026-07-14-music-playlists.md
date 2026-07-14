@@ -1401,11 +1401,22 @@ git commit -m "feat(music): add_to_playlist (query / track_id / now-playing) + r
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/integration/test_music_service_playlists.py`:
+Append to `tests/integration/test_music_service_playlists.py`.
+
+**Note:** `supports_queue` is a read-only property on `MusicService`, so these
+tests override it via `monkeypatch.setattr` — which pytest reverts after each
+test. Do **not** assign to `type(svc).supports_queue` directly: that mutates the
+class for the rest of the session and leaks into unrelated tests.
 
 ```python
+def _set_queue_support(monkeypatch: pytest.MonkeyPatch, value: bool) -> None:
+    monkeypatch.setattr(
+        MusicService, "supports_queue", property(lambda self: value)
+    )
+
+
 async def test_play_playlist_plays_first_and_queues_rest_in_order(
-    svc: MusicService, alice: UserContext
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_current_user(alice)
     svc.search = AsyncMock(
@@ -1419,7 +1430,7 @@ async def test_play_playlist_plays_first_and_queues_rest_in_order(
     queued: list[str] = []
     svc.play_item = AsyncMock(side_effect=lambda item, **kw: played.append(item.title))
     svc.add_to_queue = AsyncMock(side_effect=lambda item, **kw: queued.append(item.title))
-    type(svc).supports_queue = property(lambda self: True)
+    _set_queue_support(monkeypatch, True)
 
     out = await svc.execute_tool("play_playlist", {"name": "Workout"})
     assert played == ["One"]
@@ -1428,7 +1439,7 @@ async def test_play_playlist_plays_first_and_queues_rest_in_order(
 
 
 async def test_play_playlist_shuffle_arg_reorders_but_keeps_stored_order(
-    svc: MusicService, alice: UserContext
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_current_user(alice)
     svc.search = AsyncMock(
@@ -1443,7 +1454,7 @@ async def test_play_playlist_shuffle_arg_reorders_but_keeps_stored_order(
     order: list[str] = []
     svc.play_item = AsyncMock(side_effect=lambda item, **kw: order.append(item.title))
     svc.add_to_queue = AsyncMock(side_effect=lambda item, **kw: order.append(item.title))
-    type(svc).supports_queue = property(lambda self: True)
+    _set_queue_support(monkeypatch, True)
 
     await svc.execute_tool("play_playlist", {"name": "Workout", "shuffle": True})
 
@@ -1472,7 +1483,7 @@ async def test_play_playlist_uses_stored_shuffle_default(
     )
     svc.play_item = AsyncMock()
     svc.add_to_queue = AsyncMock()
-    type(svc).supports_queue = property(lambda self: True)
+    _set_queue_support(monkeypatch, True)
 
     await svc.execute_tool("play_playlist", {"name": "Workout"})
     assert shuffled, "stored shuffle=True should have shuffled without an argument"
@@ -1494,14 +1505,14 @@ async def test_play_playlist_shuffle_false_overrides_stored_true(
     )
     svc.play_item = AsyncMock()
     svc.add_to_queue = AsyncMock()
-    type(svc).supports_queue = property(lambda self: True)
+    _set_queue_support(monkeypatch, True)
 
     await svc.execute_tool("play_playlist", {"name": "Workout", "shuffle": False})
     assert not shuffled, "explicit shuffle=False must override the stored default"
 
 
 async def test_play_playlist_skips_unresolvable_items(
-    svc: MusicService, alice: UserContext
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_current_user(alice)
     svc.search = AsyncMock(side_effect=[[_hit("t1", "One")], [_hit("t2", "Two")]])
@@ -1511,7 +1522,7 @@ async def test_play_playlist_skips_unresolvable_items(
 
     svc.play_item = AsyncMock()
     svc.add_to_queue = AsyncMock(side_effect=RuntimeError("gone"))
-    type(svc).supports_queue = property(lambda self: True)
+    _set_queue_support(monkeypatch, True)
 
     out = await svc.execute_tool("play_playlist", {"name": "Workout"})
     assert "1 of 2" in out or "unavailable" in out.lower()
@@ -1525,7 +1536,7 @@ async def test_play_playlist_empty(svc: MusicService, alice: UserContext) -> Non
 
 
 async def test_play_playlist_without_queue_plays_first_track(
-    svc: MusicService, alice: UserContext
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_current_user(alice)
     svc.search = AsyncMock(side_effect=[[_hit("t1", "One")], [_hit("t2", "Two")]])
@@ -1536,7 +1547,7 @@ async def test_play_playlist_without_queue_plays_first_track(
     played: list[str] = []
     svc.play_item = AsyncMock(side_effect=lambda item, **kw: played.append(item.title))
     svc.add_to_queue = AsyncMock()
-    type(svc).supports_queue = property(lambda self: False)
+    _set_queue_support(monkeypatch, False)
 
     out = await svc.execute_tool("play_playlist", {"name": "Workout"})
     assert played == ["One"]
