@@ -116,12 +116,107 @@ async def test_my_playlists_description_distinguishes_from_list_playlists(
     """The AI picks tools by description. ``list_playlists`` returns the
     LINKED service's read-only playlists; ``my_playlists`` returns
     Gilbert-owned editable ones. Without explicit wording the model will
-    call the wrong one."""
+    call the wrong one — and the cross-reference has to run BOTH ways, or
+    "what playlists do I have?" lands on whichever the model saw first."""
     tools = {t.name: t for t in svc.get_tools()}
+
     mine = tools["my_playlists"].description
     assert "list_playlists" in mine
     assert "read-only" in mine.lower()
     assert "gilbert" in mine.lower()
+
+    theirs = tools["list_playlists"].description
+    assert "my_playlists" in theirs
+    assert "read-only" in theirs.lower()
+
+
+# --- SYSTEM-context refusal ---
+
+
+async def test_playlist_tools_refuse_system_context(svc: MusicService) -> None:
+    """``get_current_user()`` yields ``UserContext.SYSTEM`` on scheduled and
+    email-triggered turns, and ``check_tool_access`` short-circuits to True
+    for it. Without a guard those turns would create playlists owned by
+    "system" that no human can ever see."""
+    set_current_user(UserContext.SYSTEM)
+
+    created = await svc.execute_tool("create_playlist", {"name": "Ghost"})
+    assert "sign in" in created.lower()
+
+    listed = await svc.execute_tool("my_playlists", {})
+    assert "sign in" in listed.lower()
+
+    for tool, args in (
+        ("show_playlist", {"name": "Ghost"}),
+        ("update_playlist", {"name": "Ghost", "new_name": "Ghost 2"}),
+        ("delete_playlist", {"name": "Ghost"}),
+    ):
+        out = await svc.execute_tool(tool, args)
+        assert "sign in" in out.lower(), tool
+
+    # Nothing was written under the SYSTEM sentinel.
+    rows = await svc._require_playlists()._storage.query(Query(collection=PLAYLISTS_COLLECTION))
+    assert rows == []
+
+
+# --- Null-argument handling ---
+
+
+async def test_create_playlist_rejects_explicit_null_name(
+    svc: MusicService, alice: UserContext
+) -> None:
+    """A model can emit ``{"name": null}``. ``str(None)`` is "None" — the
+    playlist must not be created under that name."""
+    set_current_user(alice)
+    out = await svc.execute_tool("create_playlist", {"name": None})
+    assert "None" not in out
+    assert await svc._require_playlists().list_for("alice") == []
+
+
+# --- Event emissions ---
+
+
+class _RecordingEventBus:
+    """In-memory event bus that records every publish."""
+
+    def __init__(self) -> None:
+        self.published: list[Any] = []
+
+    def subscribe(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
+
+    def subscribe_pattern(self, pattern: str, handler: Any) -> Any:
+        return lambda: None
+
+    async def publish(self, event: Any) -> None:
+        self.published.append(event)
+
+
+async def test_playlist_crud_emits_events(svc: MusicService, alice: UserContext) -> None:
+    """The three playlist events are the only way other systems learn a
+    playlist changed. Without this test every ``_emit_playlist_event`` call
+    could be deleted and nothing would fail."""
+    bus = _RecordingEventBus()
+    svc._event_bus = bus  # type: ignore[assignment]
+    set_current_user(alice)
+
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("update_playlist", {"name": "Workout", "new_name": "Cardio"})
+    await svc.execute_tool("delete_playlist", {"name": "Cardio"})
+
+    assert [e.event_type for e in bus.published] == [
+        "music.playlist_created",
+        "music.playlist_updated",
+        "music.playlist_deleted",
+    ]
+    playlist_id = bus.published[0].data["playlist_id"]
+    assert playlist_id
+    for ev in bus.published:
+        assert ev.data["playlist_id"] == playlist_id
+        assert ev.data["owner_user_id"] == "alice"
+        assert ev.source == "music"
+    assert bus.published[0].data["name"] == "Workout"
+    assert bus.published[1].data["name"] == "Cardio"
 
 
 # --- start() wiring ---

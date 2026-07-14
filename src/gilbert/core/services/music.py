@@ -64,6 +64,13 @@ from gilbert.interfaces.ui import ToolOutput, UIBlock, UIElement, UIOption
 
 logger = logging.getLogger(__name__)
 
+# Playlists are owned by a person. Refused rather than silently filed under
+# the SYSTEM sentinel on scheduled / inbox-triggered turns.
+_NO_USER_MSG = (
+    "Playlists belong to a signed-in user — sign in to create or manage "
+    "playlists. (This request has no user context.)"
+)
+
 
 def _item_to_dict(item: MusicItem) -> dict[str, Any]:
     return {
@@ -738,7 +745,11 @@ class MusicService(Service):
                 slash_group="music",
                 slash_command="playlists",
                 slash_help="List saved Sonos playlists: /music playlists",
-                description="List the user's saved Sonos playlists.",
+                description=(
+                    "List the read-only saved playlists on the linked music "
+                    "service (Sonos/Spotify). For playlists you own and can "
+                    "edit in Gilbert, use my_playlists."
+                ),
                 required_role="everyone",
                 parallel_safe=True,
             ),
@@ -1589,6 +1600,21 @@ class MusicService(Service):
     # AI relays them straight to the user, and playlist errors ("you
     # already have a playlist named X") are answers, not failures.
 
+    @staticmethod
+    def _playlist_user() -> UserContext | None:
+        """The signed-in caller, or ``None`` on a SYSTEM turn.
+
+        ``get_current_user()`` returns ``UserContext.SYSTEM`` for
+        unauthenticated/system turns (scheduled jobs, inbox-triggered
+        chats), and ``check_tool_access`` short-circuits to True for it.
+        A playlist owned by ``"system"`` is orphan data no human can ever
+        see, so these tools refuse rather than write it.
+        """
+        user = get_current_user()
+        if not user or not user.user_id or user.user_id == UserContext.SYSTEM.user_id:
+            return None
+        return user
+
     async def _emit_playlist_event(self, event_type: str, playlist: Playlist) -> None:
         if self._event_bus is None:
             return
@@ -1619,13 +1645,16 @@ class MusicService(Service):
         return "\n".join(lines)
 
     async def _tool_create_playlist(self, arguments: dict[str, Any]) -> str:
-        user = get_current_user()
-        name = str(arguments.get("name", "")).strip()
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        # ``or ""`` not a default: a model can emit an explicit JSON null,
+        # and ``str(None)`` would create a playlist literally named "None".
+        name = str(arguments.get("name") or "").strip()
         shuffle = bool(arguments.get("shuffle", False))
+        store = self._require_playlists()
         try:
-            playlist = await self._require_playlists().create(
-                user.user_id, name, shuffle=shuffle
-            )
+            playlist = await store.create(user.user_id, name, shuffle=shuffle)
         # Covers DuplicatePlaylistNameError and the empty-name case.
         except PlaylistError as exc:
             return str(exc)
@@ -1633,7 +1662,9 @@ class MusicService(Service):
         return f"Created playlist {playlist.name!r}."
 
     async def _tool_my_playlists(self, arguments: dict[str, Any]) -> str:
-        user = get_current_user()
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
         playlists = await self._require_playlists().list_for(user.user_id)
         if not playlists:
             return "You have no playlists yet."
@@ -1643,22 +1674,28 @@ class MusicService(Service):
         )
 
     async def _tool_show_playlist(self, arguments: dict[str, Any]) -> str:
-        user = get_current_user()
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        store = self._require_playlists()
         try:
-            playlist = await self._require_playlists().get_by_name(
-                user.user_id, str(arguments.get("name", ""))
+            playlist = await store.get_by_name(
+                user.user_id, str(arguments.get("name") or "")
             )
         except PlaylistNotFoundError as exc:
             return str(exc)
         return self._format_playlist(playlist)
 
     async def _tool_update_playlist(self, arguments: dict[str, Any]) -> str:
-        user = get_current_user()
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
         raw_shuffle = arguments.get("shuffle")
+        store = self._require_playlists()
         try:
-            playlist = await self._require_playlists().update(
+            playlist = await store.update(
                 user.user_id,
-                str(arguments.get("name", "")),
+                str(arguments.get("name") or ""),
                 new_name=(
                     str(arguments["new_name"]) if arguments.get("new_name") else None
                 ),
@@ -1671,8 +1708,10 @@ class MusicService(Service):
         return f"Updated playlist {playlist.name!r}."
 
     async def _tool_delete_playlist(self, arguments: dict[str, Any]) -> str:
-        user = get_current_user()
-        name = str(arguments.get("name", ""))
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        name = str(arguments.get("name") or "")
         store = self._require_playlists()
         try:
             # Read first: the event payload needs the id and track count,
