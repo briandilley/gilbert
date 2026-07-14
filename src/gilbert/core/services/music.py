@@ -23,6 +23,11 @@ from gilbert.core.services._backend_actions import (
     all_backend_actions,
     invoke_backend_action,
 )
+from gilbert.core.services.music_playlists import (
+    PlaylistError,
+    PlaylistNotFoundError,
+    PlaylistStore,
+)
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
@@ -30,6 +35,7 @@ from gilbert.interfaces.configuration import (
     ConfigParam,
     ConfigurationReader,
 )
+from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.music import (
     LinkedMusicServiceLister,
@@ -38,6 +44,7 @@ from gilbert.interfaces.music import (
     MusicItemKind,
     MusicSearchUnavailableError,
     Playable,
+    Playlist,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import (
@@ -47,6 +54,7 @@ from gilbert.interfaces.speaker import (
     SpeakerProvider,
     split_speaker_id,
 )
+from gilbert.interfaces.storage import StorageProvider
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -226,13 +234,22 @@ class MusicService(Service):
         self._speaker_svc: Any | None = None
         self._resolver: ServiceResolver | None = None
         self._event_bus: EventBus | None = None
+        self._playlists: PlaylistStore | None = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="music",
             capabilities=frozenset({"music", "ai_tools"}),
+            requires=frozenset({"entity_storage"}),
             optional=frozenset({"configuration", "speaker_control", "event_bus"}),
-            events=frozenset({"music.playback_started"}),
+            events=frozenset(
+                {
+                    "music.playback_started",
+                    "music.playlist_created",
+                    "music.playlist_updated",
+                    "music.playlist_deleted",
+                }
+            ),
             toggleable=True,
             toggle_description="Music playback and search",
         )
@@ -245,6 +262,11 @@ class MusicService(Service):
         if self._speaker_svc is None and self._resolver is not None:
             self._speaker_svc = self._resolver.get_capability("speaker_control")
         return self._speaker_svc
+
+    def _require_playlists(self) -> PlaylistStore:
+        if self._playlists is None:
+            raise RuntimeError("Playlist storage is not available")
+        return self._playlists
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
@@ -260,6 +282,17 @@ class MusicService(Service):
 
         self._enabled = True
         self._config = section.get("settings", self._config)
+
+        # Gilbert-owned playlists live in the entity store, not in the
+        # music backend — they outlive any linked service and are never
+        # written upstream.
+        storage_svc = resolver.require_capability("entity_storage")
+        if not isinstance(storage_svc, StorageProvider):
+            raise TypeError(
+                "entity_storage capability does not provide StorageProvider"
+            )
+        self._playlists = PlaylistStore(storage_svc.backend)
+        await self._playlists.ensure_indexes()
 
         backend_name = section.get("backend", "sonos")
         self._backend_name = backend_name
@@ -850,6 +883,122 @@ class MusicService(Service):
                 ],
                 required_role="user",
             ),
+            # --- Gilbert-owned playlists ---
+            #
+            # Deliberately verbose descriptions: ``list_playlists`` above
+            # returns the LINKED service's read-only saved playlists,
+            # while ``my_playlists`` returns Gilbert's own editable ones.
+            # The AI picks tools by description, so each one has to name
+            # the other or the model reaches for the wrong surface.
+            ToolDefinition(
+                name="create_playlist",
+                description=(
+                    "Create a new empty playlist owned by you in Gilbert. "
+                    "Gilbert playlists are editable; they are separate from "
+                    "the read-only saved playlists on the linked music service."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name for the new playlist.",
+                    ),
+                    ToolParameter(
+                        name="shuffle",
+                        type=ToolParameterType.BOOLEAN,
+                        description=(
+                            "Whether this playlist shuffles by default when played."
+                        ),
+                        required=False,
+                        default=False,
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-create",
+                slash_help="Create a playlist: /music playlist-create <name>",
+            ),
+            ToolDefinition(
+                name="my_playlists",
+                description=(
+                    "List the playlists you own in Gilbert (editable). Use "
+                    "list_playlists instead for the read-only saved playlists "
+                    "on the linked music service."
+                ),
+                parameters=[],
+                required_role="user",
+                parallel_safe=True,
+                slash_group="music",
+                slash_command="playlist-list",
+                slash_help="List your playlists: /music playlist-list",
+            ),
+            ToolDefinition(
+                name="show_playlist",
+                description=(
+                    "Show the tracks in one of your Gilbert playlists, with "
+                    "1-based positions suitable for remove_from_playlist."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name of your playlist.",
+                    ),
+                ],
+                required_role="user",
+                parallel_safe=True,
+                slash_group="music",
+                slash_command="playlist-show",
+                slash_help="Show a playlist: /music playlist-show <name>",
+            ),
+            ToolDefinition(
+                name="update_playlist",
+                description=(
+                    "Rename one of your Gilbert playlists and/or change whether "
+                    "it shuffles by default when played."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Current name of your playlist.",
+                    ),
+                    ToolParameter(
+                        name="new_name",
+                        type=ToolParameterType.STRING,
+                        description="New name for the playlist.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="shuffle",
+                        type=ToolParameterType.BOOLEAN,
+                        description="New default shuffle setting.",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-update",
+                slash_help=(
+                    "Rename / set shuffle: /music playlist-update <name> "
+                    "[new_name=<name>] [shuffle=true]"
+                ),
+            ),
+            ToolDefinition(
+                name="delete_playlist",
+                description="Delete one of your Gilbert playlists.",
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name of your playlist.",
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-delete",
+                slash_help="Delete a playlist: /music playlist-delete <name>",
+            ),
         ]
 
         # Queue tools are opt-in — only surface them when the backend
@@ -1086,6 +1235,16 @@ class MusicService(Service):
                 return await self._tool_start_station(arguments)
             case "set_loop":
                 return await self._tool_set_loop(arguments)
+            case "create_playlist":
+                return await self._tool_create_playlist(arguments)
+            case "my_playlists":
+                return await self._tool_my_playlists(arguments)
+            case "show_playlist":
+                return await self._tool_show_playlist(arguments)
+            case "update_playlist":
+                return await self._tool_update_playlist(arguments)
+            case "delete_playlist":
+                return await self._tool_delete_playlist(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -1418,3 +1577,109 @@ class MusicService(Service):
         except (RuntimeError, NotImplementedError) as exc:
             return json.dumps({"error": str(exc)})
         return json.dumps({"status": "loop_set", "mode": mode.value})
+
+    # --- Playlist tools ---
+    #
+    # These operate on Gilbert-owned playlists in the entity store, not
+    # on the linked music service. Every handler scopes to
+    # ``get_current_user()`` — the store treats another user's playlist
+    # as absent, so a denial and a miss are indistinguishable.
+    #
+    # Unlike the playback tools these return prose rather than JSON: the
+    # AI relays them straight to the user, and playlist errors ("you
+    # already have a playlist named X") are answers, not failures.
+
+    async def _emit_playlist_event(self, event_type: str, playlist: Playlist) -> None:
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(
+            Event(
+                event_type=event_type,
+                data={
+                    "playlist_id": playlist.id,
+                    "name": playlist.name,
+                    "owner_user_id": playlist.owner_user_id,
+                    "track_count": len(playlist.items),
+                },
+                source="music",
+            )
+        )
+
+    @staticmethod
+    def _format_playlist(playlist: Playlist) -> str:
+        if not playlist.items:
+            return f"{playlist.name} is empty."
+        lines = [
+            f"{playlist.name} ({len(playlist.items)} tracks"
+            f"{', shuffles by default' if playlist.shuffle else ''}):"
+        ]
+        for pos, item in enumerate(playlist.items, start=1):
+            suffix = f" — {item.subtitle}" if item.subtitle else ""
+            lines.append(f"{pos}. {item.title}{suffix}")
+        return "\n".join(lines)
+
+    async def _tool_create_playlist(self, arguments: dict[str, Any]) -> str:
+        user = get_current_user()
+        name = str(arguments.get("name", "")).strip()
+        shuffle = bool(arguments.get("shuffle", False))
+        try:
+            playlist = await self._require_playlists().create(
+                user.user_id, name, shuffle=shuffle
+            )
+        # Covers DuplicatePlaylistNameError and the empty-name case.
+        except PlaylistError as exc:
+            return str(exc)
+        await self._emit_playlist_event("music.playlist_created", playlist)
+        return f"Created playlist {playlist.name!r}."
+
+    async def _tool_my_playlists(self, arguments: dict[str, Any]) -> str:
+        user = get_current_user()
+        playlists = await self._require_playlists().list_for(user.user_id)
+        if not playlists:
+            return "You have no playlists yet."
+        return "\n".join(
+            f"{p.name} ({len(p.items)} tracks){' [shuffle]' if p.shuffle else ''}"
+            for p in playlists
+        )
+
+    async def _tool_show_playlist(self, arguments: dict[str, Any]) -> str:
+        user = get_current_user()
+        try:
+            playlist = await self._require_playlists().get_by_name(
+                user.user_id, str(arguments.get("name", ""))
+            )
+        except PlaylistNotFoundError as exc:
+            return str(exc)
+        return self._format_playlist(playlist)
+
+    async def _tool_update_playlist(self, arguments: dict[str, Any]) -> str:
+        user = get_current_user()
+        raw_shuffle = arguments.get("shuffle")
+        try:
+            playlist = await self._require_playlists().update(
+                user.user_id,
+                str(arguments.get("name", "")),
+                new_name=(
+                    str(arguments["new_name"]) if arguments.get("new_name") else None
+                ),
+                shuffle=None if raw_shuffle is None else bool(raw_shuffle),
+            )
+        # Covers PlaylistNotFoundError and DuplicatePlaylistNameError.
+        except PlaylistError as exc:
+            return str(exc)
+        await self._emit_playlist_event("music.playlist_updated", playlist)
+        return f"Updated playlist {playlist.name!r}."
+
+    async def _tool_delete_playlist(self, arguments: dict[str, Any]) -> str:
+        user = get_current_user()
+        name = str(arguments.get("name", ""))
+        store = self._require_playlists()
+        try:
+            # Read first: the event payload needs the id and track count,
+            # which are gone once the row is deleted.
+            playlist = await store.get_by_name(user.user_id, name)
+            await store.delete(user.user_id, name)
+        except PlaylistNotFoundError as exc:
+            return str(exc)
+        await self._emit_playlist_event("music.playlist_deleted", playlist)
+        return f"Deleted playlist {playlist.name!r}."
