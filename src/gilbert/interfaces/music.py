@@ -32,6 +32,7 @@ __all__ = [
     "MusicItemKind",
     "MusicSearchUnavailableError",
     "Playable",
+    "Playlist",
     "SearchResults",
 ]
 
@@ -111,6 +112,30 @@ class Playable:
     uri: str
     didl_meta: str = ""
     title: str = ""
+
+
+@dataclass(frozen=True)
+class Playlist:
+    """A Gilbert-owned, per-user playlist.
+
+    Distinct from a ``MusicItem`` of kind ``PLAYLIST``, which is a
+    *reference* to a playlist in the upstream service (read-only).
+    A ``Playlist`` is stored by Gilbert, owned by one user, and freely
+    editable — Gilbert never writes to the upstream service.
+
+    ``items`` are point-in-time snapshots of ``MusicItem``s, so playback
+    needs no re-search and the playlist survives a track vanishing from
+    the upstream search index. ``shuffle`` is the playlist's *default*
+    play order; a ``play_playlist`` call may override it either way.
+    """
+
+    id: str
+    owner_user_id: str
+    name: str
+    items: tuple[MusicItem, ...] = ()
+    shuffle: bool = False
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class MusicBackend(ABC):

@@ -93,6 +93,13 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # the per-event ``can_see_health_event`` filter in
     # ``web/ws_protocol.py`` (mirrors the notification pattern).
     "health.": 100,
+    # Music events are user-level. ``music.playback_started`` is a
+    # household event (a speaker is a shared device) and fans out to
+    # every signed-in connection. The ``music.playlist_*`` events are
+    # owner-scoped instead: the WS layer's ``can_see_music_event``
+    # filter narrows them to the owning ``user_id``, since the playlist
+    # store itself treats another user's playlist as absent.
+    "music.": 100,
     # admin (0)
     "service.": 0,
     "config.": 0,

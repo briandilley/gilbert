@@ -229,6 +229,17 @@ def test_get_tools(service: MusicService) -> None:
         "play_music",
         "play_item",
         "now_playing",
+        # Gilbert-owned playlist CRUD — always available (storage is a
+        # hard requirement of the service), unlike the queue/station/loop
+        # tools which are gated on backend capabilities.
+        "create_playlist",
+        "my_playlists",
+        "show_playlist",
+        "update_playlist",
+        "delete_playlist",
+        "add_to_playlist",
+        "remove_from_playlist",
+        "play_playlist",
     }
 
 
