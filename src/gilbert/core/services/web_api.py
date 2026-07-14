@@ -331,6 +331,21 @@ class WebApiService(Service):
                 "placeholder_group": True,
             },
             {
+                # Parent for plugin-contributed party games (Mafia, …).
+                # Same placeholder pattern as Media: no built-in children,
+                # ``items`` filled by plugin ``ui_routes(...
+                # nav_parent_group="games")`` entries, and dropped from the
+                # nav entirely when no games plugin is enabled.
+                "key": "games",
+                "label": "Games",
+                "description": "Party games narrated and refereed by Gilbert",
+                "url": "",
+                "icon": "gamepad-2",
+                "required_role": "everyone",
+                "items": [],
+                "placeholder_group": True,
+            },
+            {
                 "key": "mcp",
                 "label": "MCP",
                 "description": "Model Context Protocol",
@@ -750,7 +765,9 @@ class WebApiService(Service):
                     return acl.get_role_level(role)
                 except Exception:
                     pass
-            return {"admin": 0, "user": 100, "anonymous": 200}.get(role, 100)
+            return {"admin": 0, "user": 100, "everyone": 200, "anonymous": 200}.get(
+                role, 100
+            )
 
         def _capability_live(cap: str) -> bool:
             # Mirrors the nav-visibility check in ``_ws_dashboard_get``:

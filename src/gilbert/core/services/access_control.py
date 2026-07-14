@@ -186,6 +186,16 @@ class AccessControlService(Service):
         required_level = self.get_role_level(required_role)
         return effective <= required_level
 
+    def get_rpc_override_level(self, frame_type: str) -> int | None:
+        """Admin-override level for the longest matching prefix, or None."""
+        best = ""
+        for prefix in self._rpc_acl:
+            if frame_type.startswith(prefix) and len(prefix) > len(best):
+                best = prefix
+        if best:
+            return self.get_role_level(self._rpc_acl[best])
+        return None
+
     def resolve_rpc_level(self, frame_type: str) -> int:
         """Resolve the required role level for an RPC frame type.
 
@@ -194,14 +204,9 @@ class AccessControlService(Service):
         """
         from gilbert.interfaces.acl import resolve_default_rpc_level
 
-        # Longest prefix match on overrides
-        best = ""
-        for prefix in self._rpc_acl:
-            if frame_type.startswith(prefix) and len(prefix) > len(best):
-                best = prefix
-        if best:
-            return self.get_role_level(self._rpc_acl[best])
-
+        override = self.get_rpc_override_level(frame_type)
+        if override is not None:
+            return override
         # Fall back to hardcoded defaults
         return resolve_default_rpc_level(frame_type)
 

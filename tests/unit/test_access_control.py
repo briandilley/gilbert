@@ -376,3 +376,31 @@ class TestCollectionACL:
         )
         parsed = json.loads(result)
         assert parsed["status"] == "set"
+
+
+# =============================================================================
+# RPC override level tests
+# =============================================================================
+
+
+class TestRpcOverrideLevel:
+    async def test_get_rpc_override_level_none_without_override(
+        self, service: AccessControlService
+    ) -> None:
+        assert service.get_rpc_override_level("mafia.game.join") is None
+
+    async def test_get_rpc_override_level_longest_prefix(
+        self, service: AccessControlService
+    ) -> None:
+        await service.set_rpc_permission("mafia.", "everyone")
+        await service.set_rpc_permission("mafia.host.", "user")
+        assert service.get_rpc_override_level("mafia.game.join") == 200
+        assert service.get_rpc_override_level("mafia.host.abort") == 100
+
+    async def test_resolve_rpc_level_unchanged_behavior(
+        self, service: AccessControlService
+    ) -> None:
+        # No override → falls back to hardcoded defaults (unlisted = 100)
+        assert service.resolve_rpc_level("mafia.game.join") == 100
+        await service.set_rpc_permission("mafia.", "everyone")
+        assert service.resolve_rpc_level("mafia.game.join") == 200

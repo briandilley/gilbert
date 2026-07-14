@@ -178,11 +178,12 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     # handlers enforce ownership so a user can only see / mutate their
     # own.
     "browser.": 100,
-    # Plugin UI extensions: any authenticated user can ask which panels
+    # Plugin UI extensions: anyone (incl. guests) can ask which panels
     # / routes the loaded plugins contribute. The handlers filter
-    # per-entry by required_role.
-    "ui.panels.": 100,
-    "ui.routes.": 100,
+    # per-entry by required_role, so guests only ever see entries
+    # declared required_role="everyone".
+    "ui.panels.": 200,
+    "ui.routes.": 200,
     # Prompt contribution discovery — admin-only since the prompts
     # themselves live in admin Settings.
     "prompts.contributions.": 0,

@@ -340,6 +340,10 @@ class AccessControlProvider(Protocol):
         """Resolve the required role level for an RPC frame type."""
         ...
 
+    def get_rpc_override_level(self, frame_type: str) -> int | None:
+        """Admin-override level for an RPC frame type, or None if no override matches."""
+        ...
+
     def check_collection_read(self, user_ctx: UserContext, collection: str) -> bool:
         """Return True if the user can read from the entity collection."""
         ...

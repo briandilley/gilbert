@@ -378,7 +378,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               .get(event.event_type)
               ?.forEach((h) => h(event));
             handlersRef.current.get("*")?.forEach((h) => h(event));
+            return;
           }
+
+          // Direct server-pushed frames (conn.enqueue with a custom type):
+          // deliver raw to exact-type subscribers. Deliberately NOT the "*"
+          // wildcard — wildcard subscribers expect bus-event shape.
+          handlersRef.current.get(type)?.forEach((h) => h(frame));
         } catch {
           // ignore parse errors
         }

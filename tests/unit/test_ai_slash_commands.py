@@ -94,6 +94,9 @@ class _StubACL:
     def resolve_rpc_level(self, frame_type: str) -> int:
         return 100
 
+    def get_rpc_override_level(self, frame_type: str) -> int | None:
+        return None
+
     def check_collection_read(self, user_ctx: UserContext, collection: str) -> bool:
         return True
 
