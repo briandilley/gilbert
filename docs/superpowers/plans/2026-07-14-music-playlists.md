@@ -20,6 +20,20 @@
 - **DB tests hit a real SQLite database** (fixture `sqlite_storage` in `tests/conftest.py`) — never mock the DB. Mocks are for the music/speaker backends only.
 - **No migration is needed** — the generic entity store accepts new collections without one.
 - Collection name: `music_playlists`. Never rename it after first write.
+- **`UserContext` lives in `gilbert.interfaces.auth`** (not `.context`) and its real fields are
+  `user_id, email, display_name, roles: frozenset[str]` — there is no `username` or `role` field.
+  `tests/integration/test_music_service_playlists.py` already defines a `_user(user_id)` helper that
+  builds one correctly; reuse it. `set_current_user` / `get_current_user` come from
+  `gilbert.interfaces.context`.
+- Known pre-existing failures, unrelated to this work: `std-plugins/kokoro/tests/test_kokoro_integration.py`
+  fails on a `KPipeline` import in this environment. Ignore them.
+- **Every playlist tool handler must refuse the SYSTEM caller.** `get_current_user()` returns
+  `UserContext.SYSTEM` (`user_id="system"`) on unauthenticated/system turns (scheduled jobs,
+  `inbox_ai_chat`), and `AccessControlService` short-circuits RBAC to `True` for `"system"` — so
+  without a guard, a scheduled turn creates playlists owned by `"system"` that no human can ever
+  see. Task 3 added this guard to the five CRUD handlers (follow its shape — see the `weather.py`
+  `_exec_set_home` precedent); **`add_to_playlist`, `remove_from_playlist`, and `play_playlist`
+  need it too.**
 
 ---
 
@@ -660,7 +674,7 @@ from gilbert.storage.sqlite import SQLiteStorage
 
 @pytest.fixture
 def alice() -> UserContext:
-    return UserContext(user_id="alice", username="alice", role="user")
+    return _user("alice")
 
 
 @pytest.fixture
@@ -693,7 +707,7 @@ async def test_my_playlists_lists_only_callers(
 ) -> None:
     set_current_user(alice)
     await svc.execute_tool("create_playlist", {"name": "Workout"})
-    set_current_user(UserContext(user_id="bob", username="bob", role="user"))
+    set_current_user(_user("bob"))
     await svc.execute_tool("create_playlist", {"name": "Bob Only"})
 
     out = await svc.execute_tool("my_playlists", {})
@@ -706,7 +720,7 @@ async def test_show_playlist_denies_other_users(
 ) -> None:
     set_current_user(alice)
     await svc.execute_tool("create_playlist", {"name": "Workout"})
-    set_current_user(UserContext(user_id="bob", username="bob", role="user"))
+    set_current_user(_user("bob"))
     out = await svc.execute_tool("show_playlist", {"name": "Workout"})
     assert "no playlist" in out.lower()
 
@@ -1178,7 +1192,7 @@ async def test_add_to_playlist_denies_other_users(
     set_current_user(alice)
     await svc.execute_tool("create_playlist", {"name": "Workout"})
     svc.search = AsyncMock(return_value=[_hit()])
-    set_current_user(UserContext(user_id="bob", username="bob", role="user"))
+    set_current_user(_user("bob"))
     out = await svc.execute_tool(
         "add_to_playlist", {"name": "Workout", "query": "horizon"}
     )
