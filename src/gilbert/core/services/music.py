@@ -1853,13 +1853,18 @@ class MusicService(Service):
         store = self._require_playlists()
         try:
             item = await self._resolve_item_to_add(arguments)
-            playlist = await store.add_item(user.user_id, name, item)
-        # One clause covers the lot: PlaylistError (not-found, unresolvable
-        # track) and MusicSearchUnavailableError both subclass RuntimeError,
-        # as do the "music/speaker service isn't available" errors from
-        # search() and now_playing(). All of them are answers for the user,
-        # not failures of the turn.
+        # PlaylistError (not-found, unresolvable track) and
+        # MusicSearchUnavailableError both subclass RuntimeError, as do the
+        # "music/speaker service isn't available" errors from search() and
+        # now_playing(). All of them are answers for the user, not failures
+        # of the turn — but log them so an infra-level RuntimeError hiding
+        # in there isn't silently swallowed.
         except RuntimeError as exc:
+            logger.warning("add_to_playlist could not resolve an item: %s", exc)
+            return str(exc)
+        try:
+            playlist = await store.add_item(user.user_id, name, item)
+        except PlaylistError as exc:
             return str(exc)
         await self._emit_playlist_event("music.playlist_updated", playlist)
         return f"Added {item.title!r} to {playlist.name!r}."

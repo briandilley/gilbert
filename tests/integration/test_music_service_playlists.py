@@ -390,7 +390,10 @@ async def test_add_to_playlist_by_query_no_results(svc: MusicService, alice: Use
     svc.search = AsyncMock(return_value=[])  # type: ignore[method-assign]
     await svc.execute_tool("create_playlist", {"name": "Workout"})
     out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "nothing"})
-    assert "no" in out.lower()
+    assert "no results" in out.lower()
+    store = svc._playlists
+    assert store is not None
+    assert (await store.get_by_name("alice", "Workout")).items == ()
 
 
 async def test_add_to_playlist_uses_now_playing_when_no_args(
