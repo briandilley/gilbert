@@ -53,3 +53,27 @@ Task 5: complete (commits 7b46895..819e917, review clean — Spec ✅ / Approved
   Implementer correctly rejected the brief's `queued < total` message, which would have
   reported a queueless backend as "1 of 2 (1 unavailable)" — a capability gap misreported
   as missing tracks.
+Task 6: complete (commits 819e917..e55f7b0, submodule e516519)
+  Stale Spotify scope comment fixed in the sonos submodule. No README music-command list
+  existed, so none was invented; root README Music bullet updated (it enumerated the tool
+  surface). Full suite: 4935 passed, 2 pre-existing kokoro failures. ruff/mypy: zero NEW
+  findings vs the pre-feature baseline.
+
+FINAL WHOLE-BRANCH REVIEW: initially NOT READY — 2 blockers, both fixed in b01707b:
+  1. play_playlist hard-failed on an unresolvable FIRST item (only the enqueue loop caught
+     failures). One delisted track at position 1 killed the whole play — and under shuffle it
+     was nondeterministic. Missed by every per-task review (each saw only one task's diff).
+     Now: skip leading failures, play the first that works, prose if none play.
+  2. PlaylistStore TOCTOU finally fixed: asyncio.Lock around the 5 mutators (reads unlocked;
+     no self-deadlock — verified). Concurrency test proven to fail without the lock.
+  Also fixed: the no-queue count was wrong once leading items could be skipped; enum
+  serialization divergence (str(kind) -> kind.value).
+RE-REVIEW: Task quality Approved — READY TO MERGE.
+
+ACCEPTED (not blocking; follow-ups if wanted):
+- Lock is correct only single-process/single-store. Multi-process would need CAS/version on
+  StorageBackend (out of scope; noted in the class docstring).
+- A now-playing add of a RADIO station stores kind=TRACK; NowPlaying.source could guard it.
+  (SonosMusic.resolve_playable discards didl_meta for ALL items, so this is a backend gap.)
+- AI emitting the STRING "false" for a boolean arg is truthy via bool().
+- Multi-word playlist names need quoting in slash commands (pre-existing convention).
