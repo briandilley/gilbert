@@ -1010,6 +1010,64 @@ class MusicService(Service):
                 slash_command="playlist-delete",
                 slash_help="Delete a playlist: /music playlist-delete <name>",
             ),
+            ToolDefinition(
+                name="add_to_playlist",
+                description=(
+                    "Add a track to one of your Gilbert playlists. Give "
+                    "'track_id' to add a specific search hit, or 'query' to "
+                    "search and add the top match, or neither to add the track "
+                    "that is currently playing."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name of your playlist.",
+                    ),
+                    ToolParameter(
+                        name="query",
+                        type=ToolParameterType.STRING,
+                        description="Search text; the top hit is added.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="track_id",
+                        type=ToolParameterType.STRING,
+                        description="Id of a track from a previous search.",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-add",
+                slash_help=(
+                    "Add a track: /music playlist-add <name> [query] "
+                    "(no query adds the current track)"
+                ),
+            ),
+            ToolDefinition(
+                name="remove_from_playlist",
+                description=(
+                    "Remove a track from one of your Gilbert playlists by its "
+                    "1-based position, as shown by show_playlist."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name of your playlist.",
+                    ),
+                    ToolParameter(
+                        name="position",
+                        type=ToolParameterType.INTEGER,
+                        description="1-based position of the track to remove.",
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-remove",
+                slash_help="Remove a track: /music playlist-remove <name> <position>",
+            ),
         ]
 
         # Queue tools are opt-in — only surface them when the backend
@@ -1256,6 +1314,10 @@ class MusicService(Service):
                 return await self._tool_update_playlist(arguments)
             case "delete_playlist":
                 return await self._tool_delete_playlist(arguments)
+            case "add_to_playlist":
+                return await self._tool_add_to_playlist(arguments)
+            case "remove_from_playlist":
+                return await self._tool_remove_from_playlist(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -1731,3 +1793,92 @@ class MusicService(Service):
             return str(exc)
         await self._emit_playlist_event("music.playlist_deleted", playlist)
         return f"Deleted playlist {playlist.name!r}."
+
+    async def _resolve_item_to_add(self, arguments: dict[str, Any]) -> MusicItem:
+        """Resolve what ``add_to_playlist`` should add.
+
+        Order: explicit ``track_id``, then ``query``, then the now-playing
+        track. Backends have no by-id lookup (see the module docstring on
+        ``interfaces/music.py``) — SMAPI-style services can't fetch an
+        arbitrary item by id without having seen it in a browse or search
+        first — so a ``track_id`` is confirmed by searching for it and
+        matching the id on the way back.
+
+        Raises ``PlaylistError`` with a user-facing message when nothing
+        can be resolved.
+        """
+        # ``or ""`` not a default: a model can emit an explicit JSON null,
+        # and ``str(None)`` would search for the literal string "None".
+        track_id = str(arguments.get("track_id") or "").strip()
+        query = str(arguments.get("query") or "").strip()
+
+        if track_id:
+            for hit in await self.search(track_id, limit=5):
+                if hit.id == track_id:
+                    return hit
+            raise PlaylistError(
+                f"Couldn't resolve track id {track_id!r} — search for the "
+                f"track and add it by query instead."
+            )
+
+        if query:
+            hits = await self.search(query, limit=1)
+            if not hits:
+                raise PlaylistError(f"No results for {query!r}.")
+            return hits[0]
+
+        now = await self.now_playing()
+        if not now.uri or not now.title:
+            raise PlaylistError(
+                "Nothing is playing — give a query or a track_id to add."
+            )
+        # No id from the speaker, so the URI doubles as one: it's the only
+        # stable handle the backend gave us, and ``resolve_playable`` can
+        # replay it later.
+        return MusicItem(
+            id=now.uri,
+            title=now.title,
+            kind=MusicItemKind.TRACK,
+            subtitle=now.artist,
+            uri=now.uri,
+            album_art_url=now.album_art_url,
+            duration_seconds=now.duration_seconds,
+        )
+
+    async def _tool_add_to_playlist(self, arguments: dict[str, Any]) -> str:
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        name = str(arguments.get("name") or "")
+        store = self._require_playlists()
+        try:
+            item = await self._resolve_item_to_add(arguments)
+            playlist = await store.add_item(user.user_id, name, item)
+        # One clause covers the lot: PlaylistError (not-found, unresolvable
+        # track) and MusicSearchUnavailableError both subclass RuntimeError,
+        # as do the "music/speaker service isn't available" errors from
+        # search() and now_playing(). All of them are answers for the user,
+        # not failures of the turn.
+        except RuntimeError as exc:
+            return str(exc)
+        await self._emit_playlist_event("music.playlist_updated", playlist)
+        return f"Added {item.title!r} to {playlist.name!r}."
+
+    async def _tool_remove_from_playlist(self, arguments: dict[str, Any]) -> str:
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        try:
+            position = int(arguments.get("position") or 0)
+        except (TypeError, ValueError):
+            return "Position must be a whole number."
+        store = self._require_playlists()
+        try:
+            playlist, removed = await store.remove_at(
+                user.user_id, str(arguments.get("name") or ""), position
+            )
+        # Covers PlaylistNotFoundError and PlaylistPositionError.
+        except PlaylistError as exc:
+            return str(exc)
+        await self._emit_playlist_event("music.playlist_updated", playlist)
+        return f"Removed {removed.title!r} from {playlist.name!r}."

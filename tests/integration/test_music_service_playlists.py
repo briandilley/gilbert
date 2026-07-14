@@ -1,14 +1,16 @@
 """MusicService playlist tools against a real SQLite entity store."""
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from gilbert.core.services.music import MusicService
 from gilbert.core.services.music_playlists import PLAYLISTS_COLLECTION, PlaylistStore
 from gilbert.interfaces.context import UserContext, set_current_user
-from gilbert.interfaces.music import MusicBackend, MusicItem, Playable
+from gilbert.interfaces.music import MusicBackend, MusicItem, MusicItemKind, Playable
 from gilbert.interfaces.service import Service, ServiceResolver
+from gilbert.interfaces.speaker import NowPlaying, PlaybackState
 from gilbert.interfaces.storage import (
     NamespacedStorageBackend,
     Query,
@@ -104,10 +106,13 @@ async def test_playlist_tools_declare_user_role(svc: MusicService) -> None:
         "show_playlist",
         "update_playlist",
         "delete_playlist",
+        "add_to_playlist",
+        "remove_from_playlist",
     }
     tools = {t.name: t for t in svc.get_tools() if t.name in names}
     assert set(tools) == names
     assert all(t.required_role == "user" for t in tools.values())
+    assert all(t.slash_group == "music" for t in tools.values())
 
 
 async def test_my_playlists_description_distinguishes_from_list_playlists(
@@ -321,6 +326,199 @@ async def test_start_wires_playlist_store_from_entity_storage(
     rows = await sqlite_storage.query(Query(collection=PLAYLISTS_COLLECTION))
     assert [r["name"] for r in rows] == ["Wired"]
     assert rows[0]["owner_user_id"] == "alice"
+
+
+# --- add_to_playlist / remove_from_playlist ---
+
+
+def _hit(track_id: str = "t1", title: str = "Horizon") -> MusicItem:
+    return MusicItem(
+        id=track_id,
+        title=title,
+        kind=MusicItemKind.TRACK,
+        subtitle="Parkway Drive",
+        uri=f"spotify:track:{track_id}",
+        service="Spotify",
+    )
+
+
+async def test_add_to_playlist_by_query(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    svc.search = AsyncMock(return_value=[_hit("t1", "Horizon")])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "horizon"})
+    assert "Horizon" in out
+    store = svc._playlists
+    assert store is not None
+    pl = await store.get_by_name("alice", "Workout")
+    assert [i.title for i in pl.items] == ["Horizon"]
+
+
+async def test_add_to_playlist_by_track_id(svc: MusicService, alice: UserContext) -> None:
+    """``MusicBackend`` has no by-id lookup (see interfaces/music.py), so a
+    track_id is resolved by searching for it and matching the returned id —
+    not by taking the top hit blindly."""
+    set_current_user(alice)
+    svc.search = AsyncMock(  # type: ignore[method-assign]
+        return_value=[_hit("other", "Wrong Song"), _hit("t2", "Right Song")]
+    )
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "track_id": "t2"})
+    assert "Right Song" in out
+    store = svc._playlists
+    assert store is not None
+    pl = await store.get_by_name("alice", "Workout")
+    assert [i.id for i in pl.items] == ["t2"]
+
+
+async def test_add_to_playlist_track_id_no_match(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    svc.search = AsyncMock(return_value=[_hit("other", "Wrong Song")])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "track_id": "t9"})
+    assert "search" in out.lower()
+    store = svc._playlists
+    assert store is not None
+    assert (await store.get_by_name("alice", "Workout")).items == ()
+
+
+async def test_add_to_playlist_by_query_no_results(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    svc.search = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "nothing"})
+    assert "no" in out.lower()
+
+
+async def test_add_to_playlist_uses_now_playing_when_no_args(
+    svc: MusicService, alice: UserContext
+) -> None:
+    set_current_user(alice)
+    svc.now_playing = AsyncMock(  # type: ignore[method-assign]
+        return_value=NowPlaying(
+            state=PlaybackState.PLAYING,
+            title="Horizon",
+            artist="Parkway Drive",
+            uri="spotify:track:t1",
+            duration_seconds=210.0,
+        )
+    )
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout"})
+    assert "Horizon" in out
+    store = svc._playlists
+    assert store is not None
+    pl = await store.get_by_name("alice", "Workout")
+    assert pl.items[0].title == "Horizon"
+    assert pl.items[0].uri == "spotify:track:t1"
+    assert pl.items[0].subtitle == "Parkway Drive"
+
+
+async def test_add_to_playlist_no_args_nothing_playing(
+    svc: MusicService, alice: UserContext
+) -> None:
+    set_current_user(alice)
+    svc.now_playing = AsyncMock(return_value=NowPlaying(state=PlaybackState.STOPPED))  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout"})
+    assert "nothing is playing" in out.lower()
+
+
+async def test_add_to_playlist_treats_null_args_as_absent(
+    svc: MusicService, alice: UserContext
+) -> None:
+    """A model can emit ``{"query": null, "track_id": null}``. ``str(None)``
+    is the literal string "None" — it must not become a search query."""
+    set_current_user(alice)
+    svc.search = AsyncMock(return_value=[_hit()])  # type: ignore[method-assign]
+    svc.now_playing = AsyncMock(return_value=NowPlaying(state=PlaybackState.STOPPED))  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+
+    out = await svc.execute_tool(
+        "add_to_playlist", {"name": "Workout", "query": None, "track_id": None}
+    )
+    assert "nothing is playing" in out.lower()
+    svc.search.assert_not_awaited()
+
+
+async def test_add_to_playlist_denies_other_users(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    svc.search = AsyncMock(return_value=[_hit()])  # type: ignore[method-assign]
+    set_current_user(_user("bob"))
+    out = await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "horizon"})
+    assert "no playlist" in out.lower()
+
+
+async def test_remove_from_playlist_by_position(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    svc.search = AsyncMock(side_effect=[[_hit("t1", "One")], [_hit("t2", "Two")]])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "one"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "two"})
+
+    out = await svc.execute_tool("remove_from_playlist", {"name": "Workout", "position": 1})
+    assert "One" in out
+    store = svc._playlists
+    assert store is not None
+    pl = await store.get_by_name("alice", "Workout")
+    assert [i.title for i in pl.items] == ["Two"]
+
+
+async def test_remove_from_playlist_out_of_range(svc: MusicService, alice: UserContext) -> None:
+    set_current_user(alice)
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    out = await svc.execute_tool("remove_from_playlist", {"name": "Workout", "position": 3})
+    assert "empty" in out.lower() or "range" in out.lower()
+
+
+async def test_playlist_mutation_emits_updated_event(svc: MusicService, alice: UserContext) -> None:
+    """Adding and removing tracks are the two mutations the SPA has to
+    re-render for — both must publish ``music.playlist_updated``."""
+    bus = _RecordingEventBus()
+    svc._event_bus = bus  # type: ignore[assignment]
+    svc.search = AsyncMock(return_value=[_hit("t1", "Horizon")])  # type: ignore[method-assign]
+    set_current_user(alice)
+
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "horizon"})
+    await svc.execute_tool("remove_from_playlist", {"name": "Workout", "position": 1})
+
+    assert [e.event_type for e in bus.published] == [
+        "music.playlist_created",
+        "music.playlist_updated",
+        "music.playlist_updated",
+    ]
+    # Owner-scoped: the WS fan-out filter reads ``user_id``.
+    assert [e.data["user_id"] for e in bus.published] == ["alice"] * 3
+    assert bus.published[1].data["track_count"] == 1
+    assert bus.published[2].data["track_count"] == 0
+
+
+async def test_add_remove_playlist_tools_refuse_system_context(svc: MusicService) -> None:
+    """Same guard as the five CRUD tools: a SYSTEM turn (scheduled job,
+    inbox-triggered chat) must not mutate — or create — playlist data under
+    the SYSTEM sentinel."""
+    set_current_user(UserContext.SYSTEM)
+    svc.search = AsyncMock(return_value=[_hit()])  # type: ignore[method-assign]
+    svc.now_playing = AsyncMock(  # type: ignore[method-assign]
+        return_value=NowPlaying(state=PlaybackState.PLAYING, title="Horizon", uri="u")
+    )
+
+    for tool, args in (
+        ("add_to_playlist", {"name": "Ghost", "query": "horizon"}),
+        ("add_to_playlist", {"name": "Ghost"}),
+        ("remove_from_playlist", {"name": "Ghost", "position": 1}),
+    ):
+        out = await svc.execute_tool(tool, args)
+        assert "sign in" in out.lower(), tool
+
+    rows = await svc._require_playlists()._storage.query(Query(collection=PLAYLISTS_COLLECTION))
+    assert rows == []
 
 
 def test_service_info_requires_entity_storage() -> None:

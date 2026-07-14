@@ -237,6 +237,8 @@ def test_get_tools(service: MusicService) -> None:
         "show_playlist",
         "update_playlist",
         "delete_playlist",
+        "add_to_playlist",
+        "remove_from_playlist",
     }
 
 
