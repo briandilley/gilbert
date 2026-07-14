@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from typing import Any, cast
 
 from gilbert.core.services._backend_actions import (
@@ -1068,6 +1069,49 @@ class MusicService(Service):
                 slash_command="playlist-remove",
                 slash_help="Remove a track: /music playlist-remove <name> <position>",
             ),
+            ToolDefinition(
+                name="play_playlist",
+                description=(
+                    "Play one of your Gilbert playlists (the ones from "
+                    "my_playlists, not the linked service's read-only ones). "
+                    "Set 'shuffle' to override the playlist's own default play "
+                    "order for this play only."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="name",
+                        type=ToolParameterType.STRING,
+                        description="Name of your playlist.",
+                    ),
+                    ToolParameter(
+                        name="shuffle",
+                        type=ToolParameterType.BOOLEAN,
+                        description=(
+                            "Shuffle for this play only. Omit to use the "
+                            "playlist's stored default."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="speaker_names",
+                        type=ToolParameterType.ARRAY,
+                        description="Speakers to play on. Omit for the default.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="volume",
+                        type=ToolParameterType.INTEGER,
+                        description="Volume level (0-100).",
+                        required=False,
+                    ),
+                ],
+                required_role="user",
+                slash_group="music",
+                slash_command="playlist-play",
+                slash_help=(
+                    "Play a playlist: /music playlist-play <name> [shuffle=true]"
+                ),
+            ),
         ]
 
         # Queue tools are opt-in — only surface them when the backend
@@ -1318,6 +1362,8 @@ class MusicService(Service):
                 return await self._tool_add_to_playlist(arguments)
             case "remove_from_playlist":
                 return await self._tool_remove_from_playlist(arguments)
+            case "play_playlist":
+                return await self._tool_play_playlist(arguments)
             case _:
                 raise KeyError(f"Unknown tool: {name}")
 
@@ -1887,3 +1933,109 @@ class MusicService(Service):
             return str(exc)
         await self._emit_playlist_event("music.playlist_updated", playlist)
         return f"Removed {removed.title!r} from {playlist.name!r}."
+
+    async def play_playlist(
+        self,
+        name: str,
+        shuffle: bool | None = None,
+        speaker_names: list[str] | None = None,
+        volume: int | None = None,
+        initiator: str = "user",
+    ) -> str:
+        """Play one of the caller's playlists, optionally shuffled.
+
+        Mirrors ``start_station``: play the first item (which clears the
+        queue and starts playback), then enqueue the rest when the
+        backend supports a queue. A backend with no queue plays the first
+        track rather than erroring — the user still gets *something*
+        playing.
+
+        ``shuffle`` overrides the playlist's stored default in either
+        direction; ``None`` (the tool argument absent) uses the stored
+        default. Shuffling reorders a *copy* — the stored order is never
+        touched.
+
+        Returns prose for the user: playlist errors ("you have no
+        playlist named X", "it's empty") are answers, not failures.
+        """
+        user = self._playlist_user()
+        if user is None:
+            return _NO_USER_MSG
+        store = self._require_playlists()
+        try:
+            playlist = await store.get_by_name(user.user_id, name)
+        except PlaylistNotFoundError as exc:
+            return str(exc)
+
+        if not playlist.items:
+            return f"{playlist.name} is empty — add some tracks first."
+
+        items = list(playlist.items)
+        if playlist.shuffle if shuffle is None else shuffle:
+            random.shuffle(items)
+
+        total = len(items)
+        first, rest = items[0], items[1:]
+        await self.play_item(
+            first,
+            speaker_names=speaker_names,
+            volume=volume,
+            initiator=initiator,
+        )
+
+        # No queue on this backend: the first track is playing and that's
+        # all we can do. Say so rather than erroring — same graceful
+        # degradation as ``start_station``.
+        if rest and not self.supports_queue:
+            return (
+                f"Playing {playlist.name} — {first.title!r}. This music "
+                f"backend can't queue, so the remaining "
+                f"{total - 1} track(s) weren't added."
+            )
+
+        queued = 1
+        for item in rest:
+            try:
+                await self.add_to_queue(
+                    item,
+                    speaker_names=speaker_names,
+                    initiator=initiator,
+                )
+            # A track that no longer resolves (delisted, region-locked)
+            # shouldn't kill the whole playlist — skip it, count it, and
+            # tell the user how many didn't make it.
+            except (RuntimeError, NotImplementedError):
+                logger.exception(
+                    "Failed to enqueue playlist track %s; skipping",
+                    item.title,
+                )
+                continue
+            queued += 1
+
+        if queued < total:
+            return (
+                f"Playing {playlist.name} — queued {queued} of {total} "
+                f"({total - queued} unavailable)."
+            )
+        return f"Playing {playlist.name} — {queued} tracks."
+
+    async def _tool_play_playlist(self, arguments: dict[str, Any]) -> str:
+        raw_shuffle = arguments.get("shuffle")
+        raw_speakers = arguments.get("speaker_names")
+        raw_volume = arguments.get("volume")
+        try:
+            volume = int(raw_volume) if raw_volume is not None else None
+        except (TypeError, ValueError):
+            return "Volume must be a whole number between 0 and 100."
+        return await self.play_playlist(
+            # ``or ""`` not a default: a model can emit an explicit JSON
+            # null, and ``str(None)`` would look up a playlist named "None".
+            str(arguments.get("name") or ""),
+            shuffle=None if raw_shuffle is None else bool(raw_shuffle),
+            speaker_names=(
+                [str(s) for s in raw_speakers]
+                if isinstance(raw_speakers, list)
+                else None
+            ),
+            volume=volume,
+        )
