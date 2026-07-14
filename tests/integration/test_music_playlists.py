@@ -1,5 +1,7 @@
 """PlaylistStore against a real SQLite entity store."""
 
+import asyncio
+
 import pytest
 
 from gilbert.core.services.music_playlists import (
@@ -130,6 +132,18 @@ async def test_remove_at_removes_by_1_based_position(store: PlaylistStore) -> No
     assert [i.title for i in pl.items] == ["Two"]
 
 
+async def test_remove_at_removes_a_middle_item(store: PlaylistStore) -> None:
+    """Removing from the middle must keep the items either side, in order."""
+    await store.create("alice", "Workout")
+    for i, title in enumerate(("One", "Two", "Three"), start=1):
+        await store.add_item("alice", "Workout", _track(f"t{i}", title))
+    pl, removed = await store.remove_at("alice", "Workout", 2)
+    assert removed.title == "Two"
+    assert [i.title for i in pl.items] == ["One", "Three"]
+    persisted = await store.get_by_name("alice", "Workout")
+    assert [i.title for i in persisted.items] == ["One", "Three"]
+
+
 async def test_remove_at_rejects_out_of_range(store: PlaylistStore) -> None:
     await store.create("alice", "Workout")
     await store.add_item("alice", "Workout", _track("t1", "One"))
@@ -186,6 +200,44 @@ async def test_update_denies_other_users_playlist(store: PlaylistStore) -> None:
     await store.create("alice", "Workout")
     with pytest.raises(PlaylistNotFoundError):
         await store.update("bob", "Workout", new_name="Stolen")
+
+
+async def test_mutations_preserve_created_at(store: PlaylistStore) -> None:
+    """``created_at`` is set once; every mutation must carry it forward
+    (and only ever move ``updated_at``)."""
+    created = await store.create("alice", "Workout")
+
+    after_add = await store.add_item("alice", "Workout", _track("t1", "One"))
+    assert after_add.created_at == created.created_at
+
+    after_update = await store.update("alice", "Workout", new_name="Gym", shuffle=True)
+    assert after_update.created_at == created.created_at
+
+    after_remove, _ = await store.remove_at("alice", "Gym", 1)
+    assert after_remove.created_at == created.created_at
+
+    persisted = await store.get_by_name("alice", "Gym")
+    assert persisted.created_at == created.created_at
+    assert persisted.updated_at >= created.updated_at
+
+
+async def test_concurrent_add_item_does_not_lose_an_append(
+    store: PlaylistStore,
+) -> None:
+    """Two interleaved ``add_item`` calls must not clobber each other.
+
+    Each mutation is a read-modify-write of the whole playlist blob. Without
+    serialization both readers see the empty playlist and the second writer's
+    ``put`` silently drops the first writer's append.
+    """
+    await store.create("alice", "Workout")
+    await asyncio.gather(
+        store.add_item("alice", "Workout", _track("t1", "One")),
+        store.add_item("alice", "Workout", _track("t2", "Two")),
+    )
+    pl = await store.get_by_name("alice", "Workout")
+    assert {i.title for i in pl.items} == {"One", "Two"}
+    assert len(pl.items) == 2
 
 
 async def test_delete_removes_playlist(store: PlaylistStore) -> None:

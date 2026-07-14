@@ -1975,13 +1975,37 @@ class MusicService(Service):
             random.shuffle(items)
 
         total = len(items)
-        first, rest = items[0], items[1:]
-        await self.play_item(
-            first,
-            speaker_names=speaker_names,
-            volume=volume,
-            initiator=initiator,
-        )
+
+        # Advance until something actually plays. A track that no longer
+        # resolves (delisted, region-locked) must not kill the playlist —
+        # and under shuffle *any* item can land first, so a hard failure
+        # here would make the same playlist play on one attempt and error
+        # on the next.
+        first: MusicItem | None = None
+        rest: list[MusicItem] = []
+        for index, candidate in enumerate(items):
+            try:
+                await self.play_item(
+                    candidate,
+                    speaker_names=speaker_names,
+                    volume=volume,
+                    initiator=initiator,
+                )
+            except (RuntimeError, NotImplementedError):
+                logger.exception(
+                    "Failed to play playlist track %s; skipping",
+                    candidate.title,
+                )
+                continue
+            first = candidate
+            rest = items[index + 1 :]
+            break
+
+        if first is None:
+            return (
+                f"None of the {total} track{'s' if total != 1 else ''} in "
+                f"{playlist.name} could be played."
+            )
 
         # No queue on this backend: the first track is playing and that's
         # all we can do. Say so rather than erroring — same graceful
@@ -1990,9 +2014,12 @@ class MusicService(Service):
             return (
                 f"Playing {playlist.name} — {first.title!r}. This music "
                 f"backend can't queue, so the remaining "
-                f"{total - 1} track(s) weren't added."
+                f"{len(rest)} track(s) weren't added."
             )
 
+        # ``queued`` counts what the user will actually hear, so the final
+        # tally below stays accurate whether items were skipped while
+        # starting playback, while enqueuing, or both.
         queued = 1
         for item in rest:
             try:

@@ -11,6 +11,7 @@ nothing leaks about other users' libraries.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -60,7 +61,11 @@ def _item_to_dict(item: MusicItem) -> dict[str, Any]:
     return {
         "id": item.id,
         "title": item.title,
-        "kind": str(item.kind),
+        # ``.value``, never ``str(item.kind)``: the latter only happens to
+        # yield "track" because MusicItemKind is a StrEnum. Demote it to a
+        # plain Enum and this would persist "MusicItemKind.TRACK", which
+        # ``_item_from_dict`` then rejects on every read.
+        "kind": item.kind.value,
         "subtitle": item.subtitle,
         "uri": item.uri,
         "didl_meta": item.didl_meta,
@@ -110,10 +115,28 @@ def _from_dict(data: dict[str, Any]) -> Playlist:
 
 
 class PlaylistStore:
-    """Storage + ACL for per-user playlists."""
+    """Storage + ACL for per-user playlists.
+
+    Every mutation is a read-modify-write of the whole playlist blob:
+    ``get_by_name`` (a fresh query) then ``_save`` (a whole-document
+    ``put``). ``StorageBackend`` offers no CAS, version, or transaction, so
+    two interleaved mutations would both read the old blob and the second
+    writer's ``put`` would silently drop the first writer's change — an
+    ordinary occurrence for one user (a chat tab plus a voice turn, or two
+    browser tabs). Gilbert is a single process holding a single
+    ``PlaylistStore``, so an in-process lock serializes the whole
+    read-modify-write and makes each mutation atomic.
+
+    Only the *mutators* take the lock. Reads (``list_for``, ``get_by_name``,
+    ``_find``, ``_save``) stay unlocked, which is what keeps this
+    deadlock-free: ``asyncio.Lock`` is not reentrant and the mutators call
+    those helpers while holding it. A mutator must never await another
+    locked method.
+    """
 
     def __init__(self, storage: StorageBackend) -> None:
         self._storage = storage
+        self._lock = asyncio.Lock()
 
     async def ensure_indexes(self) -> None:
         await self._storage.ensure_index(
@@ -149,25 +172,26 @@ class PlaylistStore:
         name: str,
         shuffle: bool = False,
     ) -> Playlist:
-        clean = name.strip()
-        if not clean:
-            raise PlaylistError("Playlist name cannot be empty")
-        if await self._find(owner_user_id, clean) is not None:
-            raise DuplicatePlaylistNameError(
-                f"You already have a playlist named {clean!r}"
+        async with self._lock:
+            clean = name.strip()
+            if not clean:
+                raise PlaylistError("Playlist name cannot be empty")
+            if await self._find(owner_user_id, clean) is not None:
+                raise DuplicatePlaylistNameError(
+                    f"You already have a playlist named {clean!r}"
+                )
+            stamp = _now()
+            playlist = Playlist(
+                id=str(uuid4()),
+                owner_user_id=owner_user_id,
+                name=clean,
+                items=(),
+                shuffle=shuffle,
+                created_at=stamp,
+                updated_at=stamp,
             )
-        stamp = _now()
-        playlist = Playlist(
-            id=str(uuid4()),
-            owner_user_id=owner_user_id,
-            name=clean,
-            items=(),
-            shuffle=shuffle,
-            created_at=stamp,
-            updated_at=stamp,
-        )
-        await self._save(playlist)
-        return playlist
+            await self._save(playlist)
+            return playlist
 
     async def add_item(
         self,
@@ -176,18 +200,19 @@ class PlaylistStore:
         item: MusicItem,
     ) -> Playlist:
         """Append an item. Duplicates are allowed, as Spotify allows them."""
-        playlist = await self.get_by_name(owner_user_id, name)
-        updated = Playlist(
-            id=playlist.id,
-            owner_user_id=playlist.owner_user_id,
-            name=playlist.name,
-            items=(*playlist.items, item),
-            shuffle=playlist.shuffle,
-            created_at=playlist.created_at,
-            updated_at=_now(),
-        )
-        await self._save(updated)
-        return updated
+        async with self._lock:
+            playlist = await self.get_by_name(owner_user_id, name)
+            updated = Playlist(
+                id=playlist.id,
+                owner_user_id=playlist.owner_user_id,
+                name=playlist.name,
+                items=(*playlist.items, item),
+                shuffle=playlist.shuffle,
+                created_at=playlist.created_at,
+                updated_at=_now(),
+            )
+            await self._save(updated)
+            return updated
 
     async def remove_at(
         self,
@@ -196,27 +221,28 @@ class PlaylistStore:
         position: int,
     ) -> tuple[Playlist, MusicItem]:
         """Remove the item at a **1-based** position (as shown to users)."""
-        playlist = await self.get_by_name(owner_user_id, name)
-        if position < 1 or position > len(playlist.items):
-            raise PlaylistPositionError(
-                f"Position {position} is out of range for {playlist.name!r} "
-                f"(1-{len(playlist.items)})"
-                if playlist.items
-                else f"{playlist.name!r} is empty"
+        async with self._lock:
+            playlist = await self.get_by_name(owner_user_id, name)
+            if position < 1 or position > len(playlist.items):
+                raise PlaylistPositionError(
+                    f"Position {position} is out of range for {playlist.name!r} "
+                    f"(1-{len(playlist.items)})"
+                    if playlist.items
+                    else f"{playlist.name!r} is empty"
+                )
+            items = list(playlist.items)
+            removed = items.pop(position - 1)
+            updated = Playlist(
+                id=playlist.id,
+                owner_user_id=playlist.owner_user_id,
+                name=playlist.name,
+                items=tuple(items),
+                shuffle=playlist.shuffle,
+                created_at=playlist.created_at,
+                updated_at=_now(),
             )
-        items = list(playlist.items)
-        removed = items.pop(position - 1)
-        updated = Playlist(
-            id=playlist.id,
-            owner_user_id=playlist.owner_user_id,
-            name=playlist.name,
-            items=tuple(items),
-            shuffle=playlist.shuffle,
-            created_at=playlist.created_at,
-            updated_at=_now(),
-        )
-        await self._save(updated)
-        return updated, removed
+            await self._save(updated)
+            return updated, removed
 
     async def update(
         self,
@@ -226,38 +252,40 @@ class PlaylistStore:
         shuffle: bool | None = None,
     ) -> Playlist:
         """Rename and/or change the stored shuffle default."""
-        playlist = await self.get_by_name(owner_user_id, name)
+        async with self._lock:
+            playlist = await self.get_by_name(owner_user_id, name)
 
-        target_name = playlist.name
-        if new_name is not None:
-            clean = new_name.strip()
-            if not clean:
-                raise PlaylistError("Playlist name cannot be empty")
-            # A rename that collides with a *different* playlist is a
-            # conflict; renaming a playlist to a case-variant of its own
-            # name is just a re-case and must be allowed.
-            clash = await self._find(owner_user_id, clean)
-            if clash is not None and clash.id != playlist.id:
-                raise DuplicatePlaylistNameError(
-                    f"You already have a playlist named {clean!r}"
-                )
-            target_name = clean
+            target_name = playlist.name
+            if new_name is not None:
+                clean = new_name.strip()
+                if not clean:
+                    raise PlaylistError("Playlist name cannot be empty")
+                # A rename that collides with a *different* playlist is a
+                # conflict; renaming a playlist to a case-variant of its own
+                # name is just a re-case and must be allowed.
+                clash = await self._find(owner_user_id, clean)
+                if clash is not None and clash.id != playlist.id:
+                    raise DuplicatePlaylistNameError(
+                        f"You already have a playlist named {clean!r}"
+                    )
+                target_name = clean
 
-        updated = Playlist(
-            id=playlist.id,
-            owner_user_id=playlist.owner_user_id,
-            name=target_name,
-            items=playlist.items,
-            shuffle=playlist.shuffle if shuffle is None else shuffle,
-            created_at=playlist.created_at,
-            updated_at=_now(),
-        )
-        await self._save(updated)
-        return updated
+            updated = Playlist(
+                id=playlist.id,
+                owner_user_id=playlist.owner_user_id,
+                name=target_name,
+                items=playlist.items,
+                shuffle=playlist.shuffle if shuffle is None else shuffle,
+                created_at=playlist.created_at,
+                updated_at=_now(),
+            )
+            await self._save(updated)
+            return updated
 
     async def delete(self, owner_user_id: str, name: str) -> None:
-        playlist = await self.get_by_name(owner_user_id, name)
-        await self._storage.delete(PLAYLISTS_COLLECTION, playlist.id)
+        async with self._lock:
+            playlist = await self.get_by_name(owner_user_id, name)
+            await self._storage.delete(PLAYLISTS_COLLECTION, playlist.id)
 
     # --- internals ---
 

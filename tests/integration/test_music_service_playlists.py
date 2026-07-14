@@ -654,6 +654,96 @@ async def test_play_playlist_skips_unresolvable_items(
     assert "1 of 2" in out or "unavailable" in out.lower()
 
 
+async def test_play_playlist_skips_unresolvable_first_item(
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first item that no longer resolves must not kill the whole play.
+
+    ``play_item`` -> ``resolve_playable`` raises for a delisted or
+    region-locked track. Under shuffle *any* item can land first, so a
+    hard failure here makes the same playlist play on one attempt and
+    error on the next.
+    """
+    set_current_user(alice)
+    svc.search = AsyncMock(side_effect=[[_hit("t1", "One")], [_hit("t2", "Two")]])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "one"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "two"})
+
+    played: list[str] = []
+
+    async def _play(item: MusicItem, **kw: Any) -> None:
+        if item.title == "One":
+            raise RuntimeError("gone")
+        played.append(item.title)
+
+    svc.play_item = AsyncMock(side_effect=_play)  # type: ignore[method-assign]
+    svc.add_to_queue = AsyncMock()  # type: ignore[method-assign]
+    _set_queue_support(monkeypatch, True)
+
+    out = await svc.execute_tool("play_playlist", {"name": "Workout"})
+    assert played == ["Two"], "the second track should play when the first is unresolvable"
+    svc.add_to_queue.assert_not_awaited()
+    assert "1 of 2" in out
+    assert "unavailable" in out.lower()
+
+
+async def test_play_playlist_all_items_unresolvable_returns_prose(
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every track dead → legible prose, never an escaping exception."""
+    set_current_user(alice)
+    svc.search = AsyncMock(side_effect=[[_hit("t1", "One")], [_hit("t2", "Two")]])  # type: ignore[method-assign]
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "one"})
+    await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": "two"})
+
+    svc.play_item = AsyncMock(side_effect=RuntimeError("gone"))  # type: ignore[method-assign]
+    svc.add_to_queue = AsyncMock()  # type: ignore[method-assign]
+    _set_queue_support(monkeypatch, True)
+
+    out = await svc.execute_tool("play_playlist", {"name": "Workout"})
+    assert "Workout" in out
+    assert "None of the 2 tracks" in out
+    svc.add_to_queue.assert_not_awaited()
+
+
+async def test_play_playlist_counts_skips_from_both_phases(
+    svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A skip while starting AND a skip while enqueuing both count."""
+    set_current_user(alice)
+    svc.search = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[_hit(f"t{i}", f"Track{i}")] for i in range(1, 5)]
+    )
+    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    for i in range(1, 5):
+        await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": f"track{i}"})
+
+    played: list[str] = []
+    queued: list[str] = []
+
+    async def _play(item: MusicItem, **kw: Any) -> None:
+        if item.title == "Track1":
+            raise RuntimeError("gone")
+        played.append(item.title)
+
+    async def _queue(item: MusicItem, **kw: Any) -> None:
+        if item.title == "Track3":
+            raise RuntimeError("gone")
+        queued.append(item.title)
+
+    svc.play_item = AsyncMock(side_effect=_play)  # type: ignore[method-assign]
+    svc.add_to_queue = AsyncMock(side_effect=_queue)  # type: ignore[method-assign]
+    _set_queue_support(monkeypatch, True)
+
+    out = await svc.execute_tool("play_playlist", {"name": "Workout"})
+    assert played == ["Track2"]
+    assert queued == ["Track4"]
+    assert "2 of 4" in out
+    assert "2 unavailable" in out
+
+
 async def test_play_playlist_empty(svc: MusicService, alice: UserContext) -> None:
     set_current_user(alice)
     svc.play_item = AsyncMock()  # type: ignore[method-assign]
