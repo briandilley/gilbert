@@ -2017,16 +2017,12 @@ class MusicService(Service):
                 f"Playing {playlist.name} — queued {queued} of {total} "
                 f"({total - queued} unavailable)."
             )
-        return f"Playing {playlist.name} — {queued} tracks."
+        return f"Playing {playlist.name} — {queued} track{'s' if queued != 1 else ''}."
 
     async def _tool_play_playlist(self, arguments: dict[str, Any]) -> str:
         raw_shuffle = arguments.get("shuffle")
         raw_speakers = arguments.get("speaker_names")
-        raw_volume = arguments.get("volume")
-        try:
-            volume = int(raw_volume) if raw_volume is not None else None
-        except (TypeError, ValueError):
-            return "Volume must be a whole number between 0 and 100."
+        volume = arguments.get("volume")
         return await self.play_playlist(
             # ``or ""`` not a default: a model can emit an explicit JSON
             # null, and ``str(None)`` would look up a playlist named "None".

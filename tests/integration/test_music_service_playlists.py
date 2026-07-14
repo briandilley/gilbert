@@ -564,11 +564,16 @@ async def test_play_playlist_plays_first_and_queues_rest_in_order(
 async def test_play_playlist_shuffle_arg_reorders_but_keeps_stored_order(
     svc: MusicService, alice: UserContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An explicit ``shuffle=True`` must override a stored ``shuffle=False``
+    default. The reorder is monkeypatched to a deterministic reverse (not a
+    ``set()`` comparison, which passes for the identity permutation too) so
+    this test actually fails if shuffling is skipped or the effective-shuffle
+    condition silently ignores the explicit argument."""
     set_current_user(alice)
     svc.search = AsyncMock(  # type: ignore[method-assign]
         side_effect=[[_hit(f"t{i}", f"Track{i}")] for i in range(1, 9)]
     )
-    await svc.execute_tool("create_playlist", {"name": "Workout"})
+    await svc.execute_tool("create_playlist", {"name": "Workout"})  # shuffle=False stored
     for i in range(1, 9):
         await svc.execute_tool("add_to_playlist", {"name": "Workout", "query": f"track{i}"})
 
@@ -576,11 +581,11 @@ async def test_play_playlist_shuffle_arg_reorders_but_keeps_stored_order(
     svc.play_item = AsyncMock(side_effect=lambda item, **kw: order.append(item.title))  # type: ignore[method-assign]
     svc.add_to_queue = AsyncMock(side_effect=lambda item, **kw: order.append(item.title))  # type: ignore[method-assign]
     _set_queue_support(monkeypatch, True)
+    monkeypatch.setattr("gilbert.core.services.music.random.shuffle", lambda seq: seq.reverse())
 
     await svc.execute_tool("play_playlist", {"name": "Workout", "shuffle": True})
 
-    expected = {f"Track{i}" for i in range(1, 9)}
-    assert set(order) == expected  # same items...
+    assert order == [f"Track{i}" for i in range(8, 0, -1)]  # deterministic reorder happened...
     store = svc._playlists
     assert store is not None
     pl = await store.get_by_name("alice", "Workout")
@@ -651,9 +656,13 @@ async def test_play_playlist_skips_unresolvable_items(
 
 async def test_play_playlist_empty(svc: MusicService, alice: UserContext) -> None:
     set_current_user(alice)
+    svc.play_item = AsyncMock()  # type: ignore[method-assign]
+    svc.add_to_queue = AsyncMock()  # type: ignore[method-assign]
     await svc.execute_tool("create_playlist", {"name": "Workout"})
     out = await svc.execute_tool("play_playlist", {"name": "Workout"})
     assert "empty" in out.lower()
+    svc.play_item.assert_not_awaited()
+    svc.add_to_queue.assert_not_awaited()
 
 
 async def test_play_playlist_without_queue_plays_first_track(
