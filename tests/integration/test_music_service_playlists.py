@@ -213,7 +213,11 @@ async def test_playlist_crud_emits_events(svc: MusicService, alice: UserContext)
     assert playlist_id
     for ev in bus.published:
         assert ev.data["playlist_id"] == playlist_id
-        assert ev.data["owner_user_id"] == "alice"
+        # The owner rides on ``user_id`` — the key the WS fan-out's
+        # per-user filter (``can_see_music_event``) reads to keep these
+        # owner-scoped events off other users' connections.
+        assert ev.data["user_id"] == "alice"
+        assert "owner_user_id" not in ev.data
         assert ev.source == "music"
     assert bus.published[0].data["name"] == "Workout"
     assert bus.published[1].data["name"] == "Cardio"

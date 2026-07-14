@@ -1616,6 +1616,15 @@ class MusicService(Service):
         return user
 
     async def _emit_playlist_event(self, event_type: str, playlist: Playlist) -> None:
+        """Publish an owner-scoped ``music.playlist_*`` event.
+
+        The owner rides on ``user_id`` — not ``owner_user_id`` — because
+        that is the key the WS fan-out's per-user filters read
+        (``can_see_music_event``, like ``can_see_notification_event``
+        before it). A playlist is private to its owner, and its *name* is
+        often personal, so the event must never reach another user's
+        connection.
+        """
         if self._event_bus is None:
             return
         await self._event_bus.publish(
@@ -1624,7 +1633,7 @@ class MusicService(Service):
                 data={
                     "playlist_id": playlist.id,
                     "name": playlist.name,
-                    "owner_user_id": playlist.owner_user_id,
+                    "user_id": playlist.owner_user_id,
                     "track_count": len(playlist.items),
                 },
                 source="music",

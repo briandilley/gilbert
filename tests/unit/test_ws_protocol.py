@@ -211,6 +211,130 @@ class TestBrowserSpeakerFiltering:
         assert get_event_visibility_level("speaker.browser.play") == 100
 
 
+# --- Music playlist per-user filter ---
+
+
+class TestMusicPlaylistFiltering:
+    """``music.playlist_*`` events are owner-only.
+
+    Gilbert playlists are per-user: the ``PlaylistStore`` reports another
+    user's playlist as absent, with no "admin sees all" path. The event
+    fan-out has to hold the same line, or a playlist's *name* (which is
+    often personal — "Alice's Therapy Songs") leaks to every signed-in
+    connection. Mirrors ``can_see_notification_event`` /
+    ``can_see_speaker_browser_event``: strict ``data["user_id"]`` match,
+    admins included.
+
+    ``music.playback_started`` is deliberately NOT filtered — a speaker is
+    a shared household device and its playback is a household event.
+    """
+
+    def _conn(self, user_id: str, level: int = 100) -> WsConnection:
+        role = "admin" if level <= 0 else "user"
+        user = UserContext(user_id=user_id, email="", display_name="User", roles=frozenset({role}))
+        manager = MagicMock(spec=WsConnectionManager)
+        return WsConnection(user, level, manager)
+
+    def test_non_music_events_pass(self) -> None:
+        conn = self._conn("alice")
+        event = Event(event_type="chat.message.created", data={"user_id": "bob"})
+        assert conn.can_see_music_event(event)
+
+    def test_owner_receives_own_playlist_events(self) -> None:
+        conn = self._conn("alice")
+        for event_type in (
+            "music.playlist_created",
+            "music.playlist_updated",
+            "music.playlist_deleted",
+        ):
+            event = Event(
+                event_type=event_type,
+                data={"user_id": "alice", "name": "Therapy Songs", "playlist_id": "p1"},
+            )
+            assert conn.can_see_music_event(event)
+
+    def test_other_user_blocked_from_playlist_events(self) -> None:
+        conn = self._conn("bob")
+        for event_type in (
+            "music.playlist_created",
+            "music.playlist_updated",
+            "music.playlist_deleted",
+        ):
+            event = Event(
+                event_type=event_type,
+                data={"user_id": "alice", "name": "Therapy Songs", "playlist_id": "p1"},
+            )
+            assert not conn.can_see_music_event(event)
+
+    def test_admin_does_not_see_another_users_playlist_events(self) -> None:
+        # The store has no admin-sees-all path; neither does the fan-out.
+        conn = self._conn("root", level=0)
+        event = Event(
+            event_type="music.playlist_created",
+            data={"user_id": "alice", "name": "Therapy Songs"},
+        )
+        assert not conn.can_see_music_event(event)
+
+    def test_playback_started_stays_a_household_event(self) -> None:
+        # A speaker is a shared device — playback is not owner-scoped.
+        alice = self._conn("alice")
+        bob = self._conn("bob")
+        event = Event(
+            event_type="music.playback_started",
+            data={"uri": "x:1", "title": "Song", "kind": "track", "initiator": "user"},
+        )
+        assert alice.can_see_music_event(event)
+        assert bob.can_see_music_event(event)
+
+    def test_playlist_events_are_user_level(self) -> None:
+        # Prefix level stays user (100); the per-connection filter narrows.
+        assert get_event_visibility_level("music.playlist_created") == 100
+        assert get_event_visibility_level("music.playback_started") == 100
+
+    async def test_fan_out_does_not_deliver_across_users(self) -> None:
+        """End-to-end through ``_dispatch_event``: Bob's WS connection
+        never receives Alice's playlist events, but Alice's does."""
+        manager = WsConnectionManager()
+        alice = WsConnection(
+            UserContext(user_id="alice", email="", display_name="Alice", roles=frozenset({"user"})),
+            100,
+            manager,
+        )
+        bob = WsConnection(
+            UserContext(user_id="bob", email="", display_name="Bob", roles=frozenset({"user"})),
+            100,
+            manager,
+        )
+        manager.register(alice)
+        manager.register(bob)
+
+        await manager._dispatch_event(
+            Event(
+                event_type="music.playlist_created",
+                data={
+                    "playlist_id": "p1",
+                    "name": "Alice's Therapy Songs",
+                    "user_id": "alice",
+                    "track_count": 0,
+                },
+                source="music",
+            )
+        )
+
+        assert not alice.queue.empty()
+        assert bob.queue.empty()
+
+        # ...while shared playback still reaches everyone.
+        await manager._dispatch_event(
+            Event(
+                event_type="music.playback_started",
+                data={"uri": "x:1", "title": "Song", "kind": "track", "initiator": "user"},
+                source="music",
+            )
+        )
+        assert not bob.queue.empty()
+
+
 # --- Connection manager dispatch ---
 
 

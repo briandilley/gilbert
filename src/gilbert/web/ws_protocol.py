@@ -224,6 +224,25 @@ class WsConnection:
             return event.data.get("user_id") == self.user_id
         return True
 
+    def can_see_music_event(self, event: Event) -> bool:
+        """Content-level filter for the owner-scoped music events.
+
+        Gilbert playlists are per-user: ``music.playlist_created`` /
+        ``_updated`` / ``_deleted`` carry the owner's ``user_id`` and are
+        fanned out to that user alone. The ``PlaylistStore`` reports
+        another user's playlist as absent — there is no "admin sees all"
+        path — so neither does this filter: a playlist *name* is often
+        personal and must not reach a connection that could never read
+        the playlist itself.
+
+        Every other ``music.*`` event (notably
+        ``music.playback_started``) is a household event — a speaker is a
+        shared device — and passes this filter untouched.
+        """
+        if not event.event_type.startswith("music.playlist_"):
+            return True
+        return event.data.get("user_id") == self.user_id
+
     def can_see_speaker_browser_event(self, event: Event) -> bool:
         """Content-level filter for browser-speaker playback frames.
 
@@ -588,6 +607,8 @@ class WsConnectionManager:
             if not conn.can_see_chat_read_aloud_event(event):
                 continue
             if not conn.can_see_health_event(event):
+                continue
+            if not conn.can_see_music_event(event):
                 continue
             conn.send_event(event)
 
