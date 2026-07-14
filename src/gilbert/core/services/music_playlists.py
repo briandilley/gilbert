@@ -169,6 +169,96 @@ class PlaylistStore:
         await self._save(playlist)
         return playlist
 
+    async def add_item(
+        self,
+        owner_user_id: str,
+        name: str,
+        item: MusicItem,
+    ) -> Playlist:
+        """Append an item. Duplicates are allowed, as Spotify allows them."""
+        playlist = await self.get_by_name(owner_user_id, name)
+        updated = Playlist(
+            id=playlist.id,
+            owner_user_id=playlist.owner_user_id,
+            name=playlist.name,
+            items=(*playlist.items, item),
+            shuffle=playlist.shuffle,
+            created_at=playlist.created_at,
+            updated_at=_now(),
+        )
+        await self._save(updated)
+        return updated
+
+    async def remove_at(
+        self,
+        owner_user_id: str,
+        name: str,
+        position: int,
+    ) -> tuple[Playlist, MusicItem]:
+        """Remove the item at a **1-based** position (as shown to users)."""
+        playlist = await self.get_by_name(owner_user_id, name)
+        if position < 1 or position > len(playlist.items):
+            raise PlaylistPositionError(
+                f"Position {position} is out of range for {playlist.name!r} "
+                f"(1-{len(playlist.items)})"
+                if playlist.items
+                else f"{playlist.name!r} is empty"
+            )
+        items = list(playlist.items)
+        removed = items.pop(position - 1)
+        updated = Playlist(
+            id=playlist.id,
+            owner_user_id=playlist.owner_user_id,
+            name=playlist.name,
+            items=tuple(items),
+            shuffle=playlist.shuffle,
+            created_at=playlist.created_at,
+            updated_at=_now(),
+        )
+        await self._save(updated)
+        return updated, removed
+
+    async def update(
+        self,
+        owner_user_id: str,
+        name: str,
+        new_name: str | None = None,
+        shuffle: bool | None = None,
+    ) -> Playlist:
+        """Rename and/or change the stored shuffle default."""
+        playlist = await self.get_by_name(owner_user_id, name)
+
+        target_name = playlist.name
+        if new_name is not None:
+            clean = new_name.strip()
+            if not clean:
+                raise PlaylistError("Playlist name cannot be empty")
+            # A rename that collides with a *different* playlist is a
+            # conflict; renaming a playlist to a case-variant of its own
+            # name is just a re-case and must be allowed.
+            clash = await self._find(owner_user_id, clean)
+            if clash is not None and clash.id != playlist.id:
+                raise DuplicatePlaylistNameError(
+                    f"You already have a playlist named {clean!r}"
+                )
+            target_name = clean
+
+        updated = Playlist(
+            id=playlist.id,
+            owner_user_id=playlist.owner_user_id,
+            name=target_name,
+            items=playlist.items,
+            shuffle=playlist.shuffle if shuffle is None else shuffle,
+            created_at=playlist.created_at,
+            updated_at=_now(),
+        )
+        await self._save(updated)
+        return updated
+
+    async def delete(self, owner_user_id: str, name: str) -> None:
+        playlist = await self.get_by_name(owner_user_id, name)
+        await self._storage.delete(PLAYLISTS_COLLECTION, playlist.id)
+
     # --- internals ---
 
     async def _find(self, owner_user_id: str, name: str) -> Playlist | None:
