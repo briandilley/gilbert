@@ -495,6 +495,23 @@ class SchedulerService(Service):
                     return
                 await asyncio.sleep(delay)
 
+                # Retire if this loop has been orphaned. ``remove_job`` /
+                # a replacing ``add_job`` / ``disable_job`` all cancel the
+                # task, but cancellation only stops the loop if it actually
+                # propagates. A callback that swallows ``CancelledError`` —
+                # as ``AIService.chat()`` does for the user stop button —
+                # lets a cancelled fire return normally, after which this
+                # loop would keep firing forever, orphaned out of
+                # ``self._jobs`` and invisible to ``list_jobs`` (the "ghost
+                # alarm" bug). Re-checking the registry after every sleep
+                # kills the orphan on its next wake regardless of whether
+                # the cancellation landed.
+                if (
+                    self._jobs.get(job.info.name) is not job
+                    or job.task is not asyncio.current_task()
+                ):
+                    return
+
                 if not job.info.enabled:
                     continue
 

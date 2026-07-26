@@ -311,6 +311,70 @@ async def test_one_shot_timer_fires() -> None:
     await svc.stop()
 
 
+async def test_removed_job_with_cancel_swallowing_callback_stops_firing() -> None:
+    """Regression: the "ghost alarm" bug.
+
+    ``remove_job`` cancels the job's task, but cancellation only stops
+    the loop if it actually propagates. ``AIService.chat()`` deliberately
+    catches ``CancelledError`` (for the user stop button) and returns
+    normally, so an interval alarm whose fire is mid-AI-call when it's
+    cancelled would swallow the cancellation and keep firing forever —
+    orphaned out of ``self._jobs`` and therefore invisible to the timer
+    list. The scheduler must retire such an orphaned loop anyway.
+    """
+    fire_count = 0
+    entered = asyncio.Event()
+    # Simulate AIService.chat()'s stop-button behavior: swallow the
+    # cancellation instead of re-raising. Flipped off in teardown so a
+    # regression fails on the assertion below rather than hanging on an
+    # unkillable orphan.
+    swallow_cancel = True
+
+    async def swallowing_cb() -> None:
+        nonlocal fire_count
+        fire_count += 1
+        entered.set()
+        try:
+            # Stand in for a long in-flight AI call. When the task is
+            # cancelled, the error is thrown in here.
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            if swallow_cancel:
+                return  # swallow, exactly like AIService.chat()
+            raise
+
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+    tasks_before = asyncio.all_tasks()
+    try:
+        svc.add_job("ghost", Schedule.every(0.01), swallowing_cb, system=False)
+        # Wait until the first fire is in-flight inside the callback.
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        assert fire_count == 1
+
+        # Cancel while the callback is mid-flight: the cancellation is
+        # thrown into the callback's await and swallowed there.
+        svc.remove_job("ghost")
+        assert svc.get_job("ghost") is None  # gone from the registry
+        count_at_removal = fire_count
+
+        # Give the (formerly orphaned) loop many intervals to misbehave.
+        await asyncio.sleep(0.2)
+        assert fire_count == count_at_removal, (
+            f"orphaned job kept firing after removal: "
+            f"{fire_count - count_at_removal} extra fire(s)"
+        )
+    finally:
+        # Stop swallowing so any orphan the bug left behind can actually
+        # be cancelled, then reap leftover tasks to keep teardown clean.
+        swallow_cancel = False
+        await svc.stop()
+        for task in asyncio.all_tasks() - tasks_before:
+            task.cancel()
+
+
 # --- Tool: set_timer ---
 
 
