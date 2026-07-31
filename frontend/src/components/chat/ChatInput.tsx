@@ -55,8 +55,6 @@ export interface PendingAttachment {
 export const MAX_CHAT_ATTACHMENTS = Infinity;
 const MAX_IMAGE_DIMENSION = 1568;
 const JPEG_QUALITY = 0.85;
-const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
-const MAX_TEXT_BYTES = 512 * 1024;
 // Generic "any file" cap mirroring ``_MAX_FILE_BYTES`` on the server.
 // Files this big bypass the WebSocket entirely and stream straight
 // to disk via ``POST /api/chat/upload``; the cap is enforced both
@@ -67,27 +65,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/gif",
   "image/webp",
-]);
-
-const TEXT_MIME_ALLOWLIST = new Set([
-  "application/json",
-  "application/xml",
-  "application/javascript",
-  "application/typescript",
-  "application/x-sh",
-  "application/toml",
-  "application/yaml",
-  "application/x-yaml",
-]);
-
-const TEXT_EXTENSION_ALLOWLIST = new Set([
-  "md", "txt", "rst", "log",
-  "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
-  "csv", "tsv", "xml", "html", "htm", "css", "scss", "less",
-  "js", "jsx", "ts", "tsx", "mjs", "cjs",
-  "py", "rb", "go", "rs", "java", "kt", "swift",
-  "c", "cpp", "cc", "h", "hpp", "cs", "php",
-  "sh", "bash", "zsh", "fish", "sql", "dockerfile", "gitignore",
 ]);
 
 interface ModelSelection {
@@ -129,22 +106,6 @@ interface ChatInputProps {
   draftKey?: string | null;
 }
 
-const readAsBase64 = (blob: Blob): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-    reader.onload = () => {
-      const result = reader.result;
-      if (typeof result !== "string") {
-        reject(new Error("unexpected reader result"));
-        return;
-      }
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.readAsDataURL(blob);
-  });
-
 /** Resize an image file to fit within ``MAX_IMAGE_DIMENSION`` on its
  *  longest side, returning a new File. GIFs and already-small images
  *  pass through unchanged. */
@@ -184,88 +145,25 @@ async function maybeResizeImage(file: File): Promise<File> {
 const XLSX_MIME =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-async function prepareBinaryDocument(
-  file: File,
-  mediaType: string,
-  fallbackName: string,
-): Promise<FileAttachment> {
-  if (file.size > MAX_DOCUMENT_BYTES) {
-    throw new Error(
-      `File too large (${Math.round(file.size / 1024 / 1024)} MB > ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB max)`,
-    );
-  }
-  return {
-    kind: "document",
-    name: file.name || fallbackName,
-    media_type: mediaType,
-    data: await readAsBase64(file),
-  };
-}
-
-function looksLikeText(file: File): boolean {
-  if (file.type.startsWith("text/")) return true;
-  if (TEXT_MIME_ALLOWLIST.has(file.type)) return true;
-  const name = file.name.toLowerCase();
-  if (name === "dockerfile" || name === "makefile") return true;
-  const dot = name.lastIndexOf(".");
-  if (dot < 0) return false;
-  return TEXT_EXTENSION_ALLOWLIST.has(name.slice(dot + 1));
-}
-
-async function prepareText(file: File): Promise<FileAttachment> {
-  if (file.size > MAX_TEXT_BYTES) {
-    throw new Error(
-      `Text file too large (${Math.round(file.size / 1024)} KB > ${MAX_TEXT_BYTES / 1024} KB max)`,
-    );
-  }
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  // Null-byte sniff — strong signal the file is binary, not text.
-  const scanLen = Math.min(bytes.length, 8192);
-  for (let i = 0; i < scanLen; i++) {
-    if (bytes[i] === 0) {
-      throw new Error(`"${file.name}" doesn't look like a text file`);
-    }
-  }
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error(`"${file.name}" is not valid UTF-8 text`);
-  }
-  return {
-    kind: "text",
-    name: file.name || "file.txt",
-    media_type: file.type || "text/plain",
-    text,
-  };
-}
-
 /** The result of classifying a picked file.
  *
- *  - ``inline`` — small, AI-readable, ride through the WebSocket
- *    as base64 in the chat frame. Image/PDF/xlsx/text paths.
- *  - ``upload`` — everything else. The caller uploads the raw File
- *    via ``POST /api/chat/upload`` and turns the server's reply
- *    into a reference-mode FileAttachment. Keeps 1 GB files off
- *    the WebSocket and out of the conversation row. */
+ *  Every attachment now streams to disk via ``POST /api/chat/upload``
+ *  and comes back as a reference-mode FileAttachment (workspace
+ *  coordinates, no inline bytes) — that's how 1 GB files stay off the
+ *  WebSocket and out of the conversation row. The server re-inlines
+ *  small AI-readable files (images, PDFs, text) for the model at send
+ *  time, so the caller doesn't classify by type here. */
 export type PreparedAttachment = { mode: "upload"; file: File };
 
 /** Classify a dropped/picked file.
  *
- *  Resolution order:
+ *  Uniform: validate the 1 GiB cap, resize oversized images so the
+ *  upload is smaller, and hand every file to upload mode. The caller
+ *  posts it to ``/api/chat/upload`` and turns the server's reply into a
+ *  reference-mode FileAttachment.
  *
- *  1. Known image types → inline ``kind="image"`` (resized if too big).
- *  2. PDF → inline ``kind="document"``.
- *  3. XLSX → inline ``kind="document"`` (server converts to markdown).
- *  4. Text/code files (by MIME or extension) → inline ``kind="text"``.
- *  5. Anything else → upload mode. Any file type is accepted, up to
- *     ``MAX_FILE_BYTES`` — the caller posts it to ``/api/chat/upload``.
- *
- *  Throws on hard failures within the inline preparation paths
- *  (image decode error, text file too big, …). The upload branch
- *  validates ``file.size`` up-front so the caller doesn't burn
- *  bandwidth on a rejected upload.
+ *  Throws when the file exceeds ``MAX_FILE_BYTES`` so the caller doesn't
+ *  burn bandwidth on an upload the server will reject.
  */
 export async function prepareChatAttachment(
   file: File,

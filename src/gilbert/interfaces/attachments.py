@@ -69,16 +69,17 @@ class FileAttachment:
       the type. Anthropic emits a plain text block describing the
       attachment, not a content block.
 
-    For workspace-reference attachments (``workspace_path`` set), the
-    backend-side rendering logic should treat them the same as inline
-    attachments of the same ``kind`` — at send time, code that forwards an
-    attachment to a provider (image/document block) is expected to
-    materialize the bytes from disk if ``workspace_path`` is set, then use
-    them as if they had arrived inline. Assistant-produced attachments are
-    not currently sent back through the AI (there's no "assistant
-    attachment" provider block that makes sense) so this matters only for
-    user-origin attachments that happen to be reference-style, which today
-    is not a thing — user uploads are always inline.
+    User uploads now ALWAYS arrive as workspace references: the chat
+    input streams every file to disk via ``POST /api/chat/upload`` (so a
+    1 GB attachment never rides the WebSocket) and the frame carries only
+    the workspace coordinates. To keep AI-readable files readable, the
+    AIService materializes small image/document/text references back to
+    inline at send time (``_materialize_reference_attachments``) — it
+    reads the bytes from disk, under the per-kind inline caps, and rebuilds
+    an inline attachment of the same ``kind`` so the provider gets a real
+    image/document block. Files over the inline cap, and opaque ``file``
+    kinds, stay references: the backend renders a stub pointing the model
+    at the workspace path so it can read them with a tool.
 
     ``name`` is the user-visible filename, always set for documents and
     text kinds; for images it's optional (historical images have none).

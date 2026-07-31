@@ -2281,6 +2281,291 @@ def test_parse_frame_attachments_rejects_bad_base64() -> None:
         )
 
 
+# --- Reference-mode image/document/text acceptance ---------------------------
+#
+# After the HTTP-upload refactor, EVERY chat attachment is uploaded via
+# POST /api/chat/upload and arrives as a workspace reference (no inline
+# ``data``). The upload endpoint tags PDFs as ``kind="document"`` and
+# images as ``kind="image"``. The parser must accept those reference-mode
+# shapes — not just ``kind="file"`` — or the send fails with
+# "document data must be a non-empty string" (the "something went wrong"
+# bug).
+
+
+def test_parse_frame_attachments_accepts_document_reference_mode() -> None:
+    result = _parse_frame_attachments(
+        [
+            {
+                "kind": "document",
+                "name": "123109.pdf",
+                "media_type": "application/pdf",
+                "workspace_skill": "workspace",
+                "workspace_path": "uploads/123109.pdf",
+                "workspace_conv": "conv-abc",
+                "size": 133642,
+            }
+        ]
+    )
+    assert len(result) == 1
+    att = result[0]
+    assert att.kind == "document"
+    assert att.is_reference
+    assert att.workspace_path == "uploads/123109.pdf"
+    assert att.workspace_conv == "conv-abc"
+    assert att.size == 133642
+    assert att.data == ""
+
+
+def test_parse_frame_attachments_accepts_image_reference_mode() -> None:
+    result = _parse_frame_attachments(
+        [
+            {
+                "kind": "image",
+                "name": "photo.png",
+                "media_type": "image/png",
+                "workspace_skill": "workspace",
+                "workspace_path": "uploads/photo.png",
+                "workspace_conv": "conv-abc",
+                "size": 2048,
+            }
+        ]
+    )
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].is_reference
+    assert result[0].data == ""
+
+
+def test_parse_frame_attachments_document_reference_rejects_oversize() -> None:
+    """Reference documents are bounded by the on-disk 1 GiB cap, not the
+    32 MB inline-document cap (materialization decides inline-vs-stub)."""
+    from gilbert.core.services.ai import _MAX_FILE_BYTES
+
+    with pytest.raises(ValueError, match="too large"):
+        _parse_frame_attachments(
+            [
+                {
+                    "kind": "document",
+                    "name": "huge.pdf",
+                    "media_type": "application/pdf",
+                    "workspace_path": "uploads/huge.pdf",
+                    "workspace_conv": "c",
+                    "size": _MAX_FILE_BYTES + 1,
+                }
+            ]
+        )
+
+
+# --- Reference-attachment materialization (read bytes back for the model) ----
+
+
+class _FakeWorkspaceProvider:
+    """Minimal WorkspaceProvider whose ``resolve_file_path`` maps a
+    workspace-relative path to a real on-disk file for the test."""
+
+    def __init__(self, mapping: dict[str, Any]) -> None:
+        self._mapping = mapping  # rel_path -> Path | None
+
+    def resolve_file_path(
+        self, user_id: str, rel_path: str, conversation_id: str | None
+    ) -> tuple[Any, str | None]:
+        p = self._mapping.get(rel_path)
+        if p is None:
+            return None, "file not found"
+        return p, None
+
+    # Unused-by-materialization surface, present so the runtime_checkable
+    # WorkspaceProvider isinstance() passes.
+    def get_workspace_root(self, user_id: str, conversation_id: str) -> Any: ...
+    def get_upload_dir(self, user_id: str, conversation_id: str) -> Any: ...
+    def get_output_dir(self, user_id: str, conversation_id: str) -> Any: ...
+    def get_scratch_dir(self, user_id: str, conversation_id: str) -> Any: ...
+    async def register_file(self, **kwargs: Any) -> dict[str, Any]:
+        return {}
+    async def list_files(
+        self, conversation_id: str, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        return []
+    async def build_workspace_manifest(self, conversation_id: str) -> str:
+        return ""
+    async def member_workspace_roots(
+        self, caller_user_id: str, conversation_id: str
+    ) -> list[Any]:
+        return []
+
+
+def _resolver_with_workspace(ws: Any) -> Any:
+    class _R:
+        def get_capability(self, cap: str) -> Any:
+            return ws if cap == "workspace" else None
+
+    return _R()
+
+
+@pytest.mark.asyncio
+async def test_materialize_reference_pdf_inlines_bytes(
+    ai_service: AIService, tmp_path: Any
+) -> None:
+    """A small reference-mode PDF is read back from disk and inlined so
+    the model gets a real document block (native PDF reading)."""
+    import base64
+
+    pdf_bytes = b"%PDF-1.4 hello world"
+    f = tmp_path / "123109.pdf"
+    f.write_bytes(pdf_bytes)
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({"uploads/123109.pdf": f})
+    )
+
+    ref = FileAttachment(
+        kind="document",
+        name="123109.pdf",
+        media_type="application/pdf",
+        workspace_skill="workspace",
+        workspace_path="uploads/123109.pdf",
+        workspace_conv="c",
+        size=len(pdf_bytes),
+    )
+    [out] = await ai_service._materialize_reference_attachments([ref], "c", "u")
+    assert out.kind == "document"
+    assert out.data == base64.b64encode(pdf_bytes).decode()
+    assert out.media_type == "application/pdf"
+    # Materialized to pure inline — no lingering workspace reference.
+    assert out.workspace_path == ""
+    assert not out.is_reference
+
+
+@pytest.mark.asyncio
+async def test_materialize_reference_image_inlines_bytes(
+    ai_service: AIService, tmp_path: Any
+) -> None:
+    import base64
+
+    img = b"\x89PNG\r\n\x1a\n fake png bytes"
+    f = tmp_path / "photo.png"
+    f.write_bytes(img)
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({"uploads/photo.png": f})
+    )
+    ref = FileAttachment(
+        kind="image",
+        name="photo.png",
+        media_type="image/png",
+        workspace_path="uploads/photo.png",
+        workspace_conv="c",
+        size=len(img),
+    )
+    [out] = await ai_service._materialize_reference_attachments([ref], "c", "u")
+    assert out.kind == "image"
+    assert out.data == base64.b64encode(img).decode()
+    assert not out.is_reference
+
+
+@pytest.mark.asyncio
+async def test_materialize_reference_text_document_becomes_text(
+    ai_service: AIService, tmp_path: Any
+) -> None:
+    """A text/* document (a .txt/.md uploaded to disk) is decoded to an
+    inline ``text`` attachment so it inlines as prompt context."""
+    f = tmp_path / "notes.md"
+    f.write_text("# Heading\n\nbody", encoding="utf-8")
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({"uploads/notes.md": f})
+    )
+    ref = FileAttachment(
+        kind="document",
+        name="notes.md",
+        media_type="text/markdown",
+        workspace_path="uploads/notes.md",
+        workspace_conv="c",
+        size=15,
+    )
+    [out] = await ai_service._materialize_reference_attachments([ref], "c", "u")
+    assert out.kind == "text"
+    assert out.text == "# Heading\n\nbody"
+    assert not out.is_reference
+
+
+@pytest.mark.asyncio
+async def test_materialize_reference_oversize_pdf_stays_reference(
+    ai_service: AIService, tmp_path: Any
+) -> None:
+    """A PDF over the 32 MB inline-document cap can't be inlined
+    (Anthropic's cap) — it stays a reference so the backend hands the
+    model a workspace stub to read via tools."""
+    from gilbert.core.services.ai import _MAX_DOCUMENT_BYTES
+
+    f = tmp_path / "huge.pdf"
+    f.write_bytes(b"%PDF-1.4")  # actual bytes small; the reported size gates
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({"uploads/huge.pdf": f})
+    )
+    ref = FileAttachment(
+        kind="document",
+        name="huge.pdf",
+        media_type="application/pdf",
+        workspace_path="uploads/huge.pdf",
+        workspace_conv="c",
+        size=_MAX_DOCUMENT_BYTES + 1,
+    )
+    [out] = await ai_service._materialize_reference_attachments([ref], "c", "u")
+    assert out.is_reference
+    assert out.data == ""
+    assert out.workspace_path == "uploads/huge.pdf"
+
+
+@pytest.mark.asyncio
+async def test_materialize_missing_file_stays_reference(
+    ai_service: AIService,
+) -> None:
+    """If the file can't be resolved on disk, leave it as a reference
+    rather than dropping the attachment or crashing the send."""
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({})
+    )
+    ref = FileAttachment(
+        kind="document",
+        name="gone.pdf",
+        media_type="application/pdf",
+        workspace_path="uploads/gone.pdf",
+        workspace_conv="c",
+        size=1000,
+    )
+    [out] = await ai_service._materialize_reference_attachments([ref], "c", "u")
+    assert out.is_reference
+    assert out.data == ""
+
+
+@pytest.mark.asyncio
+async def test_materialize_leaves_inline_and_file_kinds_untouched(
+    ai_service: AIService, tmp_path: Any
+) -> None:
+    """Already-inline attachments and opaque ``file`` references pass
+    through unchanged — only AI-readable references get materialized."""
+    import base64
+
+    inline = FileAttachment(
+        kind="image", media_type="image/png", data=base64.b64encode(b"x").decode()
+    )
+    f = tmp_path / "a.zip"
+    f.write_bytes(b"PK\x03\x04")
+    ai_service._resolver = _resolver_with_workspace(  # type: ignore[assignment]
+        _FakeWorkspaceProvider({"uploads/a.zip": f})
+    )
+    opaque = FileAttachment(
+        kind="file",
+        name="a.zip",
+        media_type="application/zip",
+        workspace_path="uploads/a.zip",
+        workspace_conv="c",
+        size=4,
+    )
+    out = await ai_service._materialize_reference_attachments([inline, opaque], "c", "u")
+    assert out[0] is inline
+    assert out[1].kind == "file"
+    assert out[1].is_reference  # opaque files stay on disk
+
+
 def test_parse_frame_attachments_rejects_too_many() -> None:
     import base64
 

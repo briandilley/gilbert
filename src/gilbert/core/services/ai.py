@@ -339,6 +339,52 @@ def _convert_xlsx_to_markdown(data: bytes, name: str) -> str:
     return "\n".join(parts) + "\n"
 
 
+def _parse_reference_attachment(
+    kind: str,
+    item: dict[str, Any],
+    name: str,
+    media_type: str,
+    idx: int,
+) -> FileAttachment:
+    """Build a reference-mode ``FileAttachment`` from a frame item whose
+    bytes live on disk (uploaded via ``POST /api/chat/upload``).
+
+    Every chat upload now arrives as a workspace reference, so *any*
+    AI-readable kind — not just ``file`` — can show up with
+    ``workspace_path`` set and no inline ``data``. This helper is shared
+    by the image / document / text / file branches so they accept that
+    shape uniformly.
+
+    ``size`` is the server-reported upload size (trusted — the upload
+    endpoint is its only writer) and is bounded by the on-disk 1 GiB
+    cap. The tighter per-kind *inline* caps are enforced later, at
+    materialization time, because they decide inline-vs-stub rather than
+    accept-vs-reject.
+    """
+    raw_size = item.get("size")
+    try:
+        reported_size = int(raw_size) if raw_size is not None else 0
+    except (TypeError, ValueError):
+        raise ValueError(f"attachments[{idx}] size must be an integer") from None
+    if reported_size < 0:
+        raise ValueError(f"attachments[{idx}] size must be non-negative")
+    if reported_size > _MAX_FILE_BYTES:
+        raise ValueError(
+            f"attachments[{idx}] {kind} is too large "
+            f"({reported_size} bytes > {_MAX_FILE_BYTES} max)",
+        )
+    return FileAttachment(
+        kind=kind,
+        name=name,
+        media_type=media_type or "application/octet-stream",
+        workspace_skill=str(item.get("workspace_skill") or ""),
+        workspace_path=str(item.get("workspace_path") or ""),
+        workspace_conv=str(item.get("workspace_conv") or ""),
+        workspace_file_id=str(item.get("workspace_file_id") or ""),
+        size=reported_size,
+    )
+
+
 def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
     """Validate and coerce the ``attachments`` field of a chat.message.send
     frame.
@@ -374,6 +420,13 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
         media_type = str(item.get("media_type") or "").lower()
 
         if kind == "image":
+            if item.get("workspace_path") and not item.get("data"):
+                # Reference mode: bytes on disk (POST /api/chat/upload).
+                # Media-type gating happens at materialization time.
+                result.append(
+                    _parse_reference_attachment("image", item, name, media_type, idx)
+                )
+                continue
             data = item.get("data")
             if media_type not in _ALLOWED_IMAGE_MEDIA_TYPES:
                 raise ValueError(
@@ -405,9 +458,18 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
                 )
             )
         elif kind == "document":
-            data = item.get("data")
             if not name:
                 raise ValueError(f"attachments[{idx}] document requires a name")
+            if item.get("workspace_path") and not item.get("data"):
+                # Reference mode: a PDF or text-typed doc streamed to disk
+                # via POST /api/chat/upload. Accept any media_type here —
+                # materialization inlines PDFs and text/* separately and
+                # stubs the rest.
+                result.append(
+                    _parse_reference_attachment("document", item, name, media_type, idx)
+                )
+                continue
+            data = item.get("data")
             if media_type not in _ALLOWED_DOCUMENT_MEDIA_TYPES:
                 raise ValueError(
                     f"attachments[{idx}] has unsupported document media_type "
@@ -465,9 +527,16 @@ def _parse_frame_attachments(raw: Any) -> list[FileAttachment]:
                     )
                 )
         elif kind == "text":
-            text = item.get("text")
             if not name:
                 raise ValueError(f"attachments[{idx}] text requires a name")
+            if item.get("workspace_path") and not item.get("text"):
+                # Reference mode: text file on disk. Materialization
+                # decodes it back to inline text.
+                result.append(
+                    _parse_reference_attachment("text", item, name, media_type, idx)
+                )
+                continue
+            text = item.get("text")
             if not isinstance(text, str) or not text:
                 raise ValueError(
                     f"attachments[{idx}] text must be a non-empty string",
@@ -2498,9 +2567,15 @@ class AIService(Service):
                 rounds=[],
             )
 
-        # Ensure all user attachments are registered in the workspace
+        # Ensure all user attachments are registered in the workspace,
+        # then pull AI-readable references (small PDFs, images, text)
+        # back inline so the model reads them natively instead of only
+        # seeing a "file on disk" stub.
         if attachments and user_ctx and self._resolver:
             attachments = await self._ensure_attachments_registered(
+                attachments, conversation_id, user_ctx.user_id
+            )
+            attachments = await self._materialize_reference_attachments(
                 attachments, conversation_id, user_ctx.user_id
             )
 
@@ -3648,6 +3723,117 @@ class AIService(Service):
                     pass
 
         return attachments
+
+    def _inline_plan(self, att: FileAttachment) -> tuple[str | None, int]:
+        """Decide whether a reference attachment can be inlined and how.
+
+        Returns ``(target_kind, byte_cap)`` — the kind the materialized
+        inline attachment should take and the provider's cap for it — or
+        ``(None, 0)`` when the media type can't be inlined (it stays a
+        reference the backend renders as a workspace stub).
+        """
+        if att.kind == "image":
+            if att.media_type in _ALLOWED_IMAGE_MEDIA_TYPES:
+                return "image", _MAX_IMAGE_BYTES
+            return None, 0
+        if att.kind == "document":
+            if att.media_type == "application/pdf":
+                return "document", _MAX_DOCUMENT_BYTES
+            if att.media_type.startswith("text/"):
+                # A text-typed "document" inlines as prompt text.
+                return "text", _MAX_TEXT_BYTES
+            return None, 0
+        return None, 0
+
+    async def _materialize_reference_attachments(
+        self,
+        attachments: list[FileAttachment],
+        conversation_id: str,
+        user_id: str,
+    ) -> list[FileAttachment]:
+        """Read AI-readable reference attachments back from disk and inline
+        them so the model sees them natively.
+
+        Every chat upload now arrives as a workspace reference (bytes on
+        disk, no inline ``data``). For images and PDFs under the
+        provider's inline caps we read the bytes back and hand the model a
+        real image/document block — otherwise it would only ever get a
+        "there's a file on disk, read it with a tool" stub. Text-typed
+        documents are decoded to an inline ``text`` attachment.
+
+        Anything that can't be inlined — over the per-kind cap, an
+        unsupported media type, an opaque ``file`` kind, a resolve miss,
+        or a byte read that fails — is left as a reference untouched, so
+        the backend still renders its workspace stub. Failures never
+        raise: a broken materialization must not sink the whole turn.
+        """
+        from gilbert.interfaces.workspace import WorkspaceProvider
+
+        ws_svc = self._resolver.get_capability("workspace") if self._resolver else None
+        if not isinstance(ws_svc, WorkspaceProvider):
+            return attachments
+
+        out: list[FileAttachment] = []
+        for att in attachments:
+            # Only AI-readable references are candidates. Inline
+            # attachments, opaque ``file`` refs, and non-references pass
+            # through untouched.
+            if not att.is_reference or att.kind not in ("image", "document"):
+                out.append(att)
+                continue
+
+            inline_kind, cap = self._inline_plan(att)
+            if inline_kind is None or (att.size and att.size > cap):
+                out.append(att)  # unsupported type or too big — keep the stub
+                continue
+
+            try:
+                path, err = ws_svc.resolve_file_path(
+                    user_id, att.workspace_path, att.workspace_conv or conversation_id
+                )
+                if err or path is None:
+                    out.append(att)
+                    continue
+                raw = await asyncio.to_thread(path.read_bytes)
+            except Exception:
+                logger.warning(
+                    "failed to materialize attachment %r; leaving as reference",
+                    att.name,
+                    exc_info=True,
+                )
+                out.append(att)
+                continue
+
+            if len(raw) > cap:
+                out.append(att)  # actual bytes exceed the cap — keep the stub
+                continue
+
+            if inline_kind == "text":
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    out.append(att)  # not really text — keep the stub
+                    continue
+                out.append(
+                    FileAttachment(
+                        kind="text",
+                        name=att.name,
+                        media_type=att.media_type or "text/plain",
+                        text=text,
+                    )
+                )
+            else:
+                import base64
+
+                out.append(
+                    FileAttachment(
+                        kind=inline_kind,
+                        name=att.name,
+                        media_type=att.media_type,
+                        data=base64.b64encode(raw).decode(),
+                    )
+                )
+        return out
 
     # --- Tool Discovery ---
 
