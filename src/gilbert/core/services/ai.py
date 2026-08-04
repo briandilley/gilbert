@@ -5029,7 +5029,7 @@ class AIService(Service):
         if self._resolver is None:
             return
         bus_svc = self._resolver.get_capability("event_bus")
-        from gilbert.interfaces.events import EventBusProvider
+        from gilbert.interfaces.events import Event, EventBusProvider
 
         if isinstance(bus_svc, EventBusProvider):
             await bus_svc.bus.publish(

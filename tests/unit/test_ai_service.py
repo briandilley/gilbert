@@ -4341,6 +4341,46 @@ def test_append_assistant_message_accepts_attachments_param() -> None:
     assert "attachments" in inspect.signature(ConversationMessagePoster.append_assistant_message).parameters
 
 
+async def test_append_assistant_message_publishes_chat_event() -> None:
+    """append_assistant_message must publish chat.message.created without raising.
+
+    Regression: the publish branch imported only ``EventBusProvider`` from
+    ``interfaces.events`` but then referenced ``Event`` — so it crashed with
+    ``NameError: name 'Event' is not defined`` the moment it reached the
+    publish step. That silently broke async-outcome delivery into chat
+    (e.g. a finished deep-research report or a failure notice never landing
+    in the conversation the user triggered it from).
+    """
+    from gilbert.interfaces.events import Event
+
+    published: list[Event] = []
+
+    class _FakeBus:
+        async def publish(self, event: Event) -> None:
+            published.append(event)
+
+    class _FakeBusProvider:
+        bus = _FakeBus()
+
+    storage = AsyncMock(spec=StorageBackend)
+    storage.get = AsyncMock(return_value={"messages": []})
+    storage.put = AsyncMock()
+
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability = lambda cap: _FakeBusProvider() if cap == "event_bus" else None
+
+    svc = AIService()
+    svc._storage = storage
+    svc._resolver = resolver
+
+    await svc.append_assistant_message("conv-1", "the report is ready")
+
+    storage.put.assert_awaited_once()
+    assert len(published) == 1
+    assert published[0].event_type == "chat.message.created"
+    assert published[0].data["content"] == "the report is ready"
+
+
 # ── Subagent child-chat: parent + title stamping (Slice 7) ──────────────────
 
 
