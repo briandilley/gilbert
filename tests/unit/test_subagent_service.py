@@ -50,6 +50,8 @@ class _FakeAI:
     def __init__(self, text: str = "subagent result") -> None:
         self.calls: list[dict[str, Any]] = []
         self._text = text
+        self.resumes: list[dict[str, Any]] = []
+        self.delivered: list[dict[str, Any]] = []
 
     async def chat(
         self,
@@ -98,6 +100,35 @@ class _FakeAI:
             attachments=[],
             rounds=[],
         )
+
+    async def resume_turn(
+        self,
+        conversation_id: str,
+        user_ctx: Any,
+        instruction: str,
+        attachments: Any = None,
+        source: str = "subagent-resume",
+    ) -> None:
+        self.resumes.append(
+            {
+                "conversation_id": conversation_id,
+                "instruction": instruction,
+                "attachments": attachments,
+                "source": source,
+            }
+        )
+
+    async def append_assistant_message(
+        self, conversation_id: str, content: str, attachments: Any = None
+    ) -> None:
+        self.delivered.append(
+            {"conversation_id": conversation_id, "content": content}
+        )
+
+    async def ensure_conversation(
+        self, conversation_id: str, user_ctx: Any, **kw: Any
+    ) -> None:
+        return None
 
 
 def _resolver(**caps: Any) -> Any:
@@ -1214,3 +1245,70 @@ async def test_run_agent_background_stores_intent_on_run(monkeypatch: Any) -> No
     run = svc._runs["sa1"]
     assert run.on_complete == "build the playlist"
     assert run.join_group == "cohort-a"
+
+
+# --- intent-gated coordinator resume: solo resume (Task 3) ---
+
+
+def _svc_with_fake_ai() -> tuple[SubagentService, _FakeAI]:
+    svc = SubagentService()
+    svc._enabled = True
+    fake = _FakeAI("REPORT BODY")
+    svc._ai = fake
+    return svc, fake
+
+
+def _u1() -> UserContext:
+    return UserContext(user_id="u1", email="u1@x.com", display_name="U")
+
+
+@pytest.mark.asyncio
+async def test_solo_resume_fires_with_on_complete(monkeypatch: Any) -> None:
+    svc, fake = _svc_with_fake_ai()
+
+    async def _fake_spawn(*a: Any, **k: Any) -> str:
+        return "REPORT BODY"
+
+    monkeypatch.setattr(svc, "spawn", _fake_spawn)
+    # Force inline delivery (no workspace) so the report body is in the seed.
+    t = dataclasses.replace(next(iter(svc._types.values())), deliver_as="inline")
+
+    await svc._run_agent_background(
+        t, "q", "parent1", _u1(),
+        on_complete="build the playlist", subagent_id="sa1",
+    )
+    assert len(fake.resumes) == 1
+    r = fake.resumes[0]
+    assert r["conversation_id"] == "parent1"
+    assert "build the playlist" in r["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_no_resume_without_on_complete(monkeypatch: Any) -> None:
+    svc, fake = _svc_with_fake_ai()
+
+    async def _fake_spawn(*a: Any, **k: Any) -> str:
+        return "REPORT BODY"
+
+    monkeypatch.setattr(svc, "spawn", _fake_spawn)
+    t = dataclasses.replace(next(iter(svc._types.values())), deliver_as="inline")
+    await svc._run_agent_background(t, "q", "parent1", _u1(), subagent_id="sa1")
+    assert fake.resumes == []
+
+
+@pytest.mark.asyncio
+async def test_solo_resume_on_failure(monkeypatch: Any) -> None:
+    svc, fake = _svc_with_fake_ai()
+
+    async def _boom(*a: Any, **k: Any) -> str:
+        raise RuntimeError("agent exploded")
+
+    monkeypatch.setattr(svc, "spawn", _boom)
+    t = dataclasses.replace(next(iter(svc._types.values())), deliver_as="inline")
+    await svc._run_agent_background(
+        t, "q", "parent1", _u1(),
+        on_complete="build the playlist", subagent_id="sa1",
+    )
+    assert len(fake.resumes) == 1
+    assert "agent exploded" in fake.resumes[0]["instruction"]
+    assert "build the playlist" in fake.resumes[0]["instruction"]

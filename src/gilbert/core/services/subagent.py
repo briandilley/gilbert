@@ -33,7 +33,11 @@ from typing import Any
 
 from gilbert.core.agent_run import AgentRunEngine, RunSpec
 from gilbert.core.subagents.types import SubagentType, builtin_seed_list
-from gilbert.interfaces.ai import AIProvider, ConversationMessagePoster
+from gilbert.interfaces.ai import (
+    AIProvider,
+    ConversationMessagePoster,
+    ConversationResumer,
+)
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.context import (
@@ -721,6 +725,15 @@ class SubagentService(Service, WsHandlerProvider):
                     )
                 except Exception:
                     logger.exception("subagent notification failed")
+            await self._finalize_run(
+                run,
+                t,
+                user_ctx,
+                parent_conversation_id,
+                report=report,
+                rel_path=rel_path,
+                failure=None,
+            )
         except Exception as exc:  # noqa: BLE001 — deliver, don't crash
             run.status = "failed"
             logger.exception("Background subagent run failed")
@@ -736,6 +749,15 @@ class SubagentService(Service, WsHandlerProvider):
             )
             await self._deliver(
                 parent_conversation_id, f"{t.name} failed: {exc}"
+            )
+            await self._finalize_run(
+                run,
+                t,
+                user_ctx,
+                parent_conversation_id,
+                report=None,
+                rel_path=None,
+                failure=str(exc),
             )
 
     async def _write_report(
@@ -781,6 +803,90 @@ class SubagentService(Service, WsHandlerProvider):
             await self._ai.append_assistant_message(conversation_id, content, attachments)
         except Exception:
             logger.exception("Failed to deliver subagent message to %s", conversation_id)
+
+    # --- coordinator resume (intent-gated) ---
+
+    @staticmethod
+    def _build_solo_seed(
+        on_complete: str,
+        agent_name: str,
+        rel_path: str | None,
+        report: str,
+        failure: str | None,
+    ) -> str:
+        """Assemble the resume instruction handed back to the coordinator.
+        Marked ``[automated]`` because it persists as a real user-role row."""
+        if failure is not None:
+            return (
+                f"[automated] The background agent `{agent_name}` you dispatched "
+                f"FAILED: {failure}. You intended to: {on_complete}. Decide how to "
+                "proceed — retry, adjust the approach, or tell the user what "
+                "happened."
+            )
+        if rel_path:
+            where = (
+                f" The full report is saved at `{rel_path}` — read it with your "
+                "workspace tools before acting."
+            )
+        else:
+            where = f"\n\nReport:\n{report}"
+        return (
+            f"[automated] The background agent `{agent_name}` you dispatched has "
+            f"finished.{where}\n\nNow: {on_complete}"
+        )
+
+    async def _finalize_run(
+        self,
+        run: _Run,
+        t: SubagentType,
+        user_ctx: UserContext | None,
+        parent_conversation_id: str | None,
+        *,
+        report: str | None,
+        rel_path: str | None,
+        failure: str | None,
+    ) -> None:
+        """Post-delivery hook: resume the coordinator if intent was declared.
+        Join-group runs are routed to the cohort machinery; solo runs with an
+        on_complete resume immediately. Best-effort — never raises into the
+        detached task."""
+        try:
+            if run.join_group:
+                await self._settle_join_member(
+                    run,
+                    t,
+                    user_ctx,
+                    parent_conversation_id,
+                    report=report,
+                    rel_path=rel_path,
+                    failure=failure,
+                )
+                return
+            if not run.on_complete:
+                return
+            if not (parent_conversation_id and user_ctx):
+                return
+            if not isinstance(self._ai, ConversationResumer):
+                return
+            seed = self._build_solo_seed(
+                run.on_complete, t.name, rel_path, report or "", failure
+            )
+            await self._ai.resume_turn(parent_conversation_id, user_ctx, seed)
+        except Exception:
+            logger.exception("subagent _finalize_run failed for %s", run.subagent_id)
+
+    async def _settle_join_member(
+        self,
+        run: _Run,
+        t: SubagentType,
+        user_ctx: UserContext | None,
+        parent_conversation_id: str | None,
+        *,
+        report: str | None,
+        rel_path: str | None,
+        failure: str | None,
+    ) -> None:
+        return None  # replaced in Task 4
 
     # --- engine ---
 
