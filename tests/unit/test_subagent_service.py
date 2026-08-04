@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -1172,3 +1173,44 @@ async def test_type_crud_ws_handlers_admin_gated() -> None:
     del_res = await h["subagent.types.delete"](_Admin(), {"id": "6", "type_id": "x"})
     assert del_res.get("ok") is True
     assert svc.get_type("x") is None
+
+
+# --- intent-gated coordinator resume: spawn_agent plumbing (Task 2) ---
+
+
+def test_spawn_agent_exposes_on_complete_and_join_group() -> None:
+    svc = SubagentService()
+    tools = svc.get_tools()
+    spawn = next(t for t in tools if t.name == "spawn_agent")
+    names = {p.name for p in spawn.parameters}
+    assert "on_complete" in names
+    assert "join_group" in names
+    for pname in ("on_complete", "join_group"):
+        p = next(p for p in spawn.parameters if p.name == pname)
+        assert p.required is False
+        assert p.type == ToolParameterType.STRING
+
+
+@pytest.mark.asyncio
+async def test_run_agent_background_stores_intent_on_run(monkeypatch: Any) -> None:
+    svc = SubagentService()
+    svc._enabled = True
+    svc._ai = _FakeAI("report body")
+
+    async def _fake_spawn(*a: Any, **k: Any) -> str:
+        return "report body"
+
+    monkeypatch.setattr(svc, "spawn", _fake_spawn)
+
+    await svc._run_agent_background(
+        next(iter(svc._types.values())),
+        "q",
+        "parent1",
+        UserContext(user_id="u1", email="u1@x.com", display_name="U"),
+        on_complete="build the playlist",
+        join_group="cohort-a",
+        subagent_id="sa1",
+    )
+    run = svc._runs["sa1"]
+    assert run.on_complete == "build the playlist"
+    assert run.join_group == "cohort-a"

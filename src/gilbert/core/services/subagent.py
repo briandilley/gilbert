@@ -67,6 +67,8 @@ class _Run:
     user_id: str
     status: str  # running | completed | stopped | failed
     started_at: str
+    on_complete: str = ""
+    join_group: str = ""
     stop_flag: list[bool] = field(default_factory=lambda: [False])
     task: Any = None
 
@@ -300,6 +302,33 @@ class SubagentService(Service, WsHandlerProvider):
                         ),
                         required=False,
                     ),
+                    ToolParameter(
+                        name="on_complete",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional. A follow-up instruction to run YOURSELF "
+                            "once this agent finishes — use it when this spawn is "
+                            "one step of a larger task (e.g. 'using the report, "
+                            "create a playlist of the tracks, queue it, and play "
+                            "it'). Leave empty for a standalone report that needs "
+                            "no follow-up. When set, you are automatically resumed "
+                            "with the report when the agent completes (or fails)."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="join_group",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional. To wait on a COHORT of agents before your "
+                            "follow-up runs, give every spawn in the cohort the "
+                            "same join_group id and put the combined follow-up in "
+                            "on_complete. You are resumed once, after ALL members "
+                            "finish, with all their reports. Omit for per-agent "
+                            "resume."
+                        ),
+                        required=False,
+                    ),
                 ],
                 required_role="user",
                 # interactive=True keeps spawn_agent out of headless subagent
@@ -458,10 +487,22 @@ class SubagentService(Service, WsHandlerProvider):
                 raise ValueError(f"Unknown agent type: {agent_type}")
             # Inherit the caller's full identity for the subagent's RBAC.
             caller = get_current_user()
+            on_complete = str(arguments.get("on_complete") or "")
+            join_group = str(arguments.get("join_group") or "")
             if t.execution_mode == "background":
                 parent_conv = get_current_conversation_id()
+                subagent_id = uuid.uuid4().hex
                 self._run_in_background(
-                    self._run_agent_background(t, prompt, parent_conv, caller, model)
+                    self._run_agent_background(
+                        t,
+                        prompt,
+                        parent_conv,
+                        caller,
+                        model,
+                        on_complete=on_complete,
+                        join_group=join_group,
+                        subagent_id=subagent_id,
+                    )
                 )
                 return (
                     f"\U0001f50d Running {t.name} on \"{prompt}\" in the background "
@@ -564,6 +605,10 @@ class SubagentService(Service, WsHandlerProvider):
         parent_conversation_id: str | None,
         user_ctx: UserContext | None,
         model_override: str = "",
+        *,
+        on_complete: str = "",
+        join_group: str = "",
+        subagent_id: str | None = None,
     ) -> None:
         """Run a background subagent off the parent turn and deliver its result
         into the parent conversation per the type's ``deliver_as``. Never raises
@@ -577,7 +622,7 @@ class SubagentService(Service, WsHandlerProvider):
             set_workspace_conversation_id(parent_conversation_id)
             set_current_conversation_id(parent_conversation_id)
 
-        subagent_id = uuid.uuid4().hex
+        subagent_id = subagent_id or uuid.uuid4().hex
         sub_conv = uuid.uuid4().hex
         title = f"{t.name}: {query}"[:80]
         run = _Run(
@@ -589,6 +634,8 @@ class SubagentService(Service, WsHandlerProvider):
             user_id=user_ctx.user_id if user_ctx else "system",
             status="running",
             started_at=datetime.now(UTC).isoformat(),
+            on_complete=on_complete,
+            join_group=join_group,
         )
         self._register_run(run)
         # Record this detached task on the run so the registry is a strong-ref
