@@ -1312,3 +1312,110 @@ async def test_solo_resume_on_failure(monkeypatch: Any) -> None:
     assert len(fake.resumes) == 1
     assert "agent exploded" in fake.resumes[0]["instruction"]
     assert "build the playlist" in fake.resumes[0]["instruction"]
+
+
+# --- intent-gated coordinator resume: join cohort (Task 4) ---
+
+
+def _member_run(sa_id: str, parent: str, group: str, on_complete: str) -> _Run:
+    return _Run(
+        subagent_id=sa_id,
+        agent_type="deep-research",
+        query="q",
+        conversation_id="c",
+        parent_conversation_id=parent,
+        user_id="u1",
+        status="completed",
+        started_at="t",
+        on_complete=on_complete,
+        join_group=group,
+    )
+
+
+@pytest.mark.asyncio
+async def test_join_fires_once_after_seal_and_all_settled() -> None:
+    from gilbert.interfaces.events import Event
+
+    svc, fake = _svc_with_fake_ai()
+    parent, group, oc = "parent1", "cohort-a", "merge into one playlist"
+    svc._register_join_member(parent, group, oc, _u1(), "sa1", "Research Analyst")
+    svc._register_join_member(parent, group, oc, _u1(), "sa2", "Research Analyst")
+
+    t = dataclasses.replace(
+        next(iter(svc._types.values())), deliver_as="inline", name="Research Analyst"
+    )
+
+    # Settle both members BEFORE seal — must NOT fire yet.
+    await svc._settle_join_member(
+        _member_run("sa1", parent, group, oc), t, _u1(), parent,
+        report="R1", rel_path=None, failure=None,
+    )
+    await svc._settle_join_member(
+        _member_run("sa2", parent, group, oc), t, _u1(), parent,
+        report="R2", rel_path=None, failure=None,
+    )
+    assert fake.resumes == []
+
+    # Seal via the coordinator turn completing.
+    await svc._on_turn_complete(
+        Event(event_type="chat.stream.turn_complete", data={"conversation_id": parent})
+    )
+
+    assert len(fake.resumes) == 1
+    instr = fake.resumes[0]["instruction"]
+    assert oc in instr
+    assert "R1" in instr and "R2" in instr
+
+
+@pytest.mark.asyncio
+async def test_join_surfaces_partial_failure() -> None:
+    from gilbert.interfaces.events import Event
+
+    svc, fake = _svc_with_fake_ai()
+    parent, group, oc = "parent1", "cohort-b", "combine results"
+    svc._register_join_member(parent, group, oc, _u1(), "sa1", "Research Analyst")
+    svc._register_join_member(parent, group, oc, _u1(), "sa2", "Research Analyst")
+    t = dataclasses.replace(
+        next(iter(svc._types.values())), deliver_as="inline", name="Research Analyst"
+    )
+
+    # Seal first, then settle members one at a time.
+    await svc._on_turn_complete(
+        Event(event_type="chat.stream.turn_complete", data={"conversation_id": parent})
+    )
+    await svc._settle_join_member(
+        _member_run("sa1", parent, group, oc), t, _u1(), parent,
+        report="GOOD", rel_path=None, failure=None,
+    )
+    assert fake.resumes == []  # one still outstanding
+    await svc._settle_join_member(
+        _member_run("sa2", parent, group, oc), t, _u1(), parent,
+        report=None, rel_path=None, failure="boom",
+    )
+
+    assert len(fake.resumes) == 1
+    instr = fake.resumes[0]["instruction"]
+    assert "GOOD" in instr
+    assert "boom" in instr  # failure surfaced, not swallowed
+
+
+@pytest.mark.asyncio
+async def test_stop_unsubscribes_turn_complete() -> None:
+    calls: list[str] = []
+
+    class _Bus:
+        def subscribe(self, event_type: str, handler: Any) -> Any:
+            def _unsub() -> None:
+                calls.append("unsub")
+            return _unsub
+
+        async def publish(self, event: Any) -> None:
+            return None
+
+    class _BusSvc:
+        bus = _Bus()
+
+    svc = SubagentService()
+    await svc.start(_resolver(ai_chat=_FakeAI(), event_bus=_BusSvc()))
+    await svc.stop()
+    assert calls == ["unsub"]
