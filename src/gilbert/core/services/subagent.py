@@ -33,7 +33,11 @@ from typing import Any
 
 from gilbert.core.agent_run import AgentRunEngine, RunSpec
 from gilbert.core.subagents.types import SubagentType, builtin_seed_list
-from gilbert.interfaces.ai import AIProvider, ConversationMessagePoster
+from gilbert.interfaces.ai import (
+    AIProvider,
+    ConversationMessagePoster,
+    ConversationResumer,
+)
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam, ConfigurationReader
 from gilbert.interfaces.context import (
@@ -67,8 +71,32 @@ class _Run:
     user_id: str
     status: str  # running | completed | stopped | failed
     started_at: str
+    on_complete: str = ""
+    join_group: str = ""
     stop_flag: list[bool] = field(default_factory=lambda: [False])
     task: Any = None
+
+
+@dataclass
+class _JoinMember:
+    subagent_id: str
+    agent_name: str
+    settled: bool = False
+    report: str | None = None
+    rel_path: str | None = None
+    failure: str | None = None
+
+
+@dataclass
+class _JoinGroup:
+    key: tuple[str, str]  # (parent_conversation_id, join_group)
+    on_complete: str
+    user_ctx: Any
+    parent_conversation_id: str
+    members: dict[str, _JoinMember] = field(default_factory=dict)
+    sealed: bool = False
+    fired: bool = False
+
 
 _DEFAULT_PREAMBLE = (
     "You are a subagent launched to complete a single task autonomously. You "
@@ -95,6 +123,10 @@ class SubagentService(Service, WsHandlerProvider):
         # and covers the window before a run's _Run exists.
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._notifications: Any = None
+        # Join cohorts keyed by (parent_conversation_id, join_group).
+        self._join_groups: dict[tuple[str, str], _JoinGroup] = {}
+        self._event_bus: Any = None
+        self._unsub_turn_complete: Any = None
         self._preamble = _DEFAULT_PREAMBLE
         # Entity-backed type catalog, loaded in start(). Falls back to the
         # in-memory seed list when no storage is available (e.g. unit tests
@@ -147,7 +179,30 @@ class SubagentService(Service, WsHandlerProvider):
         ws = resolver.get_capability("workspace")
         self._workspace = ws if isinstance(ws, WorkspaceProvider) else None
         self._notifications = resolver.get_capability("notifications")
+        # Subscribe to coordinator turn completion so a join cohort seals once
+        # the turn that spawned it ends (membership was frozen synchronously at
+        # spawn time; sealing only enables firing).
+        from gilbert.interfaces.events import EventBusProvider
+
+        bus_svc = resolver.get_capability("event_bus")
+        if isinstance(bus_svc, EventBusProvider):
+            self._event_bus = bus_svc.bus
+            if hasattr(self._event_bus, "subscribe"):
+                self._unsub_turn_complete = self._event_bus.subscribe(
+                    "chat.stream.turn_complete", self._on_turn_complete
+                )
         logger.info("Subagent service started")
+
+    async def stop(self) -> None:
+        """Unsubscribe from the event bus on shutdown/restart."""
+        if self._unsub_turn_complete is not None:
+            try:
+                self._unsub_turn_complete()
+            except Exception:
+                logger.debug(
+                    "unsubscribe(turn_complete) raised (ignored)", exc_info=True
+                )
+            self._unsub_turn_complete = None
 
     # --- Configurable ---
 
@@ -297,6 +352,33 @@ class SubagentService(Service, WsHandlerProvider):
                             "Optional model override for this run (e.g. a "
                             "stronger model for a hard task). Leave empty to use "
                             "the agent type's configured model."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="on_complete",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional. A follow-up instruction to run YOURSELF "
+                            "once this agent finishes — use it when this spawn is "
+                            "one step of a larger task (e.g. 'using the report, "
+                            "create a playlist of the tracks, queue it, and play "
+                            "it'). Leave empty for a standalone report that needs "
+                            "no follow-up. When set, you are automatically resumed "
+                            "with the report when the agent completes (or fails)."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="join_group",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Optional. To wait on a COHORT of agents before your "
+                            "follow-up runs, give every spawn in the cohort the "
+                            "same join_group id and put the combined follow-up in "
+                            "on_complete. You are resumed once, after ALL members "
+                            "finish, with all their reports. Omit for per-agent "
+                            "resume."
                         ),
                         required=False,
                     ),
@@ -458,10 +540,27 @@ class SubagentService(Service, WsHandlerProvider):
                 raise ValueError(f"Unknown agent type: {agent_type}")
             # Inherit the caller's full identity for the subagent's RBAC.
             caller = get_current_user()
+            on_complete = str(arguments.get("on_complete") or "")
+            join_group = str(arguments.get("join_group") or "")
             if t.execution_mode == "background":
                 parent_conv = get_current_conversation_id()
+                subagent_id = uuid.uuid4().hex
+                if join_group and parent_conv:
+                    self._register_join_member(
+                        parent_conv, join_group, on_complete, caller,
+                        subagent_id, t.name,
+                    )
                 self._run_in_background(
-                    self._run_agent_background(t, prompt, parent_conv, caller, model)
+                    self._run_agent_background(
+                        t,
+                        prompt,
+                        parent_conv,
+                        caller,
+                        model,
+                        on_complete=on_complete,
+                        join_group=join_group,
+                        subagent_id=subagent_id,
+                    )
                 )
                 return (
                     f"\U0001f50d Running {t.name} on \"{prompt}\" in the background "
@@ -564,6 +663,10 @@ class SubagentService(Service, WsHandlerProvider):
         parent_conversation_id: str | None,
         user_ctx: UserContext | None,
         model_override: str = "",
+        *,
+        on_complete: str = "",
+        join_group: str = "",
+        subagent_id: str | None = None,
     ) -> None:
         """Run a background subagent off the parent turn and deliver its result
         into the parent conversation per the type's ``deliver_as``. Never raises
@@ -577,7 +680,7 @@ class SubagentService(Service, WsHandlerProvider):
             set_workspace_conversation_id(parent_conversation_id)
             set_current_conversation_id(parent_conversation_id)
 
-        subagent_id = uuid.uuid4().hex
+        subagent_id = subagent_id or uuid.uuid4().hex
         sub_conv = uuid.uuid4().hex
         title = f"{t.name}: {query}"[:80]
         run = _Run(
@@ -589,6 +692,8 @@ class SubagentService(Service, WsHandlerProvider):
             user_id=user_ctx.user_id if user_ctx else "system",
             status="running",
             started_at=datetime.now(UTC).isoformat(),
+            on_complete=on_complete,
+            join_group=join_group,
         )
         self._register_run(run)
         # Record this detached task on the run so the registry is a strong-ref
@@ -674,6 +779,15 @@ class SubagentService(Service, WsHandlerProvider):
                     )
                 except Exception:
                     logger.exception("subagent notification failed")
+            await self._finalize_run(
+                run,
+                t,
+                user_ctx,
+                parent_conversation_id,
+                report=report,
+                rel_path=rel_path,
+                failure=None,
+            )
         except Exception as exc:  # noqa: BLE001 — deliver, don't crash
             run.status = "failed"
             logger.exception("Background subagent run failed")
@@ -689,6 +803,15 @@ class SubagentService(Service, WsHandlerProvider):
             )
             await self._deliver(
                 parent_conversation_id, f"{t.name} failed: {exc}"
+            )
+            await self._finalize_run(
+                run,
+                t,
+                user_ctx,
+                parent_conversation_id,
+                report=None,
+                rel_path=None,
+                failure=str(exc),
             )
 
     async def _write_report(
@@ -734,6 +857,192 @@ class SubagentService(Service, WsHandlerProvider):
             await self._ai.append_assistant_message(conversation_id, content, attachments)
         except Exception:
             logger.exception("Failed to deliver subagent message to %s", conversation_id)
+
+    # --- coordinator resume (intent-gated) ---
+
+    @staticmethod
+    def _build_solo_seed(
+        on_complete: str,
+        agent_name: str,
+        rel_path: str | None,
+        report: str,
+        failure: str | None,
+    ) -> str:
+        """Assemble the resume instruction handed back to the coordinator.
+        Marked ``[automated]`` because it persists as a real user-role row."""
+        if failure is not None:
+            return (
+                f"[automated] The background agent `{agent_name}` you dispatched "
+                f"FAILED: {failure}. You intended to: {on_complete}. Decide how to "
+                "proceed — retry, adjust the approach, or tell the user what "
+                "happened."
+            )
+        if rel_path:
+            where = (
+                f" The full report is saved at `{rel_path}` — read it with your "
+                "workspace tools before acting."
+            )
+        else:
+            where = f"\n\nReport:\n{report}"
+        return (
+            f"[automated] The background agent `{agent_name}` you dispatched has "
+            f"finished.{where}\n\nNow: {on_complete}"
+        )
+
+    async def _finalize_run(
+        self,
+        run: _Run,
+        t: SubagentType,
+        user_ctx: UserContext | None,
+        parent_conversation_id: str | None,
+        *,
+        report: str | None,
+        rel_path: str | None,
+        failure: str | None,
+    ) -> None:
+        """Post-delivery hook: resume the coordinator if intent was declared.
+        Join-group runs are routed to the cohort machinery; solo runs with an
+        on_complete resume immediately. Best-effort — never raises into the
+        detached task."""
+        try:
+            if run.join_group:
+                await self._settle_join_member(
+                    run,
+                    t,
+                    user_ctx,
+                    parent_conversation_id,
+                    report=report,
+                    rel_path=rel_path,
+                    failure=failure,
+                )
+                return
+            if not run.on_complete:
+                return
+            if not (parent_conversation_id and user_ctx):
+                return
+            if not isinstance(self._ai, ConversationResumer):
+                return
+            seed = self._build_solo_seed(
+                run.on_complete, t.name, rel_path, report or "", failure
+            )
+            await self._ai.resume_turn(parent_conversation_id, user_ctx, seed)
+        except Exception:
+            logger.exception("subagent _finalize_run failed for %s", run.subagent_id)
+
+    def _register_join_member(
+        self,
+        parent_conversation_id: str,
+        join_group: str,
+        on_complete: str,
+        user_ctx: UserContext | None,
+        subagent_id: str,
+        agent_name: str,
+    ) -> None:
+        """Add a member to its cohort synchronously, at spawn time, so
+        membership is frozen before any member can settle."""
+        key = (parent_conversation_id, join_group)
+        group = self._join_groups.get(key)
+        if group is None:
+            group = _JoinGroup(
+                key=key,
+                on_complete=on_complete,
+                user_ctx=user_ctx,
+                parent_conversation_id=parent_conversation_id,
+            )
+            self._join_groups[key] = group
+        # First non-empty on_complete wins as the cohort's follow-up.
+        if not group.on_complete and on_complete:
+            group.on_complete = on_complete
+        group.members[subagent_id] = _JoinMember(
+            subagent_id=subagent_id, agent_name=agent_name
+        )
+
+    async def _settle_join_member(
+        self,
+        run: _Run,
+        t: SubagentType,
+        user_ctx: UserContext | None,
+        parent_conversation_id: str | None,
+        *,
+        report: str | None,
+        rel_path: str | None,
+        failure: str | None,
+    ) -> None:
+        """Record a cohort member's result, then fire the cohort if it's
+        sealed and every member has settled."""
+        if not parent_conversation_id:
+            return
+        key = (parent_conversation_id, run.join_group)
+        group = self._join_groups.get(key)
+        if group is None:
+            return
+        member = group.members.get(run.subagent_id)
+        if member is None:
+            # Not pre-registered (shouldn't happen) — add it so the count is right.
+            member = _JoinMember(subagent_id=run.subagent_id, agent_name=t.name)
+            group.members[run.subagent_id] = member
+        member.settled = True
+        member.report = report
+        member.rel_path = rel_path
+        member.failure = failure
+        await self._maybe_fire_join(group)
+
+    async def _maybe_fire_join(self, group: _JoinGroup) -> None:
+        """Fire the cohort's resume exactly once, when sealed and all settled."""
+        if group.fired or not group.sealed:
+            return
+        if not group.members or not all(m.settled for m in group.members.values()):
+            return
+        group.fired = True
+        self._join_groups.pop(group.key, None)
+        if not (group.parent_conversation_id and group.user_ctx):
+            return
+        if not isinstance(self._ai, ConversationResumer):
+            return
+        seed = self._build_join_seed(group)
+        try:
+            await self._ai.resume_turn(
+                group.parent_conversation_id, group.user_ctx, seed
+            )
+        except Exception:
+            logger.exception("join-group resume failed for %s", group.key)
+
+    @staticmethod
+    def _build_join_seed(group: _JoinGroup) -> str:
+        """Assemble the combined resume instruction for a settled cohort:
+        every successful report (path or inline) plus an explicit list of any
+        failures, so the coordinator can decide whether it has enough."""
+        ok_lines: list[str] = []
+        fail_lines: list[str] = []
+        for m in group.members.values():
+            if m.failure is not None:
+                fail_lines.append(f"- `{m.agent_name}` FAILED: {m.failure}")
+            elif m.rel_path:
+                ok_lines.append(f"- `{m.agent_name}`: report at `{m.rel_path}`")
+            else:
+                ok_lines.append(f"- `{m.agent_name}`:\n{m.report or ''}")
+        parts = [
+            "[automated] The cohort of background agents you dispatched has "
+            "finished."
+        ]
+        if ok_lines:
+            parts.append("Reports:\n" + "\n".join(ok_lines))
+        if fail_lines:
+            parts.append("These failed:\n" + "\n".join(fail_lines))
+        parts.append(f"Now: {group.on_complete}")
+        return "\n\n".join(parts)
+
+    async def _on_turn_complete(self, event: Any) -> None:
+        """Seal every cohort whose parent coordinator turn just completed, then
+        fire any that are already fully settled. Membership was frozen at spawn
+        time (synchronous registration), so sealing only enables firing."""
+        conv = str(event.data.get("conversation_id") or "")
+        if not conv:
+            return
+        for group in list(self._join_groups.values()):
+            if group.parent_conversation_id == conv and not group.sealed:
+                group.sealed = True
+                await self._maybe_fire_join(group)
 
     # --- engine ---
 

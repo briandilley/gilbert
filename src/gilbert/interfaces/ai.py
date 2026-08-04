@@ -730,3 +730,26 @@ class ConversationMessagePoster(Protocol):
         run is still in progress. No-op if the conversation already exists.
         """
         ...
+
+
+@runtime_checkable
+class ConversationResumer(Protocol):
+    """Protocol for driving one coordinator AI turn on an existing
+    conversation from outside the normal WS-initiated chat flow.
+
+    Used to resume the coordinator after a background subagent it was
+    waiting on completes: the resume turn is seeded with the coordinator's
+    own declared follow-up instruction so it can act on the subagent's
+    result. Implementations MUST serialize the resume against any live
+    user turn on the same conversation so their writes to the stored
+    ``messages`` list can't interleave.
+    """
+
+    async def resume_turn(
+        self,
+        conversation_id: str,
+        user_ctx: UserContext,
+        instruction: str,
+        attachments: list[FileAttachment] | None = None,
+        source: str = "subagent-resume",
+    ) -> None: ...

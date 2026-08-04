@@ -1402,6 +1402,10 @@ class AIService(Service):
         self._memory: _MemoryHelper | None = None
         self._memory_enabled: bool = True
         self._in_flight_chats: dict[str, tuple[asyncio.Task[Any], str]] = {}
+        # Per-conversation turn lock: serializes a background-driven resume
+        # turn (resume_turn) against a live user turn on the same conversation
+        # so their appends to the single stored messages doc can't interleave.
+        self._conv_turn_locks: dict[str, asyncio.Lock] = {}
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -4901,6 +4905,66 @@ class AIService(Service):
             title=title,
         )
 
+    def _conv_turn_lock(self, conversation_id: str) -> asyncio.Lock:
+        """Stable per-conversation lock guarding a full turn on one
+        conversation. Created on first use; entries are cheap and bounded
+        by the number of active conversations."""
+        lock = self._conv_turn_locks.get(conversation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conv_turn_locks[conversation_id] = lock
+        return lock
+
+    async def resume_turn(
+        self,
+        conversation_id: str,
+        user_ctx: UserContext,
+        instruction: str,
+        attachments: list[FileAttachment] | None = None,
+        source: str = "subagent-resume",
+    ) -> None:
+        """Drive one coordinator turn on an existing conversation (see
+        ConversationResumer). Serialized per-conversation against live user
+        turns via the turn lock. Best-effort: no-ops if the conversation is
+        gone (user deleted it mid-run), consistent with append_assistant_message.
+        """
+        if self._storage is None or not conversation_id:
+            return
+        try:
+            if await self._storage.get(_COLLECTION, conversation_id) is None:
+                return
+        except Exception:
+            logger.debug(
+                "resume_turn: storage.get failed for %s", conversation_id, exc_info=True
+            )
+            return
+        async with self._conv_turn_lock(conversation_id):
+            result = await self.chat(
+                user_message=instruction,
+                conversation_id=conversation_id,
+                user_ctx=user_ctx,
+                ai_profile=self._chat_profile,
+                attachments=attachments,
+                source=source,
+            )
+        # Mirror the WS path so an open SPA renders the resumed reply even if
+        # it wasn't actively streaming when the turn started.
+        if result.response_text:
+            await self._publish_event(
+                "chat.message.created",
+                {
+                    "conversation_id": result.conversation_id,
+                    "author_id": "gilbert",
+                    "author_name": "Gilbert",
+                    "content": result.response_text,
+                    "user_message": instruction,
+                    "attachments": _serialize_attachments_for_wire(result.attachments),
+                    "user_attachments": [],
+                    "ui_blocks": result.ui_blocks,
+                    "mentioned_user_ids": [],
+                },
+            )
+
     async def append_assistant_message(
         self,
         conversation_id: str,
@@ -7125,16 +7189,26 @@ class AIService(Service):
                         },
                     )
             else:
-                # Personal chat — normal AI flow
-                turn_result = await self.chat(
-                    user_message=message,
-                    conversation_id=conversation_id,
-                    user_ctx=conn.user_ctx,
-                    ai_profile=self._chat_profile,
-                    attachments=attachments,
-                    model=frame_model,
-                    backend_override=frame_backend,
+                # Personal chat — normal AI flow. Serialize against any
+                # background-driven resume turn on the same conversation
+                # (resume_turn) so their messages-doc writes can't interleave.
+                # nullcontext for a brand-new conversation (no id yet → nothing
+                # to collide with).
+                turn_lock: Any = (
+                    self._conv_turn_lock(conversation_id)
+                    if conversation_id
+                    else contextlib.nullcontext()
                 )
+                async with turn_lock:
+                    turn_result = await self.chat(
+                        user_message=message,
+                        conversation_id=conversation_id,
+                        user_ctx=conn.user_ctx,
+                        ai_profile=self._chat_profile,
+                        attachments=attachments,
+                        model=frame_model,
+                        backend_override=frame_backend,
+                    )
                 response_text = turn_result.response_text
                 conv_id = turn_result.conversation_id
                 ui_blocks = turn_result.ui_blocks
