@@ -92,7 +92,9 @@ class _SchedulerProvider:
         owner: str = "",
     ) -> Any:
         self.jobs[name] = callback
-        self.intervals[name] = schedule.interval_seconds
+        # Schedules are cron expressions now; this fake only cares about
+        # the poll rate, which for an interval job is @every <N>s.
+        self.intervals[name] = schedule.parsed.every_seconds
         return None
 
     def remove_job(self, name: str, requester_id: str = "") -> None:

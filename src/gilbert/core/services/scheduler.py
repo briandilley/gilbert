@@ -1,26 +1,30 @@
 """Scheduler service — manages system and user timers/alarms."""
 
 import asyncio
+import contextvars
 import json
 import logging
+import random
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
-from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
+from gilbert.interfaces.context import get_current_user
+from gilbert.interfaces.cron import CronKind, CronParseError
 from gilbert.interfaces.scheduler import (
     ActionStep,
+    CatchUpPolicy,
     JobCallback,
     JobInfo,
     JobState,
+    OverlapPolicy,
     Schedule,
     ScheduledAction,
     ScheduledActionType,
-    ScheduleType,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.storage import Query
@@ -36,6 +40,22 @@ logger = logging.getLogger(__name__)
 # registered in-memory on each startup by their owning services and
 # are NOT persisted here.
 _JOBS_COLLECTION = "scheduler_jobs"
+
+# Last-fire history, keyed by job name. Separate from _JOBS_COLLECTION
+# because system jobs are never persisted there but still need catch-up.
+_JOB_STATE_COLLECTION = "scheduler_job_state"
+
+#: Longest single sleep before re-reading the wall clock. Bounds how
+#: late a fire can be after a host suspend or clock adjustment.
+_SLEEP_SLICE_SECONDS = 60.0
+
+#: Ceiling on BACKFILL catch-up, so a fast job plus long downtime can't
+#: enumerate (or fire) an unbounded number of occurrences.
+_MAX_BACKFILL_FIRES = 100
+
+#: Ceiling on window-gating iterations, guarding against an expression
+#: that can never fall inside its window.
+_MAX_WINDOW_ADVANCES = 400
 
 
 def _parse_optional_iso_datetime(value: Any) -> datetime | None:
@@ -77,6 +97,33 @@ def _parse_optional_time(value: Any) -> dtime | None:
         return dtime.fromisoformat(s)
     except ValueError:
         return None
+
+
+def _as_aware(dt: datetime | None, tz: Any) -> datetime | None:
+    """Attach ``tz`` to a naive bound so it can be compared as an instant.
+
+    Persisted bounds are naive-local by convention; the engine compares
+    instants, so they have to be localised before use.
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=tz)
+
+
+def _parse_catch_up(value: Any) -> CatchUpPolicy:
+    """Read a persisted catch-up policy, defaulting to SKIP."""
+    try:
+        return CatchUpPolicy(str(value or "skip"))
+    except ValueError:
+        return CatchUpPolicy.SKIP
+
+
+def _parse_overlap(value: Any) -> OverlapPolicy:
+    """Read a persisted overlap policy, defaulting to SKIP."""
+    try:
+        return OverlapPolicy(str(value or "skip"))
+    except ValueError:
+        return OverlapPolicy.SKIP
 
 
 def _format_optional_datetime(dt: datetime | None) -> str:
@@ -199,6 +246,12 @@ class _Job:
         )
         self.callback = callback
         self.task: asyncio.Task[None] | None = None
+        #: True while a fire is in flight — drives OverlapPolicy.SKIP.
+        self.is_running = False
+        #: Serialises fires under OverlapPolicy.QUEUE.
+        self.lock = asyncio.Lock()
+        #: In-flight fire tasks, so stop() can cancel them.
+        self.fire_tasks: set[asyncio.Task[None]] = set()
 
 
 class SchedulerService(Service):
@@ -345,8 +398,14 @@ class SchedulerService(Service):
         for job in self._jobs.values():
             if job.task is not None:
                 job.task.cancel()
+            for fire in job.fire_tasks:
+                fire.cancel()
         # Wait briefly for tasks to finish, then move on
-        tasks = [j.task for j in self._jobs.values() if j.task is not None]
+        tasks: list[asyncio.Task[None]] = [
+            j.task for j in self._jobs.values() if j.task is not None
+        ]
+        for j in self._jobs.values():
+            tasks.extend(j.fire_tasks)
         if tasks:
             try:
                 await asyncio.wait_for(
@@ -408,12 +467,12 @@ class SchedulerService(Service):
         if enabled:
             job.task = asyncio.create_task(self._run_job_loop(job))
 
+        job.info.description = schedule.describe()
         logger.info(
-            "Job '%s' registered (%s, %s, interval=%.1fs)",
+            "Job '%s' registered (%s, %s)",
             name,
             "system" if system else "user",
-            schedule.type.value,
-            schedule.interval_seconds,
+            schedule.expression,
         )
         return job.info
 
@@ -454,6 +513,7 @@ class SchedulerService(Service):
         if job is None:
             raise KeyError(f"Job not found: {name}")
         job.info.enabled = False
+        job.info.next_run_at = ""
         if job.task is not None:
             job.task.cancel()
             job.task = None
@@ -479,47 +539,174 @@ class SchedulerService(Service):
     async def _run_job_loop(self, job: _Job) -> None:
         """Run a job on its schedule until cancelled or retired.
 
-        Tracks ``last_fire_at`` locally so interval-with-window jobs can
-        anchor the next-fire calculation off the previous fire (not off
-        the loop iteration time, which drifts when sleeps are long).
-        The loop exits cleanly when ``_next_delay`` returns ``None`` —
-        that means the schedule has nothing more to do (one-shot done,
-        past ``end_at``, etc.) and the job transitions to ``DONE``.
+        The loop computes an absolute next-fire *instant* rather than a
+        delay, then sleeps toward it in bounded slices. Working in
+        instants is what makes the loop survive a host suspend or a
+        clock adjustment: each slice re-reads the wall clock, so a
+        machine that sleeps through a fire wakes up and notices,
+        instead of firing late by exactly the lost interval.
+
+        Fires are dispatched as separate tasks so a slow callback never
+        stalls scheduling — which is also what makes
+        :class:`OverlapPolicy` meaningful.
         """
-        last_fire_at: datetime | None = None
+        schedule = job.info.schedule
+        tz = schedule.resolve_timezone()
+        job.info.description = schedule.describe()
+
+        last_fire_at = await self._load_last_fire_at(job.info.name)
+        if last_fire_at is not None:
+            await self._run_catch_up(job, last_fire_at)
+
         try:
             while True:
-                delay = self._next_delay(job.info.schedule, last_fire_at)
-                if delay is None:
+                now = datetime.now(tz)
+                target = self._next_fire_at(schedule, last_fire_at, now)
+                if target is None:
+                    job.info.next_run_at = ""
                     job.info.state = JobState.DONE
                     return
-                await asyncio.sleep(delay)
+
+                job.info.next_run_at = target.isoformat()
+                await self._sleep_until(target)
 
                 if not job.info.enabled:
                     continue
 
-                await self._execute_job(job)
-                last_fire_at = datetime.now()
-
-                if job.info.schedule.type == ScheduleType.ONCE:
-                    job.info.state = JobState.DONE
+                if schedule.is_one_shot:
+                    # Awaited inline: there is no subsequent fire to
+                    # protect, and the terminal state must not be
+                    # overwritten by a still-running fire task.
+                    await self._execute_job(job)
+                    await self._record_fire(job.info.name, datetime.now(tz))
+                    job.info.next_run_at = ""
+                    if job.info.state is not JobState.FAILED:
+                        job.info.state = JobState.DONE
                     return
+
+                self._dispatch_fire(job)
+                last_fire_at = datetime.now(tz)
+                await self._record_fire(job.info.name, last_fire_at)
         except asyncio.CancelledError:
+            job.info.next_run_at = ""
             return
+
+    async def _sleep_until(self, target: datetime) -> None:
+        """Sleep toward an absolute instant in bounded slices.
+
+        A single ``asyncio.sleep(86400)`` for a daily job cannot notice
+        that the host suspended for two hours. Re-reading the clock
+        every slice bounds that error to one slice.
+        """
+        while True:
+            remaining = (
+                target.astimezone(UTC) - datetime.now(UTC)
+            ).total_seconds()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, _SLEEP_SLICE_SECONDS))
+
+    def _dispatch_fire(self, job: _Job) -> None:
+        """Start a fire as its own task, honouring the overlap policy.
+
+        ``context=contextvars.copy_context()`` keeps request-scoped
+        context vars from leaking between concurrent fires.
+        """
+        policy = job.info.schedule.overlap
+
+        if job.is_running and policy is OverlapPolicy.SKIP:
+            logger.info(
+                "Scheduler '%s': skipping fire — previous run still in "
+                "flight (overlap=skip)",
+                job.info.name,
+            )
+            return
+
+        async def _run() -> None:
+            if policy is OverlapPolicy.QUEUE:
+                async with job.lock:
+                    await self._execute_job(job)
+            else:
+                await self._execute_job(job)
+
+        task = asyncio.create_task(_run(), context=contextvars.copy_context())
+        job.fire_tasks.add(task)
+        task.add_done_callback(job.fire_tasks.discard)
+
+    async def _run_catch_up(self, job: _Job, last_fire_at: datetime) -> None:
+        """Make up for fires missed while the process was down.
+
+        Driven by the persisted ``last_fire_at`` — without it there is
+        no way to tell a fresh install from a machine that was off for
+        a week.
+        """
+        schedule = job.info.schedule
+        policy = schedule.catch_up
+        if policy is CatchUpPolicy.SKIP:
+            return
+
+        tz = schedule.resolve_timezone()
+        now = datetime.now(tz)
+        limit = 1 if policy is CatchUpPolicy.ONCE else _MAX_BACKFILL_FIRES
+        missed = self._missed_fires(schedule, last_fire_at, now, limit=limit)
+        if not missed:
+            return
+
+        logger.info(
+            "Scheduler '%s': %d missed fire(s) since %s — catch_up=%s",
+            job.info.name,
+            len(missed),
+            last_fire_at.isoformat(),
+            policy.value,
+        )
+        for _ in missed:
+            await self._execute_job(job)
+        await self._record_fire(job.info.name, now)
+
+    @staticmethod
+    def _missed_fires(
+        schedule: Schedule,
+        last_fire_at: datetime,
+        now: datetime,
+        *,
+        limit: int,
+    ) -> list[datetime]:
+        """Occurrences between the last recorded fire and now.
+
+        Capped at ``limit`` — a 10-second interval job and a week of
+        downtime would otherwise enumerate 60,000 occurrences.
+        """
+        tz = schedule.resolve_timezone()
+        out: list[datetime] = []
+        cursor = last_fire_at.astimezone(tz)
+        for _ in range(limit):
+            nxt = schedule.parsed.next_after(cursor, tz, anchor=cursor)
+            if nxt is None:
+                break
+            if nxt.astimezone(UTC) > now.astimezone(UTC):
+                break
+            out.append(nxt)
+            cursor = nxt
+        return out
 
     async def _execute_job(self, job: _Job) -> None:
         """Execute a single job invocation."""
+        job.is_running = True
         job.info.state = JobState.RUNNING
         start = time.monotonic()
 
         try:
             await job.callback()
             job.info.last_error = ""
+        except asyncio.CancelledError:
+            job.is_running = False
+            raise
         except Exception as e:
             job.info.last_error = str(e)
             logger.exception("Job '%s' failed", job.info.name)
-            if job.info.schedule.type == ScheduleType.ONCE:
+            if job.info.schedule.is_one_shot:
                 job.info.state = JobState.FAILED
+                job.is_running = False
                 return
 
         elapsed = time.monotonic() - start
@@ -527,106 +714,137 @@ class SchedulerService(Service):
         job.info.last_run = datetime.now(UTC).isoformat()
         job.info.last_duration_seconds = round(elapsed, 3)
         job.info.state = JobState.IDLE
+        job.is_running = False
 
     @staticmethod
-    def _next_delay(
+    def _next_fire_at(
         schedule: Schedule,
-        last_fire_at: datetime | None = None,
-    ) -> float | None:
-        """Seconds until the next fire, or ``None`` if the job is retired.
+        last_fire_at: datetime | None,
+        now: datetime,
+    ) -> datetime | None:
+        """The next fire instant, or ``None`` when the job is retired.
 
-        ``last_fire_at`` lets interval jobs anchor off the previous fire
-        so drift doesn't accumulate across long bounds/window sleeps.
-        For non-interval schedules the parameter is ignored — DAILY and
-        HOURLY compute against ``datetime.now()`` directly.
+        One path for every schedule kind:
 
-        Returns ``None`` in three cases:
-        - A ONCE job has already fired.
-        - The next computed fire would land after ``end_at``.
-        - The schedule type is unrecognised (shouldn't happen, but
-          returning ``None`` retires the loop cleanly rather than
-          looping forever at the 60s fallback).
+        ``expression -> start_at floor -> window gate -> end_at -> jitter``
+
+        ``last_fire_at`` anchors the interval and one-shot kinds so that
+        drift does not accumulate; field expressions are absolute and
+        ignore it.
         """
-        now = datetime.now()
+        tz = schedule.resolve_timezone()
+        parsed = schedule.parsed
+        start_at = _as_aware(schedule.start_at, tz)
+        end_at = _as_aware(schedule.end_at, tz)
 
-        if schedule.type == ScheduleType.ONCE:
-            # ONCE is one-shot: if we've already fired, we're done.
-            if last_fire_at is not None:
-                return None
-            return schedule.interval_seconds
-
-        # Candidate next-fire, ignoring bounds/window.
-        natural: datetime
-        if schedule.type == ScheduleType.INTERVAL:
-            if last_fire_at is None:
-                # First fire: honour start_at if set, else fire ASAP.
-                natural = schedule.start_at or now
-            else:
-                natural = last_fire_at + timedelta(
-                    seconds=schedule.interval_seconds
-                )
-        elif schedule.type == ScheduleType.DAILY:
-            target = now.replace(
-                hour=schedule.hour,
-                minute=schedule.minute,
-                second=0,
-                microsecond=0,
-            )
-            if target <= now:
-                target += timedelta(days=1)
-            natural = target
-        elif schedule.type == ScheduleType.HOURLY:
-            target = now.replace(minute=schedule.minute, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(hours=1)
-            natural = target
-        else:
+        # A one-shot fires exactly once; having a recorded fire retires it.
+        if parsed.is_one_shot and last_fire_at is not None:
             return None
 
-        # ``start_at`` only delays the first fire for non-interval
-        # schedules (INTERVAL handles it in the natural calc above).
-        # For DAILY/HOURLY we still need to push past ``start_at``.
-        if schedule.start_at is not None and natural < schedule.start_at:
-            natural = schedule.start_at
-            # DAILY/HOURLY anchor natural to a specific time-of-day;
-            # if start_at itself doesn't match that anchor we have to
-            # advance to the next valid anchor after start_at.
-            if schedule.type == ScheduleType.DAILY:
-                anchor = natural.replace(
-                    hour=schedule.hour,
-                    minute=schedule.minute,
-                    second=0,
-                    microsecond=0,
+        # First fire may be held back by start_at.
+        if last_fire_at is None and start_at is not None and (
+            start_at.astimezone(UTC) > now.astimezone(UTC)
+        ):
+            if parsed.kind is CronKind.FIELDS:
+                candidate = parsed.next_after(
+                    start_at - timedelta(microseconds=1), tz
                 )
-                if anchor < natural:
-                    anchor += timedelta(days=1)
-                natural = anchor
-            elif schedule.type == ScheduleType.HOURLY:
-                anchor = natural.replace(
-                    minute=schedule.minute, second=0, microsecond=0
-                )
-                if anchor < natural:
-                    anchor += timedelta(hours=1)
-                natural = anchor
+            else:
+                # An interval or one-shot job simply begins at start_at.
+                candidate = start_at
+        else:
+            anchor = last_fire_at.astimezone(tz) if last_fire_at else None
+            candidate = parsed.next_after(now, tz, anchor=anchor)
 
-        # Daily recurring window — only meaningful for INTERVAL.
+        if candidate is None:
+            return None
+
+        # Daily window, applied as a filter over candidate fires.
         if (
-            schedule.type == ScheduleType.INTERVAL
-            and schedule.window_start_time is not None
+            schedule.window_start_time is not None
             and schedule.window_end_time is not None
         ):
-            natural = _clamp_to_daily_window(
-                natural,
-                schedule.window_start_time,
-                schedule.window_end_time,
-            )
+            for _ in range(_MAX_WINDOW_ADVANCES):
+                clamped = _clamp_to_daily_window(
+                    candidate,
+                    schedule.window_start_time,
+                    schedule.window_end_time,
+                )
+                if clamped == candidate:
+                    break
+                if parsed.kind is CronKind.FIELDS:
+                    # Land on a real expression match at or after the
+                    # window opens, rather than on the window edge.
+                    nxt = parsed.next_after(
+                        clamped - timedelta(microseconds=1), tz
+                    )
+                    if nxt is None:
+                        return None
+                    candidate = nxt
+                else:
+                    candidate = clamped
+                    break
+            else:
+                logger.warning(
+                    "Scheduler: window gating did not converge for %r",
+                    schedule.expression,
+                )
+                return None
 
-        # Absolute deadline — if we've rolled past it, retire the job.
-        if schedule.end_at is not None and natural > schedule.end_at:
+        if end_at is not None and (
+            candidate.astimezone(UTC) > end_at.astimezone(UTC)
+        ):
             return None
 
-        delay = (natural - now).total_seconds()
-        return max(0.0, delay)
+        if schedule.jitter_seconds > 0:
+            candidate = candidate + timedelta(
+                seconds=random.uniform(0, schedule.jitter_seconds)
+            )
+
+        return candidate
+
+    # --- Fire history (drives catch-up) ---
+
+    async def _record_fire(self, name: str, when: datetime) -> None:
+        """Persist the last fire time. Best-effort — never blocks a fire.
+
+        Kept in its own collection rather than on the ``scheduler_jobs``
+        row because **system jobs are never persisted there**; without a
+        separate store they could never catch up.
+        """
+        if self._storage is None:
+            return
+        try:
+            await self._storage.put(
+                _JOB_STATE_COLLECTION,
+                name,
+                {
+                    "id": name,
+                    "name": name,
+                    "last_fire_at": when.astimezone(UTC).isoformat(),
+                },
+            )
+        except Exception:
+            logger.debug("Scheduler: could not record fire for '%s'", name)
+
+    async def _load_last_fire_at(self, name: str) -> datetime | None:
+        """Read the last recorded fire time, if any."""
+        if self._storage is None:
+            return None
+        try:
+            row = await self._storage.get(_JOB_STATE_COLLECTION, name)
+        except Exception:
+            return None
+        if not row:
+            return None
+        raw = str(row.get("last_fire_at") or "")
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
     # --- Action dispatch ---
 
@@ -1053,26 +1271,33 @@ class SchedulerService(Service):
         if self._storage is None:
             return
 
+        # Clear history from any earlier job of the same name, so a
+        # recycled name doesn't start life looking like it already fired.
+        await self._clear_fire_history(name)
+
         now_iso = datetime.now(UTC).isoformat()
         record: dict[str, Any] = {
             "id": name,
             "name": name,
-            "schedule_type": schedule.type.value,
-            "interval_seconds": schedule.interval_seconds,
-            "hour": schedule.hour,
-            "minute": schedule.minute,
+            "expression": schedule.expression,
+            "timezone": schedule.timezone,
             "start_at": _format_optional_datetime(schedule.start_at),
             "end_at": _format_optional_datetime(schedule.end_at),
             "window_start_time": _format_optional_time(schedule.window_start_time),
             "window_end_time": _format_optional_time(schedule.window_end_time),
+            "catch_up": schedule.catch_up.value,
+            "overlap": schedule.overlap.value,
+            "jitter_seconds": schedule.jitter_seconds,
             "owner": owner,
             "action": action.to_dict(),
             "created_at": now_iso,
         }
         # One-shot timers need a fire_at so we can drop them on startup
         # if they were scheduled to fire while Gilbert was down.
-        if schedule.type == ScheduleType.ONCE:
-            fire_at = datetime.now(UTC) + timedelta(seconds=schedule.interval_seconds)
+        if schedule.is_one_shot:
+            fire_at = datetime.now(UTC) + timedelta(
+                seconds=schedule.parsed.once_delay_seconds
+            )
             record["fire_at"] = fire_at.isoformat()
 
         try:
@@ -1081,13 +1306,31 @@ class SchedulerService(Service):
             logger.exception("Scheduler: failed to persist job '%s'", name)
 
     async def _unpersist_job(self, name: str) -> None:
-        """Best-effort delete of a persisted job record."""
+        """Best-effort delete of a persisted job record and its history.
+
+        The fire-history row has to go too. Job identity here is the
+        name, so leaving history behind means a later job that reuses
+        the name inherits it — and for a one-shot that reads as "already
+        fired", retiring it before it ever runs.
+        """
         if self._storage is None:
             return
         try:
             await self._storage.delete(_JOBS_COLLECTION, name)
         except Exception:
             logger.debug("Scheduler: unpersist of '%s' failed (may not exist)", name)
+        await self._clear_fire_history(name)
+
+    async def _clear_fire_history(self, name: str) -> None:
+        """Drop any recorded fire history for a job name."""
+        if self._storage is None:
+            return
+        try:
+            await self._storage.delete(_JOB_STATE_COLLECTION, name)
+        except Exception:
+            logger.debug(
+                "Scheduler: clearing fire history for '%s' failed", name
+            )
 
     async def _load_persisted_jobs(self) -> None:
         """Rebuild user jobs from storage on startup."""
@@ -1107,12 +1350,18 @@ class SchedulerService(Service):
         for row in rows:
             try:
                 name = row["name"]
-                sched_type = ScheduleType(row.get("schedule_type") or "interval")
+                expression = str(row.get("expression") or "").strip()
+                if not expression:
+                    logger.warning(
+                        "Scheduler: job %r has no cron expression — skipping. "
+                        "It predates migration 0007; run migrations to "
+                        "convert it.",
+                        name,
+                    )
+                    continue
                 schedule = Schedule(
-                    type=sched_type,
-                    interval_seconds=float(row.get("interval_seconds", 0) or 0),
-                    hour=int(row.get("hour", 0) or 0),
-                    minute=int(row.get("minute", 0) or 0),
+                    expression=expression,
+                    timezone=str(row.get("timezone") or ""),
                     start_at=_parse_optional_iso_datetime(row.get("start_at")),
                     end_at=_parse_optional_iso_datetime(row.get("end_at")),
                     window_start_time=_parse_optional_time(
@@ -1121,10 +1370,13 @@ class SchedulerService(Service):
                     window_end_time=_parse_optional_time(
                         row.get("window_end_time")
                     ),
+                    catch_up=_parse_catch_up(row.get("catch_up")),
+                    overlap=_parse_overlap(row.get("overlap")),
+                    jitter_seconds=float(row.get("jitter_seconds", 0) or 0),
                 )
 
                 # Drop one-shot timers that should have already fired
-                if sched_type == ScheduleType.ONCE:
+                if schedule.is_one_shot:
                     fire_at_str = row.get("fire_at") or ""
                     if fire_at_str:
                         try:
@@ -1160,7 +1412,9 @@ class SchedulerService(Service):
 
                 action = ScheduledAction.from_dict(row.get("action"))
                 owner = str(row.get("owner") or "")
-                event_type = "timer.fired" if sched_type == ScheduleType.ONCE else "alarm.fired"
+                event_type = (
+                    "timer.fired" if schedule.is_one_shot else "alarm.fired"
+                )
                 callback = self._make_fire_callback(name, action, owner, event_type)
                 self.add_job(
                     name=name,
@@ -1307,12 +1561,17 @@ class SchedulerService(Service):
                 slash_command="alarm",
                 slash_help=(
                     "Recurring alarm: /timer alarm <name> <type> "
-                    "[hour=... minute=... interval_seconds=...] "
-                    "[message=... tool=... ai_prompt=...]"
+                    "[cron='0 9 * * MON-FRI' | hour=... minute=... | "
+                    "interval_seconds=...] [timezone=... catch_up=... "
+                    "message=... tool=... ai_prompt=...]"
                 ),
                 description=(
-                    "Set a recurring user alarm (interval, daily, or "
-                    "hourly). By default publishes an 'alarm.fired' "
+                    "Set a recurring user alarm. Use type='cron' with a "
+                    "full cron expression for anything non-trivial "
+                    "(weekdays only, nth weekday of the month, "
+                    "sub-minute rates); 'interval', 'daily' and 'hourly' "
+                    "remain as shorthands. By default publishes an "
+                    "'alarm.fired' "
                     "event on each fire; optionally invoke a single "
                     "tool (tool + tool_arguments), run an AI "
                     "instruction (ai_prompt), or chain multiple tool "
@@ -1329,8 +1588,69 @@ class SchedulerService(Service):
                     ToolParameter(
                         name="type",
                         type=ToolParameterType.STRING,
-                        description="Schedule type: 'interval', 'daily', or 'hourly'.",
-                        enum=["interval", "daily", "hourly"],
+                        description=(
+                            "Schedule type: 'cron' (full cron expression, "
+                            "most flexible), 'interval', 'daily', or "
+                            "'hourly'."
+                        ),
+                        enum=["cron", "interval", "daily", "hourly"],
+                    ),
+                    ToolParameter(
+                        name="cron",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "Cron expression, used with type='cron'. "
+                            "Supports 5-field POSIX ('30 3 * * *'), "
+                            "6-field with seconds ('*/30 * * * * *'), "
+                            "ranges/lists/steps, JAN-DEC and SUN-SAT "
+                            "names, the Quartz day forms L / W / # "
+                            "('0 0 * * FRI#3' = third Friday), macros "
+                            "(@daily @hourly @weekly @monthly @yearly), "
+                            "'@every 90s' for arbitrary intervals, and "
+                            "'@reboot' / '@once+45s' for one-shots. When "
+                            "both day-of-month and day-of-week are "
+                            "restricted a day matches if EITHER matches."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="timezone",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "IANA timezone the schedule is evaluated in "
+                            "(e.g. 'America/Los_Angeles'). Defaults to the "
+                            "host's local zone. DST transitions are "
+                            "handled: a job at a time that does not exist "
+                            "on the spring-forward day fires once at the "
+                            "transition; an ambiguous fall-back time fires "
+                            "only on its first occurrence."
+                        ),
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="catch_up",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "What to do about fires missed while Gilbert "
+                            "was down: 'skip' (real cron behaviour), "
+                            "'once' (one make-up fire on startup), or "
+                            "'backfill' (replay every missed occurrence, "
+                            "capped at 100). Defaults to 'once' for daily "
+                            "and cron alarms, 'skip' for interval alarms."
+                        ),
+                        enum=["skip", "once", "backfill"],
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="overlap",
+                        type=ToolParameterType.STRING,
+                        description=(
+                            "What to do when a fire comes due while the "
+                            "previous one is still running: 'skip' "
+                            "(default), 'queue', or 'concurrent'."
+                        ),
+                        enum=["skip", "queue", "concurrent"],
+                        required=False,
                     ),
                     ToolParameter(
                         name="interval_seconds",
@@ -1538,10 +1858,10 @@ class SchedulerService(Service):
                 {
                     "name": j.name,
                     "type": "system" if j.system else "user",
-                    "schedule": j.schedule.type.value,
-                    "interval_seconds": j.schedule.interval_seconds,
-                    "hour": j.schedule.hour,
-                    "minute": j.schedule.minute,
+                    "schedule": j.schedule.expression,
+                    "description": j.schedule.describe(),
+                    "timezone": j.schedule.timezone,
+                    "next_run_at": j.next_run_at,
                     "start_at": _format_optional_datetime(j.schedule.start_at),
                     "end_at": _format_optional_datetime(j.schedule.end_at),
                     "window_start_time": _format_optional_time(
@@ -1635,39 +1955,70 @@ class SchedulerService(Service):
                     )
                 }
             )
-        if window_start is not None and alarm_type != "interval":
+        if window_start is not None and alarm_type in ("daily", "hourly"):
             return json.dumps(
                 {
                     "error": (
-                        "window_start_time / window_end_time only apply to "
-                        "'interval' alarms."
+                        "window_start_time / window_end_time do not apply to "
+                        "'daily' or 'hourly' alarms — they already carry a "
+                        "time anchor. Use type='cron' or type='interval'."
                     )
                 }
             )
 
-        if alarm_type == "interval":
-            schedule = Schedule.every(
-                float(arguments.get("interval_seconds", 60)),
-                start_at=start_at,
-                end_at=end_at,
-                window_start_time=window_start,
-                window_end_time=window_end,
-            )
-        elif alarm_type == "daily":
-            schedule = Schedule.daily_at(
-                hour=int(arguments.get("hour", 0)),
-                minute=int(arguments.get("minute", 0)),
-                start_at=start_at,
-                end_at=end_at,
-            )
-        elif alarm_type == "hourly":
-            schedule = Schedule.hourly_at(
-                minute=int(arguments.get("minute", 0)),
-                start_at=start_at,
-                end_at=end_at,
-            )
-        else:
-            return json.dumps({"error": f"Unknown schedule type: {alarm_type}"})
+        timezone = str(arguments.get("timezone") or "").strip()
+        catch_up = _parse_catch_up(arguments.get("catch_up") or None)
+        overlap = _parse_overlap(arguments.get("overlap") or None)
+
+        try:
+            if alarm_type == "cron":
+                expression = str(arguments.get("cron") or "").strip()
+                if not expression:
+                    return json.dumps(
+                        {"error": "type='cron' requires a 'cron' expression."}
+                    )
+                schedule = Schedule.cron(
+                    expression,
+                    timezone=timezone,
+                    start_at=start_at,
+                    end_at=end_at,
+                    window_start_time=window_start,
+                    window_end_time=window_end,
+                    catch_up=catch_up,
+                    overlap=overlap,
+                )
+            elif alarm_type == "interval":
+                schedule = Schedule.every(
+                    float(arguments.get("interval_seconds", 60)),
+                    start_at=start_at,
+                    end_at=end_at,
+                    window_start_time=window_start,
+                    window_end_time=window_end,
+                    timezone=timezone,
+                    catch_up=catch_up,
+                    overlap=overlap,
+                )
+            elif alarm_type == "daily":
+                schedule = Schedule.daily_at(
+                    hour=int(arguments.get("hour", 0)),
+                    minute=int(arguments.get("minute", 0)),
+                    start_at=start_at,
+                    end_at=end_at,
+                    timezone=timezone,
+                    overlap=overlap,
+                )
+            elif alarm_type == "hourly":
+                schedule = Schedule.hourly_at(
+                    minute=int(arguments.get("minute", 0)),
+                    start_at=start_at,
+                    end_at=end_at,
+                    timezone=timezone,
+                    overlap=overlap,
+                )
+            else:
+                return json.dumps({"error": f"Unknown schedule type: {alarm_type}"})
+        except CronParseError as e:
+            return json.dumps({"error": f"Invalid cron expression: {e}"})
 
         action, err = self._build_action_from_args(arguments)
         if err is not None:
@@ -1696,6 +2047,8 @@ class SchedulerService(Service):
                 "status": "set",
                 "name": alarm_name,
                 "type": alarm_type,
+                "expression": schedule.expression,
+                "description": schedule.describe(),
                 "action_type": action.type.value,
             }
         )
@@ -1769,11 +2122,13 @@ class SchedulerService(Service):
             "last_run": info.last_run,
             "last_duration_seconds": info.last_duration_seconds,
             "last_error": info.last_error,
+            "next_run_at": info.next_run_at,
             "schedule": {
-                "type": info.schedule.type.value,
-                "interval_seconds": info.schedule.interval_seconds,
-                "hour": info.schedule.hour,
-                "minute": info.schedule.minute,
+                "expression": info.schedule.expression,
+                "description": info.schedule.describe(),
+                "timezone": info.schedule.timezone,
+                "catch_up": info.schedule.catch_up.value,
+                "overlap": info.schedule.overlap.value,
                 "start_at": _format_optional_datetime(info.schedule.start_at),
                 "end_at": _format_optional_datetime(info.schedule.end_at),
                 "window_start_time": _format_optional_time(

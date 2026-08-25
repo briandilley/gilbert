@@ -314,6 +314,30 @@ An AI-generated daily digest of top-scored unbriefed feed items, producing both 
 and clickable headlines. Built by the feeds service; *who/when* is decided by the briefing
 scheduler.
 
+## Scheduling
+
+**Job**:
+A unit of scheduled work in the scheduler, identified by name. *System* jobs are registered
+in-memory by their owning service on every boot and are never persisted; *user* jobs (timers and
+alarms) are persisted and survive restarts. _Avoid_: "task" (means an item on a task list),
+"cron job" (means the expression, not the registration).
+
+**Expression**:
+The single cron string that defines when a job runs — the only schedule representation there is.
+Spans 5- and 6-field forms, the Quartz `L`/`W`/`#` day specifiers, `@daily`-style macros,
+`@every 90s` for arbitrary intervals, and `@reboot` / `@once+45s` for one-shots. _Avoid_:
+"interval", "schedule type" — both named removed fields.
+
+**Fire**:
+One execution of a job at a scheduled moment. A fire is dispatched as its own task, so a slow one
+does not stall scheduling. _Avoid_: "run" as a noun when the timing matters — `run_count` counts
+completed fires.
+
+**Catch-up**:
+What the scheduler does about fires missed while the process was down — skip, one make-up fire, or
+backfill every occurrence. Distinct from *overlap*, which is about a fire coming due while the
+previous one is still running.
+
 ## Connected accounts
 
 **Account**:

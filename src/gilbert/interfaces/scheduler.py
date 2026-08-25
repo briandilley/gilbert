@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import UTC, datetime, time, tzinfo
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from gilbert.interfaces.cron import CronExpression
+from gilbert.interfaces.cron import parse as cron_parse
 
 
 class ScheduledActionType(StrEnum):
@@ -148,57 +152,115 @@ class JobState(StrEnum):
     FAILED = "failed"
 
 
-class ScheduleType(StrEnum):
-    """How a job is scheduled."""
+class CatchUpPolicy(StrEnum):
+    """What to do about fires that were missed while Gilbert was down."""
 
-    INTERVAL = "interval"
-    DAILY = "daily"
-    HOURLY = "hourly"
+    #: Real cron behaviour — the missed fire is simply lost.
+    SKIP = "skip"
+    #: Fire once on startup to make up for the gap, then resume the
+    #: normal schedule. Four missed hourly fires produce ONE catch-up
+    #: run, not four.
     ONCE = "once"
+    #: Replay every missed occurrence in order. Correct for
+    #: accounting-style jobs, dangerous for anything that announces or
+    #: notifies.
+    BACKFILL = "backfill"
+
+
+class OverlapPolicy(StrEnum):
+    """What to do when a fire is due while the previous one still runs."""
+
+    #: Drop the new fire. The default: a slow callback should not
+    #: accumulate a backlog of concurrent copies of itself.
+    SKIP = "skip"
+    #: Wait for the in-flight fire to finish, then run.
+    QUEUE = "queue"
+    #: Run anyway, concurrently.
+    CONCURRENT = "concurrent"
 
 
 @dataclass
 class Schedule:
-    """Describes when and how often a job runs.
+    """When a job runs, expressed as a single cron expression.
 
-    Beyond the base schedule (``type`` + rate fields), four optional
-    bounds can be layered on:
+    Every schedule in Gilbert — sub-minute polling, one-shot startup
+    work, and genuine calendar recurrences alike — is one expression in
+    the dialect documented in :mod:`gilbert.interfaces.cron`. There is
+    one evaluation engine, so a fix to DST handling or drift correction
+    lands for every job at once.
 
-    - ``start_at`` / ``end_at`` — absolute naive-local datetimes that
-      delay the first fire and retire the job after a deadline. A job
-      won't fire before ``start_at``; once ``end_at`` is past, the
-      loop transitions to ``DONE``. Useful for "every minute starting
-      at 1am" or "every minute from 1am to 2am today only".
-    - ``window_start_time`` / ``window_end_time`` — a time-of-day
-      window that recurs every day. Fires only happen inside the
-      window; outside, the loop sleeps until the next window start.
-      Useful for "every minute from 1am to 2am every day". Windows
-      apply only to INTERVAL jobs — DAILY/HOURLY already carry their
-      own time anchor, and ONCE is a single shot.
+    The four legacy constructors (:meth:`every`, :meth:`daily_at`,
+    :meth:`hourly_at`, :meth:`once_after`) are retained as compilers to
+    that dialect, so existing call sites are unaffected.
 
-    All four are orthogonal: e.g. window=01:00-02:00 plus
-    ``end_at=next Sunday`` gives "every minute between 1am and 2am
-    daily until Sunday." Overnight windows (end < start) are not
-    supported — keep window_end after window_start on the same day.
+    Four optional bounds layer on top of the expression:
+
+    - ``start_at`` / ``end_at`` — absolute datetimes that delay the
+      first fire and retire the job after a deadline.
+    - ``window_start_time`` / ``window_end_time`` — a time-of-day window
+      that recurs daily. Applied as a *filter* on candidate fires rather
+      than as a generator, so it composes with every expression kind —
+      including ``@every``, whose sub-minute rates cron fields cannot
+      express. Overnight windows (end before start) are not supported.
     """
 
-    type: ScheduleType
-    interval_seconds: float = 0
-    hour: int = 0
-    minute: int = 0
-    #: First fire cannot happen before this time. ``None`` = no lower
-    #: bound (first fire is scheduled per the type's normal rules).
+    #: The cron expression. See :mod:`gilbert.interfaces.cron`.
+    expression: str
+    #: IANA timezone name (``America/Los_Angeles``). Empty = host local.
+    timezone: str = ""
+    #: First fire cannot happen before this time.
     start_at: datetime | None = None
-    #: Job retires to ``DONE`` once the next computed fire would land
-    #: after this time. ``None`` = no deadline.
+    #: Job retires to ``DONE`` once the next fire would land after this.
     end_at: datetime | None = None
-    #: Start of a daily time-of-day window for INTERVAL jobs. If set,
-    #: ``window_end_time`` must also be set. Ignored for
-    #: DAILY/HOURLY/ONCE.
+    #: Start of a daily time-of-day window gating fires.
     window_start_time: time | None = None
-    #: End of the daily window. Must be on the same clock day as
-    #: ``window_start_time`` (i.e. strictly after it).
+    #: End of the daily window. Must be after ``window_start_time``.
     window_end_time: time | None = None
+    #: How to treat fires missed while the process was down.
+    catch_up: CatchUpPolicy = CatchUpPolicy.SKIP
+    #: How to treat a fire that comes due while one is still running.
+    overlap: OverlapPolicy = OverlapPolicy.SKIP
+    #: Random spread applied to each fire, to avoid thundering herds
+    #: when many jobs share a schedule.
+    jitter_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        # Parse once, at construction, so an invalid expression fails
+        # where it is written rather than at 3am on the first fire.
+        self._parsed: CronExpression = cron_parse(self.expression)
+
+    @property
+    def parsed(self) -> CronExpression:
+        """The parsed expression. Cached at construction."""
+        return self._parsed
+
+    @property
+    def is_one_shot(self) -> bool:
+        """True for ``@once``/``@reboot`` schedules."""
+        return self._parsed.is_one_shot
+
+    def resolve_timezone(self) -> tzinfo:
+        """The job's timezone, falling back to the host's local zone.
+
+        An unknown zone name degrades to host-local rather than raising,
+        matching how the rest of the codebase treats bad tz config —
+        a typo should not take the scheduler down.
+        """
+        if not self.timezone:
+            return datetime.now().astimezone().tzinfo or UTC
+        try:
+            return ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return datetime.now().astimezone().tzinfo or UTC
+
+    def describe(self) -> str:
+        """Human-readable summary, including any bounds."""
+        base = self._parsed.describe()
+        if self.timezone:
+            base = f"{base} ({self.timezone})"
+        return base
+
+    # --- Constructors -------------------------------------------------
 
     @classmethod
     def every(
@@ -209,15 +271,24 @@ class Schedule:
         end_at: datetime | None = None,
         window_start_time: time | None = None,
         window_end_time: time | None = None,
+        timezone: str = "",
+        catch_up: CatchUpPolicy = CatchUpPolicy.SKIP,
+        overlap: OverlapPolicy = OverlapPolicy.SKIP,
     ) -> Schedule:
-        """Run every N seconds, optionally bounded by start/end/window."""
+        """Run every N seconds. Compiles to ``@every <N>s``.
+
+        Catch-up defaults to ``SKIP``: a high-frequency poll tick has
+        nothing meaningful to make up for after downtime.
+        """
         return cls(
-            type=ScheduleType.INTERVAL,
-            interval_seconds=seconds,
+            expression=f"@every {_trim_seconds(seconds)}s",
+            timezone=timezone,
             start_at=start_at,
             end_at=end_at,
             window_start_time=window_start_time,
             window_end_time=window_end_time,
+            catch_up=catch_up,
+            overlap=overlap,
         )
 
     @classmethod
@@ -228,14 +299,22 @@ class Schedule:
         *,
         start_at: datetime | None = None,
         end_at: datetime | None = None,
+        timezone: str = "",
+        catch_up: CatchUpPolicy = CatchUpPolicy.ONCE,
+        overlap: OverlapPolicy = OverlapPolicy.SKIP,
     ) -> Schedule:
-        """Run daily at a specific time, optionally bounded by start/end."""
+        """Run daily at a specific time. Compiles to ``<M> <H> * * *``.
+
+        Catch-up defaults to ``ONCE`` — a missed daily digest is worth
+        one make-up run on the next startup.
+        """
         return cls(
-            type=ScheduleType.DAILY,
-            hour=hour,
-            minute=minute,
+            expression=f"{int(minute)} {int(hour)} * * *",
+            timezone=timezone,
             start_at=start_at,
             end_at=end_at,
+            catch_up=catch_up,
+            overlap=overlap,
         )
 
     @classmethod
@@ -245,19 +324,63 @@ class Schedule:
         *,
         start_at: datetime | None = None,
         end_at: datetime | None = None,
+        timezone: str = "",
+        catch_up: CatchUpPolicy = CatchUpPolicy.ONCE,
+        overlap: OverlapPolicy = OverlapPolicy.SKIP,
     ) -> Schedule:
-        """Run hourly at a specific minute, optionally bounded."""
+        """Run hourly at a specific minute. Compiles to ``<M> * * * *``."""
         return cls(
-            type=ScheduleType.HOURLY,
-            minute=minute,
+            expression=f"{int(minute)} * * * *",
+            timezone=timezone,
             start_at=start_at,
             end_at=end_at,
+            catch_up=catch_up,
+            overlap=overlap,
         )
 
     @classmethod
     def once_after(cls, seconds: float) -> Schedule:
-        """Run once after a delay. Bounds don't apply — the delay is the schedule."""
-        return cls(type=ScheduleType.ONCE, interval_seconds=seconds)
+        """Run once after a delay. Compiles to ``@once+<N>s``.
+
+        Bounds don't apply — the delay is the whole schedule.
+        """
+        return cls(expression=f"@once+{_trim_seconds(seconds)}s")
+
+    @classmethod
+    def cron(
+        cls,
+        expression: str,
+        *,
+        timezone: str = "",
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        window_start_time: time | None = None,
+        window_end_time: time | None = None,
+        catch_up: CatchUpPolicy = CatchUpPolicy.ONCE,
+        overlap: OverlapPolicy = OverlapPolicy.SKIP,
+        jitter_seconds: float = 0.0,
+    ) -> Schedule:
+        """Run on an arbitrary cron expression.
+
+        Raises :class:`~gilbert.interfaces.cron.CronParseError` if the
+        expression is invalid.
+        """
+        return cls(
+            expression=expression,
+            timezone=timezone,
+            start_at=start_at,
+            end_at=end_at,
+            window_start_time=window_start_time,
+            window_end_time=window_end_time,
+            catch_up=catch_up,
+            overlap=overlap,
+            jitter_seconds=jitter_seconds,
+        )
+
+
+def _trim_seconds(seconds: float) -> str:
+    """Render a seconds value without a pointless trailing ``.0``."""
+    return str(int(seconds)) if float(seconds).is_integer() else str(seconds)
 
 
 @dataclass
@@ -274,6 +397,12 @@ class JobInfo:
     last_run: str = ""
     last_duration_seconds: float = 0.0
     last_error: str = ""
+    #: ISO-8601 timestamp of the next scheduled fire, or "" when the job
+    #: is retired/disabled. Recomputed each loop iteration so the UI can
+    #: answer "when does this actually run next?".
+    next_run_at: str = ""
+    #: Human-readable schedule summary, derived from the expression.
+    description: str = ""
     #: What the job does when it fires. Default is a pure event
     #: publication for backward compatibility with existing alarms.
     action: ScheduledAction = field(default_factory=ScheduledAction)
