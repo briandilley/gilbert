@@ -1396,15 +1396,22 @@ class SchedulerService(Service):
                 # would just re-register, tick once, and retire to DONE.
                 # Dropping at load time keeps the scheduler clean across
                 # restarts.
+                # end_at is naive by convention and belongs to the job's
+                # OWN timezone, not the host's — comparing it against a
+                # bare datetime.now() drops still-valid jobs whenever the
+                # two zones differ. This mirrors _next_fire_at.
+                end_at_aware = _as_aware(
+                    schedule.end_at, schedule.resolve_timezone()
+                )
                 if (
-                    schedule.end_at is not None
-                    and schedule.end_at <= datetime.now()
+                    end_at_aware is not None
+                    and end_at_aware.astimezone(UTC) <= now
                 ):
                     logger.info(
                         "Scheduler: dropping expired recurring job '%s' "
                         "(end_at=%s)",
                         name,
-                        schedule.end_at.isoformat(),
+                        end_at_aware.isoformat(),
                     )
                     await self._unpersist_job(name)
                     dropped_expired += 1

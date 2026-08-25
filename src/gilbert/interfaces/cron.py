@@ -107,6 +107,11 @@ _MACROS = {
 #: walk for expressions that can never match (``0 0 30 2 *`` — Feb 30).
 _SEARCH_HORIZON_YEARS = 5
 
+#: Maximum minutes scanned when re-walking a fall-back hour with fold=1.
+#: Covers the 4-hour window either side of a transition that the guard
+#: in ``_next_in_repeated_hour`` admits.
+_MAX_REPEAT_SCAN_MINUTES = 260
+
 #: Maximum minutes scanned to find the far edge of a spring-forward gap.
 #: Real gaps are 30-120 minutes; this is a safety bound, not a tuning knob.
 _MAX_GAP_SCAN_MINUTES = 180
@@ -159,6 +164,17 @@ class CronExpression:
     def is_one_shot(self) -> bool:
         """True for ``@once``/``@reboot`` — fires exactly once, then retires."""
         return self.kind is CronKind.ONCE
+
+    @property
+    def hour_anchored(self) -> bool:
+        """True when the expression pins specific hours rather than all 24.
+
+        This is the distinction that decides fall-back DST behaviour: an
+        hour-anchored job ("daily at 01:30") fires once when its local
+        time repeats, while a wildcard-hour job ("every 15 minutes")
+        keeps ticking through both passes of the repeated hour.
+        """
+        return len(self.hours) < 24
 
     def next_after(
         self,
@@ -213,9 +229,82 @@ class CronExpression:
 
         return self._next_fields(after.astimezone(zone), zone)
 
+    def _matches_wall(self, d: datetime) -> bool:
+        """Whether a wall-clock minute satisfies every field but seconds."""
+        return (
+            d.month in self.months
+            and self._day_matches(d)
+            and d.hour in self.hours
+            and d.minute in self.minutes
+        )
+
+    def _next_in_repeated_hour(
+        self, after: datetime, zone: tzinfo
+    ) -> datetime | None:
+        """The next fire in the *second* pass of a fall-back hour.
+
+        The main walk advances through naive wall-clock time, and a naive
+        datetime can only ever represent a given local time once. On the
+        fall-back day an hour repeats, so the second pass over it is
+        structurally invisible to that walk — for a wildcard-hour
+        expression those are real fires an hour apart, and skipping them
+        leaves a silent gap (an "every 15 minutes" job losing four
+        fires). This recovers them by re-walking the ambiguous hour with
+        ``fold=1``.
+
+        Only called for non-hour-anchored expressions, and only when a
+        UTC-offset change sits within a few hours of ``after`` — so on
+        all but two days a year it costs two timezone conversions.
+        """
+        after_utc = after.astimezone(UTC)
+        window = timedelta(hours=2)
+        before_off = (after_utc - window).astimezone(zone).utcoffset()
+        later_off = (after_utc + window).astimezone(zone).utcoffset()
+        if before_off == later_off:
+            return None
+
+        # Start behind `after`: the fold=1 instant of an *earlier* wall
+        # time is still ahead of us in real time.
+        wall = (
+            (after_utc - window)
+            .astimezone(zone)
+            .replace(tzinfo=None, second=0, microsecond=0)
+        )
+        seconds = sorted(self.seconds)
+
+        for _ in range(_MAX_REPEAT_SCAN_MINUTES):
+            fold0 = wall.replace(tzinfo=zone, fold=0)
+            fold1 = wall.replace(tzinfo=zone, fold=1)
+            # Differing offsets for one wall time == it happens twice.
+            if fold0.utcoffset() != fold1.utcoffset() and self._matches_wall(wall):
+                for second in seconds:
+                    candidate = wall.replace(second=second, tzinfo=zone, fold=1)
+                    if candidate.astimezone(UTC) > after_utc:
+                        return candidate
+            wall += timedelta(minutes=1)
+        return None
+
     # --- Field walk ---------------------------------------------------
 
     def _next_fields(self, after: datetime, zone: tzinfo) -> datetime | None:
+        """The next fire for a field expression.
+
+        The wall-clock walk handles every ordinary case. A wildcard-hour
+        expression additionally has to consider the second pass of a
+        fall-back hour, which the walk cannot represent; whichever of the
+        two comes first in real time wins.
+        """
+        primary = self._walk_wall_clock(after, zone)
+        if self.hour_anchored:
+            return primary
+        repeated = self._next_in_repeated_hour(after, zone)
+        if repeated is None:
+            return primary
+        if primary is None:
+            return repeated
+        return min(primary, repeated, key=lambda d: d.astimezone(UTC))
+
+    def _walk_wall_clock(self, after: datetime, zone: tzinfo) -> datetime | None:
         """Walk coarse-to-fine to the next matching wall-clock time.
 
         Advancing a coarse field resets every finer one, so a yearly

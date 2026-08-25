@@ -2308,3 +2308,92 @@ async def test_cancelling_a_job_clears_its_fire_history() -> None:
     )
     await svc._unpersist_job("gone")
     assert await svc._load_last_fire_at("gone") is None
+
+
+@pytest.mark.asyncio
+async def test_load_does_not_drop_a_job_whose_end_at_is_future_in_its_own_tz() -> None:
+    """`end_at` is naive and belongs to the JOB's timezone, not the
+    host's. Comparing it against a bare datetime.now() drops still-valid
+    jobs whenever the two zones differ."""
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    # An hour from now in Pacific, written naive the way it is persisted.
+    end_at = (datetime.now(tz) + timedelta(hours=1)).replace(tzinfo=None)
+
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "pacific": {
+                "id": "pacific",
+                "name": "pacific",
+                "expression": "@every 60s",
+                "timezone": "America/Los_Angeles",
+                "end_at": end_at.isoformat(),
+                "owner": "u1",
+                "action": {"type": "event", "message": "x"},
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+            return stored.get(coll, {}).get(key)
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+
+    assert "pacific" in svc._jobs
+    assert "pacific" in stored["scheduler_jobs"]
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_load_still_drops_a_job_whose_end_at_is_genuinely_past() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    end_at = (datetime.now(tz) - timedelta(hours=1)).replace(tzinfo=None)
+
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "done": {
+                "id": "done",
+                "name": "done",
+                "expression": "@every 60s",
+                "timezone": "America/Los_Angeles",
+                "end_at": end_at.isoformat(),
+                "owner": "u1",
+                "action": {"type": "event", "message": "x"},
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+            return stored.get(coll, {}).get(key)
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+
+    assert "done" not in svc._jobs
+    assert "done" not in stored["scheduler_jobs"]

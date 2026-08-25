@@ -292,6 +292,95 @@ def test_wildcard_hours_span_spring_forward_without_repeats() -> None:
     assert all(g == 900 for g in gaps)
 
 
+def test_wildcard_hours_span_fall_back_without_skipping_the_repeated_hour() -> None:
+    """The counterpart to the spring-forward test, and the case a naive
+    wall-clock walk gets wrong: an hour REPEATS on the fall-back day, and
+    for a wildcard-hour expression both passes are real fires. Skipping
+    the second pass leaves a silent 75-minute hole in an every-15-minutes
+    schedule."""
+    expr = parse("*/15 * * * *")
+    cur = _at(2026, 11, 1, 0, 30)
+    fires = []
+    for _ in range(12):
+        cur = expr.next_after(cur, LA)
+        fires.append(cur)
+
+    instants = [f.astimezone(UTC) for f in fires]
+    assert len(set(instants)) == len(instants)
+    gaps = [
+        (b - a).total_seconds()
+        for a, b in zip(instants, instants[1:], strict=False)
+    ]
+    assert all(g == 900 for g in gaps), gaps
+
+    # The repeated hour must appear twice, once at each offset.
+    one_am = [f for f in fires if f.hour == 1]
+    assert {f.utcoffset() for f in one_am} == {
+        timedelta(hours=-7),
+        timedelta(hours=-8),
+    }
+
+
+def test_hourly_expression_fires_in_both_passes_of_the_repeated_hour() -> None:
+    """``30 * * * *`` is wildcard-hour, so 01:30 happens twice — an hour
+    apart in real time."""
+    expr = parse("30 * * * *")
+    cur = _at(2026, 11, 1, 0, 0)
+    fires = []
+    for _ in range(4):
+        cur = expr.next_after(cur, LA)
+        fires.append(cur)
+    at_0130 = [f for f in fires if (f.hour, f.minute) == (1, 30)]
+    assert len(at_0130) == 2
+    assert (
+        at_0130[1].astimezone(UTC) - at_0130[0].astimezone(UTC)
+    ).total_seconds() == 3600
+
+
+def test_hour_anchored_expression_does_not_gain_a_second_fall_back_fire() -> None:
+    """The fold=1 pass must not leak into hour-anchored expressions —
+    those still fire exactly once when their local time repeats."""
+    expr = parse("30 1 * * *")
+    assert expr.hour_anchored
+    cur = _at(2026, 10, 30, 12, 0)
+    fires = []
+    for _ in range(4):
+        cur = expr.next_after(cur, LA)
+        fires.append(cur)
+    nov_1 = [f for f in fires if (f.month, f.day) == (11, 1)]
+    assert len(nov_1) == 1
+    assert nov_1[0].utcoffset() == timedelta(hours=-7)
+
+
+def test_repeated_hour_pass_respects_seconds_granularity() -> None:
+    expr = parse("*/30 * * * * *")
+    cur = _at(2026, 11, 1, 0, 59, 0)
+    instants = []
+    for _ in range(8):
+        cur = expr.next_after(cur, LA)
+        instants.append(cur.astimezone(UTC))
+    gaps = [
+        (b - a).total_seconds()
+        for a, b in zip(instants, instants[1:], strict=False)
+    ]
+    assert all(g == 30 for g in gaps), gaps
+
+
+def test_normal_days_are_unaffected_by_the_repeated_hour_pass() -> None:
+    """Away from a transition the fold=1 scan must never fire."""
+    expr = parse("*/15 * * * *")
+    cur = _at(2026, 6, 15, 0, 0)
+    instants = []
+    for _ in range(20):
+        cur = expr.next_after(cur, LA)
+        instants.append(cur.astimezone(UTC))
+    gaps = [
+        (b - a).total_seconds()
+        for a, b in zip(instants, instants[1:], strict=False)
+    ]
+    assert all(g == 900 for g in gaps)
+
+
 def test_timezone_is_honoured_not_host_local() -> None:
     """The same expression resolves differently in two zones."""
     expr = parse("30 3 * * *")

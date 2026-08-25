@@ -70,6 +70,21 @@ the anchor may be far in the past; `next_after` advances in whole
 intervals so the *phase* of the schedule survives rather than being
 restarted from the moment of waking.
 
+**The fall-back hour needs a second pass.** The field walk advances
+through naive wall-clock time, and a naive `datetime` can only ever
+represent a given local time once. On the fall-back day an hour
+*repeats*, so the second pass over it is structurally invisible to that
+walk. For an hour-anchored expression that is exactly right — "daily at
+01:30" should fire once, not twice. For a wildcard-hour expression it is
+a silent bug: an every-15-minutes job would lose four real fires and
+show a 75-minute hole.
+
+`CronExpression.hour_anchored` is the discriminator. When it is false,
+`_next_in_repeated_hour` re-walks the ambiguous hour with `fold=1` and
+whichever candidate comes first in real time wins. A cheap guard — does
+the UTC offset differ across a four-hour window around `after`? — means
+that on all but two days a year this costs two timezone conversions.
+
 **Comparisons go through UTC.** Subtracting or comparing two aware
 datetimes that share a `tzinfo` *object* makes Python skip
 `utcoffset()` and compare wall clock. Across a DST transition that
