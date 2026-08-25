@@ -15,11 +15,12 @@ from gilbert.core.services.scheduler import (
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.scheduler import (
     ActionStep,
+    CatchUpPolicy,
     JobState,
+    OverlapPolicy,
     Schedule,
     ScheduledAction,
     ScheduledActionType,
-    ScheduleType,
 )
 from gilbert.interfaces.service import ServiceResolver
 from gilbert.interfaces.tools import ToolDefinition, ToolParameter, ToolParameterType
@@ -43,29 +44,64 @@ async def service(resolver: ServiceResolver) -> SchedulerService:
 # --- Schedule factories ---
 
 
-def test_schedule_every() -> None:
+def test_schedule_every_compiles_to_an_interval_expression() -> None:
     s = Schedule.every(30)
-    assert s.type == ScheduleType.INTERVAL
-    assert s.interval_seconds == 30
+    assert s.expression == "@every 30s"
+    assert s.parsed.every_seconds == 30
 
 
-def test_schedule_daily() -> None:
+def test_schedule_daily_compiles_to_a_cron_expression() -> None:
     s = Schedule.daily_at(8, 30)
-    assert s.type == ScheduleType.DAILY
-    assert s.hour == 8
-    assert s.minute == 30
+    assert s.expression == "30 8 * * *"
+    assert s.describe() == "daily at 08:30"
 
 
-def test_schedule_once() -> None:
+def test_schedule_hourly_compiles_to_a_cron_expression() -> None:
+    assert Schedule.hourly_at(15).expression == "15 * * * *"
+
+
+def test_schedule_once_compiles_to_a_one_shot_expression() -> None:
     s = Schedule.once_after(10)
-    assert s.type == ScheduleType.ONCE
-    assert s.interval_seconds == 10
+    assert s.expression == "@once+10s"
+    assert s.is_one_shot
+
+
+def test_schedule_cron_accepts_a_raw_expression() -> None:
+    s = Schedule.cron("0 9 * * MON-FRI", timezone="America/Los_Angeles")
+    assert s.expression == "0 9 * * MON-FRI"
+    assert s.timezone == "America/Los_Angeles"
+
+
+def test_schedule_rejects_an_invalid_expression_at_construction() -> None:
+    """A typo must fail where it is written, not at 3am on first fire."""
+    from gilbert.interfaces.cron import CronParseError
+
+    with pytest.raises(CronParseError):
+        Schedule.cron("not a cron expression")
+
+
+def test_catch_up_defaults_differ_by_constructor() -> None:
+    """A missed daily digest earns a make-up run; a poll tick does not."""
+    assert Schedule.daily_at(3).catch_up is CatchUpPolicy.ONCE
+    assert Schedule.hourly_at(0).catch_up is CatchUpPolicy.ONCE
+    assert Schedule.every(10).catch_up is CatchUpPolicy.SKIP
+    assert Schedule.once_after(5).catch_up is CatchUpPolicy.SKIP
+
+
+def test_overlap_defaults_to_skip() -> None:
+    assert Schedule.every(10).overlap is OverlapPolicy.SKIP
+
+
+def test_unknown_timezone_degrades_to_host_local() -> None:
+    """A typo in a tz name must not take the scheduler down."""
+    schedule = Schedule.cron("0 3 * * *", timezone="Mars/Olympus_Mons")
+    assert schedule.resolve_timezone() is not None
 
 
 # --- Schedule bounds & windows ---
 
-from datetime import datetime, timedelta  # noqa: E402
-from datetime import time as dtime
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from datetime import time as dtime  # noqa: E402
 
 from gilbert.core.services.scheduler import (  # noqa: E402
     _clamp_to_daily_window,
@@ -74,94 +110,114 @@ from gilbert.core.services.scheduler import (  # noqa: E402
 )
 
 
-def test_next_delay_waits_for_start_at_on_first_fire() -> None:
-    """INTERVAL with a future start_at: the first fire is delayed to
-    start_at, not ``interval_seconds`` after registration. This is the
-    "every minute starting at 1am" case."""
-    future = datetime.now() + timedelta(minutes=10)
-    schedule = Schedule.every(60, start_at=future)
-    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
-    # Roughly 10 minutes out, not 60 seconds.
-    assert delay is not None
-    assert 9 * 60 < delay <= 10 * 60 + 5
+def _now_for(schedule: Schedule) -> datetime:
+    """The current instant in the schedule's own timezone."""
+    return datetime.now(schedule.resolve_timezone())
 
 
-def test_next_delay_fires_immediately_when_start_at_in_past() -> None:
-    """Past start_at must not delay the first fire — the window has
-    opened, we should tick now. The natural anchor is ``now`` (not
-    last_fire_at) on the first fire so there's no manufactured delay."""
-    past = datetime.now() - timedelta(hours=1)
-    schedule = Schedule.every(60, start_at=past)
-    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
-    assert delay == 0.0
+def _seconds_until(target: datetime, now: datetime) -> float:
+    """Real elapsed seconds — via UTC, since a shared tzinfo compares
+    as wall clock and would misread a DST boundary."""
+    return (target.astimezone(UTC) - now.astimezone(UTC)).total_seconds()
 
 
-def test_next_delay_retires_job_past_end_at() -> None:
-    """Once end_at is in the past, _next_delay returns None so the
-    loop transitions the job to DONE. Without this, a "for today only"
-    alarm would keep ticking tomorrow."""
-    past = datetime.now() - timedelta(seconds=1)
-    schedule = Schedule.every(60, end_at=past)
-    delay = SchedulerService._next_delay(schedule, last_fire_at=None)
-    assert delay is None
+def test_next_fire_waits_for_start_at_on_first_fire() -> None:
+    """An interval job with a future start_at fires at start_at, not
+    ``interval_seconds`` after registration. The "every minute starting
+    at 1am" case."""
+    schedule = Schedule.every(60)
+    now = _now_for(schedule)
+    schedule = Schedule.every(
+        60, start_at=(now + timedelta(minutes=10)).replace(tzinfo=None)
+    )
+    nxt = SchedulerService._next_fire_at(schedule, None, now)
+    assert nxt is not None
+    assert 9 * 60 < _seconds_until(nxt, now) <= 10 * 60 + 5
 
 
-def test_next_delay_clamps_to_daily_window_when_outside() -> None:
-    """Outside the window, next fire is pushed to the NEXT window
-    start (today if we haven't hit it yet, tomorrow otherwise). This
-    is the "every minute from 1am to 2am every day" case — if it's
-    noon, the next fire isn't noon+60s, it's 1am tomorrow."""
-    # Pick a window known to be in the past relative to now, regardless
-    # of what time the test runs — 00:00 to 00:01. The "next valid"
-    # is tomorrow at 00:00.
+def test_next_fire_does_not_wait_when_start_at_is_past() -> None:
+    """A past start_at must not delay the first fire — the window has
+    opened, so the normal cadence applies immediately."""
+    schedule = Schedule.every(60)
+    now = _now_for(schedule)
+    schedule = Schedule.every(
+        60, start_at=(now - timedelta(hours=1)).replace(tzinfo=None)
+    )
+    nxt = SchedulerService._next_fire_at(schedule, None, now)
+    assert nxt is not None
+    assert _seconds_until(nxt, now) <= 60.0
+
+
+def test_next_fire_retires_job_past_end_at() -> None:
+    """Once end_at is past, the next fire is None so the loop reaches
+    DONE. Without this a "for today only" alarm ticks tomorrow."""
+    schedule = Schedule.every(60)
+    now = _now_for(schedule)
+    schedule = Schedule.every(
+        60, end_at=(now - timedelta(seconds=1)).replace(tzinfo=None)
+    )
+    assert SchedulerService._next_fire_at(schedule, None, now) is None
+
+
+def test_next_fire_clamps_to_daily_window_when_outside() -> None:
+    """Outside the window the next fire is pushed to the next window
+    start. The "every minute from 1am to 2am daily" case: at noon the
+    next fire is 1am tomorrow, not noon+60s."""
     schedule = Schedule.every(
         60,
         window_start_time=dtime(0, 0),
         window_end_time=dtime(0, 1),
     )
-    # last_fire_at right now so natural = now + 60s, definitely outside
-    # the one-minute window at midnight (unless the test runs in that
-    # one minute — accept either branch).
-    now = datetime.now()
-    delay = SchedulerService._next_delay(schedule, last_fire_at=now)
-    assert delay is not None
-    # Either (rare) inside the window this exact minute, or clamped to
-    # tomorrow 00:00 which is well over an hour out.
+    now = _now_for(schedule)
+    nxt = SchedulerService._next_fire_at(schedule, now, now)
+    assert nxt is not None
     if not (now.hour == 0 and now.minute == 0):
-        # Any time except exactly 00:00 should land at tomorrow 00:00.
-        # Minimum delay to "tomorrow 00:00" is at least several
-        # minutes; bound loosely to avoid flake.
-        assert delay > 60.0
+        assert _seconds_until(nxt, now) > 60.0
 
 
-def test_next_delay_honors_window_when_inside() -> None:
-    """Inside the window, the interval applies normally. A 60-second
-    interval job whose window spans "all day" behaves exactly as a
-    windowless job."""
-    # 24-hour window: 00:00:00 to 23:59:59 — we're always inside.
+def test_next_fire_honors_window_when_inside() -> None:
+    """Inside the window the interval applies normally — an all-day
+    window behaves exactly like no window at all."""
     schedule = Schedule.every(
         60,
         window_start_time=dtime(0, 0),
         window_end_time=dtime(23, 59, 59),
     )
-    last_fire = datetime.now() - timedelta(seconds=10)
-    delay = SchedulerService._next_delay(schedule, last_fire_at=last_fire)
-    # 60s interval, minus 10s since last fire → ~50s remaining.
-    assert delay is not None
-    assert 45 <= delay <= 60
+    now = _now_for(schedule)
+    last_fire = now - timedelta(seconds=10)
+    nxt = SchedulerService._next_fire_at(schedule, last_fire, now)
+    assert nxt is not None
+    assert 45 <= _seconds_until(nxt, now) <= 60
 
 
-def test_next_delay_once_retires_after_fire() -> None:
-    """ONCE: first call returns the delay; second call (with
-    last_fire_at set) returns None so the loop exits cleanly."""
+def test_next_fire_once_retires_after_firing() -> None:
+    """A one-shot yields its delay first, then None so the loop exits."""
     schedule = Schedule.once_after(30)
-    first = SchedulerService._next_delay(schedule, last_fire_at=None)
-    assert first == 30
+    now = _now_for(schedule)
+    first = SchedulerService._next_fire_at(schedule, None, now)
+    assert first is not None
+    assert _seconds_until(first, now) == pytest.approx(30, abs=1)
 
-    after_fire = SchedulerService._next_delay(
-        schedule, last_fire_at=datetime.now()
-    )
-    assert after_fire is None
+    assert SchedulerService._next_fire_at(schedule, now, now) is None
+
+
+def test_next_fire_cron_expression_lands_on_the_expression() -> None:
+    schedule = Schedule.cron("0 3 * * *")
+    now = _now_for(schedule)
+    nxt = SchedulerService._next_fire_at(schedule, None, now)
+    assert nxt is not None
+    assert (nxt.hour, nxt.minute) == (3, 0)
+
+
+def test_next_fire_applies_jitter_within_bounds() -> None:
+    schedule = Schedule.cron("0 3 * * *", jitter_seconds=30)
+    now = _now_for(schedule)
+    plain = Schedule.cron("0 3 * * *")
+    base = SchedulerService._next_fire_at(plain, None, now)
+    jittered = SchedulerService._next_fire_at(schedule, None, now)
+    assert base is not None and jittered is not None
+    offset = _seconds_until(jittered, base)
+    assert 0 <= offset <= 30
 
 
 def test_clamp_to_daily_window_before_start_jumps_to_today() -> None:
@@ -1503,8 +1559,7 @@ async def test_load_persisted_jobs_drops_expired_recurring_bounds() -> None:
             "retired": {
                 "id": "retired",
                 "name": "retired",
-                "schedule_type": "interval",
-                "interval_seconds": 60,
+                "expression": "@every 60s",
                 "start_at": "",
                 "end_at": past,
                 "window_start_time": "",
@@ -1622,8 +1677,7 @@ async def test_persistence_drops_expired_one_shot_timers() -> None:
             "expired": {
                 "id": "expired",
                 "name": "expired",
-                "schedule_type": "once",
-                "interval_seconds": 60,
+                "expression": "@once+60s",
                 "owner": "u1",
                 "action": {"type": "event", "message": "stale"},
                 "created_at": past_fire_at,
@@ -1647,6 +1701,43 @@ async def test_persistence_drops_expired_one_shot_timers() -> None:
     await svc._load_persisted_jobs()
     assert "expired" not in svc._jobs
     assert "expired" not in stored.get("scheduler_jobs", {})
+
+
+@pytest.mark.asyncio
+async def test_persistence_skips_rows_predating_the_cron_migration() -> None:
+    """A pre-0007 row has no expression. Guessing one could turn a
+    one-shot into a job that fires forever, so it is skipped and left in
+    storage for the migration to convert."""
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "legacy": {
+                "id": "legacy",
+                "name": "legacy",
+                "schedule_type": "once",
+                "interval_seconds": 60,
+                "owner": "u1",
+                "action": {"type": "event", "message": "stale"},
+            },
+        },
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data  # type: ignore[assignment]
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)  # type: ignore[call-overload]
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+
+    assert "legacy" not in svc._jobs
+    # Not deleted — the migration still needs to convert it.
+    assert "legacy" in stored["scheduler_jobs"]
 
 
 # --- Config live reload ---
@@ -1904,3 +1995,405 @@ def test_acl_scheduler_rpc_defaults() -> None:
     assert resolve_default_rpc_level("scheduler.job.enable") == 0
     assert resolve_default_rpc_level("scheduler.job.disable") == 0
     assert resolve_default_rpc_level("scheduler.job.run_now") == 0
+
+
+def _make_job(name: str, schedule: Schedule, callback: Any) -> Any:
+    """Build an internal _Job directly, for engine-level tests."""
+    from gilbert.core.services.scheduler import _Job
+
+    return _Job(name=name, schedule=schedule, callback=callback)
+
+
+
+# --- Catch-up, overlap, and suspend resilience ---
+
+
+class _RecordingStorage:
+    """Minimal in-memory storage that records fire history."""
+
+    def __init__(self, seed: dict[str, dict[str, Any]] | None = None) -> None:
+        self.data: dict[str, dict[str, Any]] = seed or {}
+
+    async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+        self.data.setdefault(coll, {})[key] = data
+
+    async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+        return self.data.get(coll, {}).get(key)
+
+    async def delete(self, coll: str, key: str) -> None:
+        self.data.get(coll, {}).pop(key, None)
+
+    async def query(self, q: Any) -> list[dict[str, Any]]:
+        return list(self.data.get(q.collection, {}).values())
+
+
+def _fire_state(name: str, when: datetime) -> dict[str, dict[str, Any]]:
+    return {
+        "scheduler_job_state": {
+            name: {
+                "id": name,
+                "name": name,
+                "last_fire_at": when.astimezone(UTC).isoformat(),
+            }
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_catch_up_skip_does_not_fire_for_missed_occurrences() -> None:
+    """Real cron behaviour: a fire missed during downtime is lost."""
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage(  # type: ignore[assignment]
+        _fire_state("j", datetime.now(UTC) - timedelta(days=2))
+    )
+    calls = 0
+
+    async def _cb() -> None:
+        nonlocal calls
+        calls += 1
+
+    schedule = Schedule.daily_at(3, catch_up=CatchUpPolicy.SKIP)
+    job = _make_job("j", schedule, _cb)
+    await svc._run_catch_up(job, datetime.now(UTC) - timedelta(days=2))
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_catch_up_once_fires_exactly_one_make_up_run() -> None:
+    """Two days of missed daily fires produce ONE catch-up, not two."""
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage()  # type: ignore[assignment]
+    calls = 0
+
+    async def _cb() -> None:
+        nonlocal calls
+        calls += 1
+
+    schedule = Schedule.daily_at(3, catch_up=CatchUpPolicy.ONCE)
+    job = _make_job("j", schedule, _cb)
+    await svc._run_catch_up(job, datetime.now(UTC) - timedelta(days=2))
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_catch_up_backfill_replays_every_missed_occurrence() -> None:
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage()  # type: ignore[assignment]
+    calls = 0
+
+    async def _cb() -> None:
+        nonlocal calls
+        calls += 1
+
+    schedule = Schedule.hourly_at(0, catch_up=CatchUpPolicy.BACKFILL)
+    job = _make_job("j", schedule, _cb)
+    await svc._run_catch_up(job, datetime.now(UTC) - timedelta(hours=5))
+    # Five hours of downtime — between 4 and 6 hourly boundaries elapsed
+    # depending on where "now" sits inside the hour.
+    assert 4 <= calls <= 6
+
+
+@pytest.mark.asyncio
+async def test_catch_up_backfill_is_capped() -> None:
+    """A fast job plus long downtime must not fire unboundedly."""
+    schedule = Schedule.every(1, catch_up=CatchUpPolicy.BACKFILL)
+    missed = SchedulerService._missed_fires(
+        schedule,
+        datetime.now(UTC) - timedelta(days=30),
+        datetime.now(UTC),
+        limit=100,
+    )
+    assert len(missed) == 100
+
+
+@pytest.mark.asyncio
+async def test_catch_up_does_nothing_without_recorded_history() -> None:
+    """A fresh install has no fire history and must not fire on boot."""
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage()  # type: ignore[assignment]
+    assert await svc._load_last_fire_at("never-run") is None
+
+
+@pytest.mark.asyncio
+async def test_overlap_skip_drops_a_fire_while_one_is_in_flight() -> None:
+    svc = SchedulerService()
+    calls = 0
+
+    async def _cb() -> None:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.2)
+
+    job = _make_job("j", Schedule.every(1, overlap=OverlapPolicy.SKIP), _cb)
+    svc._dispatch_fire(job)
+    await asyncio.sleep(0.02)
+    svc._dispatch_fire(job)  # previous still running -> dropped
+    await asyncio.sleep(0.3)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlap_queue_serialises_fires() -> None:
+    svc = SchedulerService()
+    concurrent = 0
+    peak = 0
+
+    async def _cb() -> None:
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        await asyncio.sleep(0.1)
+        concurrent -= 1
+
+    job = _make_job("j", Schedule.every(1, overlap=OverlapPolicy.QUEUE), _cb)
+    svc._dispatch_fire(job)
+    await asyncio.sleep(0.02)
+    svc._dispatch_fire(job)
+    await asyncio.sleep(0.4)
+    assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_overlap_concurrent_allows_simultaneous_fires() -> None:
+    svc = SchedulerService()
+    concurrent = 0
+    peak = 0
+
+    async def _cb() -> None:
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        await asyncio.sleep(0.1)
+        concurrent -= 1
+
+    job = _make_job(
+        "j", Schedule.every(1, overlap=OverlapPolicy.CONCURRENT), _cb
+    )
+    svc._dispatch_fire(job)
+    await asyncio.sleep(0.02)
+    svc._dispatch_fire(job)
+    await asyncio.sleep(0.3)
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_sleep_until_returns_immediately_for_a_past_target() -> None:
+    """The suspend case: waking to find the target already behind us."""
+    svc = SchedulerService()
+    started = asyncio.get_running_loop().time()
+    await svc._sleep_until(datetime.now(UTC) - timedelta(hours=2))
+    assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_sleep_until_is_chunked_not_one_long_sleep() -> None:
+    """A day-long wait must not become a single un-interruptible sleep,
+    or a host suspend would go unnoticed until it elapsed."""
+    svc = SchedulerService()
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _spy(delay: float, *a: Any, **kw: Any) -> None:
+        slept.append(delay)
+        raise asyncio.CancelledError
+
+    asyncio.sleep = _spy  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await svc._sleep_until(datetime.now(UTC) + timedelta(days=1))
+    finally:
+        asyncio.sleep = real_sleep  # type: ignore[assignment]
+
+    assert slept and slept[0] <= 60.0
+
+
+@pytest.mark.asyncio
+async def test_next_run_at_is_reported_for_a_running_job() -> None:
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+
+    async def _cb() -> None:
+        return None
+
+    svc.add_job("daily", Schedule.daily_at(3, 30), _cb)
+    await asyncio.sleep(0.05)
+    info = svc.get_job("daily")
+    assert info is not None
+    assert info.next_run_at
+    assert info.description == "daily at 03:30"
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_serialize_job_exposes_expression_and_next_run() -> None:
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+
+    async def _cb() -> None:
+        return None
+
+    svc.add_job("cronjob", Schedule.cron("0 9 * * MON-FRI"), _cb)
+    await asyncio.sleep(0.05)
+    payload = svc._serialize_job(svc.get_job("cronjob"))  # type: ignore[arg-type]
+    assert payload["schedule"]["expression"] == "0 9 * * MON-FRI"
+    assert payload["schedule"]["catch_up"] == "once"
+    assert payload["schedule"]["overlap"] == "skip"
+    assert payload["next_run_at"]
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_accepts_a_cron_expression() -> None:
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+
+    result = json.loads(
+        await svc.execute_tool(
+            "set_alarm",
+            {"name": "standup", "type": "cron", "cron": "0 9 * * MON-FRI"},
+        )
+    )
+    assert result["status"] == "set"
+    assert result["expression"] == "0 9 * * MON-FRI"
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_alarm_rejects_a_bad_cron_expression() -> None:
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+
+    result = json.loads(
+        await svc.execute_tool(
+            "set_alarm",
+            {"name": "bad", "type": "cron", "cron": "not a cron"},
+        )
+    )
+    assert "error" in result
+    assert "bad" not in svc._jobs
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_reusing_a_job_name_does_not_inherit_stale_fire_history() -> None:
+    """A one-shot retires once it has fired. Since job identity is the
+    name, a later timer reusing that name must not inherit the old
+    history — it would retire before ever firing."""
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage(  # type: ignore[assignment]
+        _fire_state("pizza", datetime.now(UTC) - timedelta(days=1))
+    )
+
+    schedule = Schedule.once_after(30)
+    await svc._persist_job("pizza", schedule, ScheduledAction(), "u1")
+
+    assert await svc._load_last_fire_at("pizza") is None
+    now = datetime.now(schedule.resolve_timezone())
+    assert SchedulerService._next_fire_at(schedule, None, now) is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_job_clears_its_fire_history() -> None:
+    svc = SchedulerService()
+    svc._storage = _RecordingStorage(  # type: ignore[assignment]
+        _fire_state("gone", datetime.now(UTC))
+    )
+    await svc._unpersist_job("gone")
+    assert await svc._load_last_fire_at("gone") is None
+
+
+@pytest.mark.asyncio
+async def test_load_does_not_drop_a_job_whose_end_at_is_future_in_its_own_tz() -> None:
+    """`end_at` is naive and belongs to the JOB's timezone, not the
+    host's. Comparing it against a bare datetime.now() drops still-valid
+    jobs whenever the two zones differ."""
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    # An hour from now in Pacific, written naive the way it is persisted.
+    end_at = (datetime.now(tz) + timedelta(hours=1)).replace(tzinfo=None)
+
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "pacific": {
+                "id": "pacific",
+                "name": "pacific",
+                "expression": "@every 60s",
+                "timezone": "America/Los_Angeles",
+                "end_at": end_at.isoformat(),
+                "owner": "u1",
+                "action": {"type": "event", "message": "x"},
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+            return stored.get(coll, {}).get(key)
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+
+    assert "pacific" in svc._jobs
+    assert "pacific" in stored["scheduler_jobs"]
+    await svc.stop()
+
+
+@pytest.mark.asyncio
+async def test_load_still_drops_a_job_whose_end_at_is_genuinely_past() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/Los_Angeles")
+    end_at = (datetime.now(tz) - timedelta(hours=1)).replace(tzinfo=None)
+
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_jobs": {
+            "done": {
+                "id": "done",
+                "name": "done",
+                "expression": "@every 60s",
+                "timezone": "America/Los_Angeles",
+                "end_at": end_at.isoformat(),
+                "owner": "u1",
+                "action": {"type": "event", "message": "x"},
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+            return stored.get(coll, {}).get(key)
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    svc = SchedulerService()
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+    await svc._load_persisted_jobs()
+
+    assert "done" not in svc._jobs
+    assert "done" not in stored["scheduler_jobs"]

@@ -53,30 +53,11 @@ function formatSchedule(schedule: Schedule): string {
   return suffix ? `${base} ${suffix}` : base;
 }
 
+/** The backend renders the summary from the parsed expression, so the
+ *  frontend never needs a cron parser. Fall back to the raw expression
+ *  if an older backend omits the description. */
 function formatScheduleBase(schedule: Schedule): string {
-  switch (schedule.type) {
-    case "interval": {
-      const s = schedule.interval_seconds;
-      if (s < 60) return `every ${s}s`;
-      if (s < 3600) return `every ${Math.round(s / 60)}m`;
-      if (s < 86400) return `every ${Math.round(s / 3600)}h`;
-      return `every ${Math.round(s / 86400)}d`;
-    }
-    case "daily":
-      return `daily at ${String(schedule.hour).padStart(2, "0")}:${String(
-        schedule.minute,
-      ).padStart(2, "0")}`;
-    case "hourly":
-      return `hourly at :${String(schedule.minute).padStart(2, "0")}`;
-    case "once": {
-      const s = schedule.interval_seconds;
-      if (s < 60) return `once in ${s}s`;
-      if (s < 3600) return `once in ${Math.round(s / 60)}m`;
-      return `once in ${Math.round(s / 3600)}h`;
-    }
-    default:
-      return schedule.type;
-  }
+  return schedule.description || schedule.expression;
 }
 
 function formatScheduleBounds(schedule: Schedule): string {
@@ -466,6 +447,20 @@ function JobDetails({ job }: { job: Job }) {
   return (
     <div className="space-y-3 text-xs">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <DetailField label="Expression" value={job.schedule.expression} />
+        <DetailField
+          label="Next run"
+          value={compactDatetime(job.next_run_at) || "—"}
+        />
+        <DetailField
+          label="Timezone"
+          value={job.schedule.timezone || "host local"}
+        />
+        <DetailField label="Catch-up" value={job.schedule.catch_up} />
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <DetailField label="Overlap" value={job.schedule.overlap} />
         <DetailField label="Owner" value={job.owner || "—"} />
         <DetailField label="Runs" value={String(job.run_count)} />
         <DetailField
@@ -476,7 +471,6 @@ function JobDetails({ job }: { job: Job }) {
               : "—"
           }
         />
-        <DetailField label="State" value={job.state} />
       </div>
 
       {hasBounds && (
