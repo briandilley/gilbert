@@ -555,7 +555,17 @@ class SchedulerService(Service):
         job.info.description = schedule.describe()
 
         last_fire_at = await self._load_last_fire_at(job.info.name)
-        if last_fire_at is not None:
+        if schedule.is_one_shot:
+            # "@reboot" means every reboot. A one-shot is registered
+            # afresh by whoever owns it — a service at boot, or a
+            # restored user timer — so a fire recorded by a *previous*
+            # process must not retire this registration. Without this,
+            # every service boot job fires exactly once ever and is dead
+            # on each later restart. A user timer that already elapsed
+            # is dropped at load time by its own persisted ``fire_at``,
+            # so ignoring the recorded fire here cannot resurrect one.
+            last_fire_at = None
+        elif last_fire_at is not None:
             await self._run_catch_up(job, last_fire_at)
 
         try:

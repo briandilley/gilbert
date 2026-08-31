@@ -363,6 +363,57 @@ async def test_zero_delay_one_shot_fires() -> None:
     await asyncio.wait_for(fired.wait(), timeout=2.0)
 
 
+async def test_boot_one_shot_refires_after_a_restart() -> None:
+    """A one-shot re-registered by a new process must fire again.
+
+    ``@reboot`` / ``Schedule.once_after(0)`` means "once per process
+    start", not "once for all time". A fire recorded by a *previous*
+    process was retiring the freshly-registered job, so every service
+    boot job (inbox, tasks, calendar, feeds) ran exactly once ever and
+    was dead on every subsequent restart. Expired user timers are
+    dropped by their own persisted ``fire_at`` at load time, not by
+    this state.
+    """
+    stored: dict[str, dict[str, Any]] = {
+        "scheduler_job_state": {
+            "boot-job": {
+                "id": "boot-job",
+                "name": "boot-job",
+                # A fire recorded by the previous process.
+                "last_fire_at": "2020-01-01T00:00:00+00:00",
+            }
+        }
+    }
+
+    class _FakeStorage:
+        async def get(self, coll: str, key: str) -> dict[str, Any] | None:
+            return stored.get(coll, {}).get(key)
+
+        async def put(self, coll: str, key: str, data: dict[str, Any]) -> None:
+            stored.setdefault(coll, {})[key] = data
+
+        async def delete(self, coll: str, key: str) -> None:
+            stored.get(coll, {}).pop(key, None)
+
+        async def query(self, q: Any) -> list[dict[str, Any]]:
+            return list(stored.get(q.collection, {}).values())
+
+    fired = asyncio.Event()
+
+    async def _cb() -> None:
+        fired.set()
+
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+    svc._storage = _FakeStorage()  # type: ignore[assignment]
+
+    svc.add_job("boot-job", Schedule.once_after(0), _cb, system=True)
+    await asyncio.wait_for(fired.wait(), timeout=2.0)
+    await svc.stop()
+
+
 async def test_one_shot_timer_fires() -> None:
     """A once-after timer should execute and reach DONE state."""
     fired = asyncio.Event()
