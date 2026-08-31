@@ -342,6 +342,27 @@ async def test_run_now(service: SchedulerService) -> None:
     callback.assert_awaited_once()
 
 
+async def test_zero_delay_one_shot_fires() -> None:
+    """``Schedule.once_after(0)`` — every service's boot job — must run.
+
+    Regression: the cron engine treated a zero delay as "already
+    past" and retired the job without ever firing it, silently
+    stranding inbox/tasks/calendar/feeds boot work.
+    """
+    fired = asyncio.Event()
+
+    async def _cb() -> None:
+        fired.set()
+
+    svc = SchedulerService()
+    resolver = AsyncMock(spec=ServiceResolver)
+    resolver.get_capability.return_value = None
+    await svc.start(resolver)
+
+    svc.add_job("boot", Schedule.once_after(0), _cb, system=True)
+    await asyncio.wait_for(fired.wait(), timeout=2.0)
+
+
 async def test_one_shot_timer_fires() -> None:
     """A once-after timer should execute and reach DONE state."""
     fired = asyncio.Event()

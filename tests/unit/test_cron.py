@@ -453,6 +453,27 @@ def test_reboot_is_zero_delay_once() -> None:
     assert expr.once_delay_seconds == 0.0
 
 
+def test_zero_delay_once_fires_immediately() -> None:
+    """``@reboot`` / ``@once+0s`` must fire at the anchor, not never.
+
+    The delay is zero, so the fire instant *equals* the anchor. A
+    strict "must be after" comparison retires the job before it has
+    ever run — which silently stranded every boot job in the app.
+    """
+    for raw in ("@reboot", "@once", "@once+0s"):
+        expr = parse(raw)
+        anchor = _at(2026, 4, 1, 12, 0)
+        assert expr.next_after(anchor, LA, anchor=anchor) == anchor, raw
+
+
+def test_zero_delay_once_still_retires_after_its_moment() -> None:
+    """Firing at the anchor must not make it fire forever."""
+    expr = parse("@reboot")
+    anchor = _at(2026, 4, 1, 12, 0)
+    later = anchor + timedelta(seconds=1)
+    assert expr.next_after(later, LA, anchor=anchor) is None
+
+
 def test_once_accepts_bare_seconds() -> None:
     assert parse("@once+45").once_delay_seconds == 45.0
 

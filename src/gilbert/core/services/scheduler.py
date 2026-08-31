@@ -662,6 +662,13 @@ class SchedulerService(Service):
         if policy is CatchUpPolicy.SKIP:
             return
 
+        # A one-shot that has already fired is retired — there is
+        # nothing to make up, and enumerating "missed" occurrences of a
+        # zero-delay one-shot would not advance the cursor, yielding
+        # ``limit`` duplicate fires.
+        if schedule.is_one_shot:
+            return
+
         tz = schedule.resolve_timezone()
         now = datetime.now(tz)
         limit = 1 if policy is CatchUpPolicy.ONCE else _MAX_BACKFILL_FIRES

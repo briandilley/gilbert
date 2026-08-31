@@ -222,8 +222,14 @@ class CronExpression:
             if base.tzinfo is None:
                 base = base.replace(tzinfo=zone)
             candidate = base + timedelta(seconds=self.once_delay_seconds)
-            # One-shot: once the moment has passed, it never fires again.
-            if candidate.astimezone(UTC) <= after.astimezone(UTC):
+            # One-shot: once the moment has *passed*, it never fires
+            # again. The comparison is strict so that a fire instant
+            # landing exactly on ``after`` still counts as due — which
+            # is the only case a zero-delay ``@reboot``/``@once+0s``
+            # ever produces. Retirement after an actual fire is the
+            # scheduler's job (it stops consulting a one-shot once a
+            # fire is recorded), not this comparison's.
+            if candidate.astimezone(UTC) < after.astimezone(UTC):
                 return None
             return candidate.astimezone(zone)
 
