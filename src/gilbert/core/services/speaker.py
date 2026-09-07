@@ -47,6 +47,23 @@ _ALIAS_COLLECTION = "speaker_aliases"
 # Magic aliases that resolve to the caller's own browser
 _MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
 
+# Magic aliases that expand to *every* known speaker. Broadcast has to be
+# sayable: without an explicit token the model can only omit ``speakers``,
+# and an omitted list falls back to the sticky last-used set — so "announce
+# everywhere" used to land on whichever single speaker was addressed last.
+_ALL_SPEAKER_ALIASES = frozenset(
+    {
+        "all",
+        "all speakers",
+        "every speaker",
+        "everywhere",
+        "everyone",
+        "the house",
+        "whole house",
+        "house",
+    }
+)
+
 # Periodic speaker-cache refresh. Backends like Sonos use async
 # zeroconf discovery that finishes after ``initialize()`` returns;
 # this keeps ``cached_speakers`` close to live so settings-page
@@ -725,7 +742,14 @@ class SpeakerService(Service):
         return None
 
     async def resolve_speaker_names(self, names: list[str]) -> list[str]:
-        """Resolve a list of speaker names/aliases to speaker_ids."""
+        """Resolve a list of speaker names/aliases to speaker_ids.
+
+        A broadcast token anywhere in ``names`` (see ``_ALL_SPEAKER_ALIASES``)
+        expands to every speaker the caller can see and short-circuits the
+        rest of the list — "all" plus a room name is still "all".
+        """
+        if any(n.strip().lower() in _ALL_SPEAKER_ALIASES for n in names):
+            return [s.speaker_id for s in await self.list_speakers()]
         ids = []
         for name in names:
             sid = await self.resolve_speaker_name(name)
@@ -733,6 +757,16 @@ class SpeakerService(Service):
                 raise KeyError(f"Unknown speaker or alias: {name!r}")
             ids.append(sid)
         return ids
+
+    async def _display_names_for(self, speaker_ids: list[str]) -> list[str]:
+        """Map namespaced speaker ids back to display names for reporting.
+
+        Ids with no matching speaker (stale sticky targets, a backend that
+        went away) fall through as the raw id so they stay visible rather
+        than silently vanishing from the report.
+        """
+        by_id = {s.speaker_id: s.name for s in await self.list_speakers()}
+        return [by_id.get(sid, sid) for sid in speaker_ids]
 
     def _route_id(self, speaker_id: str) -> tuple[SpeakerBackend, str]:
         """Split a namespaced speaker id and return ``(backend, native_id)``.
@@ -1233,11 +1267,16 @@ class SpeakerService(Service):
         speaker_names: list[str] | None = None,
         volume: int | None = None,
         context: str = "",
+        speaker_ids: list[str] | None = None,
     ) -> str:
         """Announce text over speakers using TTS.
 
         If no speaker_names are given, falls back to the configured
         default announce speakers (or all speakers if that's also empty).
+
+        ``speaker_ids`` lets a caller that has already resolved its targets
+        (notably the ``announce`` tool, which reports them back to the model)
+        skip name resolution instead of running it twice.
 
         Announcements are serialized **per speaker**, not globally —
         two concurrent announcements that target disjoint speaker sets
@@ -1254,7 +1293,11 @@ class SpeakerService(Service):
         # lock set is known before we start acquiring. An empty set
         # means no speakers to announce on — let _announce_inner handle
         # the degenerate case without acquiring any locks.
-        target_ids = await self._resolve_target_ids(speaker_names)
+        target_ids = (
+            list(speaker_ids)
+            if speaker_ids is not None
+            else await self._resolve_target_ids(speaker_names)
+        )
         self._check_browser_target_permissions(target_ids)
         if not target_ids:
             return await self._announce_inner(
@@ -1347,7 +1390,10 @@ class SpeakerService(Service):
         audio_url = self.audio_url(str(file_path.resolve()))
         await self.play_on_speakers(
             uri=audio_url,
-            speaker_names=speaker_names,
+            # Pass the ids we already resolved (and snapshotted) rather than
+            # the raw names — re-resolving here can pick a different target
+            # set than the one holding the announce locks.
+            speaker_ids=target_ids,
             volume=effective_volume,
             title=f"Announcement: {text[:50]}",
             announce=True,
@@ -1696,7 +1742,8 @@ class SpeakerService(Service):
                     "Announce a message over speakers using text-to-speech. "
                     "This is the primary tool for speaking text out loud — it handles everything: "
                     "generates audio via TTS, groups speakers if needed, sets volume, and plays. "
-                    "If no speakers specified, uses last-used speakers or all. "
+                    'To announce on EVERY speaker, pass speakers: ["all"] — omitting the '
+                    "list instead reuses the last-used speakers, which is usually a single room. "
                     "Use this instead of 'speak' when you want audio played on speakers. "
                     'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
@@ -1709,7 +1756,11 @@ class SpeakerService(Service):
                     ToolParameter(
                         name="speakers",
                         type=ToolParameterType.ARRAY,
-                        description="Speaker names or aliases. If omitted, uses last-used speakers or all.",
+                        description=(
+                            'Speaker names or aliases. Use ["all"] (or "everywhere") '
+                            "to announce on every speaker. If omitted, reuses the "
+                            "last-used speakers, falling back to all."
+                        ),
                         required=False,
                     ),
                     ToolParameter(
@@ -1926,12 +1977,32 @@ class SpeakerService(Service):
         volume: int | None = arguments.get("volume")
         context: str = arguments.get("context", "") or ""
 
+        # Resolve first so the response can name the speakers we actually
+        # played on. A silent narrowing (e.g. the sticky last-used set
+        # swallowing a broadcast) is then visible in the tool result
+        # instead of hiding behind a bare "announced".
+        try:
+            target_ids = await self._resolve_target_ids(speaker_names or None)
+        except KeyError as e:
+            return json.dumps({"status": "error", "error": str(e)})
+
+        target_names = await self._display_names_for(target_ids)
+        if not target_ids:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "No speakers available to announce on.",
+                    "speakers": [],
+                }
+            )
+
         try:
             file_path = await self.announce(
                 text=text,
                 speaker_names=speaker_names or None,
                 volume=volume,
                 context=context,
+                speaker_ids=target_ids,
             )
         except PermissionError as e:
             return json.dumps({"status": "error", "error": str(e)})
@@ -1941,6 +2012,7 @@ class SpeakerService(Service):
         return json.dumps(
             {
                 "status": "announced",
+                "speakers": target_names,
                 "text": text,
                 "audio_file": file_path,
             }
@@ -1966,12 +2038,16 @@ class SpeakerService(Service):
 
         try:
             await self.group_speakers(speaker_ids)
-            # Fetch the group info for the response
+            # Report the group the requested speakers actually landed in.
+            # Backends order list_groups() however they like (the Sonos one
+            # sorts by name), so groups[0] is an unrelated group whenever
+            # more than one exists.
             groups = await self.list_speaker_groups()
-            # Find the group containing the first speaker (simplistic but works)
-            target_group = None
-            if groups:
-                target_group = groups[0]  # Most recently formed group
+            wanted = set(speaker_ids)
+            target_group = next(
+                (g for g in groups if wanted & set(g.member_ids)),
+                None,
+            )
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
