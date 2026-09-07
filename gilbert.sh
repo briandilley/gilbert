@@ -368,6 +368,37 @@ JSON
     return 0
 }
 
+# Rotate the stderr log if it has grown past STDERR_LOG_MAX_BYTES.
+#
+# Gilbert's Python logging rotates gilbert.log and ai_calls.log itself, but
+# this file is written by the shell (``tee -a`` below), so nothing in-process
+# can bound it. Without this it just grows: it reached 734MB alongside a
+# 780MB gilbert.log when a broken integration logged on every poll.
+#
+# Called once per supervisor start rather than continuously — the file only
+# grows while Gilbert runs, and a restart is the natural rotation point.
+rotate_stderr_log() {
+    local log="$1"
+    local max_bytes="${STDERR_LOG_MAX_BYTES:-52428800}"   # 50 MB
+    local keep="${STDERR_LOG_BACKUPS:-3}"
+
+    [ -f "$log" ] || return 0
+
+    local size
+    size=$(wc -c < "$log" 2>/dev/null || echo 0)
+    [ "$size" -gt "$max_bytes" ] || return 0
+
+    echo "Rotating $log (${size} bytes)"
+    # Drop the oldest, shuffle the rest down.
+    [ -f "$log.$keep" ] && rm -f "$log.$keep"
+    local i
+    for (( i = keep - 1; i >= 1; i-- )); do
+        [ -f "$log.$i" ] && mv -f "$log.$i" "$log.$((i + 1))"
+    done
+    mv -f "$log" "$log.1"
+}
+
+
 run_gilbert_supervised() {
     # Supervisor loop: run Gilbert, inspect its exit code, restart on
     # ``RESTART_EXIT_CODE`` (re-syncing the venv first so new plugin
@@ -381,6 +412,7 @@ run_gilbert_supervised() {
 
     refresh_std_plugins
     mkdir -p "$(dirname "$stderr_log_abs")"
+    rotate_stderr_log "$stderr_log_abs"
 
     while true; do
         if [ "$SUPERVISOR_STOP" = "true" ]; then

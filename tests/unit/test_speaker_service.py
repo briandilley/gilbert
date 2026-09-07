@@ -1367,3 +1367,161 @@ async def test_tool_list_groups_returns_namespaced_ids(
         assert mid.startswith("stub:"), (
             f"list_speaker_groups tool must return namespaced member_ids, got {mid}"
         )
+
+
+# ---------------------------------------------------------------------------
+# "Announce everywhere" targeting
+#
+# Regression: asking Gilbert to "announce on all speakers" played on exactly
+# one speaker. The model omits ``speakers`` (the tool description said an
+# omitted list means "last-used speakers or all"), and _resolve_target_ids
+# prefers the sticky ``_last_speaker_ids`` over the full speaker list — so a
+# broadcast request silently narrowed to whichever speaker was used last,
+# while the tool still reported ``{"status": "announced"}``.
+# ---------------------------------------------------------------------------
+
+
+def _make_simple_tts() -> MagicMock:
+    from gilbert.core.services.tts import TTSService
+
+    mock = MagicMock(spec=TTSService)
+    mock.synthesize = AsyncMock(
+        return_value=SynthesisResult(
+            audio=b"fake-audio", format=AudioFormat.MP3, characters_used=10
+        )
+    )
+    return mock
+
+
+@pytest.mark.parametrize("token", ["all", "All Speakers", "everywhere", "every speaker"])
+async def test_announce_all_token_targets_every_speaker(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+    token: str,
+) -> None:
+    """An explicit "all" token fans the announcement out to every speaker."""
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, _make_simple_tts(), tmp_path, monkeypatch
+    )
+
+    await service.announce("dinner is ready", speaker_names=[token])
+
+    req = stub_backend.last_play_request
+    assert req is not None, "expected the backend to receive a play request"
+    assert sorted(req.speaker_ids) == ["uid-1", "uid-2", "uid-3"], (
+        f"{token!r} must target every speaker, got {req.speaker_ids}"
+    )
+
+
+async def test_announce_all_overrides_sticky_last_speakers(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """The sticky last-used speaker set must not narrow an explicit "all".
+
+    This is the exact production failure: an earlier single-speaker command
+    left ``_last_speaker_ids == ["stub:uid-1"]``, and the following
+    "announce everywhere" played only there.
+    """
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, _make_simple_tts(), tmp_path, monkeypatch
+    )
+
+    await service.announce("first", speaker_names=["Speaker 1"])
+    assert service._last_speaker_ids == ["stub:uid-1"]
+
+    await service.announce("everyone now", speaker_names=["all"])
+
+    req = stub_backend.last_play_request
+    assert req is not None
+    assert sorted(req.speaker_ids) == ["uid-1", "uid-2", "uid-3"], (
+        f"'all' must beat the sticky last-used set, got {req.speaker_ids}"
+    )
+
+
+async def test_announce_tool_reports_which_speakers_it_played_on(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """The announce tool must name its targets so a too-narrow broadcast is
+    visible to the model (and therefore to the user) instead of a bare
+    ``{"status": "announced"}``."""
+    service = await _make_speaker_service_with_tts(
+        stub_backend, storage_service, _make_simple_tts(), tmp_path, monkeypatch
+    )
+
+    result = json.loads(
+        await service.execute_tool("announce", {"text": "hi", "speakers": ["all"]})
+    )
+
+    assert result["status"] == "announced"
+    assert sorted(result["speakers"]) == ["Speaker 1", "Speaker 2", "Speaker 3"], (
+        f"announce must report its resolved targets, got {result.get('speakers')!r}"
+    )
+
+
+async def test_announce_tool_reports_zero_targets_as_an_error(
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Announcing with no reachable speakers must not report success."""
+    empty = StubSpeakerBackend()
+    empty._speakers = []
+    service = await _make_speaker_service_with_tts(
+        empty, storage_service, _make_simple_tts(), tmp_path, monkeypatch
+    )
+
+    result = json.loads(await service.execute_tool("announce", {"text": "hi"}))
+
+    assert result["status"] != "announced", (
+        f"an announcement with no targets must not claim success: {result}"
+    )
+    assert result["speakers"] == []
+
+
+async def test_group_speakers_tool_reports_the_group_it_just_formed(
+    service: SpeakerService,
+    resolver: ServiceResolver,
+    stub_backend: StubSpeakerBackend,
+) -> None:
+    """``group_speakers`` must report the group containing the requested
+    speakers — not ``groups[0]``, which is the alphabetically-first group
+    because the Sonos backend returns ``list_groups()`` sorted by name."""
+    await service.start(resolver)
+
+    async def fake_list_groups() -> list[SpeakerGroup]:
+        return [
+            # Sorts first by name, but is NOT the group we just made.
+            SpeakerGroup(
+                group_id="aaa",
+                name="A Room",
+                coordinator_id="uid-3",
+                member_ids=["uid-3"],
+            ),
+            SpeakerGroup(
+                group_id="grp-1",
+                name="Test Group",
+                coordinator_id="uid-1",
+                member_ids=["uid-1", "uid-2"],
+            ),
+        ]
+
+    stub_backend.list_groups = fake_list_groups  # type: ignore[method-assign]
+
+    result = json.loads(
+        await service.execute_tool(
+            "group_speakers", {"speakers": ["Speaker 1", "Speaker 2"]}
+        )
+    )
+
+    assert result["group_id"] == "grp-1", (
+        f"expected the newly-formed group, got {result['group_id']!r}"
+    )
+    assert sorted(result["member_ids"]) == ["stub:uid-1", "stub:uid-2"]

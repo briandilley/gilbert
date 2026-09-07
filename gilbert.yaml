@@ -16,6 +16,11 @@ logging:
   file: .gilbert/gilbert.log
   ai_log_file: .gilbert/ai_calls.log
   loggers: {}
+  # Both log files rotate at max_bytes, keeping backup_count older copies,
+  # so a chatty or broken integration can't fill the disk. Worst case on
+  # disk is roughly (backup_count + 1) * max_bytes per log file.
+  max_bytes: 52428800  # 50 MB
+  backup_count: 5
 
 web:
   host: "0.0.0.0"
