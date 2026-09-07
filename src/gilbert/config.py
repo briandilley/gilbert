@@ -112,6 +112,12 @@ class LoggingConfig(BaseModel):
     ai_log_file: str = ".gilbert/ai_calls.log"
     loggers: dict[str, str] = {}
 
+    # Log files rotate rather than growing without bound. A single
+    # unreachable device can emit tens of thousands of identical lines a
+    # day; before rotation that produced a 780MB gilbert.log.
+    max_bytes: int = 50 * 1024 * 1024
+    backup_count: int = 5
+
 
 class TlsConfig(BaseModel):
     """TLS / HTTPS configuration."""

@@ -149,6 +149,8 @@ class Gilbert:
             log_file=self.config.logging.file,
             ai_log_file=self.config.logging.ai_log_file,
             loggers=self.config.logging.loggers,
+            max_bytes=self.config.logging.max_bytes,
+            backup_count=self.config.logging.backup_count,
         )
         logger.info("Starting Gilbert...")
 

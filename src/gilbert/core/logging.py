@@ -3,6 +3,7 @@
 import logging
 import re
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -196,19 +197,34 @@ def get_redacting_filter() -> RedactingFilter:
     return _REDACTING_FILTER
 
 
+# Rotation defaults, mirrored by ``LoggingConfig`` so a bare
+# ``setup_logging()`` call is bounded too.
+DEFAULT_MAX_BYTES = 50 * 1024 * 1024
+DEFAULT_BACKUP_COUNT = 5
+
+
 def setup_logging(
     level: str = "INFO",
     log_file: str | None = None,
     ai_log_file: str | None = None,
     loggers: dict[str, str] | None = None,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    backup_count: int = DEFAULT_BACKUP_COUNT,
 ) -> None:
     """Configure the logging system.
+
+    Both file handlers rotate. A plain ``FileHandler`` grows without bound,
+    and a single misconfigured integration is enough to fill a disk: one
+    unreachable doorbell controller logged ~17k identical warnings a day
+    and produced a 780MB ``gilbert.log`` before anyone looked.
 
     Args:
         level: Root log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
         log_file: Path to the general log file. None disables file logging.
         ai_log_file: Path to the AI API call log file. None disables.
         loggers: Per-logger level overrides (e.g., {"httpx": "WARNING"}).
+        max_bytes: Rotate a log file once it exceeds this size.
+        backup_count: How many rotated files to keep per log.
     """
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -238,7 +254,11 @@ def setup_logging(
     if log_file:
         path = Path(log_file).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(str(path))
+        file_handler = RotatingFileHandler(
+            str(path),
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+        )
         file_handler.setFormatter(
             logging.Formatter(
                 fmt="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
@@ -252,7 +272,11 @@ def setup_logging(
     if ai_log_file:
         path = Path(ai_log_file).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        ai_handler = logging.FileHandler(str(path))
+        ai_handler = RotatingFileHandler(
+            str(path),
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+        )
         ai_handler.setFormatter(
             logging.Formatter(
                 fmt="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
