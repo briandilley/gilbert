@@ -556,6 +556,52 @@ async def test_resolve_name_prefers_exact_case_match(
     assert await service.resolve_speaker_name("GARAGE") == "stub:uid-garage-upper"
 
 
+async def test_resolve_accepts_an_already_namespaced_speaker_id(
+    service: SpeakerService, resolver: ServiceResolver
+) -> None:
+    """A ``choices_from="speakers"`` dropdown stores ``speaker_id``.
+
+    Every config value picked in Settings therefore arrives at announce() as
+    an id rather than a name, so refusing ids makes those settings unusable.
+    """
+    await service.start(resolver)
+
+    assert await service.resolve_speaker_name("stub:uid-1") == "stub:uid-1"
+    assert await service.resolve_speaker_names(["stub:uid-1", "Speaker 2"]) == [
+        "stub:uid-1",
+        "stub:uid-2",
+    ]
+
+
+async def test_resolve_prefers_a_speaker_named_like_another_id(
+    service: SpeakerService,
+    stub_backend: StubSpeakerBackend,
+    resolver: ServiceResolver,
+) -> None:
+    """An exact name match still wins, however odd the name looks."""
+    stub_backend._speakers.append(
+        SpeakerInfo(
+            speaker_id="uid-odd",
+            name="stub:uid-1",
+            ip_address="192.168.1.30",
+            model="Sonos One",
+            volume=30,
+            state=PlaybackState.STOPPED,
+        )
+    )
+    await service.start(resolver)
+
+    assert await service.resolve_speaker_name("stub:uid-1") == "stub:uid-odd"
+
+
+async def test_resolve_rejects_an_unknown_namespaced_id(
+    service: SpeakerService, resolver: ServiceResolver
+) -> None:
+    await service.start(resolver)
+
+    assert await service.resolve_speaker_name("stub:uid-nope") is None
+
+
 async def test_resolve_name_raises_on_ambiguous_case(
     service: SpeakerService,
     stub_backend: StubSpeakerBackend,

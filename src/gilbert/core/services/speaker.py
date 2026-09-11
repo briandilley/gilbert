@@ -655,7 +655,10 @@ class SpeakerService(Service):
 
         Returns namespaced IDs (``<backend>:<native>``) consistent with
         ``list_speakers()`` so callers can feed the result to
-        ``_route_id`` without a separate namespace-stamping step.
+        ``_route_id`` without a separate namespace-stamping step. A
+        namespaced ID is also accepted as input and returned unchanged,
+        because that is what a ``choices_from="speakers"`` config value
+        holds.
         """
         # Magic aliases — resolve to the caller's own browser regardless of
         # whether they're actually active. Downstream dispatch is a silent
@@ -676,6 +679,16 @@ class SpeakerService(Service):
         for s in speakers:
             if s.name == name:
                 return s.speaker_id
+
+        # 1b) An already-namespaced speaker id. ``choices_from="speakers"``
+        # dropdowns store ``speaker_id`` as the value, so every speaker picked
+        # in Settings reaches announce() as an id rather than a name. Checked
+        # after the exact-name pass so a speaker actually named like an id
+        # still wins.
+        if ":" in name:
+            for s in speakers:
+                if s.speaker_id == name:
+                    return s.speaker_id
 
         # 2) Case-insensitive name match — but only if it's unique.
         ci_matches = [s for s in speakers if s.name.lower() == name.lower()]
