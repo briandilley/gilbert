@@ -22,6 +22,31 @@ STDERR_LOG=".gilbert/stderr.log"
 MAX_CRASH_RESTARTS=3
 CRASH_RESTART_DELAY=20
 
+# Records the supervisor's PID so ``./gilbert.sh stop`` has something to
+# signal. Claimed by the ``start``/``dev`` branch before the dependency
+# sync — that sync is slow enough that a user may well try to stop
+# Gilbert while it runs — and removed again by an EXIT trap.
+#
+# Deliberately NOT ``.gilbert/gilbert.pid``: that file belongs to Gilbert
+# itself (``_write_pid`` in ``src/gilbert/__main__.py``), which overwrites
+# it with the interpreter's PID once it has started.
+SUPERVISOR_PID_FILE=".gilbert/supervisor.pid"
+
+# Gilbert's own PID file, written by ``src/gilbert/__main__.py`` after
+# startup and removed on exit. Read-only here: it names the process that
+# has to receive the stop.
+APP_PID_FILE=".gilbert/gilbert.pid"
+
+# How long ``stop`` waits for Gilbert to exit before it gives up and
+# reports what is still alive. Gilbert is never SIGKILLed: it owns a
+# multi-gigabyte SQLite database, and a half-written commit is a worse
+# outcome than a slow shutdown.
+STOP_TIMEOUT=120
+
+# PID of the ``uv run python -m gilbert`` child while Gilbert is running,
+# so the INT/TERM trap can forward the signal to it. Empty between runs.
+GILBERT_CHILD_PID=""
+
 # Set by the SIGINT/SIGTERM trap so the supervisor loop knows to stop
 # even if the signal arrives between Gilbert runs (e.g. during a
 # ``uv sync``). Without this, hitting Ctrl+C during the sync would
@@ -368,6 +393,228 @@ JSON
     return 0
 }
 
+_supervisor_pid_file() {
+    echo "$SCRIPT_DIR/$SUPERVISOR_PID_FILE"
+}
+
+_pid_is_alive() {
+    [ -n "$1" ] || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    # ``kill -0`` also succeeds for a zombie, which has already exited and
+    # is only waiting for its parent to reap it. Count that as gone, or a
+    # stop waits out its whole timeout on a process that is finished.
+    local state
+    state=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ') || return 0
+    case "$state" in
+        Z*) return 1 ;;
+    esac
+    return 0
+}
+
+# True when $1 belongs to THIS checkout, so a second Gilbert
+# installation on the same machine is never signalled. Reading another
+# process's working directory needs /proc; without it we report false,
+# and ``stop`` falls back to the PID files alone instead of guessing.
+_pid_is_in_this_checkout() {
+    local cwd
+    cwd=$(readlink -f "/proc/$1/cwd" 2>/dev/null) || return 1
+    [ -n "$cwd" ] && [ "$cwd" = "$SCRIPT_DIR" ]
+}
+
+# True when $1 is a Gilbert interpreter process. The ``uv run`` wrapper
+# is excluded even though its command line also names python: uv passes a
+# signal of its own on to Gilbert, so signalling both turns the graceful
+# shutdown into a forced quit and Gilbert exits without closing the
+# database cleanly.
+_pid_is_gilbert_app() {
+    local args
+    args=$(ps -o args= -p "$1" 2>/dev/null) || return 1
+    case "$args" in
+        uv\ *|*/uv\ *) return 1 ;;
+        *python*\ -m\ gilbert*) return 0 ;;
+    esac
+    return 1
+}
+
+# Prints the PID of the running Gilbert: whatever its own PID file names,
+# plus anything found by command line, deduplicated. The PID file is the
+# reliable source; the search also catches an instance whose file was
+# lost.
+_gilbert_app_pids() {
+    local pid
+    {
+        pid=$(cat "$SCRIPT_DIR/$APP_PID_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && _pid_is_alive "$pid" && _pid_is_gilbert_app "$pid"; then
+            echo "$pid"
+        fi
+        for pid in $(pgrep -f 'python.* -m gilbert' 2>/dev/null || true); do
+            [ "$pid" = "$$" ] && continue
+            _pid_is_gilbert_app "$pid" || continue
+            _pid_is_in_this_checkout "$pid" || continue
+            echo "$pid"
+        done
+    } | sort -u -n
+}
+
+# Prints the PID of every supervisor (``./gilbert.sh start`` or ``dev``)
+# of this checkout. Left running, a supervisor reads Gilbert's shutdown as
+# a crash and relaunches it 20 seconds later.
+_gilbert_supervisor_pids() {
+    local pid
+    for pid in $(pgrep -f 'gilbert\.sh (start|dev)' 2>/dev/null || true); do
+        [ "$pid" = "$$" ] && continue
+        _pid_is_in_this_checkout "$pid" || continue
+        echo "$pid"
+    done | sort -u -n
+}
+
+_release_pid_file() {
+    local f
+    f=$(_supervisor_pid_file)
+    [ -f "$f" ] || return 0
+    # Only drop our own claim: a file naming some other PID belongs to a
+    # different supervisor.
+    [ "$(cat "$f" 2>/dev/null)" = "$$" ] || return 0
+    rm -f "$f"
+}
+
+claim_pid_file() {
+    local f
+    f=$(_supervisor_pid_file)
+    mkdir -p "$(dirname "$f")"
+    echo "$$" > "$f"
+    trap '_release_pid_file' EXIT
+}
+
+# Refuses to launch a second Gilbert against the same data directory. Two
+# instances fight over the SQLite database and the web server port, and
+# that is how ``.gilbert/gilbert.db`` was corrupted on 2026-09-28.
+assert_not_already_running() {
+    local f pid
+    f=$(_supervisor_pid_file)
+    if [ -f "$f" ]; then
+        pid=$(cat "$f" 2>/dev/null || true)
+        if _pid_is_alive "$pid"; then
+            echo "Gilbert is already running (supervisor PID $pid). Run './gilbert.sh stop' first." >&2
+            exit 1
+        fi
+        echo "Removing stale supervisor PID file (no process $pid)."
+        rm -f "$f"
+    fi
+    pid=$(_gilbert_app_pids | head -1)
+    if [ -n "$pid" ]; then
+        echo "Gilbert is already running (PID $pid). Run './gilbert.sh stop' first." >&2
+        exit 1
+    fi
+}
+
+# Passes a stop on to the running Gilbert. ``bash`` defers a trap until
+# the current foreground command returns, which is why the supervisor
+# launches Gilbert in the background and ``wait``s for it: the trap then
+# runs the moment the signal lands and this function gets to forward it.
+_forward_stop_to_child() {
+    SUPERVISOR_STOP=true
+    local app_pids kid
+    app_pids=$(_gilbert_app_pids)
+    if [ -n "$app_pids" ]; then
+        for kid in $app_pids; do
+            kill -TERM "$kid" 2>/dev/null || true
+        done
+        return 0
+    fi
+    # Gilbert has not reached the interpreter yet (uv is still resolving
+    # the environment) — stop the wrapper so the launch does not go on.
+    if _pid_is_alive "$GILBERT_CHILD_PID"; then
+        kill -TERM "$GILBERT_CHILD_PID" 2>/dev/null || true
+    fi
+}
+
+# ``./gilbert.sh stop``: SIGTERM Gilbert, wait for it to exit, and take
+# its supervisor down with it.
+#
+# Exactly one signal reaches Gilbert. A supervisor that owns a PID file
+# forwards the stop itself, so this only signals the supervisor; an older
+# supervisor does not forward, so Gilbert is signalled directly. Signal
+# both and Gilbert force-quits on the second one, skipping the clean
+# database close.
+stop_gilbert() {
+    local f pid t deadline alive forwards
+    local -a supervisors=() app_pids=() targets=()
+    f=$(_supervisor_pid_file)
+    forwards=false
+
+    if [ -f "$f" ]; then
+        pid=$(cat "$f" 2>/dev/null || true)
+        if _pid_is_alive "$pid"; then
+            supervisors+=("$pid")
+            forwards=true
+        else
+            echo "Removing stale supervisor PID file (no process $pid)."
+            rm -f "$f"
+        fi
+    fi
+    if [ "$forwards" = "false" ]; then
+        for t in $(_gilbert_supervisor_pids); do
+            supervisors+=("$t")
+        done
+    fi
+    for t in $(_gilbert_app_pids); do
+        app_pids+=("$t")
+    done
+
+    targets=("${supervisors[@]}" "${app_pids[@]}")
+    if [ "${#targets[@]}" -eq 0 ]; then
+        echo "Gilbert is not running."
+        return 0
+    fi
+
+    echo "Stopping Gilbert..."
+    if [ "${#supervisors[@]}" -gt 0 ]; then
+        echo "  supervisor PID(s): ${supervisors[*]}"
+    fi
+    if [ "${#app_pids[@]}" -gt 0 ]; then
+        echo "  gilbert PID(s): ${app_pids[*]}"
+    fi
+
+    # Supervisors first, so none of them reads Gilbert's exit as a crash
+    # and relaunches it.
+    for t in "${supervisors[@]}"; do
+        kill -TERM "$t" 2>/dev/null || true
+    done
+    if [ "$forwards" = "true" ]; then
+        echo "  signalled the supervisor, which forwards the stop to Gilbert"
+    else
+        for t in "${app_pids[@]}"; do
+            kill -TERM "$t" 2>/dev/null || true
+        done
+        echo "  signalled Gilbert directly (no supervisor to forward the stop)"
+    fi
+
+    deadline=$(( $(date +%s) + STOP_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        alive=false
+        for t in "${targets[@]}"; do
+            if _pid_is_alive "$t"; then
+                alive=true
+                break
+            fi
+        done
+        if [ "$alive" = "false" ]; then
+            rm -f "$f"
+            echo "Gilbert stopped."
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Gilbert did not exit within ${STOP_TIMEOUT}s. Still running:" >&2
+    for t in "${targets[@]}"; do
+        _pid_is_alive "$t" && ps -o pid=,args= -p "$t" >&2
+    done
+    echo "Not sending SIGKILL — it risks corrupting .gilbert/gilbert.db. Re-run './gilbert.sh stop' or investigate." >&2
+    return 1
+}
+
 run_gilbert_supervised() {
     # Supervisor loop: run Gilbert, inspect its exit code, restart on
     # ``RESTART_EXIT_CODE`` (re-syncing the venv first so new plugin
@@ -377,7 +624,7 @@ run_gilbert_supervised() {
     local exit_code
     local crash_count=0
     local stderr_log_abs="$SCRIPT_DIR/$STDERR_LOG"
-    trap 'SUPERVISOR_STOP=true' INT TERM
+    trap '_forward_stop_to_child' INT TERM
 
     refresh_std_plugins
     mkdir -p "$(dirname "$stderr_log_abs")"
@@ -412,8 +659,21 @@ run_gilbert_supervised() {
         local launch_start elapsed
         launch_start=$(date +%s)
         set +e
-        uv run python -m gilbert 2> >(tee -a "$stderr_log_abs" >&2)
+        # Launched in the background and waited on, rather than run in the
+        # foreground: bash holds a trap until the current foreground
+        # command returns, so a foreground launch would swallow the stop
+        # signal until Gilbert had already exited on its own.
+        uv run python -m gilbert 2> >(tee -a "$stderr_log_abs" >&2) &
+        GILBERT_CHILD_PID=$!
+        wait "$GILBERT_CHILD_PID"
         exit_code=$?
+        # A trap-interrupted ``wait`` returns 128+signo before the child
+        # is gone, so keep waiting for the real exit code.
+        while kill -0 "$GILBERT_CHILD_PID" 2>/dev/null; do
+            wait "$GILBERT_CHILD_PID"
+            exit_code=$?
+        done
+        GILBERT_CHILD_PID=""
         set -e
         elapsed=$(($(date +%s) - launch_start))
         echo "===== Gilbert exited with code $exit_code at $(date -Iseconds) (ran ${elapsed}s) =====" \
@@ -618,12 +878,16 @@ build_frontend() {
 
 case "$1" in
     start)
+        assert_not_already_running
+        claim_pid_file
         sync_python_deps
         check_pending_migrations
         build_frontend
         run_gilbert_supervised
         ;;
     dev)
+        assert_not_already_running
+        claim_pid_file
         sync_python_deps
         check_pending_migrations
         build_frontend
@@ -638,15 +902,7 @@ case "$1" in
         echo "Frontend built to src/gilbert/web/spa/"
         ;;
     stop)
-        PID_FILE=".gilbert/gilbert.pid"
-        if [ -f "$PID_FILE" ]; then
-            PID=$(cat "$PID_FILE")
-            echo "Stopping Gilbert (PID $PID)..."
-            kill "$PID" 2>/dev/null || echo "Process not running"
-            rm -f "$PID_FILE"
-        else
-            echo "No PID file found — Gilbert may not be running"
-        fi
+        stop_gilbert
         ;;
     update)
         # Pull latest from origin (refuses if dirty), update submodules,
