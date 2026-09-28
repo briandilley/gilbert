@@ -106,6 +106,27 @@ class ServiceManager(ServiceResolver):
                         logger.info("Service %s %s", name, reason)
                 break
 
+            # Hold back anyone whose *optional* capabilities are still on
+            # their way. ``get_by_capability`` only returns services whose
+            # ``start()`` has already returned, so a consumer that shares a
+            # wave with its optional provider resolves ``None`` — and a
+            # service that caches that answer loses the capability for the
+            # life of the process.
+            #
+            # This is a hint, never a requirement. A service is held back
+            # only while some other service can still make progress, so a
+            # cycle, a provider that never starts, and a capability nobody
+            # provides all fall through to starting anyway.
+            preferred = [
+                name
+                for name in ready
+                if not self._optional_caps_pending(
+                    remaining[name].service_info(), started_caps, remaining
+                )
+            ]
+            if preferred:
+                ready = preferred
+
             # Snapshot the wave so dict mutation during gather is safe.
             wave: list[tuple[str, Service, ServiceInfo]] = []
             for name in ready:
@@ -154,6 +175,26 @@ class ServiceManager(ServiceResolver):
         if not info.requires <= started_caps:
             return False
         return all(dep.capability in started_caps for dep in info.requires_enabled)
+
+    def _optional_caps_pending(
+        self,
+        info: ServiceInfo,
+        started_caps: set[str],
+        remaining: dict[str, Service],
+    ) -> bool:
+        """Is an optional capability this service wants still waiting to start?
+
+        True only when some *unstarted* service provides it. A capability
+        nobody provides, or whose provider has already run, is not pending —
+        waiting on either would stall startup for a capability that is never
+        going to arrive.
+        """
+        for cap in info.optional:
+            if cap in started_caps:
+                continue
+            if any(provider in remaining for provider in self._capabilities.get(cap, [])):
+                return True
+        return False
 
     def _unmet_enablement_reason(self, info: ServiceInfo) -> str | None:
         """Evaluate a service's enablement dependencies (ADR-0018).

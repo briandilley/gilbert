@@ -830,9 +830,9 @@ class WeatherService(Service, ToolProvider):
                 self._on_alert_event,
             )
 
-        notifications_svc = resolver.get_capability("notifications")
-        if isinstance(notifications_svc, NotificationProvider):
-            self._notifications = notifications_svc
+        # Optimistic. `notifications` is optional, so it may not be up yet;
+        # `_notification_service()` re-resolves on first use if that is so.
+        self._notification_service()
 
         scheduler_svc = resolver.get_capability("scheduler")
         if isinstance(scheduler_svc, SchedulerProvider):
@@ -1960,6 +1960,20 @@ class WeatherService(Service, ToolProvider):
         seen.intersection_update({a.alert_id for a in current_alerts})
         await self._persist_alert_dedup_one(dedup_key, seen)
 
+    def _notification_service(self) -> "NotificationProvider | None":
+        """The notification service, resolved late and remembered once found.
+
+        `notifications` is an optional capability, and an optional capability
+        can finish starting after this service does. Resolving it only in
+        start() therefore leaves it None for the life of the process, and
+        every severe-weather alert is dropped without a word in the log.
+        """
+        if self._notifications is None and self._resolver is not None:
+            svc = self._resolver.get_capability("notifications")
+            if isinstance(svc, NotificationProvider):
+                self._notifications = svc
+        return self._notifications
+
     async def _on_alert_event(self, event: Event) -> None:
         """Handle our own ``weather.alert.issued`` event — fan-out delivery.
 
@@ -1988,10 +2002,11 @@ class WeatherService(Service, ToolProvider):
         # matches the polled location key. v1 polls only the
         # service-default location; per-user location polling is
         # explicitly out of scope for this PR.
-        if self._notifications is not None:
+        notifications = self._notification_service()
+        if notifications is not None:
             for user_id in await self._users_for_alert(event):
                 with contextlib.suppress(Exception):
-                    await self._notifications.notify_user(
+                    await notifications.notify_user(
                         user_id=user_id,
                         message=message,
                         urgency=urgency,

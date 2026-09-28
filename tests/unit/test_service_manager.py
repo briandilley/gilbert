@@ -419,3 +419,98 @@ async def test_register_and_start(manager: ServiceManager) -> None:
     assert svc.started
     assert "late" in manager.started_services
     assert manager.get_by_capability("late_cap") is svc
+
+
+# --- Optional capabilities as a start-ordering hint ---
+
+
+class RecordingConsumer(StubService):
+    """Records what it could resolve at the moment its start() ran."""
+
+    def __init__(self, name: str, wants: str, **kwargs: object) -> None:
+        super().__init__(name, optional=frozenset({wants}), **kwargs)  # type: ignore[arg-type]
+        self._wants = wants
+        self.resolved_at_start: Service | None = None
+
+    async def start(self, resolver: ServiceResolver) -> None:
+        await super().start(resolver)
+        self.resolved_at_start = resolver.get_capability(self._wants)
+
+
+async def test_optional_provider_starts_before_its_consumer(
+    manager: ServiceManager,
+) -> None:
+    """An optional capability must be resolvable from start().
+
+    `get_by_capability` only returns services whose start() has already
+    returned, so without an ordering hint a consumer registered ahead of its
+    provider resolves None and silently loses the capability for good.
+    """
+    consumer = RecordingConsumer("consumer", wants="cap_b")
+    provider = StubService("provider", capabilities=frozenset({"cap_b"}))
+    manager.register(consumer)
+    manager.register(provider)
+
+    await manager.start_all()
+
+    assert consumer.resolved_at_start is provider
+
+
+async def test_optional_cycle_still_starts_everything(manager: ServiceManager) -> None:
+    """Two services that optionally want each other must not deadlock."""
+    a = StubService("a", capabilities=frozenset({"cap_a"}), optional=frozenset({"cap_b"}))
+    b = StubService("b", capabilities=frozenset({"cap_b"}), optional=frozenset({"cap_a"}))
+    manager.register(a)
+    manager.register(b)
+
+    await manager.start_all()
+
+    assert a.started and b.started
+
+
+async def test_optional_capability_nobody_provides_does_not_stall(
+    manager: ServiceManager,
+) -> None:
+    consumer = RecordingConsumer("consumer", wants="nobody_has_this")
+    manager.register(consumer)
+
+    await manager.start_all()
+
+    assert consumer.started
+    assert consumer.resolved_at_start is None
+
+
+async def test_consumer_starts_when_its_optional_provider_cannot(
+    manager: ServiceManager,
+) -> None:
+    """A provider stuck on an unmet requirement must not hold up a consumer."""
+    consumer = RecordingConsumer("consumer", wants="cap_b")
+    provider = StubService(
+        "provider",
+        capabilities=frozenset({"cap_b"}),
+        requires=frozenset({"never_published"}),
+    )
+    manager.register(consumer)
+    manager.register(provider)
+
+    await manager.start_all()
+
+    assert consumer.started
+    assert "provider" not in manager.started_services
+
+
+async def test_optional_hint_does_not_outrank_a_hard_requirement(
+    manager: ServiceManager,
+) -> None:
+    """`requires` still decides the waves; `optional` only orders within them."""
+    base = StubService("base", capabilities=frozenset({"cap_base"}))
+    consumer = RecordingConsumer("consumer", wants="cap_base")
+    dependent = StubService("dependent", requires=frozenset({"cap_base"}))
+    manager.register(consumer)
+    manager.register(dependent)
+    manager.register(base)
+
+    await manager.start_all()
+
+    assert consumer.resolved_at_start is base
+    assert dependent.started

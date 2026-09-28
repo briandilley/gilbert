@@ -83,7 +83,7 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
         self._catalog: dict[str, SkillCatalogEntry] = {}
         self._content_cache: dict[str, SkillContent] = {}
         self._resolver: ServiceResolver | None = None
-        self._acl_svc: Any = None
+        self._acl_svc: AccessControlProvider | None = None
         self._storage: Any = None
         user_dir = Path(self._user_dir)
         self._user_skills_dir = user_dir if user_dir.is_absolute() else Path.cwd() / user_dir
@@ -129,7 +129,9 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 )
 
         self._enabled = True
-        self._acl_svc = resolver.get_capability("access_control")
+        # Optimistic. `access_control` is optional, so it may not be up yet;
+        # `_acl()` re-resolves on first use if that is the case.
+        self._acl()
 
         from gilbert.interfaces.storage import StorageProvider
 
@@ -372,14 +374,12 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
                 continue
             result.append((key, e))
 
-        if user_ctx is not None and self._acl_svc is not None:
-            if isinstance(self._acl_svc, AccessControlProvider):
-                user_level = self._acl_svc.get_effective_level(user_ctx)
-                result = [
-                    (k, e)
-                    for k, e in result
-                    if user_level <= self._acl_svc.get_role_level(e.required_role)
-                ]
+        acl = self._acl()
+        if user_ctx is not None and acl is not None:
+            user_level = acl.get_effective_level(user_ctx)
+            result = [
+                (k, e) for k, e in result if user_level <= acl.get_role_level(e.required_role)
+            ]
         return result
 
     async def get_active_skills(self, conversation_id: str) -> list[str]:
@@ -923,14 +923,27 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
             return self._user_skills_dir / "users" / user_id
         return self._user_skills_dir
 
+    def _acl(self) -> AccessControlProvider | None:
+        """The access-control service, resolved late and remembered once found.
+
+        `access_control` is an optional capability here, and an optional
+        capability can finish starting after this service does. A lookup that
+        only runs in start() therefore returns None for the life of the
+        process, and every check below quietly degrades.
+        """
+        if self._acl_svc is None and self._resolver is not None:
+            svc = self._resolver.get_capability("access_control")
+            if isinstance(svc, AccessControlProvider):
+                self._acl_svc = svc
+        return self._acl_svc
+
     def _is_admin(self, user_id: str) -> bool:
         """Check if a user has admin role."""
-        if self._acl_svc is None:
-            return False
-        if not isinstance(self._acl_svc, AccessControlProvider):
+        acl = self._acl()
+        if acl is None:
             return False
         # Admin level is 0
-        return self._acl_svc.get_role_level("admin") >= 0
+        return acl.get_role_level("admin") >= 0
 
     # ── Blocking helpers (run in thread pool) ──────────────────────
 
@@ -1284,14 +1297,17 @@ class SkillService(Service, ToolProvider, WsHandlerProvider):
 
     def _is_admin_user(self, user_roles: list[str] | None) -> bool:
         """Check if user roles include admin-level access."""
-        if self._acl_svc is None:
-            return True  # No ACL = no restrictions
+        acl = self._acl()
+        if acl is None:
+            # An install with no access-control service at all has no roles to
+            # check against, so every caller is treated as an admin. Kept from
+            # the original, but it is now reached only when the capability is
+            # genuinely absent, not while it is still starting.
+            return True
         if not user_roles:
             return False
-        if not isinstance(self._acl_svc, AccessControlProvider):
-            return True
-        admin_level = self._acl_svc.get_role_level("admin")
-        user_level = min(self._acl_svc.get_role_level(r) for r in user_roles)
+        admin_level = acl.get_role_level("admin")
+        user_level = min(acl.get_role_level(r) for r in user_roles)
         return user_level <= admin_level
 
     async def _tool_read_skill_file(self, arguments: dict[str, Any]) -> str:
