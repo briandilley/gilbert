@@ -582,7 +582,10 @@ class TestEnhancedGreetTool:
         await greeting_service.execute_tool("greet", {"name": "Brian"})
 
         assert ai.calls
-        assert ai.calls[0]["user_message"] == "Custom prompt for Brian."
+        # The built prompt carries the guardrail instruction after it, so the
+        # template is the start of the message rather than all of it.
+        assert ai.calls[0]["user_message"].startswith("Custom prompt for Brian.")
+        assert "never ask for more information" in ai.calls[0]["user_message"].lower()
 
     @pytest.mark.asyncio
     async def test_enhanced_prompt_clearing_restores_default(
@@ -940,3 +943,114 @@ class TestGreetingCameraEvents:
             )
         )
         assert called == []
+
+
+class TestGreetingOutputGuard:
+    """The greeting that reaches the speakers must be a greeting.
+
+    On 2026-09-28 the model answered the greeting prompt with a request
+    for more information, and the whole thing was read out over the
+    Sonos speakers: "I'd be happy to help, but I need some details to
+    craft the perfect greeting for Eric! Could you tell me: ...". The
+    style setting tells the model to use the person's open issues and
+    logged time, and for a person no context provider knows about, those
+    details never arrive — so the model asked for them.
+    """
+
+    # Verbatim from .gilbert/console.log, 12:23:26.
+    CLARIFICATION = (
+        "I'd be happy to help, but I need some details to craft the perfect "
+        "greeting for Eric! Could you tell me:\n"
+        "\n"
+        "1. What day/tone would you like today? (witty, warm, dramatic)\n"
+        "2. What's Eric been working on recently?\n"
+        "3. Any time entries or shop shenanigans I should roast him about?\n"
+        "\n"
+        "Once I've got those details, I'll hit him with a greeting!"
+    )
+
+    def test_rejects_the_reply_that_was_spoken_aloud(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting(self.CLARIFICATION) is False
+
+    def test_accepts_a_plain_greeting(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("Morning, Eric — the shop missed you.") is True
+
+    def test_accepts_a_greeting_that_asks_a_rhetorical_question(self) -> None:
+        """A playful greeting may well end in a question mark."""
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("Eric! Ready to melt some copper today?") is True
+
+    def test_rejects_a_numbered_list(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("Greeting options:\n1. Hi Eric\n2. Yo Eric") is False
+
+    def test_rejects_more_than_one_paragraph(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("Morning, Eric.\n\nAnything else?") is False
+
+    def test_rejects_empty_and_overlong(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("") is False
+        assert _is_usable_greeting("   ") is False
+        assert _is_usable_greeting("Hi Eric. " * 100) is False
+
+    @pytest.mark.asyncio
+    async def test_arrival_greeting_falls_back_when_the_model_asks_for_details(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        resolver.caps["ai_chat"] = _FakeAISampling(content=self.CLARIFICATION)
+
+        greeting = await greeting_service._generate_greeting("Eric")
+
+        assert greeting == "Good morning, Eric!"
+
+    @pytest.mark.asyncio
+    async def test_group_greeting_falls_back_when_the_model_asks_for_details(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        resolver.caps["ai_chat"] = _FakeAISampling(content=self.CLARIFICATION)
+
+        greeting = await greeting_service._generate_group_greeting(["Eric", "Brian"])
+
+        assert greeting == "Good morning, Eric, and Brian!"
+
+    @pytest.mark.asyncio
+    async def test_enhanced_greeting_falls_back_when_the_model_asks_for_details(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        resolver.caps["ai_chat"] = _FakeAIChat(content=self.CLARIFICATION)
+
+        greeting = await greeting_service._generate_greeting_enhanced("Eric")
+
+        assert greeting == "Good morning, Eric!"
+
+    @pytest.mark.asyncio
+    async def test_prompt_forbids_asking_for_more_information(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """The prompt has to say so even when no context was collected.
+
+        The configured style tells the model to use details it was "given",
+        so with an empty context block it needs telling that missing
+        details are to be left out rather than asked about.
+        """
+        await greeting_service.start(resolver)
+        fake_ai = _FakeAISampling(content="Morning, Eric!")
+        resolver.caps["ai_chat"] = fake_ai
+
+        await greeting_service._generate_greeting("Eric", user_id="usr_eric")
+
+        prompt = fake_ai.calls[0]["messages"][0].content
+        assert "never ask for more information" in prompt.lower()
+        assert "spoken aloud" in prompt.lower()

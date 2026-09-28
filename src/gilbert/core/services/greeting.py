@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -84,6 +85,74 @@ _DEFAULT_CAMERA_ANNOUNCE_PROMPT = (
     "smoke = brief and urgent."
 )
 
+# Appended to every greeting prompt. The ``style`` setting tells the model
+# to use shop-work details "you are given" — open issues, logged time —
+# and for a person no GreetingContextProvider knows about, those details
+# never arrive. Without this, the model answers the prompt by asking for
+# them, and the arrival paths read the answer out over the speakers.
+_DEFAULT_NO_QUESTIONS_INSTRUCTION = (
+    "Some of the details you were told to use may be missing from what you "
+    "were given. Leave those out and greet them anyway — never ask for more "
+    "information. Your reply is spoken aloud over the speakers, so a question "
+    "about how to write the greeting gets heard instead of a greeting."
+)
+
+# A greeting is one or two sentences of prose. Anything longer is either a
+# model that ignored the brief or a reply about the greeting rather than a
+# greeting.
+_MAX_GREETING_CHARS = 500
+
+# ``1.``, ``2)``, ``-`` or ``*`` at the start of a line: a list of options,
+# never a greeting.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*\u2022])\s+", re.MULTILINE)
+
+# Phrases a model reaches for when it answers with a request for
+# instructions. Kept narrow on purpose: a playful greeting may well ask a
+# rhetorical question, so a question mark alone proves nothing.
+_CLARIFICATION_MARKERS: tuple[str, ...] = (
+    "happy to help, but",
+    "i need some details",
+    "i need more details",
+    "i need more information",
+    "i need a bit more",
+    "could you tell me",
+    "can you tell me more",
+    "once i've got those details",
+    "once i have those details",
+    "to craft the perfect",
+)
+
+
+def _append_no_questions(prompt: str, instruction: str) -> str:
+    """Append the "do not ask, just greet" instruction to a built prompt.
+
+    Appended after formatting rather than written into the templates, so a
+    prompt an operator has edited in Settings still carries it.
+    """
+    if not instruction.strip():
+        return prompt
+    return f"{prompt}\n\n{instruction.strip()}"
+
+
+def _is_usable_greeting(text: str) -> bool:
+    """True when ``text`` can go to the speakers as a greeting.
+
+    The arrival paths hand this text straight to text-to-speech, so a
+    reply *about* the greeting — several paragraphs, a list of options, a
+    request for details — is read out in full. Reject those and let the
+    caller fall back to a plain greeting.
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) >= _MAX_GREETING_CHARS:
+        return False
+    if "\n\n" in stripped:
+        return False
+    if _LIST_ITEM_RE.search(stripped):
+        return False
+    lowered = stripped.lower()
+    return not any(marker in lowered for marker in _CLARIFICATION_MARKERS)
+
+
 _DEFAULT_ANNOUNCE_CAMERA_LABELS: tuple[str, ...] = ("package",)
 _DEFAULT_CAMERA_ANNOUNCE_DEDUP_SECONDS = 300.0
 _DEFAULT_CAMERA_ANNOUNCE_DEDUP_KEYS: dict[str, list[str]] = {
@@ -137,6 +206,7 @@ class GreetingService(Service):
         )
         self._camera_zone_groups: dict[str, list[str]] = {}
         self._camera_announce_prompt: str = _DEFAULT_CAMERA_ANNOUNCE_PROMPT
+        self._no_questions_instruction: str = _DEFAULT_NO_QUESTIONS_INSTRUCTION
         self._camera_announce_per_label_prompts: dict[str, str] = {}
         # Inverse map (camera -> zone_group) for fast dedup-key rendering.
         self._camera_to_zone_group: dict[str, str] = {}
@@ -328,6 +398,20 @@ class GreetingService(Service):
                 ai_prompt=True,
             ),
             ConfigParam(
+                key="no_questions_instruction",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Appended to every greeting prompt. Stops the model "
+                    "answering with a request for details when a person has "
+                    "no context (no open issues, no logged time) — that "
+                    "answer used to be read out over the speakers. Clear it "
+                    "to restore the bundled text."
+                ),
+                default=_DEFAULT_NO_QUESTIONS_INSTRUCTION,
+                multiline=True,
+                ai_prompt=True,
+            ),
+            ConfigParam(
                 key="announce_camera_labels",
                 type=ToolParameterType.ARRAY,
                 description=(
@@ -420,6 +504,11 @@ class GreetingService(Service):
             # Empty string explicitly clears back to the bundled default.
             self._enhanced_greeting_prompt = (
                 config["enhanced_greeting_prompt"] or _DEFAULT_ENHANCED_GREETING_PROMPT
+            )
+        if "no_questions_instruction" in config:
+            # Empty string explicitly clears back to the bundled default.
+            self._no_questions_instruction = (
+                config["no_questions_instruction"] or _DEFAULT_NO_QUESTIONS_INSTRUCTION
             )
         labels = config.get("announce_camera_labels")
         if isinstance(labels, list):
@@ -772,6 +861,7 @@ class GreetingService(Service):
             avoid_section=avoid_section,
             context_section=context_section,
         )
+        prompt = _append_no_questions(prompt, self._no_questions_instruction)
 
         # tools_override=[] forces a zero-tool call regardless of the
         # profile's tool_mode, so the model can't accidentally call
@@ -784,8 +874,14 @@ class GreetingService(Service):
                 tools_override=[],
             )
             text = response.message.content.strip()
-            if text and len(text) < 500:
+            if _is_usable_greeting(text):
                 return text
+            logger.warning(
+                "Discarding AI greeting for %s — it reads as a reply about the "
+                "greeting rather than a greeting: %r",
+                name,
+                text[:200],
+            )
         except Exception:
             logger.warning("AI greeting generation failed", exc_info=True)
 
@@ -830,6 +926,7 @@ class GreetingService(Service):
             f"Write ONLY the greeting."
             f"{style_instruction}{avoid_section}"
         )
+        prompt = _append_no_questions(prompt, self._no_questions_instruction)
 
         try:
             response = await ai_svc.complete_one_shot(
@@ -838,8 +935,13 @@ class GreetingService(Service):
                 tools_override=[],
             )
             text = response.message.content.strip()
-            if text and len(text) < 500:
+            if _is_usable_greeting(text):
                 return text
+            logger.warning(
+                "Discarding AI group greeting — it reads as a reply about the "
+                "greeting rather than a greeting: %r",
+                text[:200],
+            )
         except Exception:
             logger.warning("AI group greeting failed", exc_info=True)
 
@@ -918,6 +1020,7 @@ class GreetingService(Service):
                 exc_info=True,
             )
             prompt = _DEFAULT_ENHANCED_GREETING_PROMPT.format_map(subs)
+        prompt = _append_no_questions(prompt, self._no_questions_instruction)
 
         try:
             result = await ai_svc.chat(
@@ -927,8 +1030,14 @@ class GreetingService(Service):
                 ai_profile=self._ai_profile,
             )
             text = (result.response_text or "").strip()
-            if text and len(text) < 500:
+            if _is_usable_greeting(text):
                 return text
+            logger.warning(
+                "Discarding enhanced AI greeting for %s — it reads as a reply "
+                "about the greeting rather than a greeting: %r",
+                name,
+                text[:200],
+            )
         except Exception:
             logger.warning("Enhanced AI greeting generation failed", exc_info=True)
 
