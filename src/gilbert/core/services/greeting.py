@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -109,17 +110,39 @@ _LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*\u2022])\s+", re.MULTILINE)
 # Phrases a model reaches for when it answers with a request for
 # instructions. Kept narrow on purpose: a playful greeting may well ask a
 # rhetorical question, so a question mark alone proves nothing.
-_CLARIFICATION_MARKERS: tuple[str, ...] = (
-    "happy to help, but",
-    "i need some details",
-    "i need more details",
-    "i need more information",
-    "i need a bit more",
-    "could you tell me",
-    "can you tell me more",
-    "once i've got those details",
-    "once i have those details",
-    "to craft the perfect",
+# A reply that asks the operator for input rather than greeting anyone.
+# Matched only when the reply also asks a question, because a playful
+# greeting may well ask a rhetorical one and a question mark alone proves
+# nothing. Two real replies this has to catch:
+#
+#   "I'd be happy to help, but I need some details to craft the perfect
+#    greeting for Eric! Could you tell me: ..."            (2026-09-28)
+#   "I'd love to greet Eric ... but I'm missing the key intel! What's he
+#    been tinkering with lately ... Give me the goods ..."  (2026-09-30)
+_REQUEST_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\b(?:i am|i'm) missing\b",
+        r"\bmissing (?:the|some|any|my|key)\b[^.?!]{0,24}"
+        r"\b(?:intel|info|information|context|details?)\b",
+        r"\b(?:give|tell|send|hand|throw) me\b",
+        r"\b(?:let|fill|clue|catch) me (?:know|in|up)\b",
+        r"\bi (?:need|want|require)\b[^.?!]{0,24}"
+        r"\b(?:intel|info|information|context|details?|more)\b",
+        r"\b(?:what|which|how)\b[^.?!]{0,40}"
+        r"\b(?:should i|do you want|would you like|are you after)\b",
+        r"\b(?:happy|glad|love) to (?:help|greet)\b",
+        r"\bto craft\b",
+        r"\bwhat(?:'s| is| has| have)\s+(?:he|she|they)\s+been\b",
+        r"\bonce (?:i|you)\b[^.?!]{0,30}\b(?:details?|info|intel)\b",
+    )
+)
+
+# Prefixed to the configured instruction on a second attempt. Short and
+# mechanical on purpose: the substance stays in the operator's
+# ``no_questions_instruction``.
+_RETRY_LEAD_IN = (
+    "Your previous reply asked for more information instead of greeting them. "
 )
 
 
@@ -134,13 +157,28 @@ def _append_no_questions(prompt: str, instruction: str) -> str:
     return f"{prompt}\n\n{instruction.strip()}"
 
 
-def _is_usable_greeting(text: str) -> bool:
+def _talks_about_greeting_them(text: str, name: str) -> bool:
+    """True when the reply discusses greeting the person in the third person.
+
+    "greet Eric" and "a greeting for Eric" are things a reply *about* a
+    greeting says. A greeting addresses the person instead.
+    """
+    targets = ["him", "her", "them"]
+    first = name.strip().split()[0] if name.strip() else ""
+    if first:
+        targets.append(re.escape(first))
+    alternatives = "|".join(targets)
+    pattern = rf"\bgreet(?:ing)?\s+(?:for\s+|to\s+)?(?:{alternatives})\b"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+def _is_usable_greeting(text: str, name: str = "") -> bool:
     """True when ``text`` can go to the speakers as a greeting.
 
     The arrival paths hand this text straight to text-to-speech, so a
     reply *about* the greeting — several paragraphs, a list of options, a
     request for details — is read out in full. Reject those and let the
-    caller fall back to a plain greeting.
+    caller ask again, or fall back to a plain greeting.
     """
     stripped = text.strip()
     if not stripped or len(stripped) >= _MAX_GREETING_CHARS:
@@ -149,8 +187,9 @@ def _is_usable_greeting(text: str) -> bool:
         return False
     if _LIST_ITEM_RE.search(stripped):
         return False
-    lowered = stripped.lower()
-    return not any(marker in lowered for marker in _CLARIFICATION_MARKERS)
+    if _talks_about_greeting_them(stripped, name):
+        return False
+    return not ("?" in stripped and any(p.search(stripped) for p in _REQUEST_PATTERNS))
 
 
 _DEFAULT_ANNOUNCE_CAMERA_LABELS: tuple[str, ...] = ("package",)
@@ -784,12 +823,22 @@ class GreetingService(Service):
             for p in self._context_providers
         ]
 
-    async def collect_context_block(self, user_id: str) -> str:
+    async def collect_context_block(
+        self, user_id: str, *, include_empty: bool = False
+    ) -> str:
         """Call each enabled provider, format non-None results into a
         labeled block. Returns ``""`` when no providers contribute.
 
+        With ``include_empty``, an enabled provider that found nothing is
+        named with a "nothing on record" line rather than being left out. A
+        silently absent detail is a hole the model asks about: the style
+        setting tells it to use the details it was given, and twice a person
+        with no shop work got a request for those details read out over the
+        speakers instead of a greeting.
+
         A provider raising is logged and skipped — never blocks the
-        greeting.
+        greeting, and never reported as having found nothing, because a
+        failure is not the same as an absence.
         """
         if not self._context_providers:
             return ""
@@ -799,6 +848,7 @@ class GreetingService(Service):
             else None
         )
         entries: list[GreetingContext] = []
+        quiet: list[str] = []
         for provider in self._context_providers:
             if enabled is not None and provider.greeting_context_id not in enabled:
                 continue
@@ -812,11 +862,47 @@ class GreetingService(Service):
                 )
                 continue
             if ctx is None or not ctx.prose:
+                quiet.append(provider.greeting_context_label)
                 continue
             entries.append(ctx)
-        if not entries:
+        if not entries and not (include_empty and quiet):
             return ""
-        return "\n".join(f"{e.label}: {e.prose}" for e in entries)
+        lines = [f"{e.label}: {e.prose}" for e in entries]
+        if include_empty:
+            lines += [
+                f"{label}: nothing on record for this person right now." for label in quiet
+            ]
+        return "\n".join(lines)
+
+    async def _ask_for_greeting(
+        self,
+        ask: Callable[[str], Awaitable[str]],
+        prompt: str,
+        *,
+        name: str,
+    ) -> str | None:
+        """Ask for a greeting, and ask once more when the reply is not one.
+
+        Returns None when neither reply is usable, so the caller falls back
+        to its plain greeting. The retry exists so the guard can be strict:
+        a reply wrongly rejected costs one more call, not a flat greeting.
+        """
+        attempt_prompt = prompt
+        for attempt in (1, 2):
+            text = (await ask(attempt_prompt)).strip()
+            if _is_usable_greeting(text, name):
+                return text
+            logger.warning(
+                "Greeting attempt %d for %s reads as a reply about the greeting "
+                "rather than a greeting: %r",
+                attempt,
+                name or "the crew",
+                text[:200],
+            )
+            attempt_prompt = _append_no_questions(
+                prompt, _RETRY_LEAD_IN + self._no_questions_instruction
+            )
+        return None
 
     async def _generate_greeting(
         self,
@@ -848,7 +934,7 @@ class GreetingService(Service):
 
         context_section = ""
         if user_id:
-            block = await self.collect_context_block(user_id)
+            block = await self.collect_context_block(user_id, include_empty=True)
             if block:
                 context_section = (
                     "\n\nAvailable context (use what's relevant, skip what isn't):\n"
@@ -867,21 +953,18 @@ class GreetingService(Service):
         # profile's tool_mode, so the model can't accidentally call
         # `announce` (or anything else) as a side effect of generating
         # greeting text. Profile is still used for backend/model choice.
-        try:
+        async def _ask(text: str) -> str:
             response = await ai_svc.complete_one_shot(
-                messages=[Message(role=MessageRole.USER, content=prompt)],
+                messages=[Message(role=MessageRole.USER, content=text)],
                 profile_name=self._ai_profile,
                 tools_override=[],
             )
-            text = response.message.content.strip()
-            if _is_usable_greeting(text):
-                return text
-            logger.warning(
-                "Discarding AI greeting for %s — it reads as a reply about the "
-                "greeting rather than a greeting: %r",
-                name,
-                text[:200],
-            )
+            return response.message.content
+
+        try:
+            greeting = await self._ask_for_greeting(_ask, prompt, name=name)
+            if greeting:
+                return greeting
         except Exception:
             logger.warning("AI greeting generation failed", exc_info=True)
 
@@ -928,20 +1011,18 @@ class GreetingService(Service):
         )
         prompt = _append_no_questions(prompt, self._no_questions_instruction)
 
-        try:
+        async def _ask(text: str) -> str:
             response = await ai_svc.complete_one_shot(
-                messages=[Message(role=MessageRole.USER, content=prompt)],
+                messages=[Message(role=MessageRole.USER, content=text)],
                 profile_name=self._ai_profile,
                 tools_override=[],
             )
-            text = response.message.content.strip()
-            if _is_usable_greeting(text):
-                return text
-            logger.warning(
-                "Discarding AI group greeting — it reads as a reply about the "
-                "greeting rather than a greeting: %r",
-                text[:200],
-            )
+            return response.message.content
+
+        try:
+            greeting = await self._ask_for_greeting(_ask, prompt, name=names[0])
+            if greeting:
+                return greeting
         except Exception:
             logger.warning("AI group greeting failed", exc_info=True)
 
@@ -1022,22 +1103,19 @@ class GreetingService(Service):
             prompt = _DEFAULT_ENHANCED_GREETING_PROMPT.format_map(subs)
         prompt = _append_no_questions(prompt, self._no_questions_instruction)
 
-        try:
+        async def _ask(text: str) -> str:
             result = await ai_svc.chat(
-                user_message=prompt,
+                user_message=text,
                 user_ctx=UserContext.SYSTEM,
                 ai_call="greeting",
                 ai_profile=self._ai_profile,
             )
-            text = (result.response_text or "").strip()
-            if _is_usable_greeting(text):
-                return text
-            logger.warning(
-                "Discarding enhanced AI greeting for %s — it reads as a reply "
-                "about the greeting rather than a greeting: %r",
-                name,
-                text[:200],
-            )
+            return result.response_text or ""
+
+        try:
+            greeting = await self._ask_for_greeting(_ask, prompt, name=name)
+            if greeting:
+                return greeting
         except Exception:
             logger.warning("Enhanced AI greeting generation failed", exc_info=True)
 

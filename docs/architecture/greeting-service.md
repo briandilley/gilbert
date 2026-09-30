@@ -47,6 +47,35 @@ The greeting settings page renders one toggle per discovered provider, driven by
 
 `greeting.arrival_greeting_prompt` is a `ConfigParam(ai_prompt=True)` with placeholders `{name}`, `{style_instruction}`, `{context_section}`, `{avoid_section}`. Users can write rules like "always mention the weather if it's extreme" — the AI sees the labeled context block and the prompt's instructions and combines them.
 
+### What reaches the speakers
+
+The arrival paths hand the model's reply straight to text-to-speech, so a
+reply *about* the greeting is read out in full. This happened twice in
+September 2026, to a person with no open issues and no logged time: the model
+answered the prompt by asking for those details, and the speakers played the
+question.
+
+Three things guard against it.
+
+1. Every enabled context provider is named in the block. A provider that
+   found nothing contributes "nothing on record for this person right now"
+   instead of being left out (`collect_context_block(..., include_empty=True)`).
+   The `style` setting tells the model to use the details it was given, so a
+   silently missing detail is a hole, and the model fills a hole with a
+   question.
+2. Every prompt ends with `greeting.no_questions_instruction`, a
+   `ConfigParam(ai_prompt=True)` that tells the model to leave a missing
+   detail out and never ask for more. It is appended after the template is
+   formatted, so an operator's edited template still carries it.
+3. `_is_usable_greeting(text, name)` rejects a reply that is not a greeting:
+   more than one paragraph, a numbered or bulleted list, 500 characters or
+   more, a reply that discusses greeting the person in the third person
+   ("a greeting for Eric"), or a question paired with a request for input
+   ("give me the goods"). A rejected reply earns one corrected retry, and
+   then the caller falls back to `"Good morning, <name>!"`. The retry is what
+   lets the guard be strict: a reply wrongly rejected costs one more call
+   rather than a flat greeting.
+
 ## Trigger and gating
 
 - Subscribes to `presence.arrived` and runs `_greet_user(user_id)` if the current time is inside `[start_hour, cutoff_hour)` in the configured timezone.

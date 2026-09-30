@@ -55,10 +55,14 @@ class _FakeAISampling:
     ``AsyncMock`` doesn't satisfy ``isinstance(x, AISamplingProvider)``
     under Python 3.12+'s stricter runtime_checkable check, so tests use
     this concrete class instead.
+
+    ``replies`` gives a different answer per call, for the retry path; the
+    last one repeats once the list runs out.
     """
 
-    def __init__(self, content: str = "") -> None:
+    def __init__(self, content: str = "", replies: list[str] | None = None) -> None:
         self._content = content
+        self._replies = list(replies) if replies else []
         self.calls: list[dict[str, Any]] = []
 
     def has_profile(self, name: str) -> bool:
@@ -84,8 +88,11 @@ class _FakeAISampling:
                 "tools_override": tools_override,
             },
         )
+        content = self._content
+        if self._replies:
+            content = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
         return AIResponse(
-            message=Message(role=MessageRole.ASSISTANT, content=self._content),
+            message=Message(role=MessageRole.ASSISTANT, content=content),
             model="test-model",
         )
 
@@ -1054,3 +1061,150 @@ class TestGreetingOutputGuard:
         prompt = fake_ai.calls[0]["messages"][0].content
         assert "never ask for more information" in prompt.lower()
         assert "spoken aloud" in prompt.lower()
+
+
+class TestGreetingEmptyContext:
+    """A person with no shop-work data must still get a greeting.
+
+    Eric resolves to a shop account with no open issues and no time
+    entries, so the ``current_work`` provider contributes nothing. The
+    ``style`` setting still tells the model to use "the shop-work details
+    you are given", and twice the model answered by asking for them:
+
+      2026-09-28: "I'd be happy to help, but I need some details to craft
+      the perfect greeting for Eric! Could you tell me: ..."
+
+      2026-09-30: "I'd love to greet Eric with a perfectly tailored
+      zinger, but I'm missing the key intel! What's he been tinkering
+      with lately ... Give me the goods ..."
+
+    Both were read out over the speakers. The prompt has to say that a
+    provider found nothing, rather than leaving the detail silently absent.
+    """
+
+    SEPT_28 = (
+        "I'd be happy to help, but I need some details to craft the perfect "
+        "greeting for Eric! Could you tell me:\n"
+        "\n"
+        "1. What day/tone would you like today?\n"
+        "\n"
+        "Once I've got those details, I'll hit him with a greeting!"
+    )
+    SEPT_30 = (
+        "I'd love to greet Eric with a perfectly tailored zinger, but I'm "
+        "missing the key intel! What's he been tinkering with lately, and what "
+        "tone should I hit today? Give me the goods and I'll have him laughing "
+        "before he even gets to the workbench. ⚡"
+    )
+
+    def test_rejects_both_replies_that_were_spoken_aloud(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting(self.SEPT_28, "Eric") is False
+        assert _is_usable_greeting(self.SEPT_30, "Eric") is False
+
+    def test_rejects_a_reply_about_the_act_of_greeting(self) -> None:
+        """"greet Eric" is something a reply says, never a greeting."""
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        assert _is_usable_greeting("Let me greet Eric properly.", "Eric") is False
+        assert _is_usable_greeting("A greeting for Eric, coming up.", "Eric") is False
+
+    def test_still_accepts_real_greetings(self) -> None:
+        from gilbert.core.services.greeting import _is_usable_greeting
+
+        for good in (
+            "Morning, Eric — the shop missed you.",
+            "Eric! Ready to melt some copper today?",
+            "Greetings, Eric. The battery pack is still judging you.",
+            "Look who it is. Morning, Eric!",
+        ):
+            assert _is_usable_greeting(good, "Eric") is True, good
+
+    @pytest.mark.asyncio
+    async def test_context_block_says_when_a_provider_found_nothing(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """An enabled provider with nothing to say is stated, not omitted.
+
+        Leaving it out is what created the hole the model asked about.
+        """
+        from gilbert.interfaces.greeting import GreetingContext
+
+        class _Empty:
+            greeting_context_id = "current_work"
+            greeting_context_label = "Shop work (open issues + time logs)"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return None
+
+        class _Full:
+            greeting_context_id = "weather"
+            greeting_context_label = "Weather"
+
+            async def greeting_context(self, user_id: str) -> GreetingContext | None:
+                return GreetingContext(
+                    provider_id="weather", label="Weather", prose="62F and clear."
+                )
+
+        await greeting_service.start(resolver)
+        greeting_service._context_providers = [_Empty(), _Full()]  # type: ignore[list-item]
+
+        quiet = await greeting_service.collect_context_block("usr_eric")
+        assert "Shop work" not in quiet
+
+        full = await greeting_service.collect_context_block("usr_eric", include_empty=True)
+        assert "62F and clear." in full
+        assert "Shop work (open issues + time logs)" in full
+        assert "nothing on record" in full.lower()
+
+    @pytest.mark.asyncio
+    async def test_greeting_prompt_states_the_empty_provider(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        class _Empty:
+            greeting_context_id = "current_work"
+            greeting_context_label = "Shop work (open issues + time logs)"
+
+            async def greeting_context(self, user_id: str) -> Any:
+                return None
+
+        await greeting_service.start(resolver)
+        greeting_service._context_providers = [_Empty()]  # type: ignore[list-item]
+        fake_ai = _FakeAISampling(content="Morning, Eric!")
+        resolver.caps["ai_chat"] = fake_ai
+
+        await greeting_service._generate_greeting("Eric", user_id="usr_eric")
+
+        prompt = fake_ai.calls[0]["messages"][0].content
+        assert "Shop work (open issues + time logs)" in prompt
+        assert "nothing on record" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_asks_a_second_time_before_giving_up(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        """A reply that is not a greeting earns one corrected retry."""
+        await greeting_service.start(resolver)
+        fake_ai = _FakeAISampling(replies=[self.SEPT_30, "Morning, Eric!"])
+        resolver.caps["ai_chat"] = fake_ai
+
+        greeting = await greeting_service._generate_greeting("Eric")
+
+        assert greeting == "Morning, Eric!"
+        assert len(fake_ai.calls) == 2
+        retry_prompt = fake_ai.calls[1]["messages"][0].content
+        assert "previous reply" in retry_prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_both_attempts_fail(
+        self, greeting_service: GreetingService, resolver: FakeResolver
+    ) -> None:
+        await greeting_service.start(resolver)
+        fake_ai = _FakeAISampling(replies=[self.SEPT_30, self.SEPT_28])
+        resolver.caps["ai_chat"] = fake_ai
+
+        greeting = await greeting_service._generate_greeting("Eric")
+
+        assert greeting == "Good morning, Eric!"
+        assert len(fake_ai.calls) == 2
