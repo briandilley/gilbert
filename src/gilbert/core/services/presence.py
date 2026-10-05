@@ -145,6 +145,13 @@ class PresenceService(Service):
 
         await self._backend.initialize(init_config)
 
+        # Push admin-saved thing→user mappings into the fresh backend. The
+        # backend's override table starts empty on every construction, so
+        # without this a restart silently discards every mapping until an
+        # admin next touches a row in the mapping screen — presence would
+        # mis-attribute devices in the meantime.
+        await self._notify_backend_of_mapping_change()
+
         # First poll flag — on the very first poll we skip event emission
         # for users that have no prior stored state (prevents spurious
         # arrived events for everyone on fresh install).

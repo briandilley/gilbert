@@ -17,7 +17,7 @@ User presence detection with polling, event publishing, and AI tools. UniFi impl
 - AI tools: `check_presence`, `who_is_here`, `list_all_presence`
 
 ### UniFi Backend
-- `src/gilbert/integrations/unifi/` — package with 5 modules
+- `std-plugins/unifi/` — plugin package (a `std-plugins` submodule member), 6 modules
 - **client.py**: `UniFiClient` — async httpx client with cookie auth, auto re-login on 401, SSL off by default
 - **network.py**: `UniFiNetwork` — WiFi client tracking via `/proxy/network/api/s/default/stat/sta`, device-to-person mapping (MAC map → device name → hostname parsing)
 - **protect.py**: `UniFiProtect` — camera AI via `/proxy/protect/api/events`, face recognition from `metadata.detectedThumbnails[].group.matchedName`, zone aliases
@@ -28,13 +28,20 @@ User presence detection with polling, event publishing, and AI tools. UniFi impl
 1. Badge IN → PRESENT (source: unifi:access)
 2. Badge OUT → AWAY (source: unifi:access)
 3. Face seen → PRESENT (source: unifi:protect)
-4. WiFi connected → NEARBY (source: unifi:network)
+4. WiFi phone connected → PRESENT (source: unifi:network) — only `dev_family`
+   values in `_PHONE_DEV_FAMILIES` (iPhone/Samsung/Android) count, so a laptop
+   or IoT device on the network never marks someone present
 5. No signals → AWAY
 
 ### Configuration
-- `PresenceConfig` + `UniFiControllerConfig` in config.py
-- UniFi credentials inline in config: each `UniFiControllerConfig` has `host`, `username`, `password`, `verify_ssl` — no CredentialService
-- Separate controller configs for network (UDM) vs protect/access (UNVR)
+Lives in the `gilbert.config` entity collection under the `presence` id (managed
+at Settings → Monitoring → Presence), **not** in `gilbert.yaml` — the YAML block
+below is the shape, not the storage location.
+- UniFi credentials inline in config: `host`, `username`, `password`, `verify_ssl` — no CredentialService
+- `unifi_network.api_key` authenticates with `X-API-KEY` instead of a cookie login and
+  takes precedence over username/password. Mint it in the Network app under
+  Settings → Control Plane → Integrations. Protect/Access remain username/password.
+- Separate controller configs for network (UDM/gateway console) vs protect/access (UNVR)
 - Client deduplication: shared host → shared UniFiClient instance
 - Error isolation: each subsystem failure is caught independently
 
@@ -45,6 +52,7 @@ presence:
   poll_interval_seconds: 30
   unifi_network:
     host: ""
+    api_key: ""        # preferred; wins over username/password
     username: ""
     password: ""
   unifi_protect:
@@ -59,4 +67,5 @@ presence:
 
 ## Related
 - `src/gilbert/interfaces/events.py` — EventBus for presence events
-- `tests/unit/test_unifi_presence.py` — 36 unit tests
+- `std-plugins/unifi/tests/` — `test_unifi_presence.py`, `test_unifi_doorbell.py`,
+  `test_unifi_client_auth.py` (client auth modes)

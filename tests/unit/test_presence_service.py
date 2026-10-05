@@ -25,6 +25,7 @@ from gilbert.core.services.presence import (
     _DEFAULT_HISTORY_RETENTION_DAYS,
 )
 from gilbert.interfaces.presence import (
+    PresenceBackend,
     PresenceDetection,
     PresenceHistoryProvider,
     PresenceState,
@@ -757,3 +758,105 @@ async def test_ws_things_relabel_updates_label() -> None:
     )
     assert result is not None
     assert result["thing"]["label"] == "Marvelous X"
+
+
+# --- mappings must survive a restart --------------------------------
+
+
+class _FakeConfigReader:
+    """Minimal ConfigurationReader so isinstance() narrows in start()."""
+
+    def __init__(self, section: dict[str, Any]) -> None:
+        self._section = section
+
+    def get(self, path: str) -> Any:
+        return None
+
+    def get_section(self, namespace: str) -> dict[str, Any]:
+        return dict(self._section) if namespace == "presence" else {}
+
+    def get_section_safe(self, namespace: str) -> dict[str, Any]:
+        return self.get_section(namespace)
+
+    async def set(self, path: str, value: Any) -> dict[str, Any]:
+        return {}
+
+
+class _RecordingBackend(PresenceBackend):
+    """Registered presence backend that records apply_thing_mappings calls."""
+
+    backend_name = "recording-test"
+    instances: list[Any] = []
+
+    def __init__(self) -> None:
+        self.applied: list[dict[str, str]] = []
+        type(self).instances.append(self)
+
+    async def initialize(self, config: dict[str, object]) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def get_presence(self, user_id: str) -> UserPresence:
+        return UserPresence(user_id=user_id, state=PresenceState.UNKNOWN)
+
+    async def get_all_presence(self) -> list[UserPresence]:
+        return []
+
+    async def list_tracked_users(self) -> list[str]:
+        return []
+
+    async def apply_thing_mappings(self, mappings: dict[str, str]) -> None:
+        self.applied.append(dict(mappings))
+
+
+@pytest.mark.asyncio
+async def test_start_pushes_stored_mappings_to_backend() -> None:
+    """Stored thing->user mappings must reach the backend on start().
+
+    Regression: ``_notify_backend_of_mapping_change`` was only called
+    from ``map_thing``, so a freshly constructed backend began with an
+    empty override table after every restart. Mappings an admin had
+    already saved were silently ignored until someone re-opened the
+    mapping screen and touched a row — presence quietly mis-attributed
+    devices in the meantime.
+    """
+    storage = _MemoryStorage()
+    svc = _make_svc(storage=storage, resolver=_Resolver({}))
+
+    # An admin mapped Luke's phone in an earlier session; rows are in storage.
+    await svc._upsert_observations(
+        [
+            PresenceObservation(backend="unifi:network", thing_id="Poop", kind="wifi"),
+            PresenceObservation(backend="unifi:network", thing_id="Gaby", kind="wifi"),
+        ]
+    )
+    row_id = svc._observation_row_id("unifi:network", "Poop")
+    row = await storage.get(svc._OBSERVATIONS_COLLECTION, row_id)
+    assert row is not None
+    row["mapped_user_id"] = "usr_luke"
+    await storage.put(svc._OBSERVATIONS_COLLECTION, row_id, row)
+
+    # Now start the service, as a restart would.
+    _RecordingBackend.instances.clear()
+    cfg = _FakeConfigReader({"enabled": True, "backend": "recording-test"})
+
+    class _StorageProvider:
+        @property
+        def backend(self) -> Any:
+            return storage
+
+    await svc.start(
+        _Resolver({"configuration": cfg, "entity_storage": _StorageProvider()})
+    )
+
+    assert _RecordingBackend.instances, "start() should have built the backend"
+    backend = _RecordingBackend.instances[-1]
+    assert backend.applied, (
+        "start() must push stored mappings to the backend; without this every "
+        "saved mapping is lost on restart"
+    )
+    snap = backend.applied[-1]
+    assert snap["unifi:network:Poop"] == "usr_luke"
+    assert snap["unifi:network:Gaby"] == ""
