@@ -95,6 +95,40 @@ refresh_std_plugins() {
         return
     fi
 
+    # Honour a deliberate submodule checkout. ``--remote`` moves the
+    # submodule to the tip of its tracked branch and ignores the SHA the
+    # parent records, so it will silently throw away a feature branch or a
+    # pinned pointer someone checked out on purpose — including committed
+    # work, which looks like the change simply vanished.
+    #
+    # Two cases we refuse to stomp:
+    #   1. std-plugins sits on a branch that isn't the tracked one.
+    #   2. its HEAD doesn't match the SHA the parent commit pins.
+    # In case 2 we still sync, but to the pin rather than to the branch tip.
+    local tracked_branch sub_branch recorded actual
+    tracked_branch=$(
+        git -C "$SCRIPT_DIR" config -f .gitmodules submodule.std-plugins.branch 2>/dev/null \
+            || true
+    )
+    [ -n "$tracked_branch" ] || tracked_branch=main
+    sub_branch=$(git -C "$SCRIPT_DIR/std-plugins" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    recorded=$(git -C "$SCRIPT_DIR" rev-parse "HEAD:std-plugins" 2>/dev/null || true)
+    actual=$(git -C "$SCRIPT_DIR/std-plugins" rev-parse HEAD 2>/dev/null || true)
+
+    if [ -n "$sub_branch" ] && [ "$sub_branch" != "HEAD" ] \
+       && [ "$sub_branch" != "$tracked_branch" ]; then
+        echo "std-plugins is on branch '$sub_branch' (tracked: '$tracked_branch')."
+        echo "Leaving it alone — run 'git submodule update --remote std-plugins' to refresh deliberately."
+        return
+    fi
+
+    if [ -n "$recorded" ] && [ -n "$actual" ] && [ "$recorded" != "$actual" ]; then
+        echo "std-plugins HEAD (${actual:0:9}) differs from the pinned pointer (${recorded:0:9})."
+        echo "Checking out the pin instead of pulling the branch tip."
+        cd "$SCRIPT_DIR" && git submodule update --init --recursive std-plugins
+        return
+    fi
+
     echo "Refreshing std-plugins submodule from remote..."
     cd "$SCRIPT_DIR" && git submodule update --init --recursive --remote std-plugins
 }
