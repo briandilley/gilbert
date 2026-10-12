@@ -55,8 +55,6 @@ function emptyRule(): InboxRule {
     match_profile: "light",
     action_instructions: "",
     action_profile: "standard",
-    announce: true,
-    speakers: [],
     active_days: [0, 1, 2, 3, 4],
     start_hour: 8,
     end_hour: 18,
@@ -220,8 +218,8 @@ function ProfileTools({ name, options }: { name: string; options?: InboxRuleOpti
   return (
     <p className="text-[11px] text-amber-600">
       This profile {profile.tool_mode === "all" ? "allows every tool" : "allows every tool except "}
-      {profile.tool_mode === "exclude" ? profile.tools.join(", ") : ""}. The action turn could
-      then send email or speak on its own. Pick a profile that includes only lookup tools.
+      {profile.tool_mode === "exclude" ? profile.tools.join(", ") : ""}, so the rule could send
+      email or change things. Prefer a profile with only the tools the instructions need.
     </p>
   );
 }
@@ -293,7 +291,7 @@ function RuleEditor({
                 checked={form.dry_run}
                 onChange={(e) => set("dry_run", e.target.checked)}
               />
-              Dry run (log what it would say, do not speak)
+              Dry run (run the match only, log what would happen, take no action)
             </label>
           </div>
 
@@ -373,25 +371,11 @@ function RuleEditor({
           </section>
 
           <section className="space-y-3">
-            <h3 className="text-sm font-medium">Announcement</h3>
-            <label className="flex items-center gap-2 text-xs cursor-pointer">
-              <input
-                type="checkbox"
-                className="accent-primary"
-                checked={form.announce}
-                onChange={(e) => set("announce", e.target.checked)}
-              />
-              Speak the action's reply on the speakers
-            </label>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Speakers (none checked = default speakers)</Label>
-              <CheckList
-                items={(options?.speakers ?? []).map((s) => ({ value: s, label: s }))}
-                selected={form.speakers}
-                onChange={(v) => set("speakers", v)}
-                empty="No speakers found."
-              />
-            </div>
+            <h3 className="text-sm font-medium">Active window</h3>
+            <p className="text-[11px] text-muted-foreground">
+              When the rule may act. A match outside the window waits for it; a match
+              older than the maximum age is dropped.
+            </p>
             <div className="space-y-1.5">
               <Label className="text-xs">Days</Label>
               <div className="flex flex-wrap gap-1">
@@ -430,7 +414,7 @@ function RuleEditor({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">Drop after (hours)</Label>
+                <Label className="text-xs">Maximum age (hours)</Label>
                 <Input
                   type="number"
                   min={0}
@@ -537,7 +521,19 @@ function RunsList({ rules }: { rules: InboxRule[] }) {
                 {run.attempts > 1 && ` · ${run.attempts} attempts`}
               </div>
               {run.reason && <div className="text-xs">Match: {run.reason}</div>}
-              {run.output && <div className="text-xs italic">“{run.output}”</div>}
+              {run.output && <div className="text-xs italic">{run.output}</div>}
+              {(run.tool_calls ?? []).length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Tools:{" "}
+                  {(run.tool_calls ?? []).map((t, i) => (
+                    <span key={i} className={t.error ? "text-rose-500" : undefined}>
+                      {i > 0 && ", "}
+                      {t.tool}
+                      {t.error && ` (${t.error})`}
+                    </span>
+                  ))}
+                </div>
+              )}
               {run.error && <div className="text-xs text-rose-500 break-all">{run.error}</div>}
             </CardContent>
           </Card>
@@ -569,7 +565,7 @@ export function InboxRulesPage() {
       <PageHeader
         eyebrow="INBOX"
         title="Inbox rules"
-        description="React to new email: a free filter first, then a small AI match, then a tool-limited AI action whose reply is announced."
+        description="React to new email: a free filter first, then a small AI match, then an AI action that uses its profile's tools, for example to announce on the speakers."
         actions={
           <div className="flex items-center gap-2">
             <PluginPanelSlot slot="inbox-rules.toolbar" />
@@ -628,8 +624,7 @@ export function InboxRulesPage() {
                       Filter: {[...r.sender_contains, ...r.subject_contains].join(", ")}
                     </p>
                     <p>
-                      {r.announce ? "Announces" : "Does not announce"} ·{" "}
-                      {r.active_days.map((d) => DAYS[d]).join(" ")} {r.start_hour}–{r.end_hour}
+                      Active {r.active_days.map((d) => DAYS[d]).join(" ")} {r.start_hour}–{r.end_hour}
                     </p>
                   </CardContent>
                 </Card>

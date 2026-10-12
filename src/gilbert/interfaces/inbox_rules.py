@@ -6,9 +6,12 @@ An *inbox rule* reacts to new inbound email in three stages (ADR-0023):
 2. A small AI match call on the subject and a snippet. It answers
    match / no match and returns a dedupe key.
 3. An AI action turn on the rule's action profile, which also decides the
-   tools the turn can use. Its final text
-   is announced on the speakers (business-hours gated) unless it is empty
-   or ``SKIP``.
+   tools the turn can use. The instructions say what to do, for example
+   "announce it with the announce tool". The turn's final reply is a
+   one-line summary for the activity log.
+
+A rule acts only inside its *active window* (days, hours, timezone). A
+match outside it is held; a match older than ``max_age_hours`` is dropped.
 
 The service lives in ``core/services/inbox_rules.py``. This module holds the
 record shape and the run statuses so the web layer and plugins (which seed
@@ -24,10 +27,6 @@ INBOX_RULES_COLLECTION = "inbox_rules"
 INBOX_RULE_RUNS_COLLECTION = "inbox_rule_runs"
 INBOX_RULE_DEDUPE_COLLECTION = "inbox_rule_dedupe"
 
-# The action turn answers with this token when nothing should be said.
-SKIP_TOKEN = "SKIP"
-
-
 class RunStatus:
     """Status values for one (rule, message) run record."""
 
@@ -36,7 +35,6 @@ class RunStatus:
     HELD = "held"
     RETRY = "retry"
     DONE = "done"
-    SILENT = "silent"
     DRY_RUN = "dry_run"
     STALE = "stale"
     FAILED = "failed"
@@ -70,9 +68,8 @@ class InboxRule:
     action_instructions: str = ""
     action_profile: str = "standard"
 
-    # Output.
-    announce: bool = True
-    speakers: list[str] = field(default_factory=list)
+    # Active window: when the rule may act. Outside it a match is held;
+    # a match older than max_age_hours is dropped.
     active_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     start_hour: int = 8
     end_hour: int = 18

@@ -12,8 +12,6 @@ export interface InboxRule {
   match_profile: string;
   action_instructions: string;
   action_profile: string;
-  announce: boolean;
-  speakers: string[];
   active_days: number[];
   start_hour: number;
   end_hour: number;
@@ -42,11 +40,11 @@ export interface InboxRuleRun {
   error: string;
   attempts: number;
   conversation_id: string;
+  tool_calls?: Array<{ tool: string; arguments: Record<string, unknown>; error: string }>;
 }
 
 export interface InboxRuleOptions {
   profiles: Array<{ name: string; tool_mode: string; tools: string[] }>;
   tools: Array<{ name: string; description: string }>;
-  speakers: string[];
   mailboxes: Array<{ id: string; name: string }>;
 }

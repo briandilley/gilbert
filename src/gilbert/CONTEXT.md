@@ -350,12 +350,15 @@ A *mailbox* is a shareable email account (one polling EmailBackend). *Inbox-AI* 
 AI reply/action-item flow. The *outbox* is a persisted queue of outbound drafts flushed by a tick,
 for delayed or crash-resilient sends.
 
-**Inbox rule**:
-An editable record that reacts to new inbound email. It has a cheap filter on sender, subject and
-keywords. It has a plain-language condition that a small AI call tests. It has an action that an AI
-turn does with only the tools that the rule's AI profile allows. Gilbert tests each message against each rule
-one time at most. *Inbox-AI* is different because it replies to the sender. _Avoid_: "signal"
-(taken by agent InboxSignal), "trigger".
+**Inbox rule** / **active window**:
+An *inbox rule* is an editable record that reacts to new inbound email. It has a cheap filter on
+sender, subject and keywords. It has a plain-language condition that a small AI call tests. It has
+action instructions that an AI turn carries out with only the tools that the rule's AI profile
+allows, for example announcing on the speakers. Gilbert tests each message against each rule one
+time at most. The *active window* is the days and hours when a rule may act. A match outside it waits,
+and a match older than the rule's maximum age is dropped. *Inbox-AI* is different because it replies
+to the sender. _Avoid_: "signal" (taken by agent InboxSignal), "trigger", "business hours" for the
+active window.
 
 **Task list** / **local-first reconciliation**:
 A *task list* is a user-owned, shareable to-do list bound to one TaskBackend. *Local-first

@@ -10,7 +10,7 @@ import pytest
 from gilbert.core.services import inbox_rules as mod
 from gilbert.core.services.inbox_rules import (
     InboxRulesService,
-    in_business_hours,
+    in_active_window,
     parse_match_reply,
     rule_passes_filter,
 )
@@ -36,7 +36,12 @@ class FakeAI:
 
     def __init__(self) -> None:
         self.match_reply = '{"match": true, "dedupe_key": "amz:1:delivered", "reason": "delivered"}'
-        self.action_reply = "The brakes for the Porsche were delivered."
+        self.action_reply = "Announced: brakes for the Porsche were delivered."
+        self.tool_usage: list[dict[str, Any]] = [
+            {"tool_name": "announce", "is_error": False,
+             "arguments": {"text": "The brakes for the Porsche were delivered."},
+             "result": "ok"},
+        ]
         self.match_calls: list[dict[str, Any]] = []
         self.chat_calls: list[dict[str, Any]] = []
         self.chat_error: Exception | None = None
@@ -59,7 +64,7 @@ class FakeAI:
             response_text=self.action_reply,
             conversation_id="conv_1",
             ui_blocks=[],
-            tool_usage=[],
+            tool_usage=self.tool_usage,
             attachments=[],
             rounds=[],
         )
@@ -88,28 +93,6 @@ class FakeInbox:
         return []
 
 
-class FakeSpeaker:
-    """Satisfies SpeakerProvider by method name."""
-
-    def __init__(self) -> None:
-        self.announced: list[dict[str, Any]] = []
-
-    @property
-    def backends(self) -> dict[str, Any]:
-        return {}
-
-    def get_backend(self, name: str) -> Any:
-        return None
-
-    async def resolve_names(self, names: list[str]) -> dict[str, str]:
-        return {}
-
-    async def announce(self, text: str, speaker_names: list[str] | None = None,
-                       volume: int | None = None, context: str = "") -> str:
-        self.announced.append({"text": text, "speakers": speaker_names})
-        return "ok"
-
-
 class FakeResolver:
     def __init__(self, caps: dict[str, Any]) -> None:
         self.caps = caps
@@ -134,13 +117,13 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, datetime]:
 @pytest.fixture
 def parts(sqlite_storage: SQLiteStorage) -> dict[str, Any]:
     storage = sqlite_storage
-    ai, inbox, speaker = FakeAI(), FakeInbox(), FakeSpeaker()
+    ai, inbox = FakeAI(), FakeInbox()
     svc = InboxRulesService()
     svc._storage = storage
     svc._resolver = FakeResolver(
-        {"ai_chat": ai, "inbox": inbox, "speaker_control": speaker}
+        {"ai_chat": ai, "inbox": inbox}
     )
-    return {"svc": svc, "ai": ai, "inbox": inbox, "speaker": speaker, "storage": storage}
+    return {"svc": svc, "ai": ai, "inbox": inbox, "storage": storage}
 
 
 def _rule(**kw: Any) -> InboxRule:
@@ -209,12 +192,12 @@ def test_parse_match_reply() -> None:
     assert parse_match_reply('{"match": "yes"}')[0] is False
 
 
-def test_business_hours_uses_rule_timezone_and_days() -> None:
+def test_active_window_uses_rule_timezone_and_days() -> None:
     rule = _rule()
-    assert in_business_hours(rule, _OPEN)
-    assert not in_business_hours(rule, _CLOSED)
+    assert in_active_window(rule, _OPEN)
+    assert not in_active_window(rule, _CLOSED)
     saturday = datetime(2026, 10, 17, 17, 0, tzinfo=UTC)
-    assert not in_business_hours(rule, saturday)
+    assert not in_active_window(rule, saturday)
 
 
 # ── Service flow ───────────────────────────────────────────────
@@ -225,7 +208,7 @@ async def test_save_rule_rejects_rule_without_free_filter(parts: dict[str, Any])
         await parts["svc"].save_rule(_rule(subject_contains=[]))
 
 
-async def test_match_announces_during_business_hours(
+async def test_match_runs_the_action_inside_the_active_window(
     parts: dict[str, Any], clock: dict[str, datetime]
 ) -> None:
     rule = await parts["svc"].save_rule(_rule())
@@ -233,9 +216,6 @@ async def test_match_announces_during_business_hours(
 
     await parts["svc"].process_message(_event())
 
-    assert parts["speaker"].announced == [
-        {"text": "The brakes for the Porsche were delivered.", "speakers": None}
-    ]
     chat = parts["ai"].chat_calls[0]
     # Tools come from the action profile, not from the rule.
     assert chat["ai_profile"] == "inbox-deliveries"
@@ -245,6 +225,9 @@ async def test_match_announces_during_business_hours(
     run = await _run(parts, f"{rule.id}:m1")
     assert run["status"] == RunStatus.DONE
     assert run["conversation_id"] == "conv_1"
+    assert run["output"] == "Announced: brakes for the Porsche were delivered."
+    assert run["tool_calls"][0]["tool"] == "announce"
+    assert run["error"] == ""
 
 
 async def test_filtered_out_email_costs_nothing(
@@ -276,7 +259,7 @@ async def test_same_dedupe_key_acts_once(
     for mid in ("m1", "m2"):
         _store_message(parts["inbox"], mid, _OPEN)
         await parts["svc"].process_message(_event(message_id=mid))
-    assert len(parts["speaker"].announced) == 1
+    assert len(parts["ai"].chat_calls) == 1
     assert (await _run(parts, f"{rule.id}:m2"))["status"] == RunStatus.DUPLICATE
 
 
@@ -303,7 +286,7 @@ async def test_off_hours_match_is_held_then_announced(
     clock["t"] = _CLOSED + timedelta(hours=11)  # 09:00 Thursday in LA
     await parts["svc"].flush_pending()
     assert (await _run(parts, f"{rule.id}:m1"))["status"] == RunStatus.DONE
-    assert len(parts["speaker"].announced) == 1
+    assert len(parts["ai"].chat_calls) == 1
 
 
 async def test_held_match_goes_stale(
@@ -316,10 +299,10 @@ async def test_held_match_goes_stale(
     clock["t"] = _CLOSED + timedelta(hours=11)
     await parts["svc"].flush_pending()
     assert (await _run(parts, f"{rule.id}:m1"))["status"] == RunStatus.STALE
-    assert parts["speaker"].announced == []
+    assert parts["ai"].chat_calls == []
 
 
-async def test_dry_run_logs_text_without_speaking(
+async def test_dry_run_stops_after_the_match(
     parts: dict[str, Any], clock: dict[str, datetime]
 ) -> None:
     rule = await parts["svc"].save_rule(_rule(dry_run=True))
@@ -327,19 +310,31 @@ async def test_dry_run_logs_text_without_speaking(
     await parts["svc"].process_message(_event())
     run = await _run(parts, f"{rule.id}:m1")
     assert run["status"] == RunStatus.DRY_RUN
-    assert run["output"] == "The brakes for the Porsche were delivered."
-    assert parts["speaker"].announced == []
+    assert run["dedupe_key"] == "amz:1:delivered"
+    assert parts["ai"].chat_calls == []
+
+    # The dry run recorded no dedupe key, so the live rule still acts.
+    rule.dry_run = False
+    await parts["svc"].save_rule(rule)
+    _store_message(parts["inbox"], "m2", _OPEN)
+    await parts["svc"].process_message(_event(message_id="m2"))
+    assert (await _run(parts, f"{rule.id}:m2"))["status"] == RunStatus.DONE
 
 
-async def test_skip_reply_says_nothing(
+async def test_tool_error_is_logged_not_retried(
     parts: dict[str, Any], clock: dict[str, datetime]
 ) -> None:
     rule = await parts["svc"].save_rule(_rule())
-    parts["ai"].action_reply = "SKIP"
+    parts["ai"].tool_usage = [
+        {"tool_name": "announce", "is_error": True, "arguments": {},
+         "result": "Speakers offline"},
+    ]
     _store_message(parts["inbox"], "m1", _OPEN)
     await parts["svc"].process_message(_event())
-    assert (await _run(parts, f"{rule.id}:m1"))["status"] == RunStatus.SILENT
-    assert parts["speaker"].announced == []
+    run = await _run(parts, f"{rule.id}:m1")
+    assert run["status"] == RunStatus.DONE
+    assert run["error"] == "tool error: announce"
+    assert run["tool_calls"][0]["error"] == "Speakers offline"
 
 
 async def test_failed_action_retries_then_fails(
