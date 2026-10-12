@@ -371,3 +371,8 @@ def test_rule_prompts_are_authorable() -> None:
     svc = InboxRulesService()
     assert isinstance(svc, AuthorablePromptProvider)
     assert svc.authorable_prompt_keys() == {"match_condition", "action_instructions"}
+
+
+def test_default_action_prompt_reports_failed_tools() -> None:
+    # A run whose announce call failed once logged "Announced: ..." anyway.
+    assert "Failed:" in mod._DEFAULT_ACTION_PROMPT
