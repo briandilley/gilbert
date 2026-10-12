@@ -128,7 +128,11 @@ def _parse_date(value: Any) -> datetime | None:
 
 
 def rule_passes_filter(rule: InboxRule, data: dict[str, Any]) -> bool:
-    """Stage 1: the free filter. ``data`` is the inbox event payload."""
+    """Stage 1: the free filter. ``data`` is the inbox event payload.
+
+    The email passes when its sender matches any ``sender_contains`` entry
+    OR its subject matches any ``subject_contains`` entry.
+    """
     if not rule.enabled or not rule.has_free_filter():
         return False
     if rule.mailbox_ids and str(data.get("mailbox_id", "")) not in rule.mailbox_ids:
@@ -140,9 +144,8 @@ def rule_passes_filter(rule: InboxRule, data: dict[str, Any]) -> bool:
     subject = str(data.get("subject", "") or "").lower()
     senders = [s.strip().lower() for s in rule.sender_contains if s.strip()]
     subjects = [s.strip().lower() for s in rule.subject_contains if s.strip()]
-    if senders and not any(s in sender for s in senders):
-        return False
-    return not (subjects and not any(s in subject for s in subjects))
+    # Either list may let an email through: a sender match OR a subject match.
+    return any(s in sender for s in senders) or any(s in subject for s in subjects)
 
 
 def parse_match_reply(text: str) -> tuple[bool, str, str]:

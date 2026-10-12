@@ -52,9 +52,11 @@ class InboxRule:
     enabled: bool = True
     dry_run: bool = False
 
-    # Stage 1: free filter. Each list matches case-insensitively as a
-    # substring; an empty list matches everything, but a rule must set at
-    # least one of ``sender_contains`` / ``subject_contains``.
+    # Stage 1: free filter. Entries match case-insensitively as substrings.
+    # An email passes when its sender matches any ``sender_contains`` entry
+    # OR its subject matches any ``subject_contains`` entry. A rule must set
+    # at least one of the two lists. ``mailbox_ids`` narrows both (empty =
+    # every mailbox).
     mailbox_ids: list[str] = field(default_factory=list)
     sender_contains: list[str] = field(default_factory=list)
     subject_contains: list[str] = field(default_factory=list)

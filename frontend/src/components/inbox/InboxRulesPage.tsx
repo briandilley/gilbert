@@ -298,8 +298,9 @@ function RuleEditor({
           <section className="space-y-3">
             <h3 className="text-sm font-medium">1. Free filter</h3>
             <p className="text-[11px] text-muted-foreground">
-              Only email that passes this filter reaches the AI. Comma-separated,
-              case-insensitive. Set at least one of the two.
+              Only email that passes this filter reaches the AI. An email passes when its
+              sender matches any sender entry OR its subject matches any subject entry.
+              Comma-separated, case-insensitive. Set at least one of the two.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1.5">

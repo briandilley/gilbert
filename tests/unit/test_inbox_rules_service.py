@@ -174,10 +174,22 @@ def test_filter_requires_a_free_filter() -> None:
     assert not rule_passes_filter(rule, _event())
 
 
-def test_filter_matches_sender_display_name_and_subject() -> None:
-    rule = _rule(sender_contains=["amazon"], subject_contains=["DELIVERED"])
+def test_filter_passes_when_sender_or_subject_matches() -> None:
+    rule = _rule(sender_contains=["fedex"], subject_contains=["DELIVERED"])
+    # Subject matches, sender does not.
     assert rule_passes_filter(rule, _event())
+    # Sender (display name) matches, subject does not.
+    fedex = {**_event(subject="Online tracking"), "sender_name": "'FedEx' via Vendors"}
+    assert rule_passes_filter(rule, fedex)
+    # Neither matches.
     assert not rule_passes_filter(rule, _event(subject="Shipped: brake pads"))
+
+
+def test_filter_with_one_list_needs_that_list() -> None:
+    assert rule_passes_filter(_rule(subject_contains=["delivered"]), _event())
+    assert not rule_passes_filter(
+        _rule(subject_contains=[], sender_contains=["dhl"]), _event()
+    )
 
 
 def test_filter_respects_mailbox_and_enabled() -> None:
