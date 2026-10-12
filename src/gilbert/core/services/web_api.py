@@ -255,7 +255,23 @@ class WebApiService(Service):
                 "icon": "inbox",
                 "required_role": "admin",
                 "requires_capability": "email",
-                "items": [],
+                "items": [
+                    {
+                        "label": "Inbox",
+                        "description": "Mailboxes and messages",
+                        "url": "/inbox",
+                        "icon": "inbox",
+                        "required_role": "admin",
+                    },
+                    {
+                        "label": "Rules",
+                        "description": "React to new email",
+                        "url": "/inbox/rules",
+                        "icon": "list-filter",
+                        "required_role": "admin",
+                        "requires_capability": "inbox_rules",
+                    },
+                ],
             },
             {
                 "key": "calendar",

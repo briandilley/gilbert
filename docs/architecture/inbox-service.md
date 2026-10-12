@@ -260,3 +260,4 @@ consumers into compliance is cheaper than two separate cleanups.
 - `frontend/src/components/inbox/*` — multi-mailbox UI
 - `tests/unit/test_inbox_service.py` — unit tests covering auth matrix, outbox lifecycle, polling isolation
 - `local-plugins/current-sales-assistant/sales_service.py` — example plugin that queues via `InboxProvider.schedule_send`
+- [`inbox-rules.md`](inbox-rules.md) — inbox rules, which react to `inbox.message.received`

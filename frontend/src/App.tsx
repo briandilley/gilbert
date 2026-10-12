@@ -10,6 +10,7 @@ import { EntitiesPage } from "@/components/entities/EntitiesPage";
 import { CollectionDetail } from "@/components/entities/CollectionDetail";
 import { EntityDetail } from "@/components/entities/EntityDetail";
 import { InboxPage } from "@/components/inbox/InboxPage";
+import { InboxRulesPage } from "@/components/inbox/InboxRulesPage";
 import { CalendarPage } from "@/components/calendar/CalendarPage";
 import { FeedsPage } from "@/components/feeds/FeedsPage";
 import { TasksPage } from "@/components/tasks/TasksPage";
@@ -54,6 +55,7 @@ export default function App() {
             element={<EntityDetail />}
           />
           <Route path="/inbox" element={<InboxPage />} />
+          <Route path="/inbox/rules" element={<InboxRulesPage />} />
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/feeds" element={<FeedsPage />} />
           <Route path="/tasks" element={<TasksPage />} />

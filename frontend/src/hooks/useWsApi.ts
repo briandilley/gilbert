@@ -90,6 +90,7 @@ import type {
   TaskBackendInfo,
   TaskList,
 } from "@/types/tasks";
+import type { InboxRule, InboxRuleOptions, InboxRuleRun } from "@/types/inboxRules";
 export function useWsApi() {
   const { rpc, rpcWithRef } = useWebSocket();
 
@@ -1402,6 +1403,23 @@ export function useWsApi() {
       rpc<{ runs: Array<{ subagent_id: string; agent_type: string; query: string; conversation_id: string; status: string }> }>(
         { type: "subagent.list", conversation_id: conversationId },
       ),
+
+    // ── Inbox rules (admin-only) ──────────────────────────────────
+
+    listInboxRules: () =>
+      rpc<{ rules: InboxRule[] }>({ type: "inbox_rules.list" }),
+
+    saveInboxRule: (rule: InboxRule) =>
+      rpc<{ rule: InboxRule }>({ type: "inbox_rules.save", rule }),
+
+    deleteInboxRule: (rule_id: string) =>
+      rpc<{ status: string }>({ type: "inbox_rules.delete", rule_id }),
+
+    listInboxRuleRuns: (rule_id?: string, limit = 100) =>
+      rpc<{ runs: InboxRuleRun[] }>({ type: "inbox_rules.runs.list", rule_id, limit }),
+
+    getInboxRuleOptions: () =>
+      rpc<InboxRuleOptions>({ type: "inbox_rules.options" }),
 
     // ── Subagent type admin CRUD (admin-only) ─────────────────────
 

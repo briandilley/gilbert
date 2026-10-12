@@ -51,6 +51,8 @@ DEFAULT_EVENT_VISIBILITY: dict[str, int] = {
     # Backend-status events (connect/disconnect) are admin-only
     # diagnostics, distinct from the per-camera detection stream above.
     "camera.backend.": 0,
+    # Inbox rule runs are admin-only (rules act on shared mailboxes).
+    "inbox_rules.": 0,
     # user (100)
     "presence.": 100,
     "timer.": 100,
@@ -222,6 +224,8 @@ DEFAULT_RPC_PERMISSIONS: dict[str, int] = {
     "usage.": 0,
     # Self-improvement proposals — admin-only browse + triage.
     "proposals.": 0,
+    # Inbox rules — admin-only (rules act on shared mailboxes and speak).
+    "inbox_rules.": 0,
 }
 DEFAULT_RPC_LEVEL: int = 100  # unlisted frame types → user role
 

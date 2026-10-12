@@ -337,6 +337,12 @@ class Gilbert:
 
         self.service_manager.register(InboxAIChatService())
 
+        # Inbox rules — admin-edited rules that react to new email
+        # (free filter → small match call → tool-limited action turn).
+        from gilbert.core.services.inbox_rules import InboxRulesService
+
+        self.service_manager.register(InboxRulesService())
+
         # Feeds — RSS / news service. Brings the built-in
         # ``RssAtomFeedBackend`` along via a side-effect import inside
         # ``FeedsService.start()``. Briefing fan-out is a separate
