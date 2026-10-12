@@ -1,4 +1,7 @@
-import { InboxIcon, PlusIcon, UsersIcon, ShieldIcon, GlobeIcon } from "lucide-react";
+import { Link } from "react-router-dom";
+import {
+  InboxIcon, PlusIcon, UsersIcon, ShieldIcon, GlobeIcon, ListFilterIcon,
+} from "lucide-react";
 import type { InboxMailbox, MailboxAccess } from "@/types/inbox";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -114,6 +117,23 @@ export function MailboxSidebar({
           />
         )}
       </div>
+
+      {/* The page sidebar replaces the Inbox group's nav children, so the
+          group's other pages need a link here to stay reachable. */}
+      {isAdmin && (
+        <div className="border-t border-border px-2 py-2">
+          <Link
+            to="/inbox/rules"
+            className={cn(
+              "flex h-8 items-center gap-2 px-2 rounded-md text-sm leading-none",
+              "text-foreground/80 hover:bg-foreground/5 hover:text-foreground",
+            )}
+          >
+            <ListFilterIcon className="size-4 text-muted-foreground" />
+            Inbox rules
+          </Link>
+        </div>
+      )}
     </div>
   );
 }
