@@ -59,7 +59,9 @@ export function AuthorPromptDialog({
   const [error, setError] = useState<string | null>(null);
 
   const profilesQuery = useQuery({
-    queryKey: ["ai-profiles"],
+    // Not "ai-profiles": that key holds ``listProfiles``'s full
+    // ``{profiles, ...}`` response, while this RPC returns a bare array.
+    queryKey: ["ai-profile-summaries"],
     queryFn: () => api.listAiProfiles(),
     enabled: open,
     staleTime: 60_000,

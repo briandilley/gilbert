@@ -95,6 +95,7 @@ export function AIProfileEditorDialog({ open, profileName, onClose, onSaved }: P
     mutationFn: api.saveProfile,
     onSuccess: (_r, saved) => {
       queryClient.invalidateQueries({ queryKey: ["ai-profiles"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-profile-summaries"] });
       onSaved?.(saved.name);
       onClose();
     },
