@@ -30,6 +30,7 @@ import type {
   McpToolSpec,
   McpTransport,
 } from "@/types/mcp";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 interface McpServerDialogProps {
   open: boolean;
@@ -594,6 +595,7 @@ export function McpServerDialog({
                       }
                       placeholder="mcp_sampling"
                     />
+                    <EditProfileLink profileName={draft.sampling_profile} />
                     <p className="text-xs text-muted-foreground mt-1">
                       Name of an AI context profile. The built-in{" "}
                       <code>mcp_sampling</code> profile has no tools —

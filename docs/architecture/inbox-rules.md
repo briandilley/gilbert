@@ -18,7 +18,7 @@ The service always runs. With no rules, it does nothing. Each rule has its own `
 2. Match call. `complete_one_shot` runs with `tools_override=[]` on the rule's `match_profile` (default `light`). It reads the subject and the first 1,500 characters of the body. It returns JSON with `match`, `dedupe_key` and `reason`.
 3. Action turn. `chat` runs headless as `UserContext.SYSTEM`, with at most six tool rounds, on `action_profile` (default `standard`). The profile picks the model and the tools, through its `tool_mode` and `tools`. A rule has no tool list of its own. Give each rule a profile that includes only lookup tools: with `standard` (all tools) the turn could send email or call `announce` itself. The rules page warns about such a profile. The final text is spoken as-is. The reply `SKIP` means say nothing.
 
-The two system prompts are `ConfigParam(ai_prompt=True)` values under the `inbox_rules` configuration namespace. The rule's condition and instructions are rule data. The rules page edits them.
+The two system prompts are `ConfigParam(ai_prompt=True)` values under the `inbox_rules` configuration namespace. The rule's condition and instructions are rule data. The rules page edits them. Both fields have the "Author with AI" button. The service implements `AuthorablePromptProvider` (`interfaces/configuration.py`), which names `match_condition` and `action_instructions`, so `config.prompt.author` accepts them although they are not configuration fields. Each AI profile picker on the page has an "Edit profile" link (`EditProfileLink`) that opens the profile editor in place.
 
 ### Run records
 

@@ -100,6 +100,7 @@ class ConfigParam:
             "multiline": self.multiline,
             "backend_param": bp,
             "ai_prompt": self.ai_prompt,
+            "choices_from": self.choices_from,
             "extensible_target": self.extensible_target,
             "visible_when_field": self.visible_when_field,
             "visible_when_values": list(self.visible_when_values),
@@ -256,6 +257,22 @@ class Configurable(Protocol):
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         """Called with the full config section when tunable params change."""
+        ...
+
+
+@runtime_checkable
+class AuthorablePromptProvider(Protocol):
+    """A Configurable whose *records* hold AI prompts, not only its config.
+
+    ``config.prompt.author`` ("Author with AI") normally rewrites only
+    ``ConfigParam(ai_prompt=True)`` fields. A service whose entities carry
+    prompt text (for example an inbox rule's match condition) names those
+    field keys here, under its ``config_namespace``, so editors can offer the
+    same rewrite flow. The RPC only returns text; the caller saves it.
+    """
+
+    def authorable_prompt_keys(self) -> frozenset[str]:
+        """Field keys, outside ``config_params()``, that may be AI-authored."""
         ...
 
 

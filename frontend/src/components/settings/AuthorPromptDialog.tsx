@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import { DiffView } from "@/components/ui/DiffView";
 import { useWsApi } from "@/hooks/useWsApi";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 interface AuthorPromptDialogProps {
   open: boolean;
@@ -162,6 +163,7 @@ export function AuthorPromptDialog({
                   ))}
                 </SelectContent>
               </Select>
+              <EditProfileLink profileName={profile} />
             </div>
 
             {error && (

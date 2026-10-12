@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { PencilIcon, PlusIcon, SparklesIcon, Trash2Icon } from "lucide-react";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { PluginPanelSlot } from "@/components/PluginPanelSlot";
+import { AuthorPromptDialog } from "@/components/settings/AuthorPromptDialog";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { allTimezones } from "@/lib/timezones";
 import type { InboxRule, InboxRuleOptions, InboxRuleRun } from "@/types/inboxRules";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -127,8 +129,10 @@ function ProfileSelect({
   profiles: string[];
   onChange: (v: string) => void;
 }) {
+  const queryClient = useQueryClient();
   const options = profiles.includes(value) || !value ? profiles : [value, ...profiles];
   return (
+    <div className="space-y-1">
     <Select value={value} onValueChange={(v) => v && onChange(v)}>
       <SelectTrigger>
         <SelectValue />
@@ -141,6 +145,62 @@ function ProfileSelect({
         ))}
       </SelectContent>
     </Select>
+    <EditProfileLink
+      profileName={value}
+      onSaved={() => queryClient.invalidateQueries({ queryKey: ["inbox-rule-options"] })}
+    />
+    </div>
+  );
+}
+
+/** A rule prompt field: label, "Author with AI" button, and textarea. */
+function PromptField({
+  label,
+  fieldKey,
+  value,
+  rows,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  fieldKey: "match_condition" | "action_instructions";
+  value: string;
+  rows: number;
+  placeholder?: string;
+  onChange: (v: string) => void;
+}) {
+  const [authorOpen, setAuthorOpen] = useState(false);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-xs">{label}</Label>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          title="Rewrite this text with AI assistance"
+          onClick={() => setAuthorOpen(true)}
+        >
+          <SparklesIcon />
+          Author with AI
+        </Button>
+      </div>
+      <Textarea
+        rows={rows}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <AuthorPromptDialog
+        open={authorOpen}
+        onClose={() => setAuthorOpen(false)}
+        namespace="inbox_rules"
+        paramKey={fieldKey}
+        paramLabel={label}
+        currentText={value}
+        onApply={onChange}
+      />
+    </div>
   );
 }
 
@@ -205,7 +265,7 @@ function RuleEditor({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-5xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{rule.id ? `Edit "${rule.name}"` : "New inbox rule"}</DialogTitle>
         </DialogHeader>
@@ -274,15 +334,14 @@ function RuleEditor({
 
           <section className="space-y-3">
             <h3 className="text-sm font-medium">2. Match</h3>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Condition (plain language)</Label>
-              <Textarea
-                rows={3}
-                value={form.match_condition}
-                onChange={(e) => set("match_condition", e.target.value)}
-                placeholder="The email says a package was delivered, or that a delivery failed or was delayed."
-              />
-            </div>
+            <PromptField
+              label="Condition (plain language)"
+              fieldKey="match_condition"
+              rows={4}
+              value={form.match_condition}
+              onChange={(v) => set("match_condition", v)}
+              placeholder="The email says a package was delivered, or that a delivery failed or was delayed."
+            />
             <div className="space-y-1.5">
               <Label className="text-xs">AI profile for the match call</Label>
               <ProfileSelect
@@ -295,14 +354,13 @@ function RuleEditor({
 
           <section className="space-y-3">
             <h3 className="text-sm font-medium">3. Action</h3>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Instructions</Label>
-              <Textarea
-                rows={6}
-                value={form.action_instructions}
-                onChange={(e) => set("action_instructions", e.target.value)}
-              />
-            </div>
+            <PromptField
+              label="Instructions"
+              fieldKey="action_instructions"
+              rows={10}
+              value={form.action_instructions}
+              onChange={(v) => set("action_instructions", v)}
+            />
             <div className="space-y-1.5">
               <Label className="text-xs">AI profile for the action turn</Label>
               <ProfileSelect

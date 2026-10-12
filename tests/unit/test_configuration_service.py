@@ -296,3 +296,70 @@ async def test_tool_describe_configuration(config_svc: ConfigurationService) -> 
 async def test_tool_unknown_raises(config_svc: ConfigurationService) -> None:
     with pytest.raises(KeyError, match="Unknown tool"):
         await config_svc.execute_tool("nonexistent", {})
+
+
+# --- Prompt authoring for non-config prompt fields ---
+
+
+class StubAuthorableService(StubConfigurableService):
+    """A Configurable that also names record fields as AI-authorable."""
+
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="stub_authorable", capabilities=frozenset({"stub_auth"}))
+
+    @property
+    def config_namespace(self) -> str:
+        return "stub_rules"
+
+    def authorable_prompt_keys(self) -> frozenset[str]:
+        return frozenset({"match_condition"})
+
+
+class StubSampler(Service):
+    def service_info(self) -> ServiceInfo:
+        return ServiceInfo(name="stub_ai", capabilities=frozenset({"ai_chat"}))
+
+    def has_profile(self, name: str) -> bool:
+        return True
+
+    async def complete_one_shot(self, **kwargs: Any) -> Any:
+        from gilbert.interfaces.ai import AIResponse, Message, MessageRole
+
+        return AIResponse(
+            message=Message(role=MessageRole.ASSISTANT, content="Revised text."),
+            model="fake",
+        )
+
+
+def _author_frame(key: str) -> dict[str, Any]:
+    return {"id": "1", "namespace": "stub_rules", "key": key,
+            "current_text": "Old text.", "instruction": "Make it better."}
+
+
+async def test_prompt_author_accepts_authorable_record_field(
+    config_svc: ConfigurationService,
+) -> None:
+    manager = ServiceManager()
+    manager.register(StubAuthorableService())
+    manager.register(StubSampler())
+    manager._started.extend(["stub_authorable", "stub_ai"])
+    config_svc._resolver = manager
+
+    class Conn:
+        user_level = 0
+
+    ok = await config_svc._ws_prompt_author(Conn(), _author_frame("match_condition"))
+    assert ok is not None and ok["new_text"] == "Revised text."
+
+    refused = await config_svc._ws_prompt_author(Conn(), _author_frame("other_field"))
+    assert refused is not None and refused["code"] == 400
+
+
+def test_wire_dict_carries_choices_from() -> None:
+    """The SPA needs ``choices_from`` to know a dropdown picks an AI profile
+    (and offer "Edit profile" next to it)."""
+    param = ConfigParam(
+        key="ai_profile", type=ToolParameterType.STRING, description="Profile.",
+        default="standard", choices_from="ai_profiles",
+    )
+    assert param.to_wire_dict()["choices_from"] == "ai_profiles"

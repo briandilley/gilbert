@@ -19,6 +19,9 @@ export interface ConfigParamMeta {
   /** True when the field stores an AI prompt — the Settings UI renders an
    *  "Author with AI" button next to the textarea. */
   ai_prompt: boolean;
+  /** Dynamic choices source (e.g. ``"ai_profiles"``, ``"speakers"``); empty
+   *  for fixed or free-form fields. */
+  choices_from?: string;
   /** Non-empty when this prompt is extensible by other plugins. The
    *  Settings UI shows a contributors list below the textarea, sourced
    *  from ``prompts.contributions.list`` for that target. Conventional

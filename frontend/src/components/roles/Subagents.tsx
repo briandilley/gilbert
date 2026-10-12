@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { PencilIcon, PlusIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
 import type { SubagentTypeDTO } from "@/types/subagent";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 interface TypeForm {
   id: string;
@@ -290,6 +291,7 @@ export function Subagents() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <EditProfileLink profileName={editing.ai_profile} />
                   <p className="text-[11px] text-muted-foreground">
                     Preferred, model-agnostic selection. When set, the raw
                     backend/model below act as a per-call override.

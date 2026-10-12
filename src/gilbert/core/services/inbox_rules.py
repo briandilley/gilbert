@@ -278,6 +278,10 @@ class InboxRulesService(Service):
             ),
         ]
 
+    def authorable_prompt_keys(self) -> frozenset[str]:
+        """Rule fields the editor can rewrite with "Author with AI"."""
+        return frozenset({"match_condition", "action_instructions"})
+
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._match_prompt = str(config.get("match_prompt") or "") or _DEFAULT_MATCH_PROMPT
         self._action_prompt = str(config.get("action_prompt") or "") or _DEFAULT_ACTION_PROMPT

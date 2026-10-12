@@ -356,3 +356,11 @@ async def test_failed_action_retries_then_fails(
     assert run["status"] == RunStatus.FAILED
     assert run["attempts"] == 3
     assert "backend down" in run["error"]
+
+
+def test_rule_prompts_are_authorable() -> None:
+    from gilbert.interfaces.configuration import AuthorablePromptProvider
+
+    svc = InboxRulesService()
+    assert isinstance(svc, AuthorablePromptProvider)
+    assert svc.authorable_prompt_keys() == {"match_condition", "action_instructions"}

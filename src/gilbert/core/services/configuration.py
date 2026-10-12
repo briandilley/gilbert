@@ -24,6 +24,7 @@ from gilbert.config import (
 )
 from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import (
+    AuthorablePromptProvider,
     ConfigAction,
     ConfigActionProvider,
     ConfigActionResult,
@@ -1252,7 +1253,10 @@ class ConfigurationService(Service):
                 "code": 500,
             }
         param = next((p for p in params if p.key == key), None)
-        if param is None or not param.ai_prompt:
+        record_field = isinstance(
+            configurable, AuthorablePromptProvider
+        ) and key in configurable.authorable_prompt_keys()
+        if not record_field and (param is None or not param.ai_prompt):
             return {
                 "type": "gilbert.error",
                 "ref": frame.get("id"),

@@ -36,6 +36,7 @@ import {
   AlertTriangleIcon,
 } from "lucide-react";
 import type { McpServerClient, McpServerClientDraft } from "@/types/mcp";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 /**
  * Admin-only page for managing MCP client registrations — the bearer
@@ -459,6 +460,7 @@ function CreateClientDialog({
                 ))}
               </SelectContent>
             </Select>
+            <EditProfileLink profileName={aiProfile} />
             {selectedProfile && (
               <p className="text-xs text-muted-foreground mt-1">
                 {selectedProfile.description ||

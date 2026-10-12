@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import type { ConfigParamMeta } from "@/types/config";
 import { normalizeChoice } from "@/types/config";
 import { PromptEditorDialog } from "./PromptEditorDialog";
+import { EditProfileLink } from "@/components/roles/EditProfileLink";
 
 interface ConfigFieldProps {
   param: ConfigParamMeta;
@@ -283,6 +284,7 @@ function FieldControl({
     // like the user expects.
     const labelByValue = new Map(options.map((o) => [o.value, o.label]));
     return (
+      <div className="space-y-1">
       <Select
         value={String(value ?? "")}
         onValueChange={(v) => onChange(param.key, v ?? "")}
@@ -300,6 +302,10 @@ function FieldControl({
           ))}
         </SelectContent>
       </Select>
+      {param.choices_from === "ai_profiles" && (
+        <EditProfileLink profileName={String(value ?? "")} />
+      )}
+      </div>
     );
   }
 
