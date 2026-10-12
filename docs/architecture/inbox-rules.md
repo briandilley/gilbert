@@ -16,7 +16,7 @@ The service always runs. With no rules, it does nothing. Each rule has its own `
 
 1. Free filter. The rule's `sender_contains` and `subject_contains` lists match as case-insensitive substrings. The sender text includes the display name and `original_sender`. Mail that comes through a Google group shows the vendor only in the display name ("'Amazon.com' via Vendors"). A rule must set at least one of the two lists. `save_rule` refuses a rule without one.
 2. Match call. `complete_one_shot` runs with `tools_override=[]` on the rule's `match_profile` (default `light`). It reads the subject and the first 1,500 characters of the body. It returns JSON with `match`, `dedupe_key` and `reason`.
-3. Action turn. `chat` runs headless as `UserContext.SYSTEM`, with `tool_filter=("include", rule.action_tools)` and at most six tool rounds, on `action_profile` (default `standard`). Its final text is spoken as-is. The reply `SKIP` means say nothing.
+3. Action turn. `chat` runs headless as `UserContext.SYSTEM`, with at most six tool rounds, on `action_profile` (default `standard`). The profile picks the model and the tools, through its `tool_mode` and `tools`. A rule has no tool list of its own. Give each rule a profile that includes only lookup tools: with `standard` (all tools) the turn could send email or call `announce` itself. The rules page warns about such a profile. The final text is spoken as-is. The reply `SKIP` means say nothing.
 
 The two system prompts are `ConfigParam(ai_prompt=True)` values under the `inbox_rules` configuration namespace. The rule's condition and instructions are rule data. The rules page edits them.
 

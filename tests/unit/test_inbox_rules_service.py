@@ -150,7 +150,7 @@ def _rule(**kw: Any) -> InboxRule:
         "subject_contains": ["delivered"],
         "match_condition": "The email says a package was delivered.",
         "action_instructions": "Say what was delivered.",
-        "action_tools": ["current_expense_match"],
+        "action_profile": "inbox-deliveries",
     }
     base.update(kw)
     return InboxRule(**base)
@@ -237,7 +237,9 @@ async def test_match_announces_during_business_hours(
         {"text": "The brakes for the Porsche were delivered.", "speakers": None}
     ]
     chat = parts["ai"].chat_calls[0]
-    assert chat["tool_filter"] == ("include", ["current_expense_match"])
+    # Tools come from the action profile, not from the rule.
+    assert chat["ai_profile"] == "inbox-deliveries"
+    assert "tool_filter" not in chat
     assert chat["headless"] is True
     assert parts["ai"].match_calls[0]["tools_override"] == []
     run = await _run(parts, f"{rule.id}:m1")

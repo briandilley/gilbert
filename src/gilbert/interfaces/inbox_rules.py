@@ -5,7 +5,8 @@ An *inbox rule* reacts to new inbound email in three stages (ADR-0023):
 1. A free filter on mailbox, sender and subject. No AI cost.
 2. A small AI match call on the subject and a snippet. It answers
    match / no match and returns a dedupe key.
-3. An AI action turn limited to the rule's allowed tools. Its final text
+3. An AI action turn on the rule's action profile, which also decides the
+   tools the turn can use. Its final text
    is announced on the speakers (business-hours gated) unless it is empty
    or ``SKIP``.
 
@@ -64,9 +65,9 @@ class InboxRule:
     match_condition: str = ""
     match_profile: str = "light"
 
-    # Stage 3: what the action turn does, and the tools it may use.
+    # Stage 3: what the action turn does. The AI profile picks the model
+    # and the tools (its tool_mode / tools), like a subagent type's profile.
     action_instructions: str = ""
-    action_tools: list[str] = field(default_factory=list)
     action_profile: str = "standard"
 
     # Output.

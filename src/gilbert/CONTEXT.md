@@ -353,7 +353,7 @@ for delayed or crash-resilient sends.
 **Inbox rule**:
 An editable record that reacts to new inbound email. It has a cheap filter on sender, subject and
 keywords. It has a plain-language condition that a small AI call tests. It has an action that an AI
-turn does with only the tools that the rule allows. Gilbert tests each message against each rule
+turn does with only the tools that the rule's AI profile allows. Gilbert tests each message against each rule
 one time at most. *Inbox-AI* is different because it replies to the sender. _Avoid_: "signal"
 (taken by agent InboxSignal), "trigger".
 

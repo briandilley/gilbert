@@ -11,7 +11,6 @@ export interface InboxRule {
   match_condition: string;
   match_profile: string;
   action_instructions: string;
-  action_tools: string[];
   action_profile: string;
   announce: boolean;
   speakers: string[];
@@ -46,7 +45,7 @@ export interface InboxRuleRun {
 }
 
 export interface InboxRuleOptions {
-  profiles: string[];
+  profiles: Array<{ name: string; tool_mode: string; tools: string[] }>;
   tools: Array<{ name: string; description: string }>;
   speakers: string[];
   mailboxes: Array<{ id: string; name: string }>;

@@ -27,7 +27,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { InboxRule, InboxRuleRun } from "@/types/inboxRules";
+import { allTimezones } from "@/lib/timezones";
+import type { InboxRule, InboxRuleOptions, InboxRuleRun } from "@/types/inboxRules";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -51,7 +52,6 @@ function emptyRule(): InboxRule {
     match_condition: "",
     match_profile: "light",
     action_instructions: "",
-    action_tools: [],
     action_profile: "standard",
     announce: true,
     speakers: [],
@@ -141,6 +141,28 @@ function ProfileSelect({
         ))}
       </SelectContent>
     </Select>
+  );
+}
+
+/** What the chosen action profile lets the action turn use. */
+function ProfileTools({ name, options }: { name: string; options?: InboxRuleOptions }) {
+  const profile = options?.profiles.find((p) => p.name === name);
+  if (!profile) return null;
+  if (profile.tool_mode === "include") {
+    return (
+      <p className="text-[11px] text-muted-foreground">
+        Tools from this profile:{" "}
+        {profile.tools.length > 0 ? profile.tools.join(", ") : "none"}. Edit them under
+        Security → AI Profiles.
+      </p>
+    );
+  }
+  return (
+    <p className="text-[11px] text-amber-600">
+      This profile {profile.tool_mode === "all" ? "allows every tool" : "allows every tool except "}
+      {profile.tool_mode === "exclude" ? profile.tools.join(", ") : ""}. The action turn could
+      then send email or speak on its own. Pick a profile that includes only lookup tools.
+    </p>
   );
 }
 
@@ -265,7 +287,7 @@ function RuleEditor({
               <Label className="text-xs">AI profile for the match call</Label>
               <ProfileSelect
                 value={form.match_profile}
-                profiles={options?.profiles ?? []}
+                profiles={(options?.profiles ?? []).map((p) => p.name)}
                 onChange={(v) => set("match_profile", v)}
               />
             </div>
@@ -282,25 +304,13 @@ function RuleEditor({
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs">Allowed tools</Label>
-              <CheckList
-                items={(options?.tools ?? []).map((t) => ({
-                  value: t.name,
-                  label: t.name,
-                  hint: t.description.slice(0, 90),
-                }))}
-                selected={form.action_tools}
-                onChange={(v) => set("action_tools", v)}
-                empty="No tools available."
-              />
-            </div>
-            <div className="space-y-1.5">
               <Label className="text-xs">AI profile for the action turn</Label>
               <ProfileSelect
                 value={form.action_profile}
-                profiles={options?.profiles ?? []}
+                profiles={(options?.profiles ?? []).map((p) => p.name)}
                 onChange={(v) => set("action_profile", v)}
               />
+              <ProfileTools name={form.action_profile} options={options} />
             </div>
           </section>
 
@@ -385,7 +395,18 @@ function RuleEditor({
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs">Timezone</Label>
-              <Input value={form.timezone} onChange={(e) => set("timezone", e.target.value)} />
+              <Select value={form.timezone} onValueChange={(v) => v && set("timezone", v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {allTimezones(form.timezone).map((tz) => (
+                    <SelectItem key={tz} value={tz}>
+                      {tz}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </section>
         </div>

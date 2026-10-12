@@ -7,7 +7,8 @@ runs in three stages (ADR-0023):
 2. One small AI call (``complete_one_shot``, no tools) that answers match /
    no match and returns a dedupe key, so the carrier's and the vendor's
    email about one package lead to one action.
-3. An AI turn (``chat``) limited to the rule's allowed tools. Its final text
+3. An AI turn (``chat``) on the rule's action profile; the profile's tool
+   mode decides which tools the turn can use. Its final text
    is announced on the speakers when the rule announces, gated to the
    rule's business hours and dropped when the email is too old.
 
@@ -535,7 +536,6 @@ class InboxRulesService(Service):
             user_ctx=UserContext.SYSTEM,
             system_prompt=self._action_prompt,
             ai_profile=rule.action_profile,
-            tool_filter=("include", list(rule.action_tools)),
             max_tool_rounds=_MAX_TOOL_ROUNDS,
             headless=True,
             source="inbox_rule",
@@ -654,15 +654,22 @@ class InboxRulesService(Service):
         return {"type": "inbox_rules.runs.list.result", "ref": frame.get("id"), "runs": runs}
 
     async def _ws_options(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
-        """Choices for the rule editor: AI profiles, tools, speakers, mailboxes."""
-        profiles: list[str] = []
+        """Choices for the rule editor: AI profiles (with their tool gating),
+        tool descriptions, speakers, mailboxes."""
+        profiles: list[dict[str, Any]] = []
         tools: list[dict[str, str]] = []
         speakers: list[str] = []
         mailboxes: list[dict[str, str]] = []
         resolver = self._resolver
         ai = resolver.get_capability("ai_chat") if resolver else None
         if isinstance(ai, AIProfileLister):
-            profiles = sorted(p.name for p in ai.list_profiles())
+            profiles = sorted(
+                (
+                    {"name": p.name, "tool_mode": p.tool_mode, "tools": list(p.tools)}
+                    for p in ai.list_profiles()
+                ),
+                key=lambda p: str(p["name"]),
+            )
         if isinstance(ai, AIToolDiscoveryProvider):
             found = ai.discover_tools(user_ctx=UserContext.SYSTEM)
             tools = sorted(
