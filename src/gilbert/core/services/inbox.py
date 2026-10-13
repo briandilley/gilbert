@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from gilbert.core.services._backend_actions import (
@@ -68,13 +69,28 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
-from gilbert.interfaces.workspace import WorkspaceProvider
+from gilbert.interfaces.workspace import WORKSPACE_CATEGORIES, WorkspaceProvider
 
 logger = logging.getLogger(__name__)
 
 _MAILBOXES_COLLECTION = "inbox_mailboxes"
 _MESSAGES_COLLECTION = "inbox_messages"
 _OUTBOX_COLLECTION = "inbox_outbox"
+
+_ATTACH_DOCUMENTS_DESCRIPTION = (
+    "Optional list of files to attach. Two formats:\n"
+    "1. **Knowledge store**: ``<source_id>:<path>`` "
+    "(e.g. ``local_docs:reports/march.pdf``).\n"
+    "2. **Conversation workspace file**: ``workspace:<path>``, where "
+    "``<path>`` is the path a workspace tool returned (e.g. "
+    "``workspace:outputs/report.pdf``, ``workspace:scratch/data.dbc``) "
+    "or a bare filename (``workspace:data.dbc``, looked up in outputs/, "
+    "scratch/, then uploads/). This covers files you wrote this turn "
+    "with write_workspace_file or run_workspace_script, files you "
+    "attached to the chat with attach_workspace_file, and files the user "
+    "uploaded. If any ref fails to resolve the email is NOT sent — fix "
+    "or remove the failing ref and retry."
+)
 
 _OUTBOX_TICK_INTERVAL_SEC = 10
 
@@ -1683,39 +1699,54 @@ class InboxService(Service):
         self,
         doc_id: str,
     ) -> tuple[EmailAttachment | None, str | None]:
-        """Look up a ``workspace:<user>/<conv>/<skill>/<path>`` ref and
-        read the file's bytes off disk via ``SkillService``."""
+        """Look up a ``workspace:<user>/<conv>/<path>`` ref and read the
+        file's bytes off disk via ``WorkspaceProvider``.
+
+        ``<path>`` is workspace-relative: ``outputs/report.pdf``, a
+        legacy ``<skill>/<file>``, or a bare ``report.pdf``. A path that
+        doesn't resolve as-is is retried under each workspace category,
+        because the AI usually passes the bare name it gave
+        ``write_workspace_file`` (which lands in ``scratch/``).
+        """
         workspace = self._get_workspace_service()
         if workspace is None:
             return None, f"{doc_id}: workspace service not available"
         # Strip the scheme.
         body = doc_id[len("workspace:") :]
-        # Expect at least 4 path segments: user / conv / skill / path...
-        parts = body.split("/", 3)
-        if len(parts) < 4:
+        # Expect at least 3 path segments: user / conv / path...
+        parts = body.split("/", 2)
+        if len(parts) < 3:
             return (
                 None,
                 (
-                    f"{doc_id}: invalid workspace ref — expected "
-                    "'workspace:<user_id>/<conv_id>/<skill>/<path>'"
+                    f"{doc_id}: invalid workspace ref — use the path the "
+                    "workspace tools returned, e.g. "
+                    "'workspace:outputs/report.pdf'"
                 ),
             )
-        user_id, conv_id, skill_name, rel_path = parts
-        if not user_id or not skill_name or not rel_path:
+        user_id, conv_id, rel_path = parts
+        if not user_id or not rel_path:
             return None, f"{doc_id}: workspace ref has empty segments"
 
         # Resolve via WorkspaceService — handles conv-scoped + legacy
-        # fallback + path traversal check. The split rejoins skill/path
-        # so new-layout refs (uploads/foo, outputs/bar, scratch/baz)
-        # land directly on disk; legacy refs fall through to the
-        # per-skill iteration inside ``resolve_file_path``.
-        target, err = workspace.resolve_file_path(
-            user_id=user_id,
-            rel_path=f"{skill_name}/{rel_path}",
-            conversation_id=conv_id or None,
-        )
-        if err is not None or target is None:
-            return None, f"{doc_id}: {err or 'not found'}"
+        # fallback + path traversal check.
+        candidates = [rel_path]
+        if rel_path.split("/", 1)[0] not in WORKSPACE_CATEGORIES:
+            candidates += [f"{cat}/{rel_path}" for cat in WORKSPACE_CATEGORIES]
+        target: Path | None = None
+        first_err: str | None = None
+        for candidate in candidates:
+            target, err = workspace.resolve_file_path(
+                user_id=user_id,
+                rel_path=candidate,
+                conversation_id=conv_id or None,
+            )
+            if err is None and target is not None:
+                break
+            first_err = first_err or err
+            target = None
+        if target is None:
+            return None, f"{doc_id}: {first_err or 'not found'}"
 
         try:
             data = await asyncio.to_thread(target.read_bytes)
@@ -1859,20 +1890,7 @@ class InboxService(Service):
                     ToolParameter(
                         name="attach_documents",
                         type=ToolParameterType.ARRAY,
-                        description=(
-                            "Optional list of attachment refs. Two formats:\n"
-                            "1. **Knowledge store**: ``<source_id>:<path>`` "
-                            "(e.g. ``local_docs:reports/march.pdf``).\n"
-                            "2. **Skill workspace file**: "
-                            "``workspace:<skill>/<path>`` (e.g. "
-                            "``workspace:pdf/po-00006567.pdf``). Resolves "
-                            "in the current conversation's workspace, so "
-                            "you can attach files you generated this turn "
-                            "via write_skill_workspace_file + "
-                            "run_workspace_script. If any ref fails to "
-                            "resolve the email is NOT sent — fix or remove "
-                            "the failing ref and retry."
-                        ),
+                        description=_ATTACH_DOCUMENTS_DESCRIPTION,
                         required=False,
                     ),
                 ],
@@ -1921,20 +1939,7 @@ class InboxService(Service):
                     ToolParameter(
                         name="attach_documents",
                         type=ToolParameterType.ARRAY,
-                        description=(
-                            "Optional list of attachment refs. Two formats:\n"
-                            "1. **Knowledge store**: ``<source_id>:<path>`` "
-                            "(e.g. ``local_docs:reports/march.pdf``).\n"
-                            "2. **Skill workspace file**: "
-                            "``workspace:<skill>/<path>`` (e.g. "
-                            "``workspace:pdf/po-00006567.pdf``). Resolves "
-                            "in the current conversation's workspace, so "
-                            "you can attach files you generated this turn "
-                            "via write_skill_workspace_file + "
-                            "run_workspace_script. If any ref fails to "
-                            "resolve the email is NOT sent — fix or remove "
-                            "the failing ref and retry."
-                        ),
+                        description=_ATTACH_DOCUMENTS_DESCRIPTION,
                         required=False,
                     ),
                 ],
@@ -2065,9 +2070,13 @@ class InboxService(Service):
     ) -> list[str]:
         """Expand short workspace refs to the self-contained URI form.
 
-        AI-friendly form: ``workspace:<skill>/<path>`` (omits user_id and
-        conv_id since the AI has them implicitly via the injected args).
-        Outbox-storable form: ``workspace:<user_id>/<conv_id>/<skill>/<path>``
+        AI-friendly forms: ``workspace:<path>`` or just ``<path>``, where
+        ``<path>`` is what the workspace tools returned
+        (``outputs/report.pdf``, ``scratch/data.csv``) or a bare filename.
+        They omit user_id and conv_id since the AI has them implicitly
+        via the injected args. A ref with no ``:`` can't be a knowledge
+        ID, so it is read as a workspace path.
+        Outbox-storable form: ``workspace:<user_id>/<conv_id>/<path>``
         (self-contained so the outbox processor can resolve at flush
         time without any caller context).
 
@@ -2081,22 +2090,21 @@ class InboxService(Service):
             ref = str(raw or "").strip()
             if not ref:
                 continue
+            if ":" not in ref:
+                ref = f"workspace:{ref}"
             if not ref.startswith("workspace:"):
                 out.append(ref)
                 continue
             body = ref[len("workspace:") :]
             parts = body.split("/", 3)
-            # Already 4+ segments → self-contained URI, keep as-is.
-            if len(parts) >= 4:
+            # Already 4+ segments not led by a category → legacy
+            # self-contained ``<user>/<conv>/<skill>/<path>``, keep as-is.
+            if len(parts) >= 4 and parts[0] not in WORKSPACE_CATEGORIES:
                 out.append(ref)
                 continue
-            # Short form ``workspace:<skill>/<path>`` → expand using
-            # the injected user_id + conv_id.
-            if len(parts) >= 2 and injected_user_id and injected_conv_id:
-                skill_path = body  # everything after "workspace:"
-                out.append(
-                    f"workspace:{injected_user_id}/{injected_conv_id}/{skill_path}"
-                )
+            # Short form → expand using the injected user_id + conv_id.
+            if injected_user_id and injected_conv_id:
+                out.append(f"workspace:{injected_user_id}/{injected_conv_id}/{body}")
                 continue
             # Couldn't expand — pass through and let the resolver
             # reject it with a helpful error.

@@ -1291,6 +1291,114 @@ class TestWorkspaceAttachments:
             "local_docs:reports/march.pdf",
         ]
 
+    def test_normalize_bare_workspace_filename_expanded(self) -> None:
+        """``workspace:<filename>`` (the bare name the AI passed to
+        write_workspace_file) expands to the full URI. Regression: the
+        AI sent ``workspace:TC_Charger_DCDC_500K.dbc`` and every send
+        failed with "invalid workspace ref"."""
+        out = InboxService._normalize_attach_refs(
+            ["workspace:TC_Charger_DCDC_500K.dbc"],
+            injected_user_id="usr_brian",
+            injected_conv_id="conv_xyz",
+        )
+        assert out == ["workspace:usr_brian/conv_xyz/TC_Charger_DCDC_500K.dbc"]
+
+    def test_normalize_colonless_ref_is_workspace_path(self) -> None:
+        """A ref with no scheme (``outputs/report.pdf``) can't be a
+        knowledge ID (those are ``<source>:<path>``), so it is treated
+        as a workspace path."""
+        out = InboxService._normalize_attach_refs(
+            ["outputs/report.pdf", "report.pdf"],
+            injected_user_id="usr_brian",
+            injected_conv_id="conv_xyz",
+        )
+        assert out == [
+            "workspace:usr_brian/conv_xyz/outputs/report.pdf",
+            "workspace:usr_brian/conv_xyz/report.pdf",
+        ]
+
+    def test_normalize_deep_category_path_is_short_form(self) -> None:
+        """A short ref that starts with a workspace category is never
+        mistaken for a full URI, even with four or more segments."""
+        out = InboxService._normalize_attach_refs(
+            ["workspace:outputs/a/b/c.pdf"],
+            injected_user_id="usr_brian",
+            injected_conv_id="conv_xyz",
+        )
+        assert out == ["workspace:usr_brian/conv_xyz/outputs/a/b/c.pdf"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_bare_filename_searches_categories(
+        self,
+        inbox_service: InboxService,
+        tmp_path: Any,
+    ) -> None:
+        """A full URI whose path has no category resolves by trying the
+        path as-is, then outputs/, scratch/, and uploads/."""
+        staged = tmp_path / "TC.dbc"
+        staged.write_bytes(b"VERSION \"\"")
+        asked: list[str] = []
+
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
+                asked.append(rel_path)
+                if rel_path == "scratch/TC.dbc":
+                    return staged, None
+                return None, f"File not found: {rel_path}"
+
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
+
+        atts, errs = await inbox_service._resolve_attachments(
+            ["workspace:usr_a/conv_b/TC.dbc"]
+        )
+        assert errs == []
+        assert [a.filename for a in atts] == ["TC.dbc"]
+        assert asked == ["TC.dbc", "outputs/TC.dbc", "scratch/TC.dbc"]
+
+    @pytest.mark.asyncio
+    async def test_inbox_send_attaches_bare_workspace_filename(
+        self,
+        inbox_service: InboxService,
+        tmp_path: Any,
+    ) -> None:
+        """End to end: the exact call that failed in production now
+        sends the email with the file attached."""
+        mb = _make_mailbox(mailbox_id="mbx_send")
+        backend = FakeEmailBackend()
+        await _attach_runtime(inbox_service, mb, backend)
+
+        staged = tmp_path / "TC_Charger_DCDC_500K.dbc"
+        staged.write_bytes(b"VERSION \"\"")
+
+        class FakeWorkspace:
+            def resolve_file_path(self, user_id, rel_path, conversation_id):
+                if (user_id, conversation_id, rel_path) == (
+                    "owner",
+                    "conv_xyz",
+                    "scratch/TC_Charger_DCDC_500K.dbc",
+                ):
+                    return staged, None
+                return None, f"File not found: {rel_path}"
+
+        inbox_service._get_workspace_service = lambda: FakeWorkspace()
+        set_current_user(_owner())
+
+        result = await inbox_service.execute_tool(
+            "inbox_send",
+            {
+                "mailbox_id": mb.id,
+                "to": ["recipient@example.com"],
+                "subject": "DBC",
+                "body_html": "<p>Attached.</p>",
+                "attach_documents": ["workspace:TC_Charger_DCDC_500K.dbc"],
+                "_user_id": "owner",
+                "_conversation_id": "conv_xyz",
+            },
+        )
+        assert "1 attachment" in result, result
+        sent_atts = backend.sent[0]["attachments"]
+        assert [a.filename for a in sent_atts] == ["TC_Charger_DCDC_500K.dbc"]
+
     @pytest.mark.asyncio
     async def test_resolve_workspace_attachment_reads_bytes(
         self,

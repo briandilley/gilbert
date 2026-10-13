@@ -5,6 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+# Top-level category directories inside a conversation workspace, in the
+# order a bare filename is looked up (deliverables first).
+WORKSPACE_CATEGORIES: tuple[str, ...] = ("outputs", "scratch", "uploads")
+
 
 @runtime_checkable
 class WorkspaceProvider(Protocol):
