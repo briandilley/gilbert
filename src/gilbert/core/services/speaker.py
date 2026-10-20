@@ -47,6 +47,11 @@ _ALIAS_COLLECTION = "speaker_aliases"
 # Magic aliases that resolve to the caller's own browser
 _MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
 
+# Announce volume when neither the caller nor ``default_announce_volume``
+# sets one. An announcement always sets a volume so a speaker left low or
+# near mute does not swallow it; ``audio_clip`` restores the old level.
+_FALLBACK_ANNOUNCE_VOLUME = 80
+
 # Periodic speaker-cache refresh. Backends like Sonos use async
 # zeroconf discovery that finishes after ``initialize()`` returns;
 # this keeps ``cached_speakers`` close to live so settings-page
@@ -507,12 +512,19 @@ class SpeakerService(Service):
             ConfigParam(
                 key="default_announce_volume",
                 type=ToolParameterType.INTEGER,
-                description="Default volume level for announcements (0-100). Unset means use current volume.",
+                description=(
+                    "Default volume level for announcements (0-100). The clip "
+                    "plays at this level and the speaker's own volume returns "
+                    f"afterwards. Unset means {_FALLBACK_ANNOUNCE_VOLUME}."
+                ),
             ),
             ConfigParam(
                 key="default_announce_speakers",
                 type=ToolParameterType.ARRAY,
-                description="Default speakers for announcements (empty = all).",
+                description=(
+                    "Default speakers for announcements (empty = every "
+                    "speaker except browser tabs)."
+                ),
                 default=[],
                 choices_from="speakers",
             ),
@@ -1249,8 +1261,9 @@ class SpeakerService(Service):
     ) -> str:
         """Announce text over speakers using TTS.
 
-        If no speaker_names are given, falls back to the configured
-        default announce speakers (or all speakers if that's also empty).
+        If no speaker_names are given, plays on the configured default
+        announce speakers, or every non-browser speaker if that is empty.
+        The "last used" speaker set is never read or changed.
 
         Announcements are serialized **per speaker**, not globally —
         two concurrent announcements that target disjoint speaker sets
@@ -1260,14 +1273,11 @@ class SpeakerService(Service):
         (e.g. personal greetings per room) without letting two clips
         collide on the same device's snapshot/restore state.
         """
-        # Fall back to configured default speakers
-        if speaker_names is None and self._default_announce_speakers:
-            speaker_names = self._default_announce_speakers
         # Resolve target speakers outside any per-speaker lock so the
         # lock set is known before we start acquiring. An empty set
         # means no speakers to announce on — let _announce_inner handle
         # the degenerate case without acquiring any locks.
-        target_ids = await self._resolve_target_ids(speaker_names)
+        target_ids = await self._resolve_announce_target_ids(speaker_names)
         self._check_browser_target_permissions(target_ids)
         if not target_ids:
             return await self._announce_inner(
@@ -1280,6 +1290,26 @@ class SpeakerService(Service):
             return await self._announce_inner(
                 text, speaker_names, volume, target_ids=target_ids, context=context
             )
+
+    async def _resolve_announce_target_ids(
+        self,
+        speaker_names: list[str] | None,
+    ) -> list[str]:
+        """Resolve the speakers an announcement plays on.
+
+        Explicit names → those speakers. Otherwise the configured
+        ``default_announce_speakers``, or every speaker except browser
+        tabs when that is empty. Unlike ``_resolve_target_ids`` this
+        never reads or writes the "last used" set: an announcement that
+        names two speakers (the doorbell) must not shrink every later
+        default announcement, and must not redirect the next music play.
+        """
+        if speaker_names:
+            return await self.resolve_speaker_names(speaker_names)
+        if self._default_announce_speakers:
+            return await self.resolve_speaker_names(self._default_announce_speakers)
+        speakers = await self._list_speakers_unfiltered()
+        return [s.speaker_id for s in speakers if s.backend_name != "browser"]
 
     async def _get_speaker_locks(
         self, speaker_ids: list[str]
@@ -1310,8 +1340,7 @@ class SpeakerService(Service):
     ) -> str:
         """Inner announce — must be called with the target speakers'
         per-speaker locks already held. Accepts a pre-resolved
-        ``target_ids`` to avoid re-running name resolution (and the
-        ``_last_speaker_ids`` mutation that goes with it) after the
+        ``target_ids`` to avoid re-running name resolution after the
         caller has already done so to build the lock set.
         """
         if self._tts_svc is None:
@@ -1337,8 +1366,14 @@ class SpeakerService(Service):
         file_path = output_dir / f"announce-{uuid.uuid4()}.mp3"
         file_path.write_bytes(result.audio)
 
-        # Determine volume
-        effective_volume = volume or self._default_announce_volume
+        # Announcements always set a volume; the clip path restores the
+        # speaker's own level afterwards.
+        if volume is not None:
+            effective_volume = volume
+        elif self._default_announce_volume is not None:
+            effective_volume = self._default_announce_volume
+        else:
+            effective_volume = _FALLBACK_ANNOUNCE_VOLUME
 
         # Snapshot current playback state so we can resume after —
         # on the aiosonos Sonos backend snapshot/restore are no-ops
@@ -1346,7 +1381,7 @@ class SpeakerService(Service):
         # ducks + auto-restores natively. Kept in the flow so non-
         # Sonos backends that implement snapshot/restore still work.
         if target_ids is None:
-            target_ids = await self._resolve_target_ids(speaker_names)
+            target_ids = await self._resolve_announce_target_ids(speaker_names)
         grouped = self._route_ids(target_ids)
         await asyncio.gather(
             *(self._backends[bname].snapshot(nids) for bname, nids in grouped.items())
@@ -1360,7 +1395,7 @@ class SpeakerService(Service):
         audio_url = self.audio_url(str(file_path.resolve()))
         await self.play_on_speakers(
             uri=audio_url,
-            speaker_names=speaker_names,
+            speaker_ids=target_ids,
             volume=effective_volume,
             title=f"Announcement: {text[:50]}",
             announce=True,
@@ -1709,7 +1744,8 @@ class SpeakerService(Service):
                     "Announce a message over speakers using text-to-speech. "
                     "This is the primary tool for speaking text out loud — it handles everything: "
                     "generates audio via TTS, groups speakers if needed, sets volume, and plays. "
-                    "If no speakers specified, uses last-used speakers or all. "
+                    "Omit speakers unless the user named specific ones: an "
+                    "announcement then plays on every configured announce speaker. "
                     "Use this instead of 'speak' when you want audio played on speakers. "
                     'Pass "my browser", "my speaker", or "for me" to target the caller\'s own browser tab.'
                 ),
@@ -1722,13 +1758,19 @@ class SpeakerService(Service):
                     ToolParameter(
                         name="speakers",
                         type=ToolParameterType.ARRAY,
-                        description="Speaker names or aliases. If omitted, uses last-used speakers or all.",
+                        description=(
+                            "Speaker names or aliases. Omit to announce on every "
+                            "configured announce speaker."
+                        ),
                         required=False,
                     ),
                     ToolParameter(
                         name="volume",
                         type=ToolParameterType.INTEGER,
-                        description="Volume level (0-100) for the announcement.",
+                        description=(
+                            "Volume level (0-100) for the announcement. Omit to "
+                            "use the configured announce volume."
+                        ),
                         required=False,
                     ),
                     ToolParameter(

@@ -58,8 +58,9 @@ Speaker control with an abstract interface and three bundled backends: `sonos` (
 - Requires: `entity_storage` (for aliases).
 - Optional: `configuration`, `text_to_speech` (for announce), `event_bus` (for browser-echo), `access_control` (for role-aware browser target filtering).
 - Speaker aliases stored in `speaker_aliases` entity collection with unique index on `alias` field. Alias collision detection against both existing speaker names and other aliases.
-- "Last used" speaker tracking — if no speakers specified, reuses previous target set or falls back to all.
-- `default_announce_speakers` config — list of speaker names used when no speakers are specified in an announce call (falls back before "last used" or "all").
+- "Last used" speaker tracking — if no speakers specified, `play_audio` and the other playback calls reuse the previous target set or fall back to all. Announcements never read or write this set (see below).
+- `default_announce_speakers` config — list of speaker names used when an announce call names no speakers. When it is empty, the announcement plays on every speaker except browser tabs. An announce call that names speakers (the doorbell's `Shop` + `Lobby`) affects only that announcement. Before 2026-10-19 it also became the "last used" set, so every later default announcement reached only those speakers.
+- Announce volume — every announcement sets a volume: the caller's, else `default_announce_volume`, else 80. Sonos `audio_clip` plays the clip at that level and the speaker returns to its own volume afterwards.
 - **Announce flow**: SpeakerService.announce() generates TTS audio, writes to a workspace file, then calls `play_on_speakers(..., announce=True)`. The speaker backend's announce route (`audio_clip`) handles duck+play+restore. Silence padding is still handled by the TTS service (`silence_padding` config param on TTSConfig), not here.
 - **Per-speaker announce locks**: Announcements are serialized *per target speaker*, not globally. `_speaker_locks: dict[str, asyncio.Lock]` holds one lock per speaker ID, created lazily under `_speaker_locks_guard`. `announce()` resolves target IDs first, then acquires every target's lock in sorted-ID order (deadlock-free under overlapping sets) via `contextlib.AsyncExitStack` before calling `_announce_inner`. Result: two announces on disjoint speaker sets fan out concurrently; overlapping sets still serialize on the shared speaker. The `announce` ToolDefinition is flagged `parallel_safe=True` so the AI execution loop can `asyncio.gather` N announce calls, and the per-speaker locks handle the correctness guarantee underneath.
 
@@ -77,7 +78,7 @@ Speaker control with an abstract interface and three bundled backends: `sonos` (
 
 **Grouping:** `group_speakers` rejects targets that span multiple backends with a user-readable error (`ValueError`). Groups are inherently per-backend: Sonos has a real grouping primitive with atomic member replacement; local and browser are single-speaker concepts that don't support grouping.
 
-**Default targets:** when an AI tool calls `announce()` / `play_audio()` without explicit speakers, the call goes to the speakers in `default_announce_speakers` (config). If empty, it falls back to a "last used" set or all speakers. Selection does not prioritize backends; speakers from any loaded backend are fair game.
+**Default targets:** when `announce()` names no speakers, it plays on the speakers in `default_announce_speakers` (config), or on every non-browser speaker when that is empty (`_resolve_announce_target_ids`). `play_audio()` without speakers uses the "last used" set, then all speakers. Selection does not prioritize backends.
 
 **Primary backend:** `primary_backend` config (e.g., `"sonos"`, `"local"`, `"browser"`) is used for speaker discovery `list_speakers()` when no explicit backend is mentioned in the AI tool call. The config also gates which backend's `supports_grouping` property is checked for exposing `group_speakers` / `ungroup_speakers` tools — only backends with real grouping support expose those tools to the AI.
 

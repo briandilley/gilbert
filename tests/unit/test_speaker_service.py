@@ -1413,3 +1413,95 @@ async def test_tool_list_groups_returns_namespaced_ids(
         assert mid.startswith("stub:"), (
             f"list_speaker_groups tool must return namespaced member_ids, got {mid}"
         )
+
+
+# --- Announce targets ---
+
+
+async def _announce_service(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> SpeakerService:
+    peak = {"value": 0}
+    service = await _make_speaker_service_with_tts(
+        stub_backend,
+        storage_service,
+        _make_concurrent_tracking_tts(peak),
+        tmp_path,
+        monkeypatch,
+    )
+    # The fake audio has no MP3 header, so announce would poll the
+    # transport; skip the wait.
+    monkeypatch.setattr(service, "_wait_for_playback", AsyncMock())
+    return service
+
+
+async def test_announce_without_speakers_ignores_last_used(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """Regression: a doorbell announce on two named speakers made every
+    later default announce reach only those two, because announce fell
+    back to the shared "last used" set."""
+    service = await _announce_service(stub_backend, storage_service, tmp_path, monkeypatch)
+
+    await service.announce("door", speaker_names=["Speaker 1", "Speaker 2"])
+    await service.announce("delivery")
+
+    assert stub_backend.last_play_request is not None
+    assert sorted(stub_backend.last_play_request.speaker_ids) == ["uid-1", "uid-2", "uid-3"]
+
+
+async def test_announce_does_not_change_last_used(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """An announce to named speakers must not redirect later music
+    playback that relies on the "last used" set."""
+    service = await _announce_service(stub_backend, storage_service, tmp_path, monkeypatch)
+
+    await service.play_on_speakers("http://x/song.mp3", speaker_names=["Speaker 3"])
+    await service.announce("door", speaker_names=["Speaker 1"])
+    await service.play_on_speakers("http://x/next.mp3")
+
+    assert stub_backend.last_play_request is not None
+    assert stub_backend.last_play_request.speaker_ids == ["uid-3"]
+
+
+async def test_announce_without_speakers_uses_configured_defaults(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    service = await _announce_service(stub_backend, storage_service, tmp_path, monkeypatch)
+    service._default_announce_speakers = ["Speaker 2", "Speaker 3"]
+
+    await service.announce("delivery")
+
+    assert stub_backend.last_play_request is not None
+    assert sorted(stub_backend.last_play_request.speaker_ids) == ["uid-2", "uid-3"]
+
+
+async def test_announce_always_sets_a_volume(
+    stub_backend: StubSpeakerBackend,
+    storage_service: StorageService,
+    tmp_path: Any,
+    monkeypatch: Any,
+) -> None:
+    """With no explicit or configured volume, an announce still sets
+    one, so a speaker left near mute does not swallow it."""
+    service = await _announce_service(stub_backend, storage_service, tmp_path, monkeypatch)
+    service._default_announce_volume = None
+
+    await service.announce("delivery")
+
+    assert stub_backend.last_play_request is not None
+    assert stub_backend.last_play_request.volume == 80
+    assert stub_backend.last_play_request.announce is True
