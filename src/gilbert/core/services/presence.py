@@ -145,6 +145,11 @@ class PresenceService(Service):
 
         await self._backend.initialize(init_config)
 
+        # The backend holds admin mappings in memory only, so a fresh one
+        # knows nothing but its fuzzy resolver. Push the stored set now,
+        # or a restart silently drops every mapping until the next edit.
+        await self._notify_backend_of_mapping_change()
+
         # First poll flag — on the very first poll we skip event emission
         # for users that have no prior stored state (prevents spurious
         # arrived events for everyone on fresh install).

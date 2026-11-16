@@ -603,6 +603,75 @@ async def test_map_thing_pushes_full_mapping_set_to_backend() -> None:
     assert snap["unifi:network:B"] == ""
 
 
+@pytest.mark.asyncio
+async def test_start_pushes_stored_mappings_to_backend() -> None:
+    """A restart must not drop the admin's mappings.
+
+    The backend keeps its overrides in memory, so a fresh backend only
+    knows the fuzzy resolver until the service pushes the stored
+    mappings. Before this, a restart sent the face "Eric Dotson" to
+    Eric Smith until someone next edited a mapping.
+    """
+    from gilbert.interfaces.presence import PresenceBackend
+
+    applied: list[dict[str, str]] = []
+
+    class _StartupBackend(PresenceBackend):
+        backend_name = "test-startup-mappings"
+
+        async def initialize(self, config: dict[str, object]) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+        async def get_presence(self, user_id: str) -> UserPresence:
+            return UserPresence(user_id=user_id, state=PresenceState.UNKNOWN)
+
+        async def get_all_presence(self) -> list[UserPresence]:
+            return []
+
+        async def list_tracked_users(self) -> list[str]:
+            return []
+
+        async def apply_thing_mappings(self, mappings: dict[str, str]) -> None:
+            applied.append(dict(mappings))
+
+    class _Config:
+        def get(self, path: str) -> Any:
+            return None
+
+        def get_section(self, namespace: str) -> dict[str, Any]:
+            return {"enabled": True, "backend": "test-startup-mappings"}
+
+        def get_section_safe(self, namespace: str) -> dict[str, Any]:
+            return self.get_section(namespace)
+
+        async def set(self, path: str, value: Any) -> dict[str, Any]:
+            return {}
+
+    storage = _MemoryStorage()
+
+    class _Storage:
+        backend = storage
+        raw_backend = storage
+
+        def create_namespaced(self, namespace: str) -> Any:
+            return storage
+
+    seed = _make_svc(storage=storage, resolver=_Resolver({}))
+    await seed._upsert_observations(
+        [PresenceObservation(backend="unifi:protect", thing_id="Eric Dotson", kind="face")]
+    )
+    await seed.map_thing("unifi:protect", "Eric Dotson", "usr_dotson")
+
+    svc = PresenceService()
+    await svc.start(_Resolver({"configuration": _Config(), "entity_storage": _Storage()}))
+
+    assert applied, "start() should push the stored mappings to the backend"
+    assert applied[-1]["unifi:protect:Eric Dotson"] == "usr_dotson"
+
+
 # --- WS handler tests ----------------------------------------------
 
 
